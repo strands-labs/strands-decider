@@ -74,7 +74,8 @@ def install() -> bool:
     def dispatch(hidden_states: torch.Tensor, *args: Any, **kwargs: Any) -> torch.Tensor:
         if hidden_states.device.type == "cpu":
             return causal_conv1d_cpu(hidden_states, *args, **kwargs)
-        return current(hidden_states, *args, **kwargs)  # type: ignore[no-any-return]
+        out: torch.Tensor = current(hidden_states, *args, **kwargs)
+        return out
 
     dispatch.__wrapped__ = current  # type: ignore[attr-defined]
     q.causal_conv1d_fn = dispatch
