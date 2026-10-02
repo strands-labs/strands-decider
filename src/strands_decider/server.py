@@ -8,6 +8,7 @@ Compatibility with the Jev API itself is not verified.
 from __future__ import annotations
 
 import os
+import threading
 import time
 
 from fastapi import FastAPI, HTTPException
@@ -18,6 +19,10 @@ from .modeling import StrandsDeciderModel
 from .schema import SystemOneRequest, SystemOneResponse
 
 _engine: SystemOneEngine | None = None
+# FastAPI runs a `def` handler on a thread pool, so two requests in flight reach the engine
+# from two threads. One device cannot run two forward passes at once: on MPS the second one
+# trips a Metal command-buffer assertion that kills the process. Serialise at the door.
+_engine_lock = threading.Lock()
 
 
 def get_engine() -> SystemOneEngine:
@@ -74,19 +79,25 @@ def create_app(
 
     @app.post("/v1/systemone", response_model=SystemOneResponse)
     def systemone(request: SystemOneRequest) -> JSONResponse:
-        eng = get_engine()
-        started = time.perf_counter()
-        try:
-            response = eng.evaluate(request)
-        except ValueError as exc:
-            # Option count over num_slots, malformed permutation, etc. -- caller error.
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
-        elapsed_ms = (time.perf_counter() - started) * 1000
-        payload = response.model_dump()
-        payload["latency_ms"] = round(elapsed_ms, 2)
-        return JSONResponse(content=payload)
+        return JSONResponse(content=evaluate(request))
 
     return app
+
+
+def evaluate(request: SystemOneRequest) -> dict:
+    """One request through the engine, one at a time, timed; the body of ``POST /v1/systemone``."""
+    eng = get_engine()
+    started = time.perf_counter()
+    try:
+        with _engine_lock:
+            response = eng.evaluate(request)
+    except ValueError as exc:
+        # Option count over num_slots, malformed permutation, etc. -- caller error.
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    elapsed_ms = (time.perf_counter() - started) * 1000
+    payload = response.model_dump()
+    payload["latency_ms"] = round(elapsed_ms, 2)
+    return payload
 
 
 def serve(

@@ -5,14 +5,18 @@ with ``urllib`` so the tools add no dependency beyond ``strands-agents``. ``Loca
 wraps a ``SystemOneEngine`` in this process, so an agent can carry the model without a
 server. Both return the package's own ``SystemOneResponse`` and keep the same tally.
 
-Synchronous on purpose. The engine owns one device and the server is best driven one
-request at a time; the ``@tool`` decorator already moves a plain ``def`` off the event loop.
+Synchronous and serialised on purpose. The engine owns one device, and two forward passes
+in flight at once crash it on MPS (a Metal command-buffer assertion takes the process down),
+so each client holds a lock across ``ask``. A Strands agent runs independent tool calls
+concurrently, which is exactly when this matters; the ``@tool`` decorator already moves a
+plain ``def`` off the event loop.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -100,6 +104,7 @@ class HttpDecider:
         # The first request at a new input length pays a one-off shape compile on MPS.
         self.timeout = timeout
         self.usage = DeciderUsage()
+        self._lock = threading.Lock()
 
     def _unavailable(self, exc: Exception) -> DeciderUnavailable:
         return DeciderUnavailable(
@@ -112,23 +117,24 @@ class HttpDecider:
         http = urllib.request.Request(
             f"{self.url}/v1/systemone", data=body, headers={"content-type": "application/json"}
         )
-        started = time.perf_counter()
-        try:
-            with urllib.request.urlopen(http, timeout=self.timeout) as reply:
-                payload = json.loads(reply.read())
-        except urllib.error.HTTPError as exc:
-            self.usage.errors += 1
-            detail = exc.read().decode(errors="replace")
-            raise ValueError(
-                f"the decider refused the request (HTTP {exc.code}): {detail}"
-            ) from exc
-        except (urllib.error.URLError, TimeoutError, ConnectionError) as exc:
-            self.usage.errors += 1
-            raise self._unavailable(exc) from exc
-        response = SystemOneResponse.model_validate(payload)
-        latency = float(payload.get("latency_ms") or (time.perf_counter() - started) * 1000)
-        self.usage.record(response, latency)
-        return response
+        with self._lock:
+            started = time.perf_counter()
+            try:
+                with urllib.request.urlopen(http, timeout=self.timeout) as reply:
+                    payload = json.loads(reply.read())
+            except urllib.error.HTTPError as exc:
+                self.usage.errors += 1
+                detail = exc.read().decode(errors="replace")
+                raise ValueError(
+                    f"the decider refused the request (HTTP {exc.code}): {detail}"
+                ) from exc
+            except (urllib.error.URLError, TimeoutError, ConnectionError) as exc:
+                self.usage.errors += 1
+                raise self._unavailable(exc) from exc
+            response = SystemOneResponse.model_validate(payload)
+            latency = float(payload.get("latency_ms") or (time.perf_counter() - started) * 1000)
+            self.usage.record(response, latency)
+            return response
 
     def health(self) -> dict[str, Any]:
         """The loaded checkpoint, window and device. Raises if nothing is serving."""
@@ -150,6 +156,7 @@ class LocalDecider:
         self.engine = engine
         self.checkpoint = checkpoint
         self.usage = DeciderUsage()
+        self._lock = threading.Lock()
 
     @classmethod
     def load(
@@ -173,14 +180,15 @@ class LocalDecider:
 
     def ask(self, state: Content, questions: Mapping[str, Question]) -> SystemOneResponse:
         request = SystemOneRequest(state=state, questions=dict(questions))
-        started = time.perf_counter()
-        try:
-            response = self.engine.evaluate(request)
-        except ValueError:
-            self.usage.errors += 1
-            raise
-        self.usage.record(response, (time.perf_counter() - started) * 1000)
-        return response
+        with self._lock:
+            started = time.perf_counter()
+            try:
+                response = self.engine.evaluate(request)
+            except ValueError:
+                self.usage.errors += 1
+                raise
+            self.usage.record(response, (time.perf_counter() - started) * 1000)
+            return response
 
     def health(self) -> dict[str, Any]:
         """The same rows the server's ``/health`` reports, read off the engine."""

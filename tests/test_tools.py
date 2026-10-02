@@ -760,3 +760,76 @@ def test_direct_agent_call_injects_tool_context_and_reads_invocation_state() -> 
     assert result["status"] == "success"
     assert result["toolUseId"].startswith("tooluse_decider_ask_")
     assert result["content"][0]["json"]["answers"]["q1"]["noul"] == 0.9
+
+
+def test_clients_serialise_concurrent_asks() -> None:
+    """Two tool calls in flight at once (a Strands agent runs independent tools concurrently)
+    must reach the engine one at a time: on MPS an overlap kills the process."""
+    import threading
+    import time
+
+    class Engine(_StubEngine):
+        inside = 0
+        overlap = 0
+        lock = threading.Lock()
+
+        def evaluate(self, request: SystemOneRequest) -> SystemOneResponse:
+            with self.lock:
+                self.inside += 1
+                if self.inside > 1:
+                    self.overlap += 1
+            time.sleep(0.02)
+            with self.lock:
+                self.inside -= 1
+            return super().evaluate(request)
+
+    engine = Engine()
+    local = LocalDecider(engine)  # type: ignore[arg-type]
+    threads = [
+        threading.Thread(
+            target=decider_check, kwargs={"state": "s", "question": "q", "tool_context": Ctx(local)}
+        )
+        for _ in range(6)
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert engine.overlap == 0 and local.usage.calls == 6
+
+
+def test_server_serialises_the_engine_too(monkeypatch) -> None:
+    """The server guards the engine itself, so a client that forgets to is still safe."""
+    import threading
+    import time
+
+    from strands_decider import server
+
+    class Engine(_StubEngine):
+        inside = 0
+        overlap = 0
+        lock = threading.Lock()
+
+        def evaluate(self, request: SystemOneRequest) -> SystemOneResponse:
+            with self.lock:
+                self.inside += 1
+                if self.inside > 1:
+                    self.overlap += 1
+            time.sleep(0.02)
+            with self.lock:
+                self.inside -= 1
+            return super().evaluate(request)
+
+    engine = Engine()
+    monkeypatch.setattr(server, "_engine", engine)
+    request = SystemOneRequest(state="s", questions={"q": {"type": "noul", "instructions": "q?"}})
+    payloads: list[dict] = []
+    threads = [
+        threading.Thread(target=lambda: payloads.append(server.evaluate(request))) for _ in range(6)
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert engine.overlap == 0 and len(payloads) == 6
+    assert all("latency_ms" in p and p["answers"]["q"]["type"] == "noul" for p in payloads)
