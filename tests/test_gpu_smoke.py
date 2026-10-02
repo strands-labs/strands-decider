@@ -357,7 +357,7 @@ def test_long_state_does_not_starve_the_question(model):
     rq = render_question(q)
     wanted = len(eng.tok(rq.text, add_special_tokens=False)["input_ids"])
 
-    s, kept = eng._fit(render_state(_long_state()), [rq.text])
+    s, kept, _ = eng._fit(render_state(_long_state()), [rq.text])
 
     assert len(kept[0]) == wanted, "the whole question should survive a long state"
     assert len(s) > 0, "the state must not be squeezed to nothing"
@@ -380,7 +380,7 @@ def test_question_reserve_is_capped_so_state_survives(model):
 
     eng = SystemOneEngine(model, EngineConfig(max_question_fraction=0.75))
     huge = "Is this permitted under the policy? " * 2000
-    s, kept = eng._fit(render_state(_long_state()), [huge])
+    s, kept, _ = eng._fit(render_state(_long_state()), [huge])
 
     cap = int(model.config.max_length * 0.75)
     assert len(kept[0]) == cap, "an oversized question should be trimmed to the cap"
@@ -400,7 +400,7 @@ def test_strict_window_refuses_instead_of_truncating(model):
 
     short = render_state("A short state.")
     question = "Is this permitted under the policy? " * 10
-    s, kept = eng._fit(short, [question])
+    s, kept, _ = eng._fit(short, [question])
     assert len(kept[0]) == len(eng.tok(question, add_special_tokens=False)["input_ids"])
     assert s == eng.tok(short, add_special_tokens=True)["input_ids"]
 
