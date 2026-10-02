@@ -1,9 +1,26 @@
 # Strands decider inside a Strands agent
 
-A worked example of strands decider inside a [Strands](https://github.com/strands-agents/sdk-python)
-agent. The agent runs locally on the default Bedrock model plus the locally served decider. It
-runs from a clone of the repository and expects a server on port 8099 unless
-`STRANDS_DECIDER_URL` is set.
+Two worked examples of strands decider inside a [Strands](https://github.com/strands-agents/sdk-python)
+agent. Both run locally on the default Bedrock model plus the locally served decider, from a clone
+of the repository, and expect a server on port 8099 unless `STRANDS_DECIDER_URL` is set.
+
+## As tools: `agent_tools.py`
+
+```bash
+pip install -e ".[strands]"
+strands-decider serve StrandsAgents/strands-decider-2B-hobson-v19 --port 8099
+python examples/strands/agent_tools.py
+```
+
+The eleven `@tool` functions under `strands_decider.tools` go in the agent's tool list, so the chat
+model can ask the decider for a decision (`decider_route`, `decider_classify`, `decider_sift`,
+`decider_rate`, ...) and branch on a calibrated number instead of its own opinion. The first half
+of the script calls the tools directly through `agent.tool.<name>(...)`, which needs no LLM and is
+how to use the decider from plain Python with the SDK's validation and result shape; the second
+half hands four tickets to the agent and lets it decide which tools to call. The tools section of
+the top-level [README](../../README.md#as-tools-the-agent-calls) lists them.
+
+## As a gate: `tool_call_intervention.py`
 
 **Prerequisites:** Strands drives the agent with an LLM call to Amazon Bedrock, so you need
 AWS credentials with Bedrock access in your environment before you run the example. See the

@@ -240,10 +240,65 @@ The decisions inside an agentic workflow are the natural target:
 
 ## Trying it in an Agent
 
-The repository includes a worked example of strands decider inside a Strands agent, under
-[`examples/strands/`](examples/strands/README.md): a `before_tool_call` intervention that gates a
-weather-tool call on two yes/no decisions, so the agent asks which city instead of guessing. See
-the example's [README](examples/strands/README.md) for setup and the walk-through.
+There are two ways to put the decider inside a [Strands](https://github.com/strands-agents/sdk-python)
+agent, and the repository has a worked example of each under [`examples/strands/`](examples/strands/README.md).
+
+### As tools the agent calls
+
+`strands_decider.tools` is a set of `@tool` functions a Strands agent can call like any other tool,
+so the chat model asks the decider for a decision instead of making one up. Install the `strands`
+extra, point the tools at a server (or at a checkpoint to load in-process), and hand them to an agent:
+
+```bash
+pip install "strands-decider[strands]"
+strands-decider serve StrandsAgents/strands-decider-2B-hobson-v19 --port 8099
+export STRANDS_DECIDER_URL=http://127.0.0.1:8099   # or STRANDS_DECIDER_CHECKPOINT=<checkpoint>
+```
+
+```python
+from strands import Agent
+from strands_decider.tools import ALL_TOOLS
+
+agent = Agent(tools=ALL_TOOLS)
+agent("Which team should take this ticket, and is it urgent? 'Help! My payouts have been failing for 3 days!'")
+```
+
+Or call a tool directly, with the SDK's validation and result shape but no chat model:
+
+```python
+result = agent.tool.decider_route(
+    state="Help! My payouts have been failing for 3 days!",
+    handlers={"billing": "payments and payouts", "technical": "bugs and crashes", "sales": "plans and pricing"},
+)
+result["content"][0]["json"]   # {"route": "billing", "reason": "confident", "confidence": 0.77, ...}
+```
+
+| tool | what it does |
+| --- | --- |
+| `decider_ask` | The raw call: one state, any mix of noul, choice and score questions, one pass. |
+| `decider_check` | One yes/no question; `verdict` is `yes` at or above a threshold you set. |
+| `decider_choose` | One option from a set you define; `decided` or `leaning` under a confidence floor. |
+| `decider_rate` | A position on an ascending rubric of 2 to 10 levels, with the nearest level named. |
+| `decider_sift` | Keep the items a yes/no question is true for; the count is done in code. |
+| `decider_classify` | Label each item with one option, grouped, the uncertain ones parked for review. |
+| `decider_rank` | Order items by probability or by a rubric score, best first, optional `top_k`. |
+| `decider_route` | Intent choice plus a complexity score in one pass; a fallback handler for the rest. |
+| `decider_fan_out` | Every question at once, speculative ones kept only when their premise held. |
+| `decider_info` | Which checkpoint is answering, on which device, with what window. |
+| `decider_usage` | Calls, questions, tokens and latency so far in this process. |
+
+Every tool returns JSON for code to branch on and one line for the model to read, refuses a
+malformed request before any forward pass, and takes its thresholds as arguments so the policy
+stays in your code. Which decider answers is resolved per call (`invocation_state["decider"]`),
+then process-wide (`strands_decider.tools.configure(...)`), then from the environment.
+[`examples/strands/agent_tools.py`](examples/strands/agent_tools.py) walks through all of it.
+
+### As a gate the agent never sees
+
+[`examples/strands/tool_call_intervention.py`](examples/strands/tool_call_intervention.py) is a
+`before_tool_call` intervention that gates a weather-tool call on two yes/no decisions, so the
+agent asks which city instead of guessing. See the example's
+[README](examples/strands/README.md) for setup and the walk-through.
 
 ## Training
 
