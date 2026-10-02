@@ -29,7 +29,10 @@ dependencies = [
 [project.optional-dependencies]
 # Only the corpus build uses datasets: `strands-decider data build` and `python -m strands_decider.data.multistep`.
 train = ["datasets>=2.20"]
+# The @tool functions under strands_decider.tools; the rest of the package does not import strands.
+strands = ["strands-agents>=1.57"]
 dev = [
+    "strands-agents>=1.57",
     "pytest>=8.0",
     "ruff>=0.6",
     "mypy>=1.15,<3",
@@ -126,7 +129,8 @@ format = "ruff format {args:.}"
 
 # Detached lint env: skips the project install (and therefore torch) so `hatch run lint:check`
 # stays fast in CI and locally. The typed runtime deps are listed explicitly so mypy can resolve
-# their imports; keep this list in sync with [project].dependencies for pydantic/fastapi/typer/rich/uvicorn.
+# their imports; keep this list in sync with [project].dependencies for pydantic/fastapi/typer/rich/uvicorn
+# and with the strands extra.
 [tool.hatch.envs.lint]
 detached = true
 dependencies = [
@@ -137,6 +141,7 @@ dependencies = [
     "uvicorn[standard]>=0.30",
     "typer>=0.12",
     "rich>=13.7",
+    "strands-agents>=1.57",
 ]
 
 [tool.hatch.envs.lint.scripts]
