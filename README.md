@@ -81,7 +81,7 @@ Example Output:
 ```bash
 noul_0 noul = 0.828
 ```
-Closer to 1 is leaning more toward Yes
+Closer to 1 is leaning more toward Yes.
 
 ### Score question
 Or give a question a score:
