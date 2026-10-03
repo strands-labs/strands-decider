@@ -134,6 +134,11 @@ class SystemOneEngine:
             from .mps_kernels import install
 
             install()
+        elif str(self.cfg.device) == "cpu":
+            # The reference depthwise conv runs once per channel on CPU; see cpu_kernels.
+            from .cpu_kernels import install as install_cpu
+
+            install_cpu()
         self.model = model.to(self.cfg.device).eval()
         if str(self.cfg.device) == "cpu":
             self._upcast_torso_for_cpu()

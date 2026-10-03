@@ -53,7 +53,7 @@ dev = [
 ]
 
 [project.scripts]
-strands-decider = "strands_decider.cli:app"
+strands-decider = "strands_decider.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
