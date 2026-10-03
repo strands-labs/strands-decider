@@ -41,6 +41,7 @@ from .infer import EngineConfig, SystemOneEngine
 from .modeling import (
     StrandsDeciderConfig,
     apply_temperature,
+    base_revision,
     build_head,
     checkpoint_dir,
     config_path,
@@ -246,6 +247,7 @@ def load_mlx_engine(
     """
     path = checkpoint_dir(checkpoint)
     decider_config = StrandsDeciderConfig.from_json(config_path(path))
+    decider_config.base_revision = base_revision(path, decider_config)
     lora_dir = os.path.join(path, "lora")
     if decider_config.use_lora and not os.path.isdir(lora_dir):
         raise FileNotFoundError(
@@ -259,7 +261,8 @@ def load_mlx_engine(
     if cache_limit_bytes is not None:
         mx.set_cache_limit(cache_limit_bytes)
     lm, decoder, owner, prefix = _load_torso(
-        Path(checkpoint_dir(decider_config.base_model)), decider_config.torch_dtype
+        Path(checkpoint_dir(decider_config.base_model, decider_config.base_revision)),
+        decider_config.torch_dtype,
     )
     if decider_config.use_lora:
         merge_lora(lm, lora_dir, prefix)

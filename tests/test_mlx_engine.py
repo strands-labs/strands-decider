@@ -222,3 +222,21 @@ def test_a_bf16_checkpoint_answers_from_another_thread(tmp_path):
     with ThreadPoolExecutor(1) as pool:
         response = pool.submit(engine.evaluate, REQUESTS[1]).result()
     assert set(response.answers) == set(QUESTIONS)
+
+
+def test_mlx_loads_the_base_at_the_revision_in_provenance(tmp_path, monkeypatch):
+    import strands_decider.mlx_engine as mlx_engine
+
+    path = _checkpoint(tmp_path, "pointer")
+    base = str(tmp_path / "base")
+    provenance = {"base_model": base, "base_model_revision": "abc123"}
+    (path / "provenance.json").write_text(json.dumps(provenance))
+    calls, checkpoint_dir = [], mlx_engine.checkpoint_dir
+
+    def record(repo, revision=None):
+        calls.append((repo, revision))
+        return checkpoint_dir(repo, revision)
+
+    monkeypatch.setattr(mlx_engine, "checkpoint_dir", record)
+    load_engine(str(path), device="mlx")
+    assert (base, "abc123") in calls

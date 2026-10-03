@@ -104,9 +104,10 @@ writes them, `strands-decider calibrate` adds the temperatures, and `StrandsDeci
 Training also writes `train_config.json` and `history.json`. Inference does not read them.
 
 The base weights are not in the checkpoint. At first use, `load` downloads
-`Qwen/Qwen3.5-2B-Base` (about 4.5 GB) from Hugging Face. The loader passes no revision, so
-it gets the current `main` of that repository. A later change to that repository changes
-what a fresh install loads.
+`Qwen/Qwen3.5-2B-Base` (about 4.5 GB) from Hugging Face, at the revision in the config's
+`base_revision`. A checkpoint without one uses the `base_model_revision` that its
+`provenance.json` records for the same base model, so a Hugging Face export loads the base it
+was trained on. With neither, the loader gets the current `main` of that repository.
 
 `python -m strands_decider.hf_export export CKPT OUT --run-id RUN` writes a checkpoint as a Hugging
 Face-format folder. Without `--run-id`, the exporter takes the run id from a
@@ -119,8 +120,7 @@ folder as it reads a checkpoint, and the base weights still download separately 
 Hugging Face. Where a command takes a checkpoint path (`strands-decider serve`, `strands-decider ask`,
 `strands-decider info`), a Hub model repo id such as `StrandsAgents/strands-decider-2B-hobson-v19` also works: the loader
 downloads the repo to the Hub cache. `strands-decider calibrate` writes into the checkpoint, so it
-needs a local directory. `provenance.json` records the base-model revision, but the loader does not
-read it. OUT can be a local directory or an `s3://` URI. The exporter does not upload to
+needs a local directory. OUT can be a local directory or an `s3://` URI. The exporter does not upload to
 the Hugging Face Hub.
 
 ## Ask

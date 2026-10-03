@@ -5,6 +5,7 @@ CPU only: a tiny random Qwen3 torso stands in for the base model, so nothing is
 downloaded."""
 
 import copy
+import json
 import os
 import pickle
 import shutil
@@ -111,7 +112,7 @@ def test_a_hub_repo_id_loads_from_the_downloaded_snapshot(ckpt, monkeypatch):
     path, model, loads = ckpt
     asked = []
 
-    def download(repo_id):
+    def download(repo_id, revision=None):
         asked.append(repo_id)
         return str(path)
 
@@ -119,7 +120,7 @@ def test_a_hub_repo_id_loads_from_the_downloaded_snapshot(ckpt, monkeypatch):
     assert _same(StrandsDeciderModel.load("org/hobson-test"), model)
     assert asked == ["org/hobson-test"] and loads == ["tiny"]
 
-    def refuse(repo_id):
+    def refuse(repo_id, revision=None):
         raise OSError("offline")
 
     monkeypatch.setattr(modeling, "snapshot_download", refuse)
@@ -136,7 +137,7 @@ def test_a_local_directory_named_like_a_repo_id_is_not_downloaded(ckpt, monkeypa
     local = tmp_path / "org" / "hobson-test"
     shutil.copytree(path, local)
     monkeypatch.setattr(modeling, "snapshot_download",
-                        lambda repo_id: pytest.fail(f"downloaded {repo_id}"))
+                        lambda repo_id, revision=None: pytest.fail(f"downloaded {repo_id}"))
     monkeypatch.chdir(tmp_path)
     assert _same(StrandsDeciderModel.load("org/hobson-test"), model)
     assert loads == ["tiny"]
@@ -149,7 +150,7 @@ def test_hobson_info_accepts_a_repo_id(ckpt, monkeypatch):
     from strands_decider.cli import app
 
     path, _, loads = ckpt
-    monkeypatch.setattr(modeling, "snapshot_download", lambda repo_id: str(path))
+    monkeypatch.setattr(modeling, "snapshot_download", lambda repo_id, revision=None: str(path))
     res = CliRunner().invoke(app, ["info", "org/hobson-test"])
     assert res.exit_code == 0, res.output
     assert '"base_model": "tiny"' in res.output and loads == []
@@ -164,3 +165,47 @@ def test_calibration_refuses_a_repo_id_before_the_fit(ckpt, monkeypatch):
     with pytest.raises(FileNotFoundError, match="needs a local directory"):
         calibrate_checkpoint("org/hobson-test", [])
     assert loads == []
+
+
+
+@pytest.mark.parametrize(("provenance", "pinned"), [
+    ({"base_model": "tiny", "base_model_revision": "abc123"}, "abc123"),
+    ({"base_model": "other", "base_model_revision": "abc123"}, None),
+])
+def test_the_base_revision_comes_from_provenance_for_the_same_base(ckpt, monkeypatch, provenance,
+                                                                  pinned):
+    """A Hugging Face export records the base revision in provenance.json, not in the config.
+    load pins the torso to it, unless provenance.json describes another base model."""
+    path, _, _ = ckpt
+    (path / "provenance.json").write_text(json.dumps(provenance))
+    revisions, load_torso = [], StrandsDeciderModel._load_torso
+
+    def record(config, *args):
+        revisions.append(config.base_revision)
+        return load_torso(config, *args)
+
+    monkeypatch.setattr(StrandsDeciderModel, "_load_torso", staticmethod(record))
+    StrandsDeciderModel.load(str(path))
+    assert revisions == [pinned]
+
+
+def test_the_torso_config_and_weights_load_at_the_pinned_revision(monkeypatch):
+    import transformers
+
+    revisions = []
+
+    def fake_config(name, **kwargs):
+        revisions.append(("config", kwargs.get("revision")))
+        return transformers.Qwen3Config()
+
+    def fake_model(name, **kwargs):
+        revisions.append(("model", kwargs.get("revision")))
+        return transformers.Qwen3Model(transformers.Qwen3Config(
+            vocab_size=6, hidden_size=32, intermediate_size=64, num_hidden_layers=1,
+            num_attention_heads=4, num_key_value_heads=2, head_dim=8))
+
+    monkeypatch.setattr(transformers.AutoConfig, "from_pretrained", fake_config)
+    monkeypatch.setattr(transformers.AutoModel, "from_pretrained", fake_model)
+    config = StrandsDeciderConfig(base_model="tiny", base_revision="abc123", torch_dtype="float32")
+    StrandsDeciderModel._load_torso(config, None, None)
+    assert revisions == [("config", "abc123"), ("model", "abc123")]

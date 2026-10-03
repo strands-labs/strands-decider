@@ -42,6 +42,9 @@ MASK_VALUE = -1e4
 @dataclass
 class StrandsDeciderConfig:
     base_model: str = "Qwen/Qwen3-1.7B-Base"
+    # Hub revision of base_model the adapter was trained on. None loads the repo's default branch;
+    # `load` falls back to the checkpoint's provenance.json.
+    base_revision: str | None = None
     num_slots: int = DEFAULT_NUM_SLOTS
     # 0 = single linear projection. >0 inserts one GELU hidden layer of this width.
     head_hidden: int = 0
@@ -262,7 +265,7 @@ class StrandsDeciderModel(nn.Module):
         attn_implementation: str | None = None,
     ) -> StrandsDeciderModel:
         """Load the base model's torso (AutoModel, so no LM head) and attach LoRA."""
-        tok = AutoTokenizer.from_pretrained(config.base_model)
+        tok = AutoTokenizer.from_pretrained(config.base_model, revision=config.base_revision)
         if tok.pad_token is None:
             tok.pad_token = tok.eos_token
 
@@ -278,12 +281,15 @@ class StrandsDeciderModel(nn.Module):
         device_map: str | None,
         attn_implementation: str | None,
     ) -> nn.Module:
-        kwargs: dict[str, Any] = {"dtype": getattr(torch, config.torch_dtype)}
+        kwargs: dict[str, Any] = {
+            "dtype": getattr(torch, config.torch_dtype),
+            "revision": config.base_revision,
+        }
         if device_map:
             kwargs["device_map"] = device_map
         if attn_implementation:
             kwargs["attn_implementation"] = attn_implementation
-        base_cfg = AutoConfig.from_pretrained(config.base_model)
+        base_cfg = AutoConfig.from_pretrained(config.base_model, revision=config.base_revision)
         if base_cfg.model_type in {"qwen3_5", "qwen3_5_text"}:
             # Qwen3.5 checkpoints are multimodal; AutoModel would hand back the wrapper with
             # a vision tower. Load the text tower through its causal-LM class, which maps the
@@ -501,6 +507,7 @@ class StrandsDeciderModel(nn.Module):
     ) -> StrandsDeciderModel:
         path = checkpoint_dir(path)
         config = StrandsDeciderConfig.from_json(config_path(path))
+        config.base_revision = base_revision(path, config)
         # Check the checkpoint's own files before the torso loads its 2B weights. Without
         # this check, a checkpoint without its adapter loads and gives other probabilities.
         lora_dir = os.path.join(path, "lora")
@@ -550,7 +557,18 @@ def config_path(path: str) -> str:
     return new
 
 
-def checkpoint_dir(path: str) -> str:
+def base_revision(path: str, config: StrandsDeciderConfig) -> str | None:
+    """The base model revision for checkpoint `path`: the config's, else the one its
+    provenance.json (written by every Hugging Face export) records for the same base."""
+    prov = os.path.join(path, "provenance.json")
+    if config.base_revision or not os.path.exists(prov):
+        return config.base_revision
+    with open(prov, encoding="utf-8") as fh:
+        meta = json.load(fh)
+    return meta.get("base_model_revision") if meta.get("base_model") == config.base_model else None
+
+
+def checkpoint_dir(path: str, revision: str | None = None) -> str:
     """`path` if it is a local directory, else the Hub model repo `path` downloaded to the
     Hub cache (`strands-decider serve <hub-org>/strands-decider-2B-<release>`). If that download fails for any reason (no
     such repo, private or gated, offline, a proxy error, not a valid repo id), the error
@@ -558,7 +576,7 @@ def checkpoint_dir(path: str) -> str:
     if os.path.isdir(path):
         return path
     try:
-        return str(snapshot_download(path))
+        return str(snapshot_download(path, revision=revision))
     except Exception as e:
         raise FileNotFoundError(
             f"{path}: not a local directory, and could not be downloaded from the "
