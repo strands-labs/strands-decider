@@ -29,6 +29,7 @@ script also runs on its own:
 | [`device_parity.py`](device_parity.py) | Whether two or more devices give one checkpoint the same answers: the largest probability difference and the answers that change, against the first device |
 | [`jevbench/jevbench.sh`](jevbench/jevbench.sh) | The JevBench public set against `strands-decider serve` on one GPU, at the JevBench commit the script pins |
 | [`jevbench/paired.py`](jevbench/paired.py) | A per-task comparison of two JevBench runs, with an exact McNemar test |
+| [`vision/run.py`](vision/run.py) | Image input (`--vision`): NaturalBench and POPE, with and without the image, against two baselines ([vision/](vision/README.md)) |
 | [`jevbench/jevbench_cold_warm.py`](jevbench/jevbench_cold_warm.py) | First-request against warm latency, one task asked twice (MPS) |
 
 Paths are relative to the repository root unless they are links. A module path such as

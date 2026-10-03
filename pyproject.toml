@@ -29,6 +29,8 @@ dependencies = [
 [project.optional-dependencies]
 # Only the corpus build uses datasets: `strands-decider data build` and `python -m strands_decider.data.multistep`.
 train = ["datasets>=2.20"]
+# Image input (`serve --vision`, `ask --image`, docs/vision.md); also needs transformers >= 5.18.
+vision = ["pillow>=10"]
 # `--device mlx`: the torso on Apple silicon's GPU through mlx-lm (src/strands_decider/mlx_engine.py).
 # mlx-lm is capped at the minor version tested: the backend uses its Qwen3.5 module layout and
 # prompt-cache classes, which are internals.
@@ -45,6 +47,7 @@ cuda = ["flash-linear-attention>=0.5; sys_platform == 'linux'"]
 mps = []
 cpu = []
 dev = [
+    "pillow>=10",
     "pytest>=8.0",
     "ruff>=0.6",
     "mypy>=1.15,<3",
@@ -114,6 +117,7 @@ module = [
     "yaml",
     "mlx.*",
     "mlx_lm.*",
+    "PIL.*",
 ]
 ignore_missing_imports = true
 

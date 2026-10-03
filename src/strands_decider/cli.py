@@ -311,6 +311,10 @@ def serve_cmd(
         False, "--strict-window",
         help="Reject (HTTP 422) a prompt longer than the context window instead of truncating it.",
     ),
+    vision: bool = typer.Option(
+        False, "--vision",
+        help="Keep Qwen3.5's vision tower so requests may carry `images` (docs/vision.md).",
+    ),
     max_batch: int = typer.Option(
         32, "--max-batch", help="Questions encoded per forward pass; lower it for very long states.",
     ),
@@ -324,7 +328,7 @@ def serve_cmd(
     serve(
         checkpoint, host=host, port=port, device=selected_device,
         use_prefix_cache=not no_prefix_cache, model_name=model_name,
-        strict_window=strict_window, max_batch=max_batch,
+        strict_window=strict_window, max_batch=max_batch, vision=vision,
     )
 
 
@@ -332,6 +336,9 @@ def serve_cmd(
 def ask_cmd(
     checkpoint: str = typer.Argument(...),
     state: str = typer.Option(..., "--state", "-s", help="The content to evaluate."),
+    image: list[str] | None = typer.Option(
+        None, "--image", help="Image file, part of the state; repeat. Loads the vision tower."
+    ),
     noul: list[str] | None = typer.Option(None, "--noul", help="Yes/no question; repeat."),
     choice: list[str] | None = typer.Option(
         None, "--choice", help="'question?=opt1,opt2,opt3'; repeat."
@@ -347,7 +354,7 @@ def ask_cmd(
     as_json: bool = typer.Option(False, "--json", help="Print the raw API response."),
 ) -> None:
     """Ask one state a set of typed questions from the command line."""
-    from .infer import load_engine
+    from .infer import EngineConfig, load_engine
 
     questions: dict[str, Question] = {}
     for i, q in enumerate(noul or []):
@@ -371,8 +378,20 @@ def ask_cmd(
 
     selected_device = device or _auto_device()
     _configure_inference_logging(selected_device)
-    engine = load_engine(checkpoint, device=selected_device)
-    response = engine.ask(state, questions)
+    if image:
+        import base64
+
+        from .vision import load_vision_engine
+
+        encoded = []
+        for path in image:
+            with open(path, "rb") as fh:
+                encoded.append(base64.b64encode(fh.read()).decode("ascii"))
+        response = load_vision_engine(checkpoint, EngineConfig(device=selected_device)).ask_images(
+            state, questions, encoded
+        )
+    else:
+        response = load_engine(checkpoint, device=selected_device).ask(state, questions)
 
     if as_json:
         console.print_json(response.model_dump_json())

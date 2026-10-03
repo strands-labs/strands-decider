@@ -334,6 +334,8 @@ class SystemOneEngine:
     # ---- public ----------------------------------------------------------
 
     def evaluate(self, request: SystemOneRequest) -> SystemOneResponse:
+        if request.images:
+            raise ValueError("this engine has no vision tower; serve with --vision for images")
         names = list(request.questions.keys())
         questions: list[Question] = [request.questions[n] for n in names]
 

@@ -98,6 +98,9 @@ class SystemOneRequest(BaseModel):
     state: Content
     questions: dict[str, Question] = Field(..., min_length=1)
     model: str = "strands-decider-latest"
+    # Base64 images (or data: URIs), part of the state. Needs a vision engine
+    # (`serve --vision`); a text-only engine refuses them rather than ignore them.
+    images: list[str] = Field(default_factory=list)
 
 
 class NoulAnswer(BaseModel):

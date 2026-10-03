@@ -165,6 +165,23 @@ curl -s localhost:8000/v1/systemone \
   ```
 </details>
 
+### Images
+
+Qwen3.5-2B-Base is natively multimodal. With `--vision` the server keeps its vision tower,
+and a request may carry `images` (base64) as part of the state; the same v19 checkpoint
+answers over them with no retraining. Needs `pip install "strands-decider[vision]"` and
+transformers 5.18 or later.
+
+```bash
+strands-decider serve StrandsAgents/strands-decider-2B-hobson-v19 --vision --port 8000
+strands-decider ask StrandsAgents/strands-decider-2B-hobson-v19 --state "" --image page.png \
+  --noul "Is the signature block filled in?"
+```
+
+It matches an image-trained 2B decider on accuracy, and on NaturalBench is much better
+calibrated (ECE 0.014 against 0.080); see [docs/vision.md](docs/vision.md) for the request shape,
+how it works and the measurements.
+
 ## About the model
 
 `strands-decider-2B`, the first model of the family, has 1.9 billion parameters. It answers a
