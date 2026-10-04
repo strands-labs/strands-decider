@@ -8,11 +8,11 @@ Hardware: Apple M1 MacBook Air, 16 GB RAM, macOS 26.5.1.
 ## Current run
 
 `reports/m1-local/`: checkpoint bfloat16 baseline, affine int8, affine int4.
-Bfloat16 and int8 latency and quality evaluations are complete. Int4 is still running.
-This is an **incomplete experiment snapshot**, not the final conclusion.
+Bfloat16, int8 and int4 latency and quality evaluations are complete.
+The checkpoint-default experiment is complete. The explicit fp16 follow-up is starting; final conclusions remain pending.
 The JSON files are saved after every completed shape and every quality task.
 The early bfloat16 measurements began on battery; later runs are on AC power.
-An explicit fp16 comparison is prepared but has not run yet.
+An explicit fp16 comparison is starting in `reports/m1-fp16`.
 
 Execution uses `/private/tmp/strands-decider-m1-run` because Desktop cloud placeholders
 initially stalled reads. The source changes and exact benchmark source snapshot are also
