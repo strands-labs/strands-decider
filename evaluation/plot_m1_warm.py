@@ -75,13 +75,13 @@ reduction = np.mean(
 )
 
 fig, ax = plt.subplots(figsize=(13.6, 8.2))
-fig.subplots_adjust(left=0.07, right=0.975, bottom=0.19, top=0.76)
+fig.subplots_adjust(left=0.07, right=0.975, bottom=0.16, top=0.76)
 fig.text(0.07, 0.94, "Strands Decider 2B latency | M1 MacBook Air 16GB", fontsize=23, weight="bold")
 fig.text(
     0.07,
     0.888,
     "FP16 delivers ~20% lower average latency compared to BF16.\n"
-    "INT4/INT8 quantization adds latency: the ‘dequant tax’.",
+    "INT4 and INT8 can be slower because unpacking compressed weights adds extra work during inference.",
     fontsize=12.5,
     linespacing=1.4,
     va="top",
@@ -142,13 +142,6 @@ ax.legend(
     columnspacing=2.3,
     fontsize=12,
     borderaxespad=0,
-)
-fig.text(
-    0.07,
-    0.097,
-    f"{reduction:.0f}% lower latency on average for FP16 vs BF16 across these six workloads.",
-    fontsize=12,
-    weight="bold",
 )
 fig.text(
     0.07,
