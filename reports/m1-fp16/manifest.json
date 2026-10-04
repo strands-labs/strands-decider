@@ -1,0 +1,28 @@
+{
+  "platform": "macOS-26.5.1-arm64-arm-64bit",
+  "machine": "arm64",
+  "commit": "cd3a6b54184bc5d8e92d2f20cf363810c04d4f65",
+  "diff": "",
+  "jevbench_commit": "bb05a335bc809e61b20c0f745d25499a82b326fc",
+  "packages": {
+    "mlx": "0.32.3",
+    "mlx-lm": "0.32.0",
+    "torch": "2.14.1",
+    "transformers": "5.18.0",
+    "peft": "0.21.2"
+  },
+  "args": {
+    "checkpoint": "/private/tmp/strands-fp16-checkpoint",
+    "jevbench": "/private/tmp/strands-jevbench",
+    "out": "reports/m1-fp16",
+    "lengths": "256,1024,4000",
+    "questions": "1,8",
+    "reps": 5,
+    "warmup": 2,
+    "order": "fp,8,4",
+    "precision": null
+  },
+  "started": "2026-10-04T08:51:27-0400",
+  "power": "Now drawing from 'AC Power'\n -InternalBattery-0 (id=24903779)\t73%; charging; 1:06 remaining present: true",
+  "swap_before": "vm.swapusage: total = 5120.00M  used = 4043.56M  free = 1076.44M  (encrypted)"
+}

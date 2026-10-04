@@ -1,0 +1,1398 @@
+{
+  "precision": "fp",
+  "load_s": 5.302908000070602,
+  "torso_dtype": "float16",
+  "config": {
+    "base_model": "Qwen/Qwen3.5-2B-Base",
+    "base_revision": "b1485b2fa6dfa1287294f269f5fb618e03d52d7c",
+    "num_slots": 24,
+    "head_hidden": 0,
+    "head_dropout": 0.05,
+    "max_length": 4096,
+    "torch_dtype": "float16",
+    "head_init": "random",
+    "kl_frozen_weight": 0.3,
+    "head_type": "pointer",
+    "pointer_dim": 256,
+    "temperature": 0.9627721607677362,
+    "temperature_by_kind": {
+      "noul": 0.9107136998460428,
+      "choice": 0.734189596436441,
+      "score": 1.32780942142348
+    },
+    "ordinal_smoothing": 0.1,
+    "use_lora": true,
+    "lora_r": 16,
+    "lora_alpha": 32,
+    "lora_dropout": 0.05,
+    "lora_targets": [
+      "q_proj",
+      "k_proj",
+      "v_proj",
+      "o_proj",
+      "gate_proj",
+      "up_proj",
+      "down_proj",
+      "in_proj_qkv",
+      "in_proj_z",
+      "in_proj_a",
+      "in_proj_b",
+      "out_proj"
+    ]
+  },
+  "quantized_paths": [],
+  "device": {
+    "device_name": "Apple M1",
+    "max_recommended_working_set_size": 12713115648,
+    "memory_size": 17179869184,
+    "architecture": "applegpu_g13g",
+    "max_buffer_length": 9534832640,
+    "resource_limit": 499000
+  },
+  "latency": [
+    {
+      "state_tokens_requested": 256,
+      "questions": 1,
+      "input_tokens": 350,
+      "path": "single",
+      "median_ms": 687.9847920499742,
+      "p90_ms": 905.2076670341194,
+      "samples_ms": [
+        598.3357499353588,
+        611.5063750185072,
+        687.9847920499742,
+        778.5846660844982,
+        905.2076670341194
+      ],
+      "mlx_peak_gib": 3.748374816030264,
+      "rss_peak_gib": 4.0998992919921875,
+      "swap": "vm.swapusage: total = 5120.00M  used = 4043.56M  free = 1076.44M  (encrypted)"
+    },
+    {
+      "state_tokens_requested": 256,
+      "questions": 8,
+      "input_tokens": 945,
+      "path": "prefix",
+      "median_ms": 2353.9414170663804,
+      "p90_ms": 2414.652582956478,
+      "samples_ms": [
+        2414.652582956478,
+        2353.9414170663804,
+        2344.1388332284987,
+        2344.738124869764,
+        2384.8136668093503
+      ],
+      "mlx_peak_gib": 4.193911889567971,
+      "rss_peak_gib": 4.0998992919921875,
+      "swap": "vm.swapusage: total = 5120.00M  used = 4043.56M  free = 1076.44M  (encrypted)"
+    },
+    {
+      "state_tokens_requested": 1024,
+      "questions": 1,
+      "input_tokens": 1118,
+      "path": "single",
+      "median_ms": 2868.9542920328677,
+      "p90_ms": 2902.654584031552,
+      "samples_ms": [
+        2868.9542920328677,
+        2853.859541937709,
+        2864.5355000626296,
+        2892.534540966153,
+        2902.654584031552
+      ],
+      "mlx_peak_gib": 3.9779488258063793,
+      "rss_peak_gib": 4.0998992919921875,
+      "swap": "vm.swapusage: total = 5120.00M  used = 4027.56M  free = 1092.44M  (encrypted)"
+    },
+    {
+      "state_tokens_requested": 1024,
+      "questions": 8,
+      "input_tokens": 1713,
+      "path": "prefix",
+      "median_ms": 5123.121374985203,
+      "p90_ms": 5223.946874961257,
+      "samples_ms": [
+        4808.8653748854995,
+        4935.101500013843,
+        5170.472749974579,
+        5123.121374985203,
+        5223.946874961257
+      ],
+      "mlx_peak_gib": 4.32278891839087,
+      "rss_peak_gib": 4.0998992919921875,
+      "swap": "vm.swapusage: total = 5120.00M  used = 4027.56M  free = 1092.44M  (encrypted)"
+    },
+    {
+      "state_tokens_requested": 4000,
+      "questions": 1,
+      "input_tokens": 4094,
+      "path": "single",
+      "median_ms": 10955.25799994357,
+      "p90_ms": 11196.168000111356,
+      "samples_ms": [
+        10691.07099995017,
+        10575.388541910797,
+        10955.25799994357,
+        10990.563374944031,
+        11196.168000111356
+      ],
+      "mlx_peak_gib": 4.086029579862952,
+      "rss_peak_gib": 4.0998992919921875,
+      "swap": "vm.swapusage: total = 5120.00M  used = 4003.56M  free = 1116.44M  (encrypted)"
+    },
+    {
+      "state_tokens_requested": 4000,
+      "questions": 8,
+      "input_tokens": 4689,
+      "path": "prefix",
+      "median_ms": 18412.005583988503,
+      "p90_ms": 20907.767874887213,
+      "samples_ms": [
+        17260.153291979805,
+        19201.235000044107,
+        18412.005583988503,
+        13554.179082857445,
+        20907.767874887213
+      ],
+      "mlx_peak_gib": 4.929229939356446,
+      "rss_peak_gib": 4.0998992919921875,
+      "swap": "vm.swapusage: total = 5120.00M  used = 4339.94M  free = 780.06M  (encrypted)"
+    }
+  ],
+  "quality": [
+    {
+      "id": "original-policy-01-0",
+      "type": "noul",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "yes": 0.1137,
+        "no": 0.8863
+      },
+      "predicted": "no",
+      "correct": true,
+      "brier": 0.025855380000000004
+    },
+    {
+      "id": "original-policy-01-1",
+      "type": "noul",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "yes": 0.1242,
+        "no": 0.8758
+      },
+      "predicted": "no",
+      "correct": true,
+      "brier": 0.030851279999999995
+    },
+    {
+      "id": "original-policy-02-0",
+      "type": "noul",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "yes": 0.6501,
+        "no": 0.3499
+      },
+      "predicted": "yes",
+      "correct": true,
+      "brier": 0.24486001999999998
+    },
+    {
+      "id": "original-policy-02-1",
+      "type": "noul",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "yes": 0.3521,
+        "no": 0.6478999999999999
+      },
+      "predicted": "no",
+      "correct": false,
+      "brier": 0.8395488199999998
+    },
+    {
+      "id": "original-policy-03-0",
+      "type": "noul",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "yes": 0.784,
+        "no": 0.21599999999999997
+      },
+      "predicted": "yes",
+      "correct": true,
+      "brier": 0.09331199999999998
+    },
+    {
+      "id": "original-policy-03-1",
+      "type": "noul",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "yes": 0.3155,
+        "no": 0.6845
+      },
+      "predicted": "no",
+      "correct": false,
+      "brier": 0.9370805
+    },
+    {
+      "id": "original-policy-04-0",
+      "type": "noul",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "yes": 0.3818,
+        "no": 0.6182000000000001
+      },
+      "predicted": "no",
+      "correct": true,
+      "brier": 0.29154247999999994
+    },
+    {
+      "id": "original-policy-04-1",
+      "type": "noul",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "yes": 0.1763,
+        "no": 0.8237
+      },
+      "predicted": "no",
+      "correct": true,
+      "brier": 0.06216338000000001
+    },
+    {
+      "id": "original-policy-05-0",
+      "type": "noul",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "yes": 0.5697,
+        "no": 0.4303
+      },
+      "predicted": "yes",
+      "correct": false,
+      "brier": 0.6491161799999999
+    },
+    {
+      "id": "original-policy-05-1",
+      "type": "noul",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "yes": 0.1883,
+        "no": 0.8117
+      },
+      "predicted": "no",
+      "correct": true,
+      "brier": 0.07091378000000001
+    },
+    {
+      "id": "original-policy-06-0",
+      "type": "noul",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "yes": 0.8791,
+        "no": 0.12090000000000001
+      },
+      "predicted": "yes",
+      "correct": true,
+      "brier": 0.029233620000000005
+    },
+    {
+      "id": "original-policy-06-1",
+      "type": "noul",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "yes": 0.743,
+        "no": 0.257
+      },
+      "predicted": "yes",
+      "correct": true,
+      "brier": 0.132098
+    },
+    {
+      "id": "original-intent-01-0",
+      "type": "choice",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "cancel": 0.0783,
+        "change_address": 0.0039,
+        "other": 0.0919,
+        "refund": 0.8241,
+        "status": 0.0018
+      },
+      "predicted": "refund",
+      "correct": true,
+      "brier": 0.04553575999999998
+    },
+    {
+      "id": "original-intent-01-1",
+      "type": "choice",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "cancel": 0.1911,
+        "change_address": 0.0038,
+        "other": 0.1228,
+        "refund": 0.6806,
+        "status": 0.0016
+      },
+      "predicted": "refund",
+      "correct": true,
+      "brier": 0.15363241000000002
+    },
+    {
+      "id": "original-intent-02-0",
+      "type": "choice",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "cancel": 0.0234,
+        "change_address": 0.1432,
+        "other": 0.2557,
+        "refund": 0.0129,
+        "status": 0.5648
+      },
+      "predicted": "status",
+      "correct": true,
+      "brier": 0.27600174
+    },
+    {
+      "id": "original-intent-02-1",
+      "type": "choice",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "cancel": 0.0126,
+        "change_address": 0.0212,
+        "other": 0.0646,
+        "refund": 0.0061,
+        "status": 0.8954
+      },
+      "predicted": "status",
+      "correct": true,
+      "brier": 0.015759730000000007
+    },
+    {
+      "id": "original-intent-03-0",
+      "type": "choice",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "cancel": 0.0193,
+        "change_address": 0.8712,
+        "other": 0.0875,
+        "refund": 0.0072,
+        "status": 0.0147
+      },
+      "predicted": "change_address",
+      "correct": true,
+      "brier": 0.024886110000000006
+    },
+    {
+      "id": "original-intent-03-1",
+      "type": "choice",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "cancel": 0.0074,
+        "change_address": 0.9473,
+        "other": 0.0396,
+        "refund": 0.0044,
+        "status": 0.0013
+      },
+      "predicted": "change_address",
+      "correct": true,
+      "brier": 0.004421259999999997
+    },
+    {
+      "id": "original-intent-04-0",
+      "type": "choice",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "cancel": 0.9091,
+        "change_address": 0.0033,
+        "other": 0.0627,
+        "refund": 0.024,
+        "status": 0.0009
+      },
+      "predicted": "cancel",
+      "correct": true,
+      "brier": 0.012781799999999998
+    },
+    {
+      "id": "original-intent-04-1",
+      "type": "choice",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "cancel": 0.9527,
+        "change_address": 0.003,
+        "other": 0.0352,
+        "refund": 0.0083,
+        "status": 0.0008
+      },
+      "predicted": "cancel",
+      "correct": true,
+      "brier": 0.003554860000000001
+    },
+    {
+      "id": "original-intent-05-0",
+      "type": "choice",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "cancel": 0.0372,
+        "change_address": 0.0063,
+        "other": 0.4097,
+        "refund": 0.5413,
+        "status": 0.0056
+      },
+      "predicted": "refund",
+      "correct": false,
+      "brier": 0.64291467
+    },
+    {
+      "id": "original-intent-05-1",
+      "type": "choice",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "cancel": 0.0889,
+        "change_address": 0.0074,
+        "other": 0.4821,
+        "refund": 0.4152,
+        "status": 0.0064
+      },
+      "predicted": "other",
+      "correct": true,
+      "brier": 0.44861038000000003
+    },
+    {
+      "id": "original-intent-06-0",
+      "type": "choice",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "cancel": 0.1668,
+        "change_address": 0.016,
+        "other": 0.1704,
+        "refund": 0.0171,
+        "status": 0.6296
+      },
+      "predicted": "status",
+      "correct": true,
+      "brier": 0.19460296999999996
+    },
+    {
+      "id": "original-intent-06-1",
+      "type": "choice",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "cancel": 0.1357,
+        "change_address": 0.0111,
+        "other": 0.133,
+        "refund": 0.0378,
+        "status": 0.6824
+      },
+      "predicted": "status",
+      "correct": true,
+      "brier": 0.1385253
+    },
+    {
+      "id": "original-ordinal-01-0",
+      "type": "score",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "0": 0.6521,
+        "1": 0.2093,
+        "2": 0.0871,
+        "3": 0.0515
+      },
+      "ordinal_ev": 0.538,
+      "predicted": "0",
+      "correct": true,
+      "brier": 0.17507956
+    },
+    {
+      "id": "original-ordinal-01-1",
+      "type": "score",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "0": 0.6416,
+        "1": 0.2185,
+        "2": 0.0921,
+        "3": 0.0478
+      },
+      "ordinal_ev": 0.5461,
+      "predicted": "0",
+      "correct": true,
+      "brier": 0.18696006000000004
+    },
+    {
+      "id": "original-ordinal-02-0",
+      "type": "score",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "0": 0.2034,
+        "1": 0.6002,
+        "2": 0.148,
+        "3": 0.0484
+      },
+      "ordinal_ev": 1.0413999999999999,
+      "predicted": "1",
+      "correct": true,
+      "brier": 0.22545816000000005
+    },
+    {
+      "id": "original-ordinal-02-1",
+      "type": "score",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "0": 0.1453,
+        "1": 0.7176,
+        "2": 0.0993,
+        "3": 0.0378
+      },
+      "ordinal_ev": 1.0296,
+      "predicted": "1",
+      "correct": true,
+      "brier": 0.11215117999999999
+    },
+    {
+      "id": "original-ordinal-03-0",
+      "type": "score",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "0": 0.1446,
+        "1": 0.1393,
+        "2": 0.6602,
+        "3": 0.0559
+      },
+      "ordinal_ev": 1.6274,
+      "predicted": "2",
+      "correct": true,
+      "brier": 0.1589025
+    },
+    {
+      "id": "original-ordinal-03-1",
+      "type": "score",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "0": 0.1882,
+        "1": 0.2018,
+        "2": 0.5455,
+        "3": 0.0645
+      },
+      "ordinal_ev": 1.4863,
+      "predicted": "2",
+      "correct": true,
+      "brier": 0.28687298
+    },
+    {
+      "id": "original-ordinal-04-0",
+      "type": "score",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "0": 0.1011,
+        "1": 0.1016,
+        "2": 0.1801,
+        "3": 0.6172
+      },
+      "ordinal_ev": 2.3134,
+      "predicted": "3",
+      "correct": true,
+      "brier": 0.19951562000000003
+    },
+    {
+      "id": "original-ordinal-04-1",
+      "type": "score",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "0": 0.1108,
+        "1": 0.1075,
+        "2": 0.2013,
+        "3": 0.5805
+      },
+      "ordinal_ev": 2.2516000000000003,
+      "predicted": "3",
+      "correct": true,
+      "brier": 0.24033482999999997
+    },
+    {
+      "id": "original-ordinal-05-0",
+      "type": "score",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "0": 0.4232,
+        "1": 0.1364,
+        "2": 0.347,
+        "3": 0.0934
+      },
+      "ordinal_ev": 1.1106,
+      "predicted": "0",
+      "correct": true,
+      "brier": 0.48043576
+    },
+    {
+      "id": "original-ordinal-05-1",
+      "type": "score",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "0": 0.4315,
+        "1": 0.22,
+        "2": 0.2609,
+        "3": 0.0876
+      },
+      "ordinal_ev": 1.0046,
+      "predicted": "0",
+      "correct": true,
+      "brier": 0.44733482
+    },
+    {
+      "id": "original-ordinal-06-0",
+      "type": "score",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "0": 0.1433,
+        "1": 0.2005,
+        "2": 0.6185,
+        "3": 0.0377
+      },
+      "ordinal_ev": 1.5506000000000002,
+      "predicted": "2",
+      "correct": true,
+      "brier": 0.20769867999999994
+    },
+    {
+      "id": "original-ordinal-06-1",
+      "type": "score",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "0": 0.0943,
+        "1": 0.122,
+        "2": 0.746,
+        "3": 0.0377
+      },
+      "ordinal_ev": 1.7271,
+      "predicted": "2",
+      "correct": true,
+      "brier": 0.08971378
+    },
+    {
+      "id": "original-extraction-01-0",
+      "type": "choice",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "courier": 0.0723,
+        "pickup": 0.8452,
+        "post": 0.016,
+        "unknown": 0.0664
+      },
+      "predicted": "pickup",
+      "correct": true,
+      "brier": 0.03385529000000001
+    },
+    {
+      "id": "original-extraction-01-1",
+      "type": "choice",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "courier": 0.1297,
+        "pickup": 0.7297,
+        "post": 0.0196,
+        "unknown": 0.1209
+      },
+      "predicted": "pickup",
+      "correct": true,
+      "brier": 0.10488514999999998
+    },
+    {
+      "id": "original-extraction-02-0",
+      "type": "choice",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "courier": 0.0586,
+        "pickup": 0.0222,
+        "post": 0.2473,
+        "unknown": 0.6718
+      },
+      "predicted": "unknown",
+      "correct": true,
+      "brier": 0.17279933000000003
+    },
+    {
+      "id": "original-extraction-02-1",
+      "type": "choice",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "courier": 0.0445,
+        "pickup": 0.0054,
+        "post": 0.1721,
+        "unknown": 0.778
+      },
+      "predicted": "unknown",
+      "correct": true,
+      "brier": 0.08091182
+    },
+    {
+      "id": "original-extraction-03-0",
+      "type": "choice",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "courier": 0.512,
+        "pickup": 0.102,
+        "post": 0.0208,
+        "unknown": 0.3653
+      },
+      "predicted": "courier",
+      "correct": true,
+      "brier": 0.38242473
+    },
+    {
+      "id": "original-extraction-03-1",
+      "type": "choice",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "courier": 0.9504,
+        "pickup": 0.0194,
+        "post": 0.0113,
+        "unknown": 0.0188
+      },
+      "predicted": "courier",
+      "correct": true,
+      "brier": 0.003317649999999998
+    },
+    {
+      "id": "original-extraction-04-0",
+      "type": "choice",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "courier": 0.0295,
+        "pickup": 0.0323,
+        "post": 0.7742,
+        "unknown": 0.1639
+      },
+      "predicted": "post",
+      "correct": true,
+      "brier": 0.07976238999999999
+    },
+    {
+      "id": "original-extraction-04-1",
+      "type": "choice",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "courier": 0.0434,
+        "pickup": 0.0073,
+        "post": 0.888,
+        "unknown": 0.0612
+      },
+      "predicted": "post",
+      "correct": true,
+      "brier": 0.01822629
+    },
+    {
+      "id": "original-extraction-05-0",
+      "type": "choice",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "courier": 0.0657,
+        "pickup": 0.0215,
+        "post": 0.0211,
+        "unknown": 0.8917
+      },
+      "predicted": "unknown",
+      "correct": true,
+      "brier": 0.01695283999999999
+    },
+    {
+      "id": "original-extraction-05-1",
+      "type": "choice",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "courier": 0.181,
+        "pickup": 0.0175,
+        "post": 0.0232,
+        "unknown": 0.7783
+      },
+      "predicted": "unknown",
+      "correct": true,
+      "brier": 0.08275638
+    },
+    {
+      "id": "original-extraction-06-0",
+      "type": "choice",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "courier": 0.8931,
+        "pickup": 0.0084,
+        "post": 0.0634,
+        "unknown": 0.0351
+      },
+      "predicted": "courier",
+      "correct": true,
+      "brier": 0.01674974
+    },
+    {
+      "id": "original-extraction-06-1",
+      "type": "choice",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "courier": 0.902,
+        "pickup": 0.0099,
+        "post": 0.0485,
+        "unknown": 0.0397
+      },
+      "predicted": "courier",
+      "correct": true,
+      "brier": 0.013630349999999996
+    },
+    {
+      "id": "original-adequacy-01-0",
+      "type": "noul",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "yes": 0.6237,
+        "no": 0.37629999999999997
+      },
+      "predicted": "yes",
+      "correct": true,
+      "brier": 0.28320337999999995
+    },
+    {
+      "id": "original-adequacy-01-1",
+      "type": "noul",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "yes": 0.5384,
+        "no": 0.4616
+      },
+      "predicted": "yes",
+      "correct": true,
+      "brier": 0.42614912
+    },
+    {
+      "id": "original-adequacy-02-0",
+      "type": "noul",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "yes": 0.4132,
+        "no": 0.5868
+      },
+      "predicted": "no",
+      "correct": true,
+      "brier": 0.34146848
+    },
+    {
+      "id": "original-adequacy-02-1",
+      "type": "noul",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "yes": 0.288,
+        "no": 0.712
+      },
+      "predicted": "no",
+      "correct": true,
+      "brier": 0.165888
+    },
+    {
+      "id": "original-adequacy-03-0",
+      "type": "noul",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "yes": 0.556,
+        "no": 0.44399999999999995
+      },
+      "predicted": "yes",
+      "correct": false,
+      "brier": 0.6182720000000002
+    },
+    {
+      "id": "original-adequacy-03-1",
+      "type": "noul",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "yes": 0.5877,
+        "no": 0.4123
+      },
+      "predicted": "yes",
+      "correct": false,
+      "brier": 0.69078258
+    },
+    {
+      "id": "original-adequacy-04-0",
+      "type": "noul",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "yes": 0.8142,
+        "no": 0.18579999999999997
+      },
+      "predicted": "yes",
+      "correct": true,
+      "brier": 0.06904327999999997
+    },
+    {
+      "id": "original-adequacy-04-1",
+      "type": "noul",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "yes": 0.6961,
+        "no": 0.30389999999999995
+      },
+      "predicted": "yes",
+      "correct": true,
+      "brier": 0.18471041999999993
+    },
+    {
+      "id": "original-adequacy-05-0",
+      "type": "noul",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "yes": 0.3892,
+        "no": 0.6108
+      },
+      "predicted": "no",
+      "correct": true,
+      "brier": 0.30295328
+    },
+    {
+      "id": "original-adequacy-05-1",
+      "type": "noul",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "yes": 0.419,
+        "no": 0.581
+      },
+      "predicted": "no",
+      "correct": true,
+      "brier": 0.35112200000000005
+    },
+    {
+      "id": "original-adequacy-06-0",
+      "type": "noul",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "yes": 0.704,
+        "no": 0.29600000000000004
+      },
+      "predicted": "yes",
+      "correct": true,
+      "brier": 0.17523200000000005
+    },
+    {
+      "id": "original-adequacy-06-1",
+      "type": "noul",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "yes": 0.7532,
+        "no": 0.24680000000000002
+      },
+      "predicted": "yes",
+      "correct": true,
+      "brier": 0.12182048000000002
+    },
+    {
+      "id": "original-routing-01-0",
+      "type": "choice",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "coding": 0.0475,
+        "coding_agent": 0.0084,
+        "document": 0.0062,
+        "general": 0.0649,
+        "math": 0.8671,
+        "tools": 0.006
+      },
+      "predicted": "math",
+      "correct": true,
+      "brier": 0.024275670000000006
+    },
+    {
+      "id": "original-routing-01-1",
+      "type": "choice",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "coding": 0.0572,
+        "coding_agent": 0.0111,
+        "document": 0.0097,
+        "general": 0.0851,
+        "math": 0.829,
+        "tools": 0.008
+      },
+      "predicted": "math",
+      "correct": true,
+      "brier": 0.04003615000000001
+    },
+    {
+      "id": "original-routing-02-0",
+      "type": "choice",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "coding": 0.9288,
+        "coding_agent": 0.019,
+        "document": 0.0036,
+        "general": 0.0433,
+        "math": 0.003,
+        "tools": 0.0022
+      },
+      "predicted": "coding",
+      "correct": true,
+      "brier": 0.007332130000000006
+    },
+    {
+      "id": "original-routing-02-1",
+      "type": "choice",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "coding": 0.9295,
+        "coding_agent": 0.016,
+        "document": 0.0046,
+        "general": 0.0436,
+        "math": 0.004,
+        "tools": 0.0023
+      },
+      "predicted": "coding",
+      "correct": true,
+      "brier": 0.007169660000000001
+    },
+    {
+      "id": "original-routing-03-0",
+      "type": "choice",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "coding": 0.055,
+        "coding_agent": 0.9205,
+        "document": 0.0028,
+        "general": 0.0166,
+        "math": 0.001,
+        "tools": 0.004
+      },
+      "predicted": "coding_agent",
+      "correct": true,
+      "brier": 0.009645650000000002
+    },
+    {
+      "id": "original-routing-03-1",
+      "type": "choice",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "coding": 0.0398,
+        "coding_agent": 0.9384,
+        "document": 0.0026,
+        "general": 0.0145,
+        "math": 0.0008,
+        "tools": 0.0038
+      },
+      "predicted": "coding_agent",
+      "correct": true,
+      "brier": 0.005610689999999999
+    },
+    {
+      "id": "original-routing-04-0",
+      "type": "choice",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "coding": 0.0352,
+        "coding_agent": 0.016,
+        "document": 0.8148,
+        "general": 0.1214,
+        "math": 0.0031,
+        "tools": 0.0095
+      },
+      "predicted": "document",
+      "correct": true,
+      "brier": 0.05063190000000001
+    },
+    {
+      "id": "original-routing-04-1",
+      "type": "choice",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "coding": 0.0787,
+        "coding_agent": 0.026,
+        "document": 0.7063,
+        "general": 0.1708,
+        "math": 0.0038,
+        "tools": 0.0144
+      },
+      "predicted": "document",
+      "correct": true,
+      "brier": 0.12252381999999998
+    },
+    {
+      "id": "original-routing-05-0",
+      "type": "choice",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "coding": 0.0291,
+        "coding_agent": 0.0121,
+        "document": 0.0114,
+        "general": 0.1881,
+        "math": 0.004,
+        "tools": 0.7552
+      },
+      "predicted": "tools",
+      "correct": true,
+      "brier": 0.09644783
+    },
+    {
+      "id": "original-routing-05-1",
+      "type": "choice",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "coding": 0.0566,
+        "coding_agent": 0.0176,
+        "document": 0.0117,
+        "general": 0.6972,
+        "math": 0.0045,
+        "tools": 0.2123
+      },
+      "predicted": "general",
+      "correct": false,
+      "brier": 1.1102295900000003
+    },
+    {
+      "id": "original-routing-06-0",
+      "type": "choice",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "coding": 0.0775,
+        "coding_agent": 0.0224,
+        "document": 0.0258,
+        "general": 0.8511,
+        "math": 0.0076,
+        "tools": 0.0155
+      },
+      "predicted": "general",
+      "correct": true,
+      "brier": 0.029642870000000012
+    },
+    {
+      "id": "original-routing-06-1",
+      "type": "choice",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "coding": 0.082,
+        "coding_agent": 0.0194,
+        "document": 0.0206,
+        "general": 0.8531,
+        "math": 0.0069,
+        "tools": 0.018
+      },
+      "predicted": "general",
+      "correct": true,
+      "brier": 0.029475940000000013
+    }
+  ],
+  "dataset_sha256": "5c2414edb3006b8bfcb70fda433f0f9ca015759433849f8d3104328a1f7c4180",
+  "metrics": {
+    "n": 72,
+    "accuracy": 0.9027777777777778,
+    "brier": 0.2006694338888889,
+    "ece": {
+      "ece": 0.1714166666666667,
+      "n": 72,
+      "bins": [
+        {
+          "lo": 0.0,
+          "hi": 0.1,
+          "n": 0,
+          "mean_confidence": null,
+          "accuracy": null
+        },
+        {
+          "lo": 0.1,
+          "hi": 0.2,
+          "n": 0,
+          "mean_confidence": null,
+          "accuracy": null
+        },
+        {
+          "lo": 0.2,
+          "hi": 0.3,
+          "n": 0,
+          "mean_confidence": null,
+          "accuracy": null
+        },
+        {
+          "lo": 0.3,
+          "hi": 0.4,
+          "n": 0,
+          "mean_confidence": null,
+          "accuracy": null
+        },
+        {
+          "lo": 0.4,
+          "hi": 0.5,
+          "n": 3,
+          "mean_confidence": 0.4456,
+          "accuracy": 1.0
+        },
+        {
+          "lo": 0.5,
+          "hi": 0.6,
+          "n": 11,
+          "mean_confidence": 0.5603363636363636,
+          "accuracy": 0.6363636363636364
+        },
+        {
+          "lo": 0.6,
+          "hi": 0.7,
+          "n": 18,
+          "mean_confidence": 0.6490388888888887,
+          "accuracy": 0.8333333333333334
+        },
+        {
+          "lo": 0.7,
+          "hi": 0.8,
+          "n": 13,
+          "mean_confidence": 0.7447307692307693,
+          "accuracy": 1.0
+        },
+        {
+          "lo": 0.8,
+          "hi": 0.9,
+          "n": 18,
+          "mean_confidence": 0.8563666666666667,
+          "accuracy": 1.0
+        },
+        {
+          "lo": 0.9,
+          "hi": 1.0,
+          "n": 9,
+          "mean_confidence": 0.9309666666666667,
+          "accuracy": 1.0
+        }
+      ]
+    }
+  }
+}

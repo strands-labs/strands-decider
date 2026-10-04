@@ -1,0 +1,1549 @@
+{
+  "precision": "8",
+  "load_s": 5.9983347919769585,
+  "torso_dtype": "float16",
+  "config": {
+    "base_model": "Qwen/Qwen3.5-2B-Base",
+    "base_revision": "b1485b2fa6dfa1287294f269f5fb618e03d52d7c",
+    "num_slots": 24,
+    "head_hidden": 0,
+    "head_dropout": 0.05,
+    "max_length": 4096,
+    "torch_dtype": "float16",
+    "head_init": "random",
+    "kl_frozen_weight": 0.3,
+    "head_type": "pointer",
+    "pointer_dim": 256,
+    "temperature": 0.9627721607677362,
+    "temperature_by_kind": {
+      "noul": 0.9107136998460428,
+      "choice": 0.734189596436441,
+      "score": 1.32780942142348
+    },
+    "ordinal_smoothing": 0.1,
+    "use_lora": true,
+    "lora_r": 16,
+    "lora_alpha": 32,
+    "lora_dropout": 0.05,
+    "lora_targets": [
+      "q_proj",
+      "k_proj",
+      "v_proj",
+      "o_proj",
+      "gate_proj",
+      "up_proj",
+      "down_proj",
+      "in_proj_qkv",
+      "in_proj_z",
+      "in_proj_a",
+      "in_proj_b",
+      "out_proj"
+    ]
+  },
+  "quantized_paths": [
+    "language_model.model.layers.0.linear_attn.in_proj_qkv",
+    "language_model.model.layers.0.linear_attn.in_proj_z",
+    "language_model.model.layers.0.linear_attn.out_proj",
+    "language_model.model.layers.0.mlp.gate_proj",
+    "language_model.model.layers.0.mlp.down_proj",
+    "language_model.model.layers.0.mlp.up_proj",
+    "language_model.model.layers.1.linear_attn.in_proj_qkv",
+    "language_model.model.layers.1.linear_attn.in_proj_z",
+    "language_model.model.layers.1.linear_attn.out_proj",
+    "language_model.model.layers.1.mlp.gate_proj",
+    "language_model.model.layers.1.mlp.down_proj",
+    "language_model.model.layers.1.mlp.up_proj",
+    "language_model.model.layers.2.linear_attn.in_proj_qkv",
+    "language_model.model.layers.2.linear_attn.in_proj_z",
+    "language_model.model.layers.2.linear_attn.out_proj",
+    "language_model.model.layers.2.mlp.gate_proj",
+    "language_model.model.layers.2.mlp.down_proj",
+    "language_model.model.layers.2.mlp.up_proj",
+    "language_model.model.layers.3.self_attn.q_proj",
+    "language_model.model.layers.3.self_attn.k_proj",
+    "language_model.model.layers.3.self_attn.v_proj",
+    "language_model.model.layers.3.self_attn.o_proj",
+    "language_model.model.layers.3.mlp.gate_proj",
+    "language_model.model.layers.3.mlp.down_proj",
+    "language_model.model.layers.3.mlp.up_proj",
+    "language_model.model.layers.4.linear_attn.in_proj_qkv",
+    "language_model.model.layers.4.linear_attn.in_proj_z",
+    "language_model.model.layers.4.linear_attn.out_proj",
+    "language_model.model.layers.4.mlp.gate_proj",
+    "language_model.model.layers.4.mlp.down_proj",
+    "language_model.model.layers.4.mlp.up_proj",
+    "language_model.model.layers.5.linear_attn.in_proj_qkv",
+    "language_model.model.layers.5.linear_attn.in_proj_z",
+    "language_model.model.layers.5.linear_attn.out_proj",
+    "language_model.model.layers.5.mlp.gate_proj",
+    "language_model.model.layers.5.mlp.down_proj",
+    "language_model.model.layers.5.mlp.up_proj",
+    "language_model.model.layers.6.linear_attn.in_proj_qkv",
+    "language_model.model.layers.6.linear_attn.in_proj_z",
+    "language_model.model.layers.6.linear_attn.out_proj",
+    "language_model.model.layers.6.mlp.gate_proj",
+    "language_model.model.layers.6.mlp.down_proj",
+    "language_model.model.layers.6.mlp.up_proj",
+    "language_model.model.layers.7.self_attn.q_proj",
+    "language_model.model.layers.7.self_attn.k_proj",
+    "language_model.model.layers.7.self_attn.v_proj",
+    "language_model.model.layers.7.self_attn.o_proj",
+    "language_model.model.layers.7.mlp.gate_proj",
+    "language_model.model.layers.7.mlp.down_proj",
+    "language_model.model.layers.7.mlp.up_proj",
+    "language_model.model.layers.8.linear_attn.in_proj_qkv",
+    "language_model.model.layers.8.linear_attn.in_proj_z",
+    "language_model.model.layers.8.linear_attn.out_proj",
+    "language_model.model.layers.8.mlp.gate_proj",
+    "language_model.model.layers.8.mlp.down_proj",
+    "language_model.model.layers.8.mlp.up_proj",
+    "language_model.model.layers.9.linear_attn.in_proj_qkv",
+    "language_model.model.layers.9.linear_attn.in_proj_z",
+    "language_model.model.layers.9.linear_attn.out_proj",
+    "language_model.model.layers.9.mlp.gate_proj",
+    "language_model.model.layers.9.mlp.down_proj",
+    "language_model.model.layers.9.mlp.up_proj",
+    "language_model.model.layers.10.linear_attn.in_proj_qkv",
+    "language_model.model.layers.10.linear_attn.in_proj_z",
+    "language_model.model.layers.10.linear_attn.out_proj",
+    "language_model.model.layers.10.mlp.gate_proj",
+    "language_model.model.layers.10.mlp.down_proj",
+    "language_model.model.layers.10.mlp.up_proj",
+    "language_model.model.layers.11.self_attn.q_proj",
+    "language_model.model.layers.11.self_attn.k_proj",
+    "language_model.model.layers.11.self_attn.v_proj",
+    "language_model.model.layers.11.self_attn.o_proj",
+    "language_model.model.layers.11.mlp.gate_proj",
+    "language_model.model.layers.11.mlp.down_proj",
+    "language_model.model.layers.11.mlp.up_proj",
+    "language_model.model.layers.12.linear_attn.in_proj_qkv",
+    "language_model.model.layers.12.linear_attn.in_proj_z",
+    "language_model.model.layers.12.linear_attn.out_proj",
+    "language_model.model.layers.12.mlp.gate_proj",
+    "language_model.model.layers.12.mlp.down_proj",
+    "language_model.model.layers.12.mlp.up_proj",
+    "language_model.model.layers.13.linear_attn.in_proj_qkv",
+    "language_model.model.layers.13.linear_attn.in_proj_z",
+    "language_model.model.layers.13.linear_attn.out_proj",
+    "language_model.model.layers.13.mlp.gate_proj",
+    "language_model.model.layers.13.mlp.down_proj",
+    "language_model.model.layers.13.mlp.up_proj",
+    "language_model.model.layers.14.linear_attn.in_proj_qkv",
+    "language_model.model.layers.14.linear_attn.in_proj_z",
+    "language_model.model.layers.14.linear_attn.out_proj",
+    "language_model.model.layers.14.mlp.gate_proj",
+    "language_model.model.layers.14.mlp.down_proj",
+    "language_model.model.layers.14.mlp.up_proj",
+    "language_model.model.layers.15.self_attn.q_proj",
+    "language_model.model.layers.15.self_attn.k_proj",
+    "language_model.model.layers.15.self_attn.v_proj",
+    "language_model.model.layers.15.self_attn.o_proj",
+    "language_model.model.layers.15.mlp.gate_proj",
+    "language_model.model.layers.15.mlp.down_proj",
+    "language_model.model.layers.15.mlp.up_proj",
+    "language_model.model.layers.16.linear_attn.in_proj_qkv",
+    "language_model.model.layers.16.linear_attn.in_proj_z",
+    "language_model.model.layers.16.linear_attn.out_proj",
+    "language_model.model.layers.16.mlp.gate_proj",
+    "language_model.model.layers.16.mlp.down_proj",
+    "language_model.model.layers.16.mlp.up_proj",
+    "language_model.model.layers.17.linear_attn.in_proj_qkv",
+    "language_model.model.layers.17.linear_attn.in_proj_z",
+    "language_model.model.layers.17.linear_attn.out_proj",
+    "language_model.model.layers.17.mlp.gate_proj",
+    "language_model.model.layers.17.mlp.down_proj",
+    "language_model.model.layers.17.mlp.up_proj",
+    "language_model.model.layers.18.linear_attn.in_proj_qkv",
+    "language_model.model.layers.18.linear_attn.in_proj_z",
+    "language_model.model.layers.18.linear_attn.out_proj",
+    "language_model.model.layers.18.mlp.gate_proj",
+    "language_model.model.layers.18.mlp.down_proj",
+    "language_model.model.layers.18.mlp.up_proj",
+    "language_model.model.layers.19.self_attn.q_proj",
+    "language_model.model.layers.19.self_attn.k_proj",
+    "language_model.model.layers.19.self_attn.v_proj",
+    "language_model.model.layers.19.self_attn.o_proj",
+    "language_model.model.layers.19.mlp.gate_proj",
+    "language_model.model.layers.19.mlp.down_proj",
+    "language_model.model.layers.19.mlp.up_proj",
+    "language_model.model.layers.20.linear_attn.in_proj_qkv",
+    "language_model.model.layers.20.linear_attn.in_proj_z",
+    "language_model.model.layers.20.linear_attn.out_proj",
+    "language_model.model.layers.20.mlp.gate_proj",
+    "language_model.model.layers.20.mlp.down_proj",
+    "language_model.model.layers.20.mlp.up_proj",
+    "language_model.model.layers.21.linear_attn.in_proj_qkv",
+    "language_model.model.layers.21.linear_attn.in_proj_z",
+    "language_model.model.layers.21.linear_attn.out_proj",
+    "language_model.model.layers.21.mlp.gate_proj",
+    "language_model.model.layers.21.mlp.down_proj",
+    "language_model.model.layers.21.mlp.up_proj",
+    "language_model.model.layers.22.linear_attn.in_proj_qkv",
+    "language_model.model.layers.22.linear_attn.in_proj_z",
+    "language_model.model.layers.22.linear_attn.out_proj",
+    "language_model.model.layers.22.mlp.gate_proj",
+    "language_model.model.layers.22.mlp.down_proj",
+    "language_model.model.layers.22.mlp.up_proj",
+    "language_model.model.layers.23.self_attn.q_proj",
+    "language_model.model.layers.23.self_attn.k_proj",
+    "language_model.model.layers.23.self_attn.v_proj",
+    "language_model.model.layers.23.self_attn.o_proj",
+    "language_model.model.layers.23.mlp.gate_proj",
+    "language_model.model.layers.23.mlp.down_proj",
+    "language_model.model.layers.23.mlp.up_proj"
+  ],
+  "device": {
+    "device_name": "Apple M1",
+    "max_recommended_working_set_size": 12713115648,
+    "memory_size": 17179869184,
+    "architecture": "applegpu_g13g",
+    "max_buffer_length": 9534832640,
+    "resource_limit": 499000
+  },
+  "latency": [
+    {
+      "state_tokens_requested": 256,
+      "questions": 1,
+      "input_tokens": 350,
+      "path": "single",
+      "median_ms": 1477.677624905482,
+      "p90_ms": 2280.0632079597563,
+      "samples_ms": [
+        1477.677624905482,
+        2280.0632079597563,
+        1577.8047498315573,
+        1189.384666038677,
+        1158.2102498505265
+      ],
+      "mlx_peak_gib": 2.75471468269825,
+      "rss_peak_gib": 3.896148681640625,
+      "swap": "vm.swapusage: total = 5120.00M  used = 4315.94M  free = 804.06M  (encrypted)"
+    },
+    {
+      "state_tokens_requested": 256,
+      "questions": 8,
+      "input_tokens": 945,
+      "path": "prefix",
+      "median_ms": 2929.2788750026375,
+      "p90_ms": 3284.5401659142226,
+      "samples_ms": [
+        2959.886916913092,
+        2827.0762080792338,
+        2929.2788750026375,
+        3284.5401659142226,
+        2865.461958805099
+      ],
+      "mlx_peak_gib": 3.1581911724060774,
+      "rss_peak_gib": 3.896148681640625,
+      "swap": "vm.swapusage: total = 5120.00M  used = 4315.94M  free = 804.06M  (encrypted)"
+    },
+    {
+      "state_tokens_requested": 1024,
+      "questions": 1,
+      "input_tokens": 1118,
+      "path": "single",
+      "median_ms": 3976.3187079224735,
+      "p90_ms": 4644.912749994546,
+      "samples_ms": [
+        3475.1517500262707,
+        3976.3187079224735,
+        4644.912749994546,
+        4643.987458897755,
+        3718.743790872395
+      ],
+      "mlx_peak_gib": 2.929319081827998,
+      "rss_peak_gib": 3.896148681640625,
+      "swap": "vm.swapusage: total = 5120.00M  used = 4315.94M  free = 804.06M  (encrypted)"
+    },
+    {
+      "state_tokens_requested": 1024,
+      "questions": 8,
+      "input_tokens": 1713,
+      "path": "prefix",
+      "median_ms": 5879.294791026041,
+      "p90_ms": 6729.167375015095,
+      "samples_ms": [
+        5724.48066691868,
+        6729.167375015095,
+        5879.294791026041,
+        6127.737042028457,
+        5317.475459072739
+      ],
+      "mlx_peak_gib": 3.3121688589453697,
+      "rss_peak_gib": 3.896148681640625,
+      "swap": "vm.swapusage: total = 5120.00M  used = 4275.94M  free = 844.06M  (encrypted)"
+    },
+    {
+      "state_tokens_requested": 4000,
+      "questions": 1,
+      "input_tokens": 4094,
+      "path": "single",
+      "median_ms": 12664.618333103135,
+      "p90_ms": 14963.573249988258,
+      "samples_ms": [
+        12522.270207991824,
+        14963.573249988258,
+        12439.136374974623,
+        12676.029791124165,
+        12664.618333103135
+      ],
+      "mlx_peak_gib": 2.9687962979078293,
+      "rss_peak_gib": 3.896148681640625,
+      "swap": "vm.swapusage: total = 5120.00M  used = 4275.94M  free = 844.06M  (encrypted)"
+    },
+    {
+      "state_tokens_requested": 4000,
+      "questions": 8,
+      "input_tokens": 4689,
+      "path": "prefix",
+      "median_ms": 15862.52145911567,
+      "p90_ms": 16427.077625179663,
+      "samples_ms": [
+        16427.077625179663,
+        16137.67091720365,
+        15862.52145911567,
+        15800.835083937272,
+        14411.08995815739
+      ],
+      "mlx_peak_gib": 3.8057097420096397,
+      "rss_peak_gib": 3.896148681640625,
+      "swap": "vm.swapusage: total = 5120.00M  used = 4267.88M  free = 852.12M  (encrypted)"
+    }
+  ],
+  "quality": [
+    {
+      "id": "original-policy-01-0",
+      "type": "noul",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "yes": 0.1138,
+        "no": 0.8862
+      },
+      "predicted": "no",
+      "correct": true,
+      "brier": 0.02590088
+    },
+    {
+      "id": "original-policy-01-1",
+      "type": "noul",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "yes": 0.1233,
+        "no": 0.8767
+      },
+      "predicted": "no",
+      "correct": true,
+      "brier": 0.030405779999999993
+    },
+    {
+      "id": "original-policy-02-0",
+      "type": "noul",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "yes": 0.659,
+        "no": 0.34099999999999997
+      },
+      "predicted": "yes",
+      "correct": true,
+      "brier": 0.23256199999999996
+    },
+    {
+      "id": "original-policy-02-1",
+      "type": "noul",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "yes": 0.3497,
+        "no": 0.6503
+      },
+      "predicted": "no",
+      "correct": false,
+      "brier": 0.84578018
+    },
+    {
+      "id": "original-policy-03-0",
+      "type": "noul",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "yes": 0.7897,
+        "no": 0.21030000000000004
+      },
+      "predicted": "yes",
+      "correct": true,
+      "brier": 0.08845218000000003
+    },
+    {
+      "id": "original-policy-03-1",
+      "type": "noul",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "yes": 0.3104,
+        "no": 0.6896
+      },
+      "predicted": "no",
+      "correct": false,
+      "brier": 0.95109632
+    },
+    {
+      "id": "original-policy-04-0",
+      "type": "noul",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "yes": 0.3812,
+        "no": 0.6188
+      },
+      "predicted": "no",
+      "correct": true,
+      "brier": 0.29062688
+    },
+    {
+      "id": "original-policy-04-1",
+      "type": "noul",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "yes": 0.1742,
+        "no": 0.8258
+      },
+      "predicted": "no",
+      "correct": true,
+      "brier": 0.06069128
+    },
+    {
+      "id": "original-policy-05-0",
+      "type": "noul",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "yes": 0.5737,
+        "no": 0.4263
+      },
+      "predicted": "yes",
+      "correct": false,
+      "brier": 0.65826338
+    },
+    {
+      "id": "original-policy-05-1",
+      "type": "noul",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "yes": 0.1866,
+        "no": 0.8134
+      },
+      "predicted": "no",
+      "correct": true,
+      "brier": 0.06963911999999998
+    },
+    {
+      "id": "original-policy-06-0",
+      "type": "noul",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "yes": 0.8788,
+        "no": 0.12119999999999997
+      },
+      "predicted": "yes",
+      "correct": true,
+      "brier": 0.02937887999999999
+    },
+    {
+      "id": "original-policy-06-1",
+      "type": "noul",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "yes": 0.743,
+        "no": 0.257
+      },
+      "predicted": "yes",
+      "correct": true,
+      "brier": 0.132098
+    },
+    {
+      "id": "original-intent-01-0",
+      "type": "choice",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "cancel": 0.0785,
+        "change_address": 0.004,
+        "other": 0.0911,
+        "refund": 0.8246,
+        "status": 0.0018
+      },
+      "predicted": "refund",
+      "correct": true,
+      "brier": 0.045245860000000006
+    },
+    {
+      "id": "original-intent-01-1",
+      "type": "choice",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "cancel": 0.1938,
+        "change_address": 0.0039,
+        "other": 0.1247,
+        "refund": 0.676,
+        "status": 0.0016
+      },
+      "predicted": "refund",
+      "correct": true,
+      "brier": 0.15810229999999997
+    },
+    {
+      "id": "original-intent-02-0",
+      "type": "choice",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "cancel": 0.024,
+        "change_address": 0.1443,
+        "other": 0.2511,
+        "refund": 0.0132,
+        "status": 0.5675
+      },
+      "predicted": "status",
+      "correct": true,
+      "brier": 0.27168019
+    },
+    {
+      "id": "original-intent-02-1",
+      "type": "choice",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "cancel": 0.0129,
+        "change_address": 0.0216,
+        "other": 0.0645,
+        "refund": 0.0062,
+        "status": 0.8947
+      },
+      "predicted": "status",
+      "correct": true,
+      "brier": 0.01591974999999999
+    },
+    {
+      "id": "original-intent-03-0",
+      "type": "choice",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "cancel": 0.0195,
+        "change_address": 0.8725,
+        "other": 0.086,
+        "refund": 0.0073,
+        "status": 0.0146
+      },
+      "predicted": "change_address",
+      "correct": true,
+      "brier": 0.024298949999999986
+    },
+    {
+      "id": "original-intent-03-1",
+      "type": "choice",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "cancel": 0.0075,
+        "change_address": 0.947,
+        "other": 0.0397,
+        "refund": 0.0045,
+        "status": 0.0013
+      },
+      "predicted": "change_address",
+      "correct": true,
+      "brier": 0.004463280000000005
+    },
+    {
+      "id": "original-intent-04-0",
+      "type": "choice",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "cancel": 0.9093,
+        "change_address": 0.0033,
+        "other": 0.0623,
+        "refund": 0.0242,
+        "status": 0.0009
+      },
+      "predicted": "cancel",
+      "correct": true,
+      "brier": 0.012705120000000002
+    },
+    {
+      "id": "original-intent-04-1",
+      "type": "choice",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "cancel": 0.9539,
+        "change_address": 0.003,
+        "other": 0.0341,
+        "refund": 0.0081,
+        "status": 0.0008
+      },
+      "predicted": "cancel",
+      "correct": true,
+      "brier": 0.0033632700000000024
+    },
+    {
+      "id": "original-intent-05-0",
+      "type": "choice",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "cancel": 0.0379,
+        "change_address": 0.0064,
+        "other": 0.4108,
+        "refund": 0.5393,
+        "status": 0.0056
+      },
+      "predicted": "refund",
+      "correct": false,
+      "brier": 0.63950986
+    },
+    {
+      "id": "original-intent-05-1",
+      "type": "choice",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "cancel": 0.0905,
+        "change_address": 0.0076,
+        "other": 0.4795,
+        "refund": 0.4161,
+        "status": 0.0064
+      },
+      "predicted": "other",
+      "correct": true,
+      "brier": 0.45234843
+    },
+    {
+      "id": "original-intent-06-0",
+      "type": "choice",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "cancel": 0.1698,
+        "change_address": 0.016,
+        "other": 0.1672,
+        "refund": 0.0172,
+        "status": 0.6297
+      },
+      "predicted": "status",
+      "correct": true,
+      "brier": 0.19446180999999996
+    },
+    {
+      "id": "original-intent-06-1",
+      "type": "choice",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "cancel": 0.1392,
+        "change_address": 0.0111,
+        "other": 0.1337,
+        "refund": 0.038,
+        "status": 0.6781
+      },
+      "predicted": "status",
+      "correct": true,
+      "brier": 0.14243915
+    },
+    {
+      "id": "original-ordinal-01-0",
+      "type": "score",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "0": 0.6518,
+        "1": 0.21,
+        "2": 0.0872,
+        "3": 0.0511
+      },
+      "ordinal_ev": 0.5377,
+      "predicted": "0",
+      "correct": true,
+      "brier": 0.17555828999999998
+    },
+    {
+      "id": "original-ordinal-01-1",
+      "type": "score",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "0": 0.6435,
+        "1": 0.2179,
+        "2": 0.0912,
+        "3": 0.0474
+      },
+      "ordinal_ev": 0.5425,
+      "predicted": "0",
+      "correct": true,
+      "brier": 0.18513686000000001
+    },
+    {
+      "id": "original-ordinal-02-0",
+      "type": "score",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "0": 0.2029,
+        "1": 0.6009,
+        "2": 0.1479,
+        "3": 0.0483
+      },
+      "ordinal_ev": 1.0416,
+      "predicted": "1",
+      "correct": true,
+      "brier": 0.22465652
+    },
+    {
+      "id": "original-ordinal-02-1",
+      "type": "score",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "0": 0.1448,
+        "1": 0.7188,
+        "2": 0.0989,
+        "3": 0.0376
+      },
+      "ordinal_ev": 1.0294,
+      "predicted": "1",
+      "correct": true,
+      "brier": 0.11123545000000001
+    },
+    {
+      "id": "original-ordinal-03-0",
+      "type": "score",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "0": 0.1436,
+        "1": 0.1395,
+        "2": 0.6604,
+        "3": 0.0565
+      },
+      "ordinal_ev": 1.6298,
+      "predicted": "2",
+      "correct": true,
+      "brier": 0.15860162000000003
+    },
+    {
+      "id": "original-ordinal-03-1",
+      "type": "score",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "0": 0.1888,
+        "1": 0.2033,
+        "2": 0.5434,
+        "3": 0.0645
+      },
+      "ordinal_ev": 1.4836,
+      "predicted": "2",
+      "correct": true,
+      "brier": 0.28962014
+    },
+    {
+      "id": "original-ordinal-04-0",
+      "type": "score",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "0": 0.1017,
+        "1": 0.1025,
+        "2": 0.1803,
+        "3": 0.6155
+      },
+      "ordinal_ev": 2.3096,
+      "predicted": "3",
+      "correct": true,
+      "brier": 0.20119747999999993
+    },
+    {
+      "id": "original-ordinal-04-1",
+      "type": "score",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "0": 0.1108,
+        "1": 0.1083,
+        "2": 0.2008,
+        "3": 0.5801
+      },
+      "ordinal_ev": 2.2502,
+      "predicted": "3",
+      "correct": true,
+      "brier": 0.24064218000000004
+    },
+    {
+      "id": "original-ordinal-05-0",
+      "type": "score",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "0": 0.4271,
+        "1": 0.1361,
+        "2": 0.344,
+        "3": 0.0928
+      },
+      "ordinal_ev": 1.1025,
+      "predicted": "0",
+      "correct": true,
+      "brier": 0.47368545999999995
+    },
+    {
+      "id": "original-ordinal-05-1",
+      "type": "score",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "0": 0.4351,
+        "1": 0.2199,
+        "2": 0.2578,
+        "3": 0.0872
+      },
+      "ordinal_ev": 0.9971,
+      "predicted": "0",
+      "correct": true,
+      "brier": 0.44153269999999994
+    },
+    {
+      "id": "original-ordinal-06-0",
+      "type": "score",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "0": 0.1442,
+        "1": 0.2014,
+        "2": 0.6166,
+        "3": 0.0378
+      },
+      "ordinal_ev": 1.548,
+      "predicted": "2",
+      "correct": true,
+      "brier": 0.20977999999999997
+    },
+    {
+      "id": "original-ordinal-06-1",
+      "type": "score",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "0": 0.0945,
+        "1": 0.1228,
+        "2": 0.745,
+        "3": 0.0377
+      },
+      "ordinal_ev": 1.7259,
+      "predicted": "2",
+      "correct": true,
+      "brier": 0.09045638000000002
+    },
+    {
+      "id": "original-extraction-01-0",
+      "type": "choice",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "courier": 0.0704,
+        "pickup": 0.851,
+        "post": 0.0156,
+        "unknown": 0.0629
+      },
+      "predicted": "pickup",
+      "correct": true,
+      "brier": 0.031356930000000005
+    },
+    {
+      "id": "original-extraction-01-1",
+      "type": "choice",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "courier": 0.1265,
+        "pickup": 0.7388,
+        "post": 0.0192,
+        "unknown": 0.1155
+      },
+      "predicted": "pickup",
+      "correct": true,
+      "brier": 0.09793658
+    },
+    {
+      "id": "original-extraction-02-0",
+      "type": "choice",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "courier": 0.0585,
+        "pickup": 0.0221,
+        "post": 0.2454,
+        "unknown": 0.6739
+      },
+      "predicted": "unknown",
+      "correct": true,
+      "brier": 0.17047302999999997
+    },
+    {
+      "id": "original-extraction-02-1",
+      "type": "choice",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "courier": 0.0444,
+        "pickup": 0.0054,
+        "post": 0.1717,
+        "unknown": 0.7785
+      },
+      "predicted": "unknown",
+      "correct": true,
+      "brier": 0.08054366000000002
+    },
+    {
+      "id": "original-extraction-03-0",
+      "type": "choice",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "courier": 0.5218,
+        "pickup": 0.1008,
+        "post": 0.0203,
+        "unknown": 0.3571
+      },
+      "predicted": "courier",
+      "correct": true,
+      "brier": 0.36676837999999995
+    },
+    {
+      "id": "original-extraction-03-1",
+      "type": "choice",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "courier": 0.9517,
+        "pickup": 0.0191,
+        "post": 0.011,
+        "unknown": 0.0182
+      },
+      "predicted": "courier",
+      "correct": true,
+      "brier": 0.0031499400000000012
+    },
+    {
+      "id": "original-extraction-04-0",
+      "type": "choice",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "courier": 0.0296,
+        "pickup": 0.0329,
+        "post": 0.7768,
+        "unknown": 0.1608
+      },
+      "predicted": "post",
+      "correct": true,
+      "brier": 0.07763344999999998
+    },
+    {
+      "id": "original-extraction-04-1",
+      "type": "choice",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "courier": 0.0439,
+        "pickup": 0.0073,
+        "post": 0.8885,
+        "unknown": 0.0603
+      },
+      "predicted": "post",
+      "correct": true,
+      "brier": 0.01804884000000001
+    },
+    {
+      "id": "original-extraction-05-0",
+      "type": "choice",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "courier": 0.0663,
+        "pickup": 0.0216,
+        "post": 0.0213,
+        "unknown": 0.8908
+      },
+      "predicted": "unknown",
+      "correct": true,
+      "brier": 0.01724057999999999
+    },
+    {
+      "id": "original-extraction-05-1",
+      "type": "choice",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "courier": 0.1852,
+        "pickup": 0.0175,
+        "post": 0.0232,
+        "unknown": 0.7741
+      },
+      "predicted": "unknown",
+      "correct": true,
+      "brier": 0.08617434
+    },
+    {
+      "id": "original-extraction-06-0",
+      "type": "choice",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "courier": 0.8945,
+        "pickup": 0.0083,
+        "post": 0.0628,
+        "unknown": 0.0345
+      },
+      "predicted": "courier",
+      "correct": true,
+      "brier": 0.016333230000000008
+    },
+    {
+      "id": "original-extraction-06-1",
+      "type": "choice",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "courier": 0.9036,
+        "pickup": 0.0097,
+        "post": 0.0479,
+        "unknown": 0.0388
+      },
+      "predicted": "courier",
+      "correct": true,
+      "brier": 0.013186900000000008
+    },
+    {
+      "id": "original-adequacy-01-0",
+      "type": "noul",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "yes": 0.6235,
+        "no": 0.37649999999999995
+      },
+      "predicted": "yes",
+      "correct": true,
+      "brier": 0.28350449999999994
+    },
+    {
+      "id": "original-adequacy-01-1",
+      "type": "noul",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "yes": 0.5354,
+        "no": 0.4646
+      },
+      "predicted": "yes",
+      "correct": true,
+      "brier": 0.43170632000000003
+    },
+    {
+      "id": "original-adequacy-02-0",
+      "type": "noul",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "yes": 0.4159,
+        "no": 0.5841000000000001
+      },
+      "predicted": "no",
+      "correct": true,
+      "brier": 0.34594561999999995
+    },
+    {
+      "id": "original-adequacy-02-1",
+      "type": "noul",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "yes": 0.2874,
+        "no": 0.7126
+      },
+      "predicted": "no",
+      "correct": true,
+      "brier": 0.16519752
+    },
+    {
+      "id": "original-adequacy-03-0",
+      "type": "noul",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "yes": 0.557,
+        "no": 0.44299999999999995
+      },
+      "predicted": "yes",
+      "correct": false,
+      "brier": 0.6204980000000001
+    },
+    {
+      "id": "original-adequacy-03-1",
+      "type": "noul",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "yes": 0.5869,
+        "no": 0.4131
+      },
+      "predicted": "yes",
+      "correct": false,
+      "brier": 0.6889032199999999
+    },
+    {
+      "id": "original-adequacy-04-0",
+      "type": "noul",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "yes": 0.813,
+        "no": 0.18700000000000006
+      },
+      "predicted": "yes",
+      "correct": true,
+      "brier": 0.06993800000000004
+    },
+    {
+      "id": "original-adequacy-04-1",
+      "type": "noul",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "yes": 0.6927,
+        "no": 0.3073
+      },
+      "predicted": "yes",
+      "correct": true,
+      "brier": 0.18886658000000003
+    },
+    {
+      "id": "original-adequacy-05-0",
+      "type": "noul",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "yes": 0.3865,
+        "no": 0.6134999999999999
+      },
+      "predicted": "no",
+      "correct": true,
+      "brier": 0.29876450000000004
+    },
+    {
+      "id": "original-adequacy-05-1",
+      "type": "noul",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "yes": 0.4152,
+        "no": 0.5848
+      },
+      "predicted": "no",
+      "correct": true,
+      "brier": 0.34478208000000005
+    },
+    {
+      "id": "original-adequacy-06-0",
+      "type": "noul",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "yes": 0.7028,
+        "no": 0.2972
+      },
+      "predicted": "yes",
+      "correct": true,
+      "brier": 0.17665568000000004
+    },
+    {
+      "id": "original-adequacy-06-1",
+      "type": "noul",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "yes": 0.7548,
+        "no": 0.24519999999999997
+      },
+      "predicted": "yes",
+      "correct": true,
+      "brier": 0.12024607999999998
+    },
+    {
+      "id": "original-routing-01-0",
+      "type": "choice",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "coding": 0.047,
+        "coding_agent": 0.0083,
+        "document": 0.0063,
+        "general": 0.0642,
+        "math": 0.8683,
+        "tools": 0.006
+      },
+      "predicted": "math",
+      "correct": true,
+      "brier": 0.023820110000000005
+    },
+    {
+      "id": "original-routing-01-1",
+      "type": "choice",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "coding": 0.0574,
+        "coding_agent": 0.0111,
+        "document": 0.0098,
+        "general": 0.0841,
+        "math": 0.8297,
+        "tools": 0.0079
+      },
+      "predicted": "math",
+      "correct": true,
+      "brier": 0.03965132
+    },
+    {
+      "id": "original-routing-02-0",
+      "type": "choice",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "coding": 0.9286,
+        "coding_agent": 0.0192,
+        "document": 0.0036,
+        "general": 0.0434,
+        "math": 0.003,
+        "tools": 0.0022
+      },
+      "predicted": "coding",
+      "correct": true,
+      "brier": 0.007376960000000004
+    },
+    {
+      "id": "original-routing-02-1",
+      "type": "choice",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "coding": 0.9293,
+        "coding_agent": 0.0161,
+        "document": 0.0047,
+        "general": 0.0437,
+        "math": 0.004,
+        "tools": 0.0023
+      },
+      "predicted": "coding",
+      "correct": true,
+      "brier": 0.007210769999999998
+    },
+    {
+      "id": "original-routing-03-0",
+      "type": "choice",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "coding": 0.0543,
+        "coding_agent": 0.9217,
+        "document": 0.0028,
+        "general": 0.0163,
+        "math": 0.001,
+        "tools": 0.0039
+      },
+      "predicted": "coding_agent",
+      "correct": true,
+      "brier": 0.009369120000000007
+    },
+    {
+      "id": "original-routing-03-1",
+      "type": "choice",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "coding": 0.0397,
+        "coding_agent": 0.9389,
+        "document": 0.0026,
+        "general": 0.0143,
+        "math": 0.0008,
+        "tools": 0.0038
+      },
+      "predicted": "coding_agent",
+      "correct": true,
+      "brier": 0.005535630000000006
+    },
+    {
+      "id": "original-routing-04-0",
+      "type": "choice",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "coding": 0.035,
+        "coding_agent": 0.016,
+        "document": 0.8164,
+        "general": 0.1201,
+        "math": 0.0031,
+        "tools": 0.0093
+      },
+      "predicted": "document",
+      "correct": true,
+      "brier": 0.04971007
+    },
+    {
+      "id": "original-routing-04-1",
+      "type": "choice",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "coding": 0.0794,
+        "coding_agent": 0.0264,
+        "document": 0.7054,
+        "general": 0.1706,
+        "math": 0.0038,
+        "tools": 0.0144
+      },
+      "predicted": "document",
+      "correct": true,
+      "brier": 0.12311663999999999
+    },
+    {
+      "id": "original-routing-05-0",
+      "type": "choice",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "coding": 0.0286,
+        "coding_agent": 0.012,
+        "document": 0.0113,
+        "general": 0.1833,
+        "math": 0.0039,
+        "tools": 0.7609
+      },
+      "predicted": "tools",
+      "correct": true,
+      "brier": 0.09187255999999999
+    },
+    {
+      "id": "original-routing-05-1",
+      "type": "choice",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "coding": 0.0558,
+        "coding_agent": 0.0175,
+        "document": 0.0116,
+        "general": 0.6943,
+        "math": 0.0044,
+        "tools": 0.2165
+      },
+      "predicted": "general",
+      "correct": false,
+      "brier": 1.09949855
+    },
+    {
+      "id": "original-routing-06-0",
+      "type": "choice",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "coding": 0.0772,
+        "coding_agent": 0.0225,
+        "document": 0.0259,
+        "general": 0.8516,
+        "math": 0.0075,
+        "tools": 0.0152
+      },
+      "predicted": "general",
+      "correct": true,
+      "brier": 0.029446749999999994
+    },
+    {
+      "id": "original-routing-06-1",
+      "type": "choice",
+      "valid": true,
+      "strict_valid": true,
+      "renormalized": false,
+      "probs": {
+        "coding": 0.0812,
+        "coding_agent": 0.0195,
+        "document": 0.0207,
+        "general": 0.8542,
+        "math": 0.0068,
+        "tools": 0.0176
+      },
+      "predicted": "general",
+      "correct": true,
+      "brier": 0.02901582000000001
+    }
+  ],
+  "dataset_sha256": "5c2414edb3006b8bfcb70fda433f0f9ca015759433849f8d3104328a1f7c4180",
+  "metrics": {
+    "n": 72,
+    "accuracy": 0.9027777777777778,
+    "brier": 0.2001529748611111,
+    "ece": {
+      "ece": 0.17055972222222215,
+      "n": 72,
+      "bins": [
+        {
+          "lo": 0.0,
+          "hi": 0.1,
+          "n": 0,
+          "mean_confidence": null,
+          "accuracy": null
+        },
+        {
+          "lo": 0.1,
+          "hi": 0.2,
+          "n": 0,
+          "mean_confidence": null,
+          "accuracy": null
+        },
+        {
+          "lo": 0.2,
+          "hi": 0.3,
+          "n": 0,
+          "mean_confidence": null,
+          "accuracy": null
+        },
+        {
+          "lo": 0.3,
+          "hi": 0.4,
+          "n": 0,
+          "mean_confidence": null,
+          "accuracy": null
+        },
+        {
+          "lo": 0.4,
+          "hi": 0.5,
+          "n": 3,
+          "mean_confidence": 0.4472333333333333,
+          "accuracy": 1.0
+        },
+        {
+          "lo": 0.5,
+          "hi": 0.6,
+          "n": 11,
+          "mean_confidence": 0.5612727272727274,
+          "accuracy": 0.6363636363636364
+        },
+        {
+          "lo": 0.6,
+          "hi": 0.7,
+          "n": 18,
+          "mean_confidence": 0.6493388888888889,
+          "accuracy": 0.8333333333333334
+        },
+        {
+          "lo": 0.7,
+          "hi": 0.8,
+          "n": 13,
+          "mean_confidence": 0.7462461538461539,
+          "accuracy": 1.0
+        },
+        {
+          "lo": 0.8,
+          "hi": 0.9,
+          "n": 18,
+          "mean_confidence": 0.8572611111111113,
+          "accuracy": 1.0
+        },
+        {
+          "lo": 0.9,
+          "hi": 1.0,
+          "n": 9,
+          "mean_confidence": 0.9315555555555556,
+          "accuracy": 1.0
+        }
+      ]
+    }
+  }
+}
