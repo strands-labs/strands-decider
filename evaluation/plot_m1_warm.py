@@ -76,12 +76,15 @@ reduction = np.mean(
 
 fig, ax = plt.subplots(figsize=(13.6, 8.2))
 fig.subplots_adjust(left=0.07, right=0.975, bottom=0.19, top=0.76)
-fig.text(0.07, 0.94, "FP16 delivers the lowest latency on this M1", fontsize=23, weight="bold")
+fig.text(0.07, 0.94, "Strands Decider 2B latency | M1 MacBook Air 16GB", fontsize=23, weight="bold")
 fig.text(
     0.07,
     0.888,
-    "Strands Decider 2B  /  MacBook Air M1, 16 GB  /  median request latency",
+    "FP16 delivers ~20% lower average latency compared to BF16.\n"
+    "INT4/INT8 quantization adds latency: the ‘dequant tax’.",
     fontsize=12.5,
+    linespacing=1.4,
+    va="top",
     color=MUTED,
 )
 fig.text(0.975, 0.81, "Lower is better", ha="right", fontsize=11, color=MUTED)
