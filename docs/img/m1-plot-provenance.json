@@ -1,0 +1,11 @@
+{
+  "matplotlib": "3.11.2",
+  "sha256": {
+    "reports/m1-bf16-clean/fp.json": "12550097b8dbc96fcf96787b81f09c80a5881a886a969c6c78b92fd749de96ba",
+    "reports/m1-fp16-clean/fp.json": "ff1544ef2ea3d7926cb6ece7401067d6c01d22b401a19689e3c15555f1579358",
+    "reports/m1-fp16-clean/8.json": "57cf57fce0bd85d2e183e3f9a3e0b149b7886ef6a742c5c70b44745ada7a06a7",
+    "reports/m1-fp16-clean/4.json": "9895f225c4ad0dee6d7bb0dfda33fb5ef910fcccf7190d1d6f45ddea5a95d2a1"
+  },
+  "selection": "BF16 baseline from m1-bf16-clean; FP16 and both quantized variants from m1-fp16-clean.",
+  "whiskers": "Observed minimum and maximum of five timed runs; not confidence intervals."
+}

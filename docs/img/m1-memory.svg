@@ -1,0 +1,215 @@
+<?xml version="1.0" encoding="utf-8" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN"
+  "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg xmlns:xlink="http://www.w3.org/1999/xlink" width="979.2pt" height="554.4pt" viewBox="0 0 979.2 554.4" xmlns="http://www.w3.org/2000/svg" version="1.1">
+ <metadata>
+  <rdf:RDF xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:cc="http://creativecommons.org/ns#" xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+   <cc:Work>
+    <dc:type rdf:resource="http://purl.org/dc/dcmitype/StillImage"/>
+    <dc:date>2026-10-04T15:55:16.005173</dc:date>
+    <dc:format>image/svg+xml</dc:format>
+    <dc:creator>
+     <cc:Agent>
+      <dc:title>Matplotlib v3.11.2, https://matplotlib.org/</dc:title>
+     </cc:Agent>
+    </dc:creator>
+   </cc:Work>
+  </rdf:RDF>
+ </metadata>
+ <defs>
+  <style type="text/css">*{stroke-linejoin: round; stroke-linecap: butt}</style>
+ </defs>
+ <g id="figure_1">
+  <g id="patch_1">
+   <path d="M 0 554.4 
+L 979.2 554.4 
+L 979.2 0 
+L 0 0 
+z
+" style="fill: #ffffff"/>
+  </g>
+  <g id="axes_1">
+   <g id="patch_2">
+    <path d="M 117.504 415.8 
+L 954.72 415.8 
+L 954.72 133.056 
+L 117.504 133.056 
+z
+" style="fill: #ffffff"/>
+   </g>
+   <g id="matplotlib.axis_1">
+    <g id="xtick_1">
+     <g id="line2d_1">
+      <path d="M 117.504 415.8 
+L 117.504 133.056 
+" clip-path="url(#p56658a32e0)" style="fill: none; stroke: #e3e9f0; stroke-width: 0.8; stroke-linecap: square"/>
+     </g>
+     <g id="line2d_2"/>
+     <g id="text_1">
+      <text style="font-size: 12px; font-family: 'DejaVu Sans'; text-anchor: middle; fill: #58677b" x="117.504" y="436.917187" transform="rotate(-0 117.504 436.917187)">0</text>
+     </g>
+    </g>
+    <g id="xtick_2">
+     <g id="line2d_3">
+      <path d="M 250.395429 415.8 
+L 250.395429 133.056 
+" clip-path="url(#p56658a32e0)" style="fill: none; stroke: #e3e9f0; stroke-width: 0.8; stroke-linecap: square"/>
+     </g>
+     <g id="line2d_4"/>
+     <g id="text_2">
+      <text style="font-size: 12px; font-family: 'DejaVu Sans'; text-anchor: middle; fill: #58677b" x="250.395429" y="436.917187" transform="rotate(-0 250.395429 436.917187)">1</text>
+     </g>
+    </g>
+    <g id="xtick_3">
+     <g id="line2d_5">
+      <path d="M 383.286857 415.8 
+L 383.286857 133.056 
+" clip-path="url(#p56658a32e0)" style="fill: none; stroke: #e3e9f0; stroke-width: 0.8; stroke-linecap: square"/>
+     </g>
+     <g id="line2d_6"/>
+     <g id="text_3">
+      <text style="font-size: 12px; font-family: 'DejaVu Sans'; text-anchor: middle; fill: #58677b" x="383.286857" y="436.917187" transform="rotate(-0 383.286857 436.917187)">2</text>
+     </g>
+    </g>
+    <g id="xtick_4">
+     <g id="line2d_7">
+      <path d="M 516.178286 415.8 
+L 516.178286 133.056 
+" clip-path="url(#p56658a32e0)" style="fill: none; stroke: #e3e9f0; stroke-width: 0.8; stroke-linecap: square"/>
+     </g>
+     <g id="line2d_8"/>
+     <g id="text_4">
+      <text style="font-size: 12px; font-family: 'DejaVu Sans'; text-anchor: middle; fill: #58677b" x="516.178286" y="436.917187" transform="rotate(-0 516.178286 436.917187)">3</text>
+     </g>
+    </g>
+    <g id="xtick_5">
+     <g id="line2d_9">
+      <path d="M 649.069714 415.8 
+L 649.069714 133.056 
+" clip-path="url(#p56658a32e0)" style="fill: none; stroke: #e3e9f0; stroke-width: 0.8; stroke-linecap: square"/>
+     </g>
+     <g id="line2d_10"/>
+     <g id="text_5">
+      <text style="font-size: 12px; font-family: 'DejaVu Sans'; text-anchor: middle; fill: #58677b" x="649.069714" y="436.917187" transform="rotate(-0 649.069714 436.917187)">4</text>
+     </g>
+    </g>
+    <g id="xtick_6">
+     <g id="line2d_11">
+      <path d="M 781.961143 415.8 
+L 781.961143 133.056 
+" clip-path="url(#p56658a32e0)" style="fill: none; stroke: #e3e9f0; stroke-width: 0.8; stroke-linecap: square"/>
+     </g>
+     <g id="line2d_12"/>
+     <g id="text_6">
+      <text style="font-size: 12px; font-family: 'DejaVu Sans'; text-anchor: middle; fill: #58677b" x="781.961143" y="436.917187" transform="rotate(-0 781.961143 436.917187)">5</text>
+     </g>
+    </g>
+    <g id="text_7">
+     <text style="font-size: 12px; font-family: 'DejaVu Sans'; text-anchor: middle; fill: #58677b" x="536.112" y="461.918125" transform="rotate(-0 536.112 461.918125)">Peak MLX allocation (GiB)</text>
+    </g>
+   </g>
+   <g id="matplotlib.axis_2">
+    <g id="ytick_1">
+     <g id="line2d_13"/>
+     <g id="text_8">
+      <text style="font-weight: 700; font-size: 13px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #58677b" x="105.504" y="170.451222" transform="rotate(-0 105.504 170.451222)">BF16</text>
+     </g>
+    </g>
+    <g id="ytick_2">
+     <g id="line2d_14"/>
+     <g id="text_9">
+      <text style="font-weight: 700; font-size: 13px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #58677b" x="105.504" y="243.061392" transform="rotate(-0 105.504 243.061392)">FP16</text>
+     </g>
+    </g>
+    <g id="ytick_3">
+     <g id="line2d_15"/>
+     <g id="text_10">
+      <text style="font-weight: 700; font-size: 13px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #58677b" x="105.504" y="315.671561" transform="rotate(-0 105.504 315.671561)">INT8</text>
+     </g>
+    </g>
+    <g id="ytick_4">
+     <g id="line2d_16"/>
+     <g id="text_11">
+      <text style="font-weight: 700; font-size: 13px; font-family: 'DejaVu Sans'; text-anchor: end; fill: #58677b" x="105.504" y="388.281731" transform="rotate(-0 105.504 388.281731)">INT4</text>
+     </g>
+    </g>
+   </g>
+   <g id="patch_3">
+    <path d="M 117.504 145.908 
+L 772.556408 145.908 
+L 772.556408 185.117492 
+L 117.504 185.117492 
+z
+" clip-path="url(#p56658a32e0)" style="fill: #94a3b8"/>
+   </g>
+   <g id="patch_4">
+    <path d="M 117.504 218.518169 
+L 772.556408 218.518169 
+L 772.556408 257.727661 
+L 117.504 257.727661 
+z
+" clip-path="url(#p56658a32e0)" style="fill: #2563eb"/>
+   </g>
+   <g id="patch_5">
+    <path d="M 117.504 291.128339 
+L 623.250246 291.128339 
+L 623.250246 330.337831 
+L 117.504 330.337831 
+z
+" clip-path="url(#p56658a32e0)" style="fill: #d28a1f"/>
+   </g>
+   <g id="patch_6">
+    <path d="M 117.504 363.738508 
+L 538.376229 363.738508 
+L 538.376229 402.948 
+L 117.504 402.948 
+z
+" clip-path="url(#p56658a32e0)" style="fill: #c45558"/>
+   </g>
+   <g id="text_12">
+    <text style="font-weight: 700; font-size: 13px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #12243a" x="785.845551" y="164.533597" transform="rotate(-0 785.845551 164.533597)">4.93 GiB</text>
+   </g>
+   <g id="text_13">
+    <text style="font-size: 10.5px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #58677b" x="785.845551" y="179.857912" transform="rotate(-0 785.845551 179.857912)">Same as FP16</text>
+   </g>
+   <g id="text_14">
+    <text style="font-weight: 700; font-size: 13px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #12243a" x="785.845551" y="237.143766" transform="rotate(-0 785.845551 237.143766)">4.93 GiB</text>
+   </g>
+   <g id="text_15">
+    <text style="font-size: 10.5px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #58677b" x="785.845551" y="252.468492" transform="rotate(-0 785.845551 252.468492)">Baseline</text>
+   </g>
+   <g id="text_16">
+    <text style="font-weight: 700; font-size: 13px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #12243a" x="636.539389" y="309.753936" transform="rotate(-0 636.539389 309.753936)">3.81 GiB</text>
+   </g>
+   <g id="text_17">
+    <text style="font-weight: 700; font-size: 10.5px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #d28a1f" x="636.539389" y="325.078251" transform="rotate(-0 636.539389 325.078251)">−23% vs FP16</text>
+   </g>
+   <g id="text_18">
+    <text style="font-weight: 700; font-size: 13px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #12243a" x="551.665371" y="382.364105" transform="rotate(-0 551.665371 382.364105)">3.17 GiB</text>
+   </g>
+   <g id="text_19">
+    <text style="font-weight: 700; font-size: 10.5px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #c45558" x="551.665371" y="397.68842" transform="rotate(-0 551.665371 397.68842)">−36% vs FP16</text>
+   </g>
+  </g>
+  <g id="text_20">
+   <text style="font-weight: 700; font-size: 24px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #12243a" x="68.544" y="33.264" transform="rotate(-0 68.544 33.264)">Quantization reduces peak MLX memory</text>
+  </g>
+  <g id="text_21">
+   <text style="font-size: 12.5px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #58677b" x="68.544" y="63.756" transform="rotate(-0 68.544 63.756)">Largest workload: 4,000 state tokens + 8 questions  /  lower is better</text>
+  </g>
+  <g id="text_22">
+   <text style="font-weight: 700; font-size: 13px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #12243a" x="68.544" y="482.328" transform="rotate(-0 68.544 482.328)">Average savings across all six workloads:  INT8 25%  ·  INT4 39%</text>
+  </g>
+  <g id="text_23">
+   <text style="font-size: 10px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #58677b" x="68.544" y="512.82" transform="rotate(-0 68.544 512.82)">INT8 and INT4 use the FP16 base. The largest-shape reductions are 23% and 36%, respectively.</text>
+  </g>
+  <g id="text_24">
+   <text style="font-size: 10px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #58677b" x="68.544" y="530.5608" transform="rotate(-0 68.544 530.5608)">MLX allocation is not total system RAM, process RSS, or peak memory during model loading.</text>
+  </g>
+ </g>
+ <defs>
+  <clipPath id="p56658a32e0">
+   <rect x="117.504" y="133.056" width="837.216" height="282.744"/>
+  </clipPath>
+ </defs>
+</svg>
