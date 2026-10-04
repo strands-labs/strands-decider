@@ -1,9 +1,66 @@
 # Results
 
-The measurements of v19 and the versions before it: the AWS retrain, the summary by version,
+The measurements of v21 (the released model), v19 and the versions before them: v21's
+seeds and release checks, the AWS retrain, the summary by version,
 calibration, and accuracy and latency on a Mac. [README.md](README.md) says how to run them, and
 [jevbench.md](jevbench.md) has the external benchmark. Paths are relative to the repository
 root unless they are links. A module path such as `infer.py` is relative to `src/strands_decider/`.
+
+## v21, the released model
+
+`StrandsAgents/strands-decider-2B-hobson-v21` is v21b of the research notes:
+[configs/experiments/v21b.yaml](../configs/experiments/v21b.yaml), v19's recipe plus v20's
+checked question paraphrases and distillation from Qwen3.5-4B where it agrees with the gold
+label (no catch-all rows, no instruction flips). Six seeds trained on one `p5.48xlarge`
+host (8x H100, `NGPU=8`, FAST settings), all of which pass the validity gates: 231 JevBench
+tasks attempted, strict schema 1.000, `/health` names the scored checkpoint at window 4096
+before and after, easy tier 48/48, one epoch of 3,738 steps, every stage exit code 0.
+
+**How the released seed was chosen.** The rule was written down before the seeds were
+ranked, so that the release is a representative seed and not the luckiest one on the public
+tasks. For each of five measures (JevBench tasks right, MuSiQue, ContractNLI, BoardgameQA,
+HotpotQA), take the six-seed mean and SD. A seed's distance is the square root of the sum
+of its squared z-scores over the five. Release the seed with the smallest distance (a tie
+goes to the lower seed). Seed 5 has distance 1.48; the next are seed 3 (1.93) and seed 0
+(1.98).
+
+| measure | s0 | s1 | s2 | s3 | s4 | s5 (released) | six-seed mean (SD) |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| JevBench public, tasks right of 231 (window 4096) | 177 | 171 | 173 | 177 | 176 | 176 | 175.0 (2.4) |
+| JevBench Brier | 0.339 | 0.335 | 0.328 | 0.340 | 0.322 | 0.323 | 0.331 (0.008) |
+| MuSiQue | 0.898 | 0.881 | 0.897 | 0.891 | 0.886 | 0.882 | 0.889 (0.007) |
+| ContractNLI | 0.872 | 0.858 | 0.861 | 0.851 | 0.870 | 0.865 | 0.863 (0.008) |
+| BoardgameQA | 0.804 | 0.820 | 0.818 | 0.810 | 0.793 | 0.821 | 0.811 (0.011) |
+| HotpotQA (never trained on) | 0.750 | 0.751 | 0.730 | 0.764 | 0.771 | 0.746 | 0.752 (0.014) |
+| held-out short tasks (6,000) | 0.642 | 0.645 | 0.645 | 0.636 | 0.645 | 0.650 | 0.644 (0.004) |
+| HelpSteer2 adequacy (234) | 0.744 | 0.756 | 0.735 | 0.718 | 0.718 | 0.739 | 0.735 (0.015) |
+| generated adequacy (302) | 0.818 | 0.811 | 0.811 | 0.798 | 0.785 | 0.788 | 0.802 (0.014) |
+| generated documents, v16's set | 0.857 | 0.857 | 0.866 | 0.854 | 0.854 | 0.849 | 0.856 (0.006) |
+| generated documents, v18's set | 0.761 | 0.757 | 0.745 | 0.773 | 0.765 | 0.741 | 0.757 (0.012) |
+
+Against v19. On the host of the v21 ablation, six seeds of v19's recipe scored 170, 173,
+170, 174, 175 and 175 (mean 172.8, Brier 0.341), and six of v21b 173, 174, 169, 170, 174
+and 174 (mean 172.3, Brier 0.331). So on one host v21b has the same JevBench accuracy as
+v19's recipe and a lower Brier score. The higher means above come from another host:
+the six v21b seeds of the two hosts average 172.3 and 175.0, so compare seeds from one
+host only. The published v19 is one run (167 at 3072, 168 at 4096).
+
+**Release checks.** The released files were checked through the code on `main`, not the
+training harness, on other GPUs (NVIDIA L40S for text, L4 for images):
+
+| check | training time (H100, training harness) | release (`main`) |
+| --- | --- | --- |
+| JevBench public, tasks right (window 4096) | 176/231 | 176/231, the same answer on every task, from the training-format copy and from these files |
+| JevBench Brier / ECE | 0.323 / 0.074 | 0.323 / 0.064 |
+| MuSiQue / ContractNLI / BoardgameQA | 0.882 / 0.865 / 0.821 | 0.882 / 0.864 / 0.822 |
+| HotpotQA (never trained on) | 0.746 | 0.745 |
+| held-out short tasks (6,000) | 0.650 | 0.650 |
+| generated adequacy (302) | 0.788 | 0.788 |
+| images, `--vision` ([docs/vision.md](../docs/vision.md#v21)) | not run | NaturalBench 0.785, POPE 0.878 |
+| code: test suite (CPU), ruff and mypy, as CI runs them | | pass |
+
+Every accuracy is within one item of its training-time figure. JevBench ECE, binned over
+231 tasks, moves with small probability changes between GPUs.
 
 ## Retraining on AWS
 

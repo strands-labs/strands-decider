@@ -1,7 +1,8 @@
 # Images
 
-Strands Decider (v19) answers questions about images when it is loaded with `--vision`.
-No weights change: the published checkpoint is used as is, and the images are read by the
+Strands Decider answers questions about images when it is loaded with `--vision`. This was
+built and measured on v19 and checked again on v21, the current release
+([How well it does](#how-well-it-does)). No weights change: the published checkpoint is used as is, and the images are read by the
 vision tower that already ships inside Qwen3.5-2B-Base. Text-only requests to a vision
 server get the same answers as from a text server.
 
@@ -9,7 +10,7 @@ server get the same answers as from a text server.
 
 ```bash
 pip install "strands-decider[vision]"     # Pillow; needs transformers >= 5.18
-strands-decider serve StrandsAgents/strands-decider-2B-hobson-v19 --vision --port 8000
+strands-decider serve StrandsAgents/strands-decider-2B-hobson-v21 --vision --port 8000
 ```
 
 A request adds `images`: a list of base64 images, PNG, JPEG, WebP or GIF (a
@@ -119,6 +120,27 @@ without the image, v19 still answers at a mean confidence of 0.652 on NaturalBen
 - Image JevBench: the official items are sealed. These are the 60 published preview items
   that can be rebuilt exactly from their source rows (CLEVR-HOPE, Geometry3K, ArxivQA).
 - One run per system, on one H100 each (fp32 for v19 and the base, bf16 for Mapika).
+
+### v21
+
+v21 (`StrandsAgents/strands-decider-2B-hobson-v21`) was measured the same way, with v19
+again beside it, both on one NVIDIA L4 (fp32, the same command with `--systems strands` and
+`--checkpoint`). v19 there reproduces the H100 figures above to within 0.002, except
+NaturalBench ECE (0.012).
+
+| | NaturalBench acc | G-Acc | ECE | POPE-adv acc | Brier | ECE |
+| --- | --- | --- | --- | --- | --- | --- |
+| v21 (this checkpoint), `--vision` | 0.785 | 0.313 | 0.043 | 0.878 | 0.179 | 0.036 |
+| v19, `--vision` | 0.784 | 0.327 | 0.012 | 0.877 | 0.202 | 0.072 |
+| v21 minus v19, paired bootstrap 95% CI | +0.001 (-0.012 to +0.014) | -0.013 | +0.031 (-0.004 to +0.048) | +0.002 (-0.012 to +0.015) | -0.023 (-0.033 to -0.012) | -0.035 (-0.057 to -0.009) |
+
+The same accuracy. On POPE v21 is better calibrated; on NaturalBench the ECE difference is
+not resolved. v21 is more confident than v19 throughout (mean confidence +0.04 to +0.07).
+
+With the image removed both fall to chance, but v21 answers more confidently than v19:
+mean confidence 0.722 on NaturalBench and 0.792 on POPE (v19 0.652 and 0.725), ECE 0.222
+and 0.292 (v19 0.152 and 0.225; paired 95% CIs of the difference +0.054 to +0.087 and +0.065
+to +0.070). Its confidence does not tell you that an image is missing or unreadable.
 
 The script is `evaluation/vision/run.py`; [evaluation/vision/README.md](../evaluation/vision/README.md)
 has the exact command and a link to the recorded runs: per-item probabilities for v19 and

@@ -83,7 +83,10 @@ GPU.
 
 ## Model artifact
 
-The v19 reference weights are published as
+The v21 reference weights are published as
+[`StrandsAgents/strands-decider-2B-hobson-v21`](https://huggingface.co/StrandsAgents/strands-decider-2B-hobson-v21),
+and the same files as [`amazon/strands-decider-2B-hobson-v21`](https://huggingface.co/amazon/strands-decider-2B-hobson-v21).
+The earlier v19 weights stay at
 [`StrandsAgents/strands-decider-2B-hobson-v19`](https://huggingface.co/StrandsAgents/strands-decider-2B-hobson-v19).
 Every command that takes a checkpoint path also takes that id, and the loader downloads the
 repository to the Hub cache. You can equally train your own with the recipe
@@ -118,7 +121,7 @@ adapter, the tokenizer and configuration files, and a model card (`README.md`).
 `python -m strands_decider.hf_export verify DIR` checks a folder. `StrandsDeciderModel.load` reads the
 folder as it reads a checkpoint, and the base weights still download separately from
 Hugging Face. Where a command takes a checkpoint path (`strands-decider serve`, `strands-decider ask`,
-`strands-decider info`), a Hub model repo id such as `StrandsAgents/strands-decider-2B-hobson-v19` also works: the loader
+`strands-decider info`), a Hub model repo id such as `StrandsAgents/strands-decider-2B-hobson-v21` also works: the loader
 downloads the repo to the Hub cache. `strands-decider calibrate` writes into the checkpoint, so it
 needs a local directory. OUT can be a local directory or an `s3://` URI. The exporter does not upload to
 the Hugging Face Hub.

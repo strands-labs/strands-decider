@@ -13,7 +13,7 @@ for the supported credential options.
 ```bash
 git clone https://github.com/strands-labs/strands-decider && cd strands-decider
 pip install -e . strands-agents
-strands-decider serve StrandsAgents/strands-decider-2B-hobson-v19 --port 8099
+strands-decider serve StrandsAgents/strands-decider-2B-hobson-v21 --port 8099
 
 python examples/strands/tool_call_intervention.py
 ```
