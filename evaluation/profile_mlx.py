@@ -3,16 +3,17 @@ from __future__ import annotations
 
 import argparse
 import cProfile
+import hashlib
 import importlib.metadata
 import json
 import os
-from pathlib import Path
 import platform
 import pstats
 import statistics
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 
 def save(path, value):
@@ -28,6 +29,7 @@ def worker(args):
     import mlx.core as mx
     import torch
     from bench_local import make_questions, make_state
+
     from strands_decider.infer import load_engine
     from strands_decider.schema import SystemOneRequest
 
@@ -37,7 +39,10 @@ def worker(args):
     if engine.model.config.torch_dtype != "float16":
         raise ValueError("Both arms require a float16 checkpoint; use prepare_mlx_dtype.py")
     result = {"precision": args.precision, "dtype": "float16", "device": mx.device_info(),
-              "quantized_paths": engine.quantized_paths, "shapes": []}
+              "quantized_paths": engine.quantized_paths, "shapes": [],
+              "script_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+              "power_before": command("pmset", "-g", "batt"),
+              "swap_before": command("sysctl", "vm.swapusage")}
     output = args.out / f"{args.precision}.json"
     for length in args.lengths:
         for count in args.questions:
@@ -59,7 +64,7 @@ def worker(args):
             phases = []
             originals = {name: getattr(engine, name) for name in ("_hidden", "_probs")}
             events = []
-            def wrap(name, fn):
+            def wrap(name, fn, events):
                 def measured(*a, **kw):
                     mx.synchronize()
                     start = time.perf_counter()
@@ -71,14 +76,14 @@ def worker(args):
                 return measured
             try:
                 for name, fn in originals.items():
-                    setattr(engine, name, wrap(name, fn))
+                    setattr(engine, name, wrap(name, fn, events))
                 for _ in range(args.reps):
-                    events = []
+                    events.clear()
                     start = time.perf_counter()
                     engine.evaluate(req)
                     mx.synchronize()
                     total = (time.perf_counter() - start) * 1000
-                    phases.append({"total_ms": total, "events": events,
+                    phases.append({"total_ms": total, "events": list(events),
                                    "other_ms": total - sum(e["ms"] for e in events)})
             finally:
                 for name, fn in originals.items():
@@ -101,6 +106,8 @@ def worker(args):
                     mx.metal.stop_capture()
                 row["metal_trace"] = str(trace)
             result["shapes"].append(row)
+            result["power_latest"] = command("pmset", "-g", "batt")
+            result["swap_latest"] = command("sysctl", "vm.swapusage")
             save(output, result)
             print(args.precision, length, count, round(row["median_ms"], 2), "ms", flush=True)
 
@@ -128,7 +135,7 @@ def main():
     save(args.out / "manifest.json", {
         "args": vars(args), "started": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         "platform": platform.platform(), "commit": command("git", "rev-parse", "HEAD"),
-        "script_sha256": __import__("hashlib").sha256(Path(__file__).read_bytes()).hexdigest(),
+        "script_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
         "packages": {p: importlib.metadata.version(p) for p in ["mlx", "mlx-lm", "torch"]},
         "power": command("pmset", "-g", "batt"), "thermal": command("pmset", "-g", "therm"),
         "swap": command("sysctl", "vm.swapusage")})

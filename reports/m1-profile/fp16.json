@@ -1,0 +1,343 @@
+{
+  "precision": "fp16",
+  "dtype": "float16",
+  "device": {
+    "device_name": "Apple M1",
+    "max_recommended_working_set_size": 12713115648,
+    "memory_size": 17179869184,
+    "architecture": "applegpu_g13g",
+    "max_buffer_length": 9534832640,
+    "resource_limit": 499000
+  },
+  "quantized_paths": [],
+  "shapes": [
+    {
+      "state_tokens": 256,
+      "questions": 1,
+      "samples_ms": [
+        1138.6674579698592,
+        1317.0596668496728,
+        1190.3290420304984
+      ],
+      "median_ms": 1190.3290420304984,
+      "peak_mlx_gib": 3.748374816030264,
+      "instrumented_passes": [
+        {
+          "total_ms": 1138.7580409646034,
+          "events": [
+            {
+              "phase": "_hidden",
+              "ms": 1133.0540420021862,
+              "shape": [
+                1,
+                350
+              ]
+            },
+            {
+              "phase": "_probs",
+              "ms": 2.2578330244868994,
+              "shape": null
+            }
+          ],
+          "other_ms": 3.4461659379303455
+        },
+        {
+          "total_ms": 1269.4040420465171,
+          "events": [
+            {
+              "phase": "_hidden",
+              "ms": 1264.4725418649614,
+              "shape": [
+                1,
+                350
+              ]
+            },
+            {
+              "phase": "_probs",
+              "ms": 2.736541908234358,
+              "shape": null
+            }
+          ],
+          "other_ms": 2.19495827332139
+        },
+        {
+          "total_ms": 1274.932208005339,
+          "events": [
+            {
+              "phase": "_hidden",
+              "ms": 1271.480750059709,
+              "shape": [
+                1,
+                350
+              ]
+            },
+            {
+              "phase": "_probs",
+              "ms": 1.2583329807966948,
+              "shape": null
+            }
+          ],
+          "other_ms": 2.1931249648332596
+        }
+      ]
+    },
+    {
+      "state_tokens": 256,
+      "questions": 8,
+      "samples_ms": [
+        3890.647375024855,
+        3591.277833795175,
+        4809.260291978717
+      ],
+      "median_ms": 3890.647375024855,
+      "peak_mlx_gib": 4.199099877849221,
+      "instrumented_passes": [
+        {
+          "total_ms": 4140.0925000198185,
+          "events": [
+            {
+              "phase": "_hidden",
+              "ms": 1604.0560421533883,
+              "shape": [
+                1,
+                265
+              ]
+            },
+            {
+              "phase": "_hidden",
+              "ms": 2517.118874937296,
+              "shape": [
+                8,
+                85
+              ]
+            },
+            {
+              "phase": "_probs",
+              "ms": 3.7170839495956898,
+              "shape": null
+            }
+          ],
+          "other_ms": 15.20049897953868
+        },
+        {
+          "total_ms": 3698.9724999293685,
+          "events": [
+            {
+              "phase": "_hidden",
+              "ms": 1032.195416977629,
+              "shape": [
+                1,
+                265
+              ]
+            },
+            {
+              "phase": "_hidden",
+              "ms": 2643.731332849711,
+              "shape": [
+                8,
+                85
+              ]
+            },
+            {
+              "phase": "_probs",
+              "ms": 3.709082957357168,
+              "shape": null
+            }
+          ],
+          "other_ms": 19.336667144671082
+        },
+        {
+          "total_ms": 3439.791082870215,
+          "events": [
+            {
+              "phase": "_hidden",
+              "ms": 1026.2647909112275,
+              "shape": [
+                1,
+                265
+              ]
+            },
+            {
+              "phase": "_hidden",
+              "ms": 2394.7314170654863,
+              "shape": [
+                8,
+                85
+              ]
+            },
+            {
+              "phase": "_probs",
+              "ms": 3.9405832067131996,
+              "shape": null
+            }
+          ],
+          "other_ms": 14.854291686788201
+        }
+      ]
+    },
+    {
+      "state_tokens": 1024,
+      "questions": 1,
+      "samples_ms": [
+        4283.840249991044,
+        3980.7480410672724,
+        3899.95462493971
+      ],
+      "median_ms": 3980.7480410672724,
+      "peak_mlx_gib": 3.9779488258063793,
+      "instrumented_passes": [
+        {
+          "total_ms": 3769.1363331396133,
+          "events": [
+            {
+              "phase": "_hidden",
+              "ms": 3758.5305829998106,
+              "shape": [
+                1,
+                1118
+              ]
+            },
+            {
+              "phase": "_probs",
+              "ms": 4.653707845136523,
+              "shape": null
+            }
+          ],
+          "other_ms": 5.952042294666171
+        },
+        {
+          "total_ms": 3575.949541060254,
+          "events": [
+            {
+              "phase": "_hidden",
+              "ms": 3561.580582987517,
+              "shape": [
+                1,
+                1118
+              ]
+            },
+            {
+              "phase": "_probs",
+              "ms": 8.239250164479017,
+              "shape": null
+            }
+          ],
+          "other_ms": 6.129707908257842
+        },
+        {
+          "total_ms": 3661.1857500392944,
+          "events": [
+            {
+              "phase": "_hidden",
+              "ms": 3647.5058749783784,
+              "shape": [
+                1,
+                1118
+              ]
+            },
+            {
+              "phase": "_probs",
+              "ms": 7.722333073616028,
+              "shape": null
+            }
+          ],
+          "other_ms": 5.957541987299919
+        }
+      ]
+    },
+    {
+      "state_tokens": 1024,
+      "questions": 8,
+      "samples_ms": [
+        6576.911292038858,
+        6022.790249902755,
+        6169.3753330037
+      ],
+      "median_ms": 6169.3753330037,
+      "peak_mlx_gib": 4.32278891839087,
+      "instrumented_passes": [
+        {
+          "total_ms": 6240.254666889086,
+          "events": [
+            {
+              "phase": "_hidden",
+              "ms": 3742.791000055149,
+              "shape": [
+                1,
+                1033
+              ]
+            },
+            {
+              "phase": "_hidden",
+              "ms": 2461.739958031103,
+              "shape": [
+                8,
+                85
+              ]
+            },
+            {
+              "phase": "_probs",
+              "ms": 7.662542164325714,
+              "shape": null
+            }
+          ],
+          "other_ms": 28.06116663850844
+        },
+        {
+          "total_ms": 4775.947167072445,
+          "events": [
+            {
+              "phase": "_hidden",
+              "ms": 3247.7690828964114,
+              "shape": [
+                1,
+                1033
+              ]
+            },
+            {
+              "phase": "_hidden",
+              "ms": 1510.0320840720087,
+              "shape": [
+                8,
+                85
+              ]
+            },
+            {
+              "phase": "_probs",
+              "ms": 3.1966250389814377,
+              "shape": null
+            }
+          ],
+          "other_ms": 14.949375065043569
+        },
+        {
+          "total_ms": 3001.061291899532,
+          "events": [
+            {
+              "phase": "_hidden",
+              "ms": 1738.6529590003192,
+              "shape": [
+                1,
+                1033
+              ]
+            },
+            {
+              "phase": "_hidden",
+              "ms": 1235.4113750625402,
+              "shape": [
+                8,
+                85
+              ]
+            },
+            {
+              "phase": "_probs",
+              "ms": 14.64337483048439,
+              "shape": null
+            }
+          ],
+          "other_ms": 12.353583006188273
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,494 @@
+{
+  "precision": "int8",
+  "dtype": "float16",
+  "device": {
+    "device_name": "Apple M1",
+    "max_recommended_working_set_size": 12713115648,
+    "memory_size": 17179869184,
+    "architecture": "applegpu_g13g",
+    "max_buffer_length": 9534832640,
+    "resource_limit": 499000
+  },
+  "quantized_paths": [
+    "language_model.model.layers.0.linear_attn.in_proj_qkv",
+    "language_model.model.layers.0.linear_attn.in_proj_z",
+    "language_model.model.layers.0.linear_attn.out_proj",
+    "language_model.model.layers.0.mlp.gate_proj",
+    "language_model.model.layers.0.mlp.down_proj",
+    "language_model.model.layers.0.mlp.up_proj",
+    "language_model.model.layers.1.linear_attn.in_proj_qkv",
+    "language_model.model.layers.1.linear_attn.in_proj_z",
+    "language_model.model.layers.1.linear_attn.out_proj",
+    "language_model.model.layers.1.mlp.gate_proj",
+    "language_model.model.layers.1.mlp.down_proj",
+    "language_model.model.layers.1.mlp.up_proj",
+    "language_model.model.layers.2.linear_attn.in_proj_qkv",
+    "language_model.model.layers.2.linear_attn.in_proj_z",
+    "language_model.model.layers.2.linear_attn.out_proj",
+    "language_model.model.layers.2.mlp.gate_proj",
+    "language_model.model.layers.2.mlp.down_proj",
+    "language_model.model.layers.2.mlp.up_proj",
+    "language_model.model.layers.3.self_attn.q_proj",
+    "language_model.model.layers.3.self_attn.k_proj",
+    "language_model.model.layers.3.self_attn.v_proj",
+    "language_model.model.layers.3.self_attn.o_proj",
+    "language_model.model.layers.3.mlp.gate_proj",
+    "language_model.model.layers.3.mlp.down_proj",
+    "language_model.model.layers.3.mlp.up_proj",
+    "language_model.model.layers.4.linear_attn.in_proj_qkv",
+    "language_model.model.layers.4.linear_attn.in_proj_z",
+    "language_model.model.layers.4.linear_attn.out_proj",
+    "language_model.model.layers.4.mlp.gate_proj",
+    "language_model.model.layers.4.mlp.down_proj",
+    "language_model.model.layers.4.mlp.up_proj",
+    "language_model.model.layers.5.linear_attn.in_proj_qkv",
+    "language_model.model.layers.5.linear_attn.in_proj_z",
+    "language_model.model.layers.5.linear_attn.out_proj",
+    "language_model.model.layers.5.mlp.gate_proj",
+    "language_model.model.layers.5.mlp.down_proj",
+    "language_model.model.layers.5.mlp.up_proj",
+    "language_model.model.layers.6.linear_attn.in_proj_qkv",
+    "language_model.model.layers.6.linear_attn.in_proj_z",
+    "language_model.model.layers.6.linear_attn.out_proj",
+    "language_model.model.layers.6.mlp.gate_proj",
+    "language_model.model.layers.6.mlp.down_proj",
+    "language_model.model.layers.6.mlp.up_proj",
+    "language_model.model.layers.7.self_attn.q_proj",
+    "language_model.model.layers.7.self_attn.k_proj",
+    "language_model.model.layers.7.self_attn.v_proj",
+    "language_model.model.layers.7.self_attn.o_proj",
+    "language_model.model.layers.7.mlp.gate_proj",
+    "language_model.model.layers.7.mlp.down_proj",
+    "language_model.model.layers.7.mlp.up_proj",
+    "language_model.model.layers.8.linear_attn.in_proj_qkv",
+    "language_model.model.layers.8.linear_attn.in_proj_z",
+    "language_model.model.layers.8.linear_attn.out_proj",
+    "language_model.model.layers.8.mlp.gate_proj",
+    "language_model.model.layers.8.mlp.down_proj",
+    "language_model.model.layers.8.mlp.up_proj",
+    "language_model.model.layers.9.linear_attn.in_proj_qkv",
+    "language_model.model.layers.9.linear_attn.in_proj_z",
+    "language_model.model.layers.9.linear_attn.out_proj",
+    "language_model.model.layers.9.mlp.gate_proj",
+    "language_model.model.layers.9.mlp.down_proj",
+    "language_model.model.layers.9.mlp.up_proj",
+    "language_model.model.layers.10.linear_attn.in_proj_qkv",
+    "language_model.model.layers.10.linear_attn.in_proj_z",
+    "language_model.model.layers.10.linear_attn.out_proj",
+    "language_model.model.layers.10.mlp.gate_proj",
+    "language_model.model.layers.10.mlp.down_proj",
+    "language_model.model.layers.10.mlp.up_proj",
+    "language_model.model.layers.11.self_attn.q_proj",
+    "language_model.model.layers.11.self_attn.k_proj",
+    "language_model.model.layers.11.self_attn.v_proj",
+    "language_model.model.layers.11.self_attn.o_proj",
+    "language_model.model.layers.11.mlp.gate_proj",
+    "language_model.model.layers.11.mlp.down_proj",
+    "language_model.model.layers.11.mlp.up_proj",
+    "language_model.model.layers.12.linear_attn.in_proj_qkv",
+    "language_model.model.layers.12.linear_attn.in_proj_z",
+    "language_model.model.layers.12.linear_attn.out_proj",
+    "language_model.model.layers.12.mlp.gate_proj",
+    "language_model.model.layers.12.mlp.down_proj",
+    "language_model.model.layers.12.mlp.up_proj",
+    "language_model.model.layers.13.linear_attn.in_proj_qkv",
+    "language_model.model.layers.13.linear_attn.in_proj_z",
+    "language_model.model.layers.13.linear_attn.out_proj",
+    "language_model.model.layers.13.mlp.gate_proj",
+    "language_model.model.layers.13.mlp.down_proj",
+    "language_model.model.layers.13.mlp.up_proj",
+    "language_model.model.layers.14.linear_attn.in_proj_qkv",
+    "language_model.model.layers.14.linear_attn.in_proj_z",
+    "language_model.model.layers.14.linear_attn.out_proj",
+    "language_model.model.layers.14.mlp.gate_proj",
+    "language_model.model.layers.14.mlp.down_proj",
+    "language_model.model.layers.14.mlp.up_proj",
+    "language_model.model.layers.15.self_attn.q_proj",
+    "language_model.model.layers.15.self_attn.k_proj",
+    "language_model.model.layers.15.self_attn.v_proj",
+    "language_model.model.layers.15.self_attn.o_proj",
+    "language_model.model.layers.15.mlp.gate_proj",
+    "language_model.model.layers.15.mlp.down_proj",
+    "language_model.model.layers.15.mlp.up_proj",
+    "language_model.model.layers.16.linear_attn.in_proj_qkv",
+    "language_model.model.layers.16.linear_attn.in_proj_z",
+    "language_model.model.layers.16.linear_attn.out_proj",
+    "language_model.model.layers.16.mlp.gate_proj",
+    "language_model.model.layers.16.mlp.down_proj",
+    "language_model.model.layers.16.mlp.up_proj",
+    "language_model.model.layers.17.linear_attn.in_proj_qkv",
+    "language_model.model.layers.17.linear_attn.in_proj_z",
+    "language_model.model.layers.17.linear_attn.out_proj",
+    "language_model.model.layers.17.mlp.gate_proj",
+    "language_model.model.layers.17.mlp.down_proj",
+    "language_model.model.layers.17.mlp.up_proj",
+    "language_model.model.layers.18.linear_attn.in_proj_qkv",
+    "language_model.model.layers.18.linear_attn.in_proj_z",
+    "language_model.model.layers.18.linear_attn.out_proj",
+    "language_model.model.layers.18.mlp.gate_proj",
+    "language_model.model.layers.18.mlp.down_proj",
+    "language_model.model.layers.18.mlp.up_proj",
+    "language_model.model.layers.19.self_attn.q_proj",
+    "language_model.model.layers.19.self_attn.k_proj",
+    "language_model.model.layers.19.self_attn.v_proj",
+    "language_model.model.layers.19.self_attn.o_proj",
+    "language_model.model.layers.19.mlp.gate_proj",
+    "language_model.model.layers.19.mlp.down_proj",
+    "language_model.model.layers.19.mlp.up_proj",
+    "language_model.model.layers.20.linear_attn.in_proj_qkv",
+    "language_model.model.layers.20.linear_attn.in_proj_z",
+    "language_model.model.layers.20.linear_attn.out_proj",
+    "language_model.model.layers.20.mlp.gate_proj",
+    "language_model.model.layers.20.mlp.down_proj",
+    "language_model.model.layers.20.mlp.up_proj",
+    "language_model.model.layers.21.linear_attn.in_proj_qkv",
+    "language_model.model.layers.21.linear_attn.in_proj_z",
+    "language_model.model.layers.21.linear_attn.out_proj",
+    "language_model.model.layers.21.mlp.gate_proj",
+    "language_model.model.layers.21.mlp.down_proj",
+    "language_model.model.layers.21.mlp.up_proj",
+    "language_model.model.layers.22.linear_attn.in_proj_qkv",
+    "language_model.model.layers.22.linear_attn.in_proj_z",
+    "language_model.model.layers.22.linear_attn.out_proj",
+    "language_model.model.layers.22.mlp.gate_proj",
+    "language_model.model.layers.22.mlp.down_proj",
+    "language_model.model.layers.22.mlp.up_proj",
+    "language_model.model.layers.23.self_attn.q_proj",
+    "language_model.model.layers.23.self_attn.k_proj",
+    "language_model.model.layers.23.self_attn.v_proj",
+    "language_model.model.layers.23.self_attn.o_proj",
+    "language_model.model.layers.23.mlp.gate_proj",
+    "language_model.model.layers.23.mlp.down_proj",
+    "language_model.model.layers.23.mlp.up_proj"
+  ],
+  "shapes": [
+    {
+      "state_tokens": 256,
+      "questions": 1,
+      "samples_ms": [
+        617.579041980207,
+        625.8765000384301,
+        680.4321249946952
+      ],
+      "median_ms": 625.8765000384301,
+      "peak_mlx_gib": 2.75471468269825,
+      "instrumented_passes": [
+        {
+          "total_ms": 632.115000160411,
+          "events": [
+            {
+              "phase": "_hidden",
+              "ms": 625.9354171343148,
+              "shape": [
+                1,
+                350
+              ]
+            },
+            {
+              "phase": "_probs",
+              "ms": 2.8696670196950436,
+              "shape": null
+            }
+          ],
+          "other_ms": 3.309916006401181
+        },
+        {
+          "total_ms": 620.5795831046999,
+          "events": [
+            {
+              "phase": "_hidden",
+              "ms": 614.0921250917017,
+              "shape": [
+                1,
+                350
+              ]
+            },
+            {
+              "phase": "_probs",
+              "ms": 3.329541999846697,
+              "shape": null
+            }
+          ],
+          "other_ms": 3.1579160131514072
+        },
+        {
+          "total_ms": 646.7864168807864,
+          "events": [
+            {
+              "phase": "_hidden",
+              "ms": 643.0257079191506,
+              "shape": [
+                1,
+                350
+              ]
+            },
+            {
+              "phase": "_probs",
+              "ms": 0.9780421387404203,
+              "shape": null
+            }
+          ],
+          "other_ms": 2.7826668228954077
+        }
+      ]
+    },
+    {
+      "state_tokens": 256,
+      "questions": 8,
+      "samples_ms": [
+        1778.9407088421285,
+        1869.0414580050856,
+        1766.44654199481
+      ],
+      "median_ms": 1778.9407088421285,
+      "peak_mlx_gib": 3.1581911724060774,
+      "instrumented_passes": [
+        {
+          "total_ms": 1834.991083946079,
+          "events": [
+            {
+              "phase": "_hidden",
+              "ms": 521.7417499516159,
+              "shape": [
+                1,
+                265
+              ]
+            },
+            {
+              "phase": "_hidden",
+              "ms": 1297.3452920559794,
+              "shape": [
+                8,
+                85
+              ]
+            },
+            {
+              "phase": "_probs",
+              "ms": 5.341625073924661,
+              "shape": null
+            }
+          ],
+          "other_ms": 10.562416864559054
+        },
+        {
+          "total_ms": 1789.2133749555796,
+          "events": [
+            {
+              "phase": "_hidden",
+              "ms": 545.5312498379499,
+              "shape": [
+                1,
+                265
+              ]
+            },
+            {
+              "phase": "_hidden",
+              "ms": 1225.2797081600875,
+              "shape": [
+                8,
+                85
+              ]
+            },
+            {
+              "phase": "_probs",
+              "ms": 4.391958005726337,
+              "shape": null
+            }
+          ],
+          "other_ms": 14.010458951815963
+        },
+        {
+          "total_ms": 1771.4279589708894,
+          "events": [
+            {
+              "phase": "_hidden",
+              "ms": 500.507292104885,
+              "shape": [
+                1,
+                265
+              ]
+            },
+            {
+              "phase": "_hidden",
+              "ms": 1254.0057499427348,
+              "shape": [
+                8,
+                85
+              ]
+            },
+            {
+              "phase": "_probs",
+              "ms": 5.901791155338287,
+              "shape": null
+            }
+          ],
+          "other_ms": 11.013125767931342
+        }
+      ]
+    },
+    {
+      "state_tokens": 1024,
+      "questions": 1,
+      "samples_ms": [
+        1999.0300419740379,
+        2056.9233749993145,
+        2005.2973341662437
+      ],
+      "median_ms": 2005.2973341662437,
+      "peak_mlx_gib": 2.929319081827998,
+      "instrumented_passes": [
+        {
+          "total_ms": 2052.1962919738144,
+          "events": [
+            {
+              "phase": "_hidden",
+              "ms": 2040.6736249569803,
+              "shape": [
+                1,
+                1118
+              ]
+            },
+            {
+              "phase": "_probs",
+              "ms": 4.9869169015437365,
+              "shape": null
+            }
+          ],
+          "other_ms": 6.535750115290284
+        },
+        {
+          "total_ms": 2009.856167016551,
+          "events": [
+            {
+              "phase": "_hidden",
+              "ms": 1999.488334171474,
+              "shape": [
+                1,
+                1118
+              ]
+            },
+            {
+              "phase": "_probs",
+              "ms": 3.881958080455661,
+              "shape": null
+            }
+          ],
+          "other_ms": 6.485874764621258
+        },
+        {
+          "total_ms": 2036.1935419496149,
+          "events": [
+            {
+              "phase": "_hidden",
+              "ms": 2026.0448330082,
+              "shape": [
+                1,
+                1118
+              ]
+            },
+            {
+              "phase": "_probs",
+              "ms": 4.860082874074578,
+              "shape": null
+            }
+          ],
+          "other_ms": 5.288626067340374
+        }
+      ]
+    },
+    {
+      "state_tokens": 1024,
+      "questions": 8,
+      "samples_ms": [
+        3257.0389579050243,
+        3364.89083385095,
+        3202.018167125061
+      ],
+      "median_ms": 3257.0389579050243,
+      "peak_mlx_gib": 3.312153600156307,
+      "instrumented_passes": [
+        {
+          "total_ms": 3270.7406668923795,
+          "events": [
+            {
+              "phase": "_hidden",
+              "ms": 1955.6654170155525,
+              "shape": [
+                1,
+                1033
+              ]
+            },
+            {
+              "phase": "_hidden",
+              "ms": 1300.2614590805024,
+              "shape": [
+                8,
+                85
+              ]
+            },
+            {
+              "phase": "_probs",
+              "ms": 2.490874845534563,
+              "shape": null
+            }
+          ],
+          "other_ms": 12.322915950790048
+        },
+        {
+          "total_ms": 3343.1389580946416,
+          "events": [
+            {
+              "phase": "_hidden",
+              "ms": 1967.7835409529507,
+              "shape": [
+                1,
+                1033
+              ]
+            },
+            {
+              "phase": "_hidden",
+              "ms": 1350.531083997339,
+              "shape": [
+                8,
+                85
+              ]
+            },
+            {
+              "phase": "_probs",
+              "ms": 11.049375170841813,
+              "shape": null
+            }
+          ],
+          "other_ms": 13.774957973510027
+        },
+        {
+          "total_ms": 3371.702916920185,
+          "events": [
+            {
+              "phase": "_hidden",
+              "ms": 2004.2223331984133,
+              "shape": [
+                1,
+                1033
+              ]
+            },
+            {
+              "phase": "_hidden",
+              "ms": 1339.1569168306887,
+              "shape": [
+                8,
+                85
+              ]
+            },
+            {
+              "phase": "_probs",
+              "ms": 8.535665925592184,
+              "shape": null
+            }
+          ],
+          "other_ms": 19.788000965490937
+        }
+      ]
+    }
+  ]
+}
