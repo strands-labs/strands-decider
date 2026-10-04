@@ -1,0 +1,540 @@
+{
+  "precision": "fp16",
+  "dtype": "float16",
+  "device": {
+    "device_name": "Apple M1",
+    "max_recommended_working_set_size": 12713115648,
+    "memory_size": 17179869184,
+    "architecture": "applegpu_g13g",
+    "max_buffer_length": 9534832640,
+    "resource_limit": 499000
+  },
+  "quantized_paths": [],
+  "shapes": [
+    {
+      "state_tokens": 256,
+      "questions": 1,
+      "samples_ms": [
+        599.2816248908639,
+        596.3204998988658,
+        620.1270411256701,
+        634.9843749776483,
+        604.5622911769897
+      ],
+      "median_ms": 604.5622911769897,
+      "peak_mlx_gib": 3.748374816030264,
+      "instrumented_passes": [
+        {
+          "total_ms": 599.7429159469903,
+          "events": [
+            {
+              "phase": "_hidden",
+              "ms": 595.5777917988598,
+              "shape": [
+                1,
+                350
+              ]
+            },
+            {
+              "phase": "_probs",
+              "ms": 1.7227500211447477,
+              "shape": null
+            }
+          ],
+          "other_ms": 2.442374126985669
+        },
+        {
+          "total_ms": 599.8744589742273,
+          "events": [
+            {
+              "phase": "_hidden",
+              "ms": 595.2917078975588,
+              "shape": [
+                1,
+                350
+              ]
+            },
+            {
+              "phase": "_probs",
+              "ms": 2.306707901880145,
+              "shape": null
+            }
+          ],
+          "other_ms": 2.276043174788356
+        },
+        {
+          "total_ms": 601.4641658402979,
+          "events": [
+            {
+              "phase": "_hidden",
+              "ms": 596.9179170206189,
+              "shape": [
+                1,
+                350
+              ]
+            },
+            {
+              "phase": "_probs",
+              "ms": 2.223582938313484,
+              "shape": null
+            }
+          ],
+          "other_ms": 2.3226658813655376
+        },
+        {
+          "total_ms": 602.8355839662254,
+          "events": [
+            {
+              "phase": "_hidden",
+              "ms": 598.1807080097497,
+              "shape": [
+                1,
+                350
+              ]
+            },
+            {
+              "phase": "_probs",
+              "ms": 2.257541986182332,
+              "shape": null
+            }
+          ],
+          "other_ms": 2.3973339702934027
+        },
+        {
+          "total_ms": 648.2787497807294,
+          "events": [
+            {
+              "phase": "_hidden",
+              "ms": 643.6574999243021,
+              "shape": [
+                1,
+                350
+              ]
+            },
+            {
+              "phase": "_probs",
+              "ms": 2.2371672093868256,
+              "shape": null
+            }
+          ],
+          "other_ms": 2.3840826470404863
+        }
+      ]
+    },
+    {
+      "state_tokens": 256,
+      "questions": 8,
+      "samples_ms": [
+        1686.293917009607,
+        1605.9620000887662,
+        1695.5980001948774,
+        1600.5586669780314,
+        1722.7761668618768
+      ],
+      "median_ms": 1686.293917009607,
+      "peak_mlx_gib": 4.199099877849221,
+      "instrumented_passes": [
+        {
+          "total_ms": 1653.7728342227638,
+          "events": [
+            {
+              "phase": "_hidden",
+              "ms": 545.9529999643564,
+              "shape": [
+                1,
+                265
+              ]
+            },
+            {
+              "phase": "_hidden",
+              "ms": 1094.0585830248892,
+              "shape": [
+                8,
+                85
+              ]
+            },
+            {
+              "phase": "_probs",
+              "ms": 3.1419999431818724,
+              "shape": null
+            }
+          ],
+          "other_ms": 10.619251290336251
+        },
+        {
+          "total_ms": 1600.5774580407888,
+          "events": [
+            {
+              "phase": "_hidden",
+              "ms": 494.3987079896033,
+              "shape": [
+                1,
+                265
+              ]
+            },
+            {
+              "phase": "_hidden",
+              "ms": 1094.3481249269098,
+              "shape": [
+                8,
+                85
+              ]
+            },
+            {
+              "phase": "_probs",
+              "ms": 2.880583982914686,
+              "shape": null
+            }
+          ],
+          "other_ms": 8.950041141360998
+        },
+        {
+          "total_ms": 1659.2332918662578,
+          "events": [
+            {
+              "phase": "_hidden",
+              "ms": 545.9752921015024,
+              "shape": [
+                1,
+                265
+              ]
+            },
+            {
+              "phase": "_hidden",
+              "ms": 1097.9321668855846,
+              "shape": [
+                8,
+                85
+              ]
+            },
+            {
+              "phase": "_probs",
+              "ms": 4.889792064204812,
+              "shape": null
+            }
+          ],
+          "other_ms": 10.436040814965963
+        },
+        {
+          "total_ms": 1605.8529592119157,
+          "events": [
+            {
+              "phase": "_hidden",
+              "ms": 495.2282910235226,
+              "shape": [
+                1,
+                265
+              ]
+            },
+            {
+              "phase": "_hidden",
+              "ms": 1093.844334129244,
+              "shape": [
+                8,
+                85
+              ]
+            },
+            {
+              "phase": "_probs",
+              "ms": 4.152792040258646,
+              "shape": null
+            }
+          ],
+          "other_ms": 12.62754201889038
+        },
+        {
+          "total_ms": 1661.293749930337,
+          "events": [
+            {
+              "phase": "_hidden",
+              "ms": 494.31199999526143,
+              "shape": [
+                1,
+                265
+              ]
+            },
+            {
+              "phase": "_hidden",
+              "ms": 1152.7305839117616,
+              "shape": [
+                8,
+                85
+              ]
+            },
+            {
+              "phase": "_probs",
+              "ms": 3.806374967098236,
+              "shape": null
+            }
+          ],
+          "other_ms": 10.444791056215763
+        }
+      ]
+    },
+    {
+      "state_tokens": 1024,
+      "questions": 1,
+      "samples_ms": [
+        1878.6432498600334,
+        1873.854000121355,
+        1856.4489579293877,
+        1892.1265830285847,
+        1847.0564158633351
+      ],
+      "median_ms": 1873.854000121355,
+      "peak_mlx_gib": 3.9779488258063793,
+      "instrumented_passes": [
+        {
+          "total_ms": 1907.7203748747706,
+          "events": [
+            {
+              "phase": "_hidden",
+              "ms": 1896.4935841504484,
+              "shape": [
+                1,
+                1118
+              ]
+            },
+            {
+              "phase": "_probs",
+              "ms": 5.554334027692676,
+              "shape": null
+            }
+          ],
+          "other_ms": 5.672456696629524
+        },
+        {
+          "total_ms": 1856.651582987979,
+          "events": [
+            {
+              "phase": "_hidden",
+              "ms": 1844.6974579710513,
+              "shape": [
+                1,
+                1118
+              ]
+            },
+            {
+              "phase": "_probs",
+              "ms": 6.076291901990771,
+              "shape": null
+            }
+          ],
+          "other_ms": 5.877833114936948
+        },
+        {
+          "total_ms": 1904.8997089266777,
+          "events": [
+            {
+              "phase": "_hidden",
+              "ms": 1897.0841660629958,
+              "shape": [
+                1,
+                1118
+              ]
+            },
+            {
+              "phase": "_probs",
+              "ms": 2.5753341615200043,
+              "shape": null
+            }
+          ],
+          "other_ms": 5.240208702161908
+        },
+        {
+          "total_ms": 1850.0427911058068,
+          "events": [
+            {
+              "phase": "_hidden",
+              "ms": 1841.032207943499,
+              "shape": [
+                1,
+                1118
+              ]
+            },
+            {
+              "phase": "_probs",
+              "ms": 4.258499946445227,
+              "shape": null
+            }
+          ],
+          "other_ms": 4.752083215862513
+        },
+        {
+          "total_ms": 1902.4077500216663,
+          "events": [
+            {
+              "phase": "_hidden",
+              "ms": 1892.9319998715073,
+              "shape": [
+                1,
+                1118
+              ]
+            },
+            {
+              "phase": "_probs",
+              "ms": 3.711333032697439,
+              "shape": null
+            }
+          ],
+          "other_ms": 5.764417117461562
+        }
+      ]
+    },
+    {
+      "state_tokens": 1024,
+      "questions": 8,
+      "samples_ms": [
+        3134.4977498520166,
+        3218.943875050172,
+        3060.00900012441,
+        2910.2408750914037,
+        2967.6274158991873
+      ],
+      "median_ms": 3060.00900012441,
+      "peak_mlx_gib": 4.32278891839087,
+      "instrumented_passes": [
+        {
+          "total_ms": 2967.5939579028636,
+          "events": [
+            {
+              "phase": "_hidden",
+              "ms": 1783.6050000041723,
+              "shape": [
+                1,
+                1033
+              ]
+            },
+            {
+              "phase": "_hidden",
+              "ms": 1164.1039589885622,
+              "shape": [
+                8,
+                85
+              ]
+            },
+            {
+              "phase": "_probs",
+              "ms": 3.8012920413166285,
+              "shape": null
+            }
+          ],
+          "other_ms": 16.083706868812442
+        },
+        {
+          "total_ms": 2978.5392920020968,
+          "events": [
+            {
+              "phase": "_hidden",
+              "ms": 1687.06891592592,
+              "shape": [
+                1,
+                1033
+              ]
+            },
+            {
+              "phase": "_hidden",
+              "ms": 1268.3328748680651,
+              "shape": [
+                8,
+                85
+              ]
+            },
+            {
+              "phase": "_probs",
+              "ms": 5.154458107426763,
+              "shape": null
+            }
+          ],
+          "other_ms": 17.98304310068488
+        },
+        {
+          "total_ms": 2905.971584143117,
+          "events": [
+            {
+              "phase": "_hidden",
+              "ms": 1712.9921251907945,
+              "shape": [
+                1,
+                1033
+              ]
+            },
+            {
+              "phase": "_hidden",
+              "ms": 1174.7749589849263,
+              "shape": [
+                8,
+                85
+              ]
+            },
+            {
+              "phase": "_probs",
+              "ms": 4.726334009319544,
+              "shape": null
+            }
+          ],
+          "other_ms": 13.478165958076715
+        },
+        {
+          "total_ms": 2966.223416849971,
+          "events": [
+            {
+              "phase": "_hidden",
+              "ms": 1769.9138331227005,
+              "shape": [
+                1,
+                1033
+              ]
+            },
+            {
+              "phase": "_hidden",
+              "ms": 1173.1910828966647,
+              "shape": [
+                8,
+                85
+              ]
+            },
+            {
+              "phase": "_probs",
+              "ms": 5.697166081517935,
+              "shape": null
+            }
+          ],
+          "other_ms": 17.42133474908769
+        },
+        {
+          "total_ms": 3011.175749823451,
+          "events": [
+            {
+              "phase": "_hidden",
+              "ms": 1800.6882909685373,
+              "shape": [
+                1,
+                1033
+              ]
+            },
+            {
+              "phase": "_hidden",
+              "ms": 1177.4419171269983,
+              "shape": [
+                8,
+                85
+              ]
+            },
+            {
+              "phase": "_probs",
+              "ms": 5.153000121936202,
+              "shape": null
+            }
+          ],
+          "other_ms": 27.892541605979204
+        }
+      ]
+    }
+  ],
+  "script_sha256": "9b7ed7d48bc1c392216bebd33180ec0a44160d60e54f5686d7fed57fb22ecf1c",
+  "power_before": "Now drawing from 'AC Power'\n -InternalBattery-0 (id=24903779)\t93%; charging; 0:33 remaining present: true",
+  "swap_before": "vm.swapusage: total = 6144.00M  used = 4843.75M  free = 1300.25M  (encrypted)",
+  "power_latest": "Now drawing from 'AC Power'\n -InternalBattery-0 (id=24903779)\t93%; charging; 0:33 remaining present: true",
+  "swap_latest": "vm.swapusage: total = 6144.00M  used = 4843.75M  free = 1300.25M  (encrypted)"
+}

@@ -1,0 +1,68 @@
+         6010 function calls (5998 primitive calls) in 3.703 seconds
+
+   Ordered by: cumulative time
+   List reduced from 176 to 60 due to restriction <60>
+
+   ncalls  tottime  percall  cumtime  percall filename:lineno(function)
+        1    0.000    0.000    3.702    3.702 mlx_engine.py:222(_slot_probs_shared_prefix)
+        1    0.000    0.000    3.702    3.702 mlx_engine.py:182(_probs)
+        1    0.000    0.000    3.701    3.701 grad_mode.py:294(__exit__)
+        2    3.673    1.837    3.685    1.843 mlx_engine.py:172(_hidden)
+        2    0.000    0.000    0.012    0.006 qwen3_5.py:265(__call__)
+       48    0.001    0.000    0.011    0.000 qwen3_5.py:227(__call__)
+        1    0.000    0.000    0.007    0.007 infer.py:179(_fit)
+        2    0.000    0.000    0.007    0.004 tokenization_utils_base.py:2418(__call__)
+        2    0.000    0.000    0.007    0.004 tokenization_utils_tokenizers.py:961(_encode_plus)
+       36    0.002    0.000    0.007    0.000 qwen3_5.py:133(__call__)
+        2    0.007    0.003    0.007    0.003 {method 'encode_batch' of 'tokenizers.Tokenizer' objects}
+      7/1    0.000    0.000    0.003    0.003 module.py:1779(_wrapped_call_impl)
+      7/1    0.000    0.000    0.003    0.003 module.py:1787(_call_impl)
+        1    0.000    0.000    0.003    0.003 modeling.py:154(forward)
+       12    0.001    0.000    0.002    0.000 qwen3_next.py:114(__call__)
+        1    0.000    0.000    0.002    0.002 grad_mode.py:290(__enter__)
+        2    0.000    0.000    0.002    0.001 linear.py:130(forward)
+       36    0.001    0.000    0.002    0.000 gated_delta.py:605(gated_delta_update)
+        2    0.002    0.001    0.002    0.001 {built-in method torch._C._nn.linear}
+      300    0.001    0.000    0.002    0.000 quantized.py:270(__call__)
+       48    0.000    0.000    0.001    0.000 qwen3_next.py:161(__call__)
+       18    0.001    0.000    0.001    0.000 cache.py:697(merge)
+        1    0.001    0.001    0.001    0.001 mlx_engine.py:237(_to_torch)
+        6    0.000    0.000    0.001    0.000 cache.py:409(merge)
+        6    0.001    0.000    0.001    0.000 cache.py:1056(merge)
+        8    0.000    0.000    0.001    0.000 infer.py:449(_to_answer)
+       36    0.000    0.000    0.001    0.000 gated_delta.py:545(gated_delta_kernel)
+       36    0.001    0.000    0.001    0.000 gated_delta.py:429(_gated_delta_kernel_impl)
+      838    0.001    0.000    0.001    0.000 base.py:99(__getattr__)
+       36    0.001    0.000    0.001    0.000 gated_delta.py:33(normalize_qk)
+        8    0.001    0.000    0.001    0.000 prompting.py:159(read_choice)
+        1    0.000    0.000    0.001    0.001 mlx_engine.py:205(_option_positions)
+        1    0.000    0.000    0.001    0.001 infer.py:226(_option_idx)
+        8    0.000    0.000    0.000    0.000 infer.py:419(_option_token_index)
+     1158    0.000    0.000    0.000    0.000 {method 'get' of 'dict' objects}
+        8    0.000    0.000    0.000    0.000 prompting.py:90(render_question)
+       12    0.000    0.000    0.000    0.000 base.py:110(scaled_dot_product_attention)
+       36    0.000    0.000    0.000    0.000 qwen3_next.py:64(__call__)
+      122    0.000    0.000    0.000    0.000 normalization.py:163(__call__)
+       72    0.000    0.000    0.000    0.000 linear.py:65(__call__)
+        9    0.000    0.000    0.000    0.000 tokenization_utils_tokenizers.py:774(_convert_encoding)
+        6    0.000    0.000    0.000    0.000 cache.py:910(update_and_fetch)
+        6    0.000    0.000    0.000    0.000 cache.py:347(update_and_fetch)
+       36    0.000    0.000    0.000    0.000 convolution.py:77(__call__)
+       62    0.000    0.000    0.000    0.000 {built-in method builtins.max}
+        2    0.000    0.000    0.000    0.000 normalization.py:227(forward)
+        2    0.000    0.000    0.000    0.000 functional.py:2972(layer_norm)
+       10    0.000    0.000    0.000    0.000 main.py:253(__init__)
+        2    0.000    0.000    0.000    0.000 {built-in method torch.layer_norm}
+        8    0.000    0.000    0.000    0.000 prompting.py:71(_option_block)
+        3    0.000    0.000    0.000    0.000 {built-in method torch.tensor}
+       10    0.000    0.000    0.000    0.000 {method 'validate_python' of 'pydantic_core._pydantic_core.SchemaValidator' objects}
+     1026    0.000    0.000    0.000    0.000 cache.py:617(__getitem__)
+        6    0.000    0.000    0.000    0.000 tokenization_utils_base.py:1279(__getattr__)
+        6    0.000    0.000    0.000    0.000 cache.py:883(__init__)
+        1    0.000    0.000    0.000    0.000 modeling.py:210(masked_log_softmax)
+       24    0.000    0.000    0.000    0.000 positional_encoding.py:46(__call__)
+        1    0.000    0.000    0.000    0.000 infer.py:168(_temperatures)
+        6    0.000    0.000    0.000    0.000 cache.py:371(keys_and_values)
+        3    0.000    0.000    0.000    0.000 tokenization_utils_base.py:222(__init__)
+
+

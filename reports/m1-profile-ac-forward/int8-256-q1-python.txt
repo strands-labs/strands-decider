@@ -1,0 +1,68 @@
+         1857 function calls (1845 primitive calls) in 0.618 seconds
+
+   Ordered by: cumulative time
+   List reduced from 145 to 60 due to restriction <60>
+
+   ncalls  tottime  percall  cumtime  percall filename:lineno(function)
+        1    0.000    0.000    0.618    0.618 mlx_engine.py:211(_slot_probs_batched)
+        1    0.000    0.000    0.618    0.618 mlx_engine.py:182(_probs)
+        1    0.000    0.000    0.618    0.618 grad_mode.py:294(__exit__)
+        1    0.609    0.609    0.613    0.613 mlx_engine.py:172(_hidden)
+        1    0.000    0.000    0.004    0.004 qwen3_5.py:265(__call__)
+       24    0.000    0.000    0.004    0.000 qwen3_5.py:227(__call__)
+       18    0.001    0.000    0.003    0.000 qwen3_5.py:133(__call__)
+        1    0.000    0.000    0.002    0.002 infer.py:179(_fit)
+        2    0.000    0.000    0.002    0.001 tokenization_utils_base.py:2418(__call__)
+        2    0.000    0.000    0.002    0.001 tokenization_utils_tokenizers.py:961(_encode_plus)
+        2    0.002    0.001    0.002    0.001 {method 'encode_batch' of 'tokenizers.Tokenizer' objects}
+      7/1    0.000    0.000    0.001    0.001 module.py:1779(_wrapped_call_impl)
+      7/1    0.000    0.000    0.001    0.001 module.py:1787(_call_impl)
+        1    0.000    0.000    0.001    0.001 modeling.py:154(forward)
+        2    0.000    0.000    0.001    0.000 linear.py:130(forward)
+        2    0.001    0.000    0.001    0.000 {built-in method torch._C._nn.linear}
+       18    0.000    0.000    0.001    0.000 gated_delta.py:605(gated_delta_update)
+        1    0.000    0.000    0.001    0.001 grad_mode.py:290(__enter__)
+        6    0.000    0.000    0.001    0.000 qwen3_next.py:114(__call__)
+      150    0.001    0.000    0.001    0.000 quantized.py:270(__call__)
+        1    0.001    0.001    0.001    0.001 mlx_engine.py:237(_to_torch)
+       24    0.000    0.000    0.000    0.000 qwen3_next.py:161(__call__)
+       18    0.000    0.000    0.000    0.000 gated_delta.py:545(gated_delta_kernel)
+       18    0.000    0.000    0.000    0.000 gated_delta.py:429(_gated_delta_kernel_impl)
+      419    0.000    0.000    0.000    0.000 base.py:99(__getattr__)
+       18    0.000    0.000    0.000    0.000 gated_delta.py:33(normalize_qk)
+        6    0.000    0.000    0.000    0.000 base.py:110(scaled_dot_product_attention)
+       18    0.000    0.000    0.000    0.000 qwen3_next.py:64(__call__)
+       36    0.000    0.000    0.000    0.000 linear.py:65(__call__)
+        1    0.000    0.000    0.000    0.000 mlx_engine.py:205(_option_positions)
+      578    0.000    0.000    0.000    0.000 {method 'get' of 'dict' objects}
+        1    0.000    0.000    0.000    0.000 infer.py:226(_option_idx)
+        1    0.000    0.000    0.000    0.000 prompting.py:90(render_question)
+       61    0.000    0.000    0.000    0.000 normalization.py:163(__call__)
+        1    0.000    0.000    0.000    0.000 modeling.py:210(masked_log_softmax)
+        4    0.000    0.000    0.000    0.000 tokenization_utils_base.py:1279(__getattr__)
+       18    0.000    0.000    0.000    0.000 convolution.py:77(__call__)
+        8    0.000    0.000    0.000    0.000 {built-in method builtins.hasattr}
+        2    0.000    0.000    0.000    0.000 normalization.py:227(forward)
+        1    0.000    0.000    0.000    0.000 infer.py:449(_to_answer)
+        3    0.000    0.000    0.000    0.000 {built-in method torch.tensor}
+        2    0.000    0.000    0.000    0.000 functional.py:2972(layer_norm)
+        1    0.000    0.000    0.000    0.000 {method 'disable' of '_lsprof.Profiler' objects}
+        3    0.000    0.000    0.000    0.000 tokenization_utils_base.py:222(__init__)
+        2    0.000    0.000    0.000    0.000 tokenization_utils_tokenizers.py:886(set_truncation_and_padding)
+        2    0.000    0.000    0.000    0.000 dropout.py:69(forward)
+        2    0.000    0.000    0.000    0.000 tokenization_utils_tokenizers.py:774(_convert_encoding)
+        3    0.000    0.000    0.000    0.000 main.py:253(__init__)
+        2    0.000    0.000    0.000    0.000 functional.py:1473(dropout)
+       12    0.000    0.000    0.000    0.000 positional_encoding.py:46(__call__)
+        1    0.000    0.000    0.000    0.000 prompting.py:71(_option_block)
+        3    0.000    0.000    0.000    0.000 {method 'validate_python' of 'pydantic_core._pydantic_core.SchemaValidator' objects}
+        2    0.000    0.000    0.000    0.000 {built-in method torch.layer_norm}
+        3    0.000    0.000    0.000    0.000 __init__.py:1120(__init__)
+        1    0.000    0.000    0.000    0.000 infer.py:419(_option_token_index)
+        1    0.000    0.000    0.000    0.000 modeling.py:224(apply_temperature)
+        3    0.000    0.000    0.000    0.000 <frozen _collections_abc>:974(update)
+        4    0.000    0.000    0.000    0.000 {method 'endswith' of 'str' objects}
+        1    0.000    0.000    0.000    0.000 embedding.py:31(__call__)
+        2    0.000    0.000    0.000    0.000 {method 'clamp_min' of 'torch._C.TensorBase' objects}
+
+
