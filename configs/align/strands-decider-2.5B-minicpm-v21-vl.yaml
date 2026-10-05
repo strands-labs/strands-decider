@@ -1,0 +1,36 @@
+# strands-decider-2.5B-minicpm-v21-vl, stage 1 of grafting eyes onto MiniCPM5-2B
+# (python -m strands_decider.graft_align; training/recipe_minicpm_vision.sh align). Only the
+# projector trains: SigLIP2 so400m
+# (patch 16, 384 px, frozen) -> 2x2 pixel-unshuffle -> 2-layer GELU MLP -> 144 slot embeddings
+# a frozen MiniCPM5-2B reads; next-token loss on one COCO train2014 caption per image
+# (data/image/captions.py, 80,000 images). Exploratory.
+
+base_model: "openbmb/MiniCPM5-2B"
+base_revision: "f97400052a43d642bbc6e9975e2397e3ae6a6b52"
+torch_dtype: "bfloat16"
+
+encoder: "google/siglip2-so400m-patch16-384"          # Apache-2.0
+encoder_revision: "dd658faac399427308559e2c3ac1e99cbe43845d"
+unshuffle: 2            # 24 x 24 patches -> 12 x 12 = 144 slots per image
+image_slot: "<unused_token_0>"
+
+data_root: "data/image/build"
+caption_files: ["captions.jsonl"]
+val_rows: 512
+image_max_pixels: 400000   # decoded as stage 2 and the evaluation decode, then squashed to 384 px
+max_caption_tokens: 64
+
+epochs: 1
+lr: 0.001               # LLaVA's projector pretraining rate
+weight_decay: 0.0
+warmup_ratio: 0.03
+max_grad_norm: 1.0
+batch_size: 128         # 621 steps for 79,488 training rows
+micro_batch: 64
+gradient_checkpointing: false
+workers: 8
+
+output_dir: "checkpoints/strands-decider-2.5B-minicpm-v21-vl-align"
+seed: 0
+log_every: 20
+eval_every: 200

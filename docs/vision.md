@@ -145,3 +145,45 @@ to +0.070). Its confidence does not tell you that an image is missing or unreada
 The script is `evaluation/vision/run.py`; [evaluation/vision/README.md](../evaluation/vision/README.md)
 has the exact command and a link to the recorded runs: per-item probabilities for v19 and
 the base, and Mapika's summary.
+
+Two opt-in settings change how images are read, and fine-tuning on images builds on them
+([strands-decider-2B-hobson-v20-balanced](models/strands-decider-2B-hobson-v20-balanced.md)):
+a pixel budget per image instead of the long-side cap
+(`serve --vision --image-long-side 0 --image-max-pixels 400000`, or
+`load_vision_engine(image_long_side=0, image_max_pixels=400_000)`; at 400,000 pixels v19 gets
+40 of the 60 preview items right instead of 37, within noise), and per-kind temperatures
+for questions over images (`image_temperature_by_kind`, fitted by
+`evaluation/vision/temps.py`), which `serve --vision` applies when a checkpoint has them.
+
+## A torso without a vision tower: grafted eyes (MiniCPM5)
+
+MiniCPM5-2B is a text-only Llama decoder. `src/strands_decider/graft.py` gives a MiniCPM5
+checkpoint eyes LLaVA-style: [`google/siglip2-so400m-patch16-384`](https://huggingface.co/google/siglip2-so400m-patch16-384)
+(Apache-2.0, pinned at `dd658faac399427308559e2c3ac1e99cbe43845d`, frozen) reads each image
+at 384 x 384 px as 24 x 24 patches; a 2 x 2 pixel-unshuffle and a two-layer GELU MLP (the
+projector, trained, saved in the checkpoint as `projector.safetensors` and
+`projector_config.json`) turn them into 144 vectors of the decoder's width. They replace the
+input embeddings of 144 `<unused_token_0>` slots inside `<state>`, between plain-text markers:
+
+```
+<state>
+<image><unused_token_0> x 144</image>
+Checkout page after the user tapped Pay.
+</state>
+```
+
+Positions stay 1-D, so the shared-prefix cache is the text one: images and state are
+forwarded once (as `inputs_embeds`), the question suffixes as token ids against that cache.
+Text requests take the text path untouched. `serve --vision`, `evaluation/vision/run.py`
+and `text_check.py` recognise such a checkpoint by its `projector_config.json`. As with
+`<|image_pad|>` on the Qwen path, a state that itself contains the literal text
+`<unused_token_0>` adds slots the images do not fill, and the request is refused (the slot
+count must match the images'); keep that token out of request text.
+
+Training is two stages (`training/recipe_minicpm_vision.sh`): stage 1 trains the projector
+alone to caption 80,000 COCO train2014 images through the frozen base LM
+(`strands_decider.graft_align`, `configs/align/strands-decider-2.5B-minicpm-v21-vl.yaml`);
+stage 2 is the v19-images recipe on the v21 MiniCPM5 text checkpoint with that projector,
+LoRA, head and projector trained (`configs/vision/strands-decider-2.5B-minicpm-v21-vl*.yaml`).
+Checks: `tests/test_graft.py` and `tests/test_graft_train.py`. Exploratory; the commands and
+the measurements are in [strands-decider-2.5B-minicpm-v21-vl](models/strands-decider-2.5B-minicpm-v21-vl.md).

@@ -234,14 +234,16 @@ class StepSlices:
     rows train some twice and some never, silently.
     """
 
-    def __init__(self, loader: DataLoader, kl_slots: int, grad_accum: int, total_steps: int):
+    def __init__(self, loader: DataLoader, kl_slots: int, grad_accum: int, total_steps: int,
+                 kl_skip_kinds: frozenset[str] = frozenset()):
         self.loader = loader
         self.examples = loader.dataset.examples
         self.collate = loader.collate_fn
         self.grad_accum = grad_accum
         self.rank, _, self.world = env()
         self.lengths = [example_length(ex) for ex in self.examples]
-        self.kl_slots = kl_slots  # rows with at most this many options get the frozen KL
+        self.kl_slots = kl_slots  # rows with at most this many options get the frozen KL,
+        self.kl_skip_kinds = kl_skip_kinds  # unless their kind is one of these
         self.open: list[list[int]] = []
         self.windows = 0  # steps (windows of grad_accum micro-batches) handed out so far
 
@@ -287,7 +289,8 @@ class StepSlices:
                 batch = self.collate(rows[a:b])
                 batch["part"] = Slice(
                     weights=_share(rows, a, b, lambda ex: ex.weight),
-                    kl=_share(rows, a, b, lambda ex: ex.n_options <= self.kl_slots),
+                    kl=_share(rows, a, b, lambda ex: ex.n_options <= self.kl_slots
+                              and ex.kind not in self.kl_skip_kinds),
                     teacher=_share(rows, a, b, lambda ex: getattr(ex, "teacher", None) is not None),
                     last=(jj, a, b) == mine[-1],
                     micro=first + j,

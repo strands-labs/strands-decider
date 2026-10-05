@@ -41,6 +41,8 @@ MASK_VALUE = -1e4
 
 @dataclass
 class StrandsDeciderConfig:
+    # A Qwen3.5 (text tower) or any AutoModel decoder such as Llama; see
+    # StrandsDeciderModel._load_torso.
     base_model: str = "Qwen/Qwen3-1.7B-Base"
     # Hub revision of base_model the adapter was trained on. None loads the repo's default branch;
     # `load` falls back to the checkpoint's provenance.json.
@@ -73,6 +75,9 @@ class StrandsDeciderConfig:
     # different accuracies, so a temperature good for one over-softens another.
     temperature: float = 1.0
     temperature_by_kind: dict[str, float] = field(default_factory=dict)
+    # Per-kind temperatures for questions asked over images (vision.VisionEngine), fitted
+    # on held-out image items; a kind missing here falls back to temperature_by_kind.
+    image_temperature_by_kind: dict[str, float] = field(default_factory=dict)
     # Mirrors the training-time collator setting. Inference needs it to correct the
     # variance floor that smoothing imposes on score confidence (see schema.py).
     ordinal_smoothing: float = 0.0
@@ -93,7 +98,12 @@ class StrandsDeciderConfig:
     @classmethod
     def from_json(cls, path: str) -> StrandsDeciderConfig:
         with open(path, encoding="utf-8") as fh:
-            return cls(**json.load(fh))
+            raw = json.load(fh)
+        # The candidate models' checkpoints name the field as their training configs did
+        # before it was `base_revision`.
+        if "base_model_revision" in raw:
+            raw.setdefault("base_revision", raw.pop("base_model_revision"))
+        return cls(**raw)
 
 
 class SlotHead(nn.Module):
@@ -264,7 +274,7 @@ class StrandsDeciderModel(nn.Module):
         device_map: str | None = None,
         attn_implementation: str | None = None,
     ) -> StrandsDeciderModel:
-        """Load the base model's torso (AutoModel, so no LM head) and attach LoRA."""
+        """Load the base model's torso (no LM head; see _load_torso) and attach LoRA."""
         tok = AutoTokenizer.from_pretrained(config.base_model, revision=config.base_revision)
         if tok.pad_token is None:
             tok.pad_token = tok.eos_token
@@ -281,6 +291,12 @@ class StrandsDeciderModel(nn.Module):
         device_map: str | None,
         attn_implementation: str | None,
     ) -> nn.Module:
+        """The base model's decoder, without its output head.
+
+        Qwen3.5 checkpoints are multimodal; only their text decoder is loaded, so no vision
+        tower takes memory. Anything else goes through AutoModel, which gives a plain decoder
+        such as Llama's (MiniCPM5 is one).
+        """
         kwargs: dict[str, Any] = {
             "dtype": getattr(torch, config.torch_dtype),
             "revision": config.base_revision,
@@ -360,23 +376,26 @@ class StrandsDeciderModel(nn.Module):
         """slot index -> token id of the option number the prompt shows for it.
 
         `_option_block` numbers options from 1, and the prompt ends at `<answer>`, so
-        the natural continuation for slot k is the token "k+1". Only 1-9 are single
-        tokens in the Qwen vocabulary; slots past that have no usable row and are
-        omitted, which covers 78.6% of the training corpus and almost every real
-        request (JevBench families are mostly 2-5 options).
+        the natural continuation for slot k is the token "k+1". Only the one-digit
+        numbers 1-9 count, and only where one is a single token (all of them, in the Qwen
+        vocabulary); this covers 78.6% of the training corpus and almost every real
+        request (JevBench families are mostly 2-5 options). Some vocabularies (MiniCPM5's)
+        also have single tokens for 10-24; they are left out, so that the frozen-KL term
+        covers the same rows whatever the torso, and so that "1" and "12" are never read
+        as rival answers at one position.
         """
         out: dict[int, int] = {}
-        for k in range(self.config.num_slots):
+        for k in range(min(self.config.num_slots, 9)):
             ids = self.tokenizer.encode(str(k + 1), add_special_tokens=False)
             if len(ids) == 1:
                 out[k] = ids[0]
         return out
 
     def _output_embedding(self) -> torch.Tensor:
-        """The LM output matrix. Qwen3 ties embeddings, so the input table *is* it.
+        """The LM output matrix of a torso that ties it to the input embeddings.
 
-        `AutoModel` never loads `lm_head`, so without the tie there would be nothing
-        to read; assert rather than silently seeding from an unrelated matrix.
+        `_load_torso` never loads `lm_head`, so with the tie the input table *is* it
+        (Qwen3, Qwen3.5). Untied torsos are read by `slot_rows` instead.
         """
         base = self.torso
         base = getattr(base, "base_model", base)
@@ -384,22 +403,36 @@ class StrandsDeciderModel(nn.Module):
         emb = base.get_input_embeddings() if hasattr(base, "get_input_embeddings") else None
         if emb is None:
             raise RuntimeError("torso exposes no input embedding to use as an LM head")
-        cfg = getattr(self.torso, "config", None)
-        if cfg is not None and not getattr(cfg, "tie_word_embeddings", False):
-            raise RuntimeError(
-                "base model does not tie embeddings, so the input table is not the LM head"
-            )
         return emb.weight
+
+    def slot_rows(self) -> torch.Tensor:
+        """The LM output rows of the option-number tokens, in slot order: [slots, d] fp32.
+
+        An untied torso (MiniCPM5) has its own `lm_head`, which `_load_torso` leaves out;
+        its rows are read once from the base checkpoint's files and kept on the CPU.
+        """
+        ids = list(self.slot_token_ids().values())
+        cfg = getattr(self.torso, "config", None)
+        if cfg is None or getattr(cfg, "tie_word_embeddings", False):
+            return self._output_embedding()[ids].to(torch.float32)
+        cached = getattr(self, "_untied_rows", None)
+        if cached is None:
+            cached = _lm_head_rows(self.config, ids)
+            self._untied_rows = cached
+        return cached
+
+    def slot_logits(self, pooled: torch.Tensor) -> torch.Tensor:
+        """The LM's own logits for the option-number tokens at `pooled` [B, d] fp32."""
+        return pooled @ self.slot_rows().to(pooled.device).t()
 
     def init_head_from_lm_head(self) -> int:
         """Seed the slot head with the LM's own option-number readout directions."""
         if self.config.head_hidden:
             raise ValueError("lm_head init applies to the linear head only")
-        table = self._output_embedding()
         slots = self.slot_token_ids()
         proj = self.head.proj
         with torch.no_grad():
-            rows = table[list(slots.values())].to(torch.float32)
+            rows = self.slot_rows()
             # Match the scale the randomly-initialised head was given, so the change
             # under test is the *direction* carried by the LM head, not a larger step.
             rows = rows * (proj.weight.std() / rows.std().clamp_min(1e-8))
@@ -423,15 +456,13 @@ class StrandsDeciderModel(nn.Module):
         eligible = n_slots <= usable
         if not bool(eligible.any()):
             return torch.zeros(0, device=input_ids.device), eligible
-        table = self._output_embedding()
         with torch.no_grad():
             disable = getattr(self.torso, "disable_adapter", None)
             ctx = disable() if callable(disable) else contextlib.nullcontext()
             with ctx:
                 hidden = self.encode(input_ids, attention_mask)
             pooled = pool_last_token(hidden, attention_mask).to(torch.float32)
-            rows = table[[slots[k] for k in sorted(slots)]].to(torch.float32)
-            logits = pooled @ rows.t()
+            logits = self.slot_logits(pooled)
             pad = self.config.num_slots - logits.size(-1)
             if pad > 0:
                 logits = F.pad(logits, (0, pad), value=MASK_VALUE)
@@ -504,7 +535,9 @@ class StrandsDeciderModel(nn.Module):
         *,
         device_map: str | None = None,
         attn_implementation: str | None = None,
+        trainable: bool = False,
     ) -> StrandsDeciderModel:
+        """A saved checkpoint, its adapter frozen unless `trainable` (to continue training it)."""
         path = checkpoint_dir(path)
         config = StrandsDeciderConfig.from_json(config_path(path))
         config.base_revision = base_revision(path, config)
@@ -525,7 +558,7 @@ class StrandsDeciderModel(nn.Module):
         if config.use_lora:
             from peft import PeftModel
 
-            torso = PeftModel.from_pretrained(torso, lora_dir, is_trainable=False)
+            torso = PeftModel.from_pretrained(torso, lora_dir, is_trainable=trainable)
 
         # __init__ would re-attach LoRA on top of the adapter we just loaded, so build
         # the module directly and restore the head weights in place.
@@ -538,6 +571,24 @@ class StrandsDeciderModel(nn.Module):
         obj.head.load_state_dict(head_state)
         obj.head.to(torch.float32)
         return obj
+
+
+def _lm_head_rows(config: StrandsDeciderConfig, ids: list[int]) -> torch.Tensor:
+    """Rows `ids` of the base checkpoint's `lm_head.weight`, read from its safetensors
+    files (already in the Hub cache: the torso was loaded from them), fp32 on the CPU."""
+    from safetensors import safe_open
+
+    root = config.base_model
+    if not os.path.isdir(root):
+        root = snapshot_download(root, allow_patterns=["*.safetensors"], revision=config.base_revision)
+    for name in sorted(os.listdir(root)):
+        if not name.endswith(".safetensors"):
+            continue
+        with safe_open(os.path.join(root, name), "pt") as st:
+            if "lm_head.weight" in st.keys():
+                weight = st.get_slice("lm_head.weight")
+                return torch.cat([weight[i:i + 1] for i in ids]).to(torch.float32)
+    raise RuntimeError(f"{config.base_model}: unties its output head, but no lm_head.weight was found")
 
 
 CONFIG_NAME = "strands_decider_config.json"

@@ -108,6 +108,31 @@ def load(model_id: str, revision: str) -> tuple[Any, Any]:
     return model, tok
 
 
+def prompts(tok: Any, examples: Sequence[Example],
+            max_tokens: int) -> list[tuple[int, list[int], list[int]]]:
+    """(example index, prompt token ids, option order) for every example the teacher can
+    read in `max_tokens` tokens, shortest first."""
+    rows = []
+    for i, ex in enumerate(examples):
+        mapped = to_row(ex)
+        if mapped is None:
+            continue
+        row, order = mapped
+        ids = tok.encode(render(tok, row), add_special_tokens=False)
+        if len(ids) <= max_tokens:
+            rows.append((i, ids, order))
+    rows.sort(key=lambda r: len(r[1]))
+    return rows
+
+
+def canonical(p: list[float], order: list[int]) -> list[float]:
+    """Probabilities in the teacher's option order -> the example's canonical order."""
+    canon = [0.0] * len(order)
+    for teacher_pos, canon_idx in enumerate(order):
+        canon[canon_idx] = p[teacher_pos]
+    return canon
+
+
 def label(model: Any, tok: Any, examples: Sequence[Example], *, max_batch_tokens: int = 4000,
           max_batch: int = 32, max_tokens: int = 4096, log_every: int = 2000,
           skip: set | None = None,
@@ -132,16 +157,8 @@ def label(model: Any, tok: Any, examples: Sequence[Example], *, max_batch_tokens
 
     letters = letter_ids(tok)
     head = model.get_output_embeddings().weight
-    rows: list[tuple[int, list[int], list[int]]] = []  # (example index, token ids, order)
-    for i, ex in enumerate(examples):
-        mapped = to_row(ex)
-        if mapped is None:
-            continue
-        row, order = mapped
-        ids = tok.encode(render(tok, row), add_special_tokens=False)
-        if len(ids) <= max_tokens and (num_shards > 1 or not (skip and i in skip)):
-            rows.append((i, ids, order))
-    rows.sort(key=lambda r: len(r[1]))
+    rows = [r for r in prompts(tok, examples, max_tokens)
+            if num_shards > 1 or not (skip and r[0] in skip)]
 
     out: list[list[float] | None] = [None] * len(examples)
     pad = tok.pad_token_id if tok.pad_token_id is not None else 0
@@ -173,10 +190,7 @@ def label(model: Any, tok: Any, examples: Sequence[Example], *, max_batch_tokens
             for j, (i, _, order) in enumerate(batch):
                 n = len(order)
                 logits = last[j].float() @ head[letters[:n]].float().t()
-                p = torch.softmax(logits, -1).tolist()
-                canon = [0.0] * n
-                for teacher_pos, canon_idx in enumerate(order):
-                    canon[canon_idx] = p[teacher_pos]
+                canon = canonical(torch.softmax(logits, -1).tolist(), order)
                 out[i] = canon
                 if sink is not None:
                     sink(i, canon)
@@ -185,6 +199,55 @@ def label(model: Any, tok: Any, examples: Sequence[Example], *, max_batch_tokens
             rate = done / (time.time() - t0)
             print(f"[teacher] {done:,}/{total:,}  {rate:.1f} rows/s  "
                   f"eta {(total - done) / rate / 60:.0f} min", flush=True)
+    return out
+
+
+def label_vllm(model_id: str, revision: str, examples: Sequence[Example], *,
+               max_tokens: int = 4096, skip: set | None = None,
+               sink: Callable[[int, list[float]], None] | None = None,
+               chunk: int = 4096) -> list[list[float] | None]:
+    """`label`'s distributions computed by vLLM, which batches and caches far better.
+
+    The same prompts as `label`, passed as token ids. One greedy token restricted to the
+    option letters, with `logprobs_mode="processed_logprobs"`: vLLM then reports the
+    log-softmax taken after that restriction, which is the softmax over the letters'
+    logits that `label` computes. Agreement is to bf16 kernel rounding, not bit for bit.
+    Needs vLLM >= 0.10.2 (`logprobs_mode`); a distribution that does not sum to 1 means
+    an engine that reports something else, and stops the run.
+    """
+    import math
+
+    import transformers
+    from vllm import LLM, SamplingParams
+    from vllm.inputs import TokensPrompt
+
+    tok = transformers.AutoTokenizer.from_pretrained(model_id, revision=revision)
+    letters = letter_ids(tok)
+    rows = [r for r in prompts(tok, examples, max_tokens) if not (skip and r[0] in skip)]
+    llm = LLM(model=model_id, revision=revision, dtype="bfloat16", max_model_len=max_tokens + 1,
+              logprobs_mode="processed_logprobs", max_logprobs=len(LETTERS),
+              enable_prefix_caching=True)
+    out: list[list[float] | None] = [None] * len(examples)
+    t0 = time.time()
+    for start in range(0, len(rows), chunk):
+        part = rows[start:start + chunk]
+        params = [SamplingParams(max_tokens=1, temperature=0.0, logprobs=len(order),
+                                 allowed_token_ids=letters[:len(order)]) for _, _, order in part]
+        results = llm.generate([TokensPrompt(prompt_token_ids=ids) for _, ids, _ in part], params,
+                               use_tqdm=False)
+        for (i, _, order), res in zip(part, results, strict=True):
+            lp = res.outputs[0].logprobs[0]
+            p = [math.exp(lp[t].logprob) for t in letters[:len(order)]]
+            if abs(sum(p) - 1) > 1e-3:
+                raise RuntimeError(f"vLLM letter probabilities sum to {sum(p):.4f}, not 1: "
+                                   "this vLLM does not report processed logprobs")
+            canon = out[i] = canonical(p, order)
+            if sink is not None:
+                sink(i, canon)
+        done = start + len(part)
+        rate = done / (time.time() - t0)
+        print(f"[teacher] {done:,}/{len(rows):,}  {rate:.1f} rows/s  "
+              f"eta {(len(rows) - done) / rate / 60:.0f} min", flush=True)
     return out
 
 

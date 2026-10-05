@@ -143,7 +143,7 @@ as shipped, changes it by 0.44.
 
 `training/recipe.sh` builds, trains and evaluates the default, v19, end to end under WSL2; pass
 one or more step names (`build`, `fetch`, `multistep`, `generated`, `adequacy`,
-`catchall`, `teacher`, `distill`, `parent`, `replay`, `train`, `calibrate`, `eval`) to run
+`catchall`, `teacher`, `distill`, `teacher_yn`, `parent`, `replay`, `train`, `calibrate`, `eval`) to run
 those. It trains twice: a parent on v14's recipe (`configs/train-parent.yaml`), whose
 answers on the multi-step rows become the targets for v19 (`configs/train.yaml`) — about
 11 h in all. `training/recipe_v7.sh` does the same for v7 on Windows.
@@ -169,6 +169,19 @@ multi-step sets also rebuild exactly from the downloads. The catch-all and teach
 depend on the short-task corpus ([1. Build the corpora](steps.md#1-build-the-corpora)). `eval` then
 adds v20's measures: the catch-all set, and paraphrase consistency and instruction-flip
 pairs (`evaluation/pair_eval.py`).
+
+**The candidate models** ([docs/models/](../docs/models/)): `TrainConfig` options serve
+their text recipes: `continue_from` (train an existing checkpoint's adapter and head,
+rather than a fresh head on a frozen torso as `init_from` does), `kl_frozen_skip_kinds` (no
+frozen-KL term on the listed row kinds), `init_seed` (seed the initialisation apart from the
+data order, so seeds can be averaged with `strands-decider soup`) and `base_revision` (pin
+the base, which may be a Qwen3.5 or a Llama-family decoder such as MiniCPM5),
+with `recipe.sh teacher_yn`. Image fine-tuning has its own trainer,
+`python -m strands_decider.vision_train`, driven end to end by `training/recipe_images.sh`.
+A MiniCPM5 checkpoint, which has no vision tower,
+gets grafted eyes in two stages (`python -m strands_decider.graft_align`, then
+`vision_train` with `projector_from`), driven by `training/recipe_minicpm_vision.sh`
+([docs/vision.md](../docs/vision.md#a-torso-without-a-vision-tower-grafted-eyes-minicpm5)).
 
 The steps, each with its command, are in [steps.md](steps.md):
 [1. Build the corpora](steps.md#1-build-the-corpora),

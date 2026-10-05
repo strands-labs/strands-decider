@@ -136,8 +136,6 @@ def readouts(ckpt: str, items, torso_tokens: bool):
     )
     loader = DataLoader(ExampleDataset([it[3] for it in items]), batch_size=16,
                         shuffle=False, collate_fn=coll)
-    slots = model.slot_token_ids()
-    rows = model._output_embedding()[[slots[k] for k in sorted(slots)]].float()
     out = defaultdict(list)
     name = ckpt.rstrip("/\\").split("/")[-1].split("\\")[-1]
     for batch in loader:
@@ -151,7 +149,7 @@ def readouts(ckpt: str, items, torso_tokens: bool):
         out[f"{name} frozen"] += lp.argmax(-1).tolist()
         if torso_tokens:
             h = model.encode(batch["input_ids"], batch["attention_mask"])
-            logits = pool_last_token(h, batch["attention_mask"]).float() @ rows.t()
+            logits = model.slot_logits(pool_last_token(h, batch["attention_mask"]).float())
             logits = torch.nn.functional.pad(
                 logits, (0, model.config.num_slots - logits.size(-1)), value=MASK_VALUE)
             out[f"{name} torso+tok"] += masked_log_softmax(

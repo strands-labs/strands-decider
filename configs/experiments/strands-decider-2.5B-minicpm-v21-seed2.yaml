@@ -1,0 +1,50 @@
+# strands-decider-2.5B-minicpm-v21-seed2: strands-decider-2.5B-minicpm-v21.yaml exactly, with seed 2
+# -- the seed replicate (same init_seed, so the three average into one model).
+
+train_files: ["data/train_v5.jsonl", "data/multistep_v14.jsonl", "data/generated_v16.jsonl",
+              "data/generated_v18.jsonl", "data/adequacy_hs2.jsonl", "data/adequacy_gen.jsonl"]
+val_fraction: 0.03
+
+base_model: "openbmb/MiniCPM5-2B"
+base_revision: "f97400052a43d642bbc6e9975e2397e3ae6a6b52"
+num_slots: 24           # must match `data build --max-options`; also the KL reference width
+head_type: "pointer"    # scores each option from its own hidden state; see modeling.PointerHead
+pointer_dim: 256
+head_init: "random"
+kl_frozen_weight: 0.3   # KL(frozen || student) over the option-number readout...
+kl_frozen_skip_kinds: ["noul"]   # ...except on yes/no rows
+# (`training/recipe.sh teacher_yn`)
+teacher_file: "data/teacher_yn_qwen35-27b.jsonl"
+teacher_weight: 1.0
+head_dropout: 0.05
+max_length: 4096
+
+use_lora: true
+lora_r: 16
+lora_alpha: 32
+# Attention and MLP projections of all 42 layers.
+lora_targets: ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+freeze_torso: false
+
+epochs: 1
+max_steps: 3738         # one full epoch: 119,623 training rows / 8 / 4
+micro_batch_size: 8
+grad_accum: 4           # effective batch 32
+lr: 0.0001              # LoRA
+head_lr: 0.001          # randomly-initialised head needs a bigger step
+weight_decay: 0.01
+warmup_ratio: 0.03
+max_grad_norm: 1.0
+gradient_checkpointing: true
+precompute_frozen_kl: true   # speed only
+
+shuffle_options: true
+group_by_length: true
+ordinal_smoothing: 0.1
+reverse_score_prob: 0.5
+
+output_dir: "checkpoints/strands-decider-2.5B-minicpm-v21-s2"
+seed: 2
+init_seed: 0            # the three seeds start from one point, so they can be averaged
+log_every: 20
+eval_every: 500
