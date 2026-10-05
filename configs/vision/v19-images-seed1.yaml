@@ -1,0 +1,43 @@
+# v19-images-seed1: configs/vision/v19-images.yaml exactly, with seed 1 -- the seed replicate.
+
+init_from: "StrandsAgents/strands-decider-2B-hobson-v19"
+init_revision: "bb282d786bc251fd4e3068de3ada9ddbb38127cd"
+
+data_root: "data/image/build"
+train_files: ["vqa.jsonl", "count.jsonl", "m2w.jsonl", "charts.jsonl", "docs.jsonl", "tabfact.jsonl"]
+dedupe_drop: "data/image/build/dedupe_drop.txt"   # empty for the recorded build
+# v19's own committed training rows, to protect text behaviour
+text_replay_files: ["data/synthetic/generated_v16.jsonl", "data/synthetic/generated_v18.jsonl",
+                    "data/synthetic/adequacy_gen.jsonl"]
+text_replay_n: 3000
+# An image-removed copy of 15% of the image rows with <= 9 options: no label, trained only
+# toward the frozen torso's reading of the text-only prompt (kl_only_weight)
+ablation_fraction: 0.15
+kl_frozen_weight: 0.3   # KL(frozen || student) on the labelled rows, image in the prompt
+kl_only_weight: 1.0
+val_fraction: 0.03
+
+image_long_side: 0      # no long-side cap: the pixel budget alone
+image_max_pixels: 400000
+est_image_tokens: 400
+max_length: 4096
+shuffle_options: true
+ordinal_smoothing: 0.1
+
+epochs: 1
+lr: 0.00005             # LoRA
+head_lr: 0.0002         # a trained head: a smaller step than v19's fresh one
+weight_decay: 0.01
+warmup_ratio: 0.03
+max_grad_norm: 1.0
+micro_rows: 16
+micro_tokens: 12000
+rows_per_step: 32
+gradient_checkpointing: true
+workers: 8
+
+output_dir: "checkpoints/v19-images-seed1"
+seed: 1
+log_every: 20
+eval_every: 400
+val_batches: 60

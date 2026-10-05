@@ -145,3 +145,12 @@ to +0.070). Its confidence does not tell you that an image is missing or unreada
 The script is `evaluation/vision/run.py`; [evaluation/vision/README.md](../evaluation/vision/README.md)
 has the exact command and a link to the recorded runs: per-item probabilities for v19 and
 the base, and Mapika's summary.
+
+Two opt-in settings change how images are read, and fine-tuning on images builds on them
+([strands-decider-2B-hobson-v20-balanced](models/strands-decider-2B-hobson-v20-balanced.md)):
+a pixel budget per image instead of the long-side cap
+(`serve --vision --image-long-side 0 --image-max-pixels 400000`, or
+`load_vision_engine(image_long_side=0, image_max_pixels=400_000)`; at 400,000 pixels v19 gets
+40 of the 60 preview items right instead of 37, within noise), and per-kind temperatures
+for questions over images (`image_temperature_by_kind`, fitted by
+`evaluation/vision/temps.py`), which `serve --vision` applies when a checkpoint has them.

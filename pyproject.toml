@@ -118,6 +118,8 @@ module = [
     "mlx.*",
     "mlx_lm.*",
     "PIL.*",
+    "vllm",
+    "vllm.*",
 ]
 ignore_missing_imports = true
 

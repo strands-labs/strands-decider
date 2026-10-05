@@ -73,6 +73,9 @@ class StrandsDeciderConfig:
     # different accuracies, so a temperature good for one over-softens another.
     temperature: float = 1.0
     temperature_by_kind: dict[str, float] = field(default_factory=dict)
+    # Per-kind temperatures for questions asked over images (vision.VisionEngine), fitted
+    # on held-out image items; a kind missing here falls back to temperature_by_kind.
+    image_temperature_by_kind: dict[str, float] = field(default_factory=dict)
     # Mirrors the training-time collator setting. Inference needs it to correct the
     # variance floor that smoothing imposes on score confidence (see schema.py).
     ordinal_smoothing: float = 0.0
@@ -93,7 +96,12 @@ class StrandsDeciderConfig:
     @classmethod
     def from_json(cls, path: str) -> StrandsDeciderConfig:
         with open(path, encoding="utf-8") as fh:
-            return cls(**json.load(fh))
+            raw = json.load(fh)
+        # The candidate models' checkpoints name the field as their training configs did
+        # before it was `base_revision`.
+        if "base_model_revision" in raw:
+            raw.setdefault("base_revision", raw.pop("base_model_revision"))
+        return cls(**raw)
 
 
 class SlotHead(nn.Module):
@@ -504,7 +512,9 @@ class StrandsDeciderModel(nn.Module):
         *,
         device_map: str | None = None,
         attn_implementation: str | None = None,
+        trainable: bool = False,
     ) -> StrandsDeciderModel:
+        """A saved checkpoint, its adapter frozen unless `trainable` (to continue training it)."""
         path = checkpoint_dir(path)
         config = StrandsDeciderConfig.from_json(config_path(path))
         config.base_revision = base_revision(path, config)
@@ -525,7 +535,7 @@ class StrandsDeciderModel(nn.Module):
         if config.use_lora:
             from peft import PeftModel
 
-            torso = PeftModel.from_pretrained(torso, lora_dir, is_trainable=False)
+            torso = PeftModel.from_pretrained(torso, lora_dir, is_trainable=trainable)
 
         # __init__ would re-attach LoRA on top of the adapter we just loaded, so build
         # the module directly and restore the head weights in place.

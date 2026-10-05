@@ -84,3 +84,27 @@ def image_dependence(with_img: list[dict[str, Any]], blind: list[dict[str, Any]]
             n += 1
     return {"n": n, "mean_tv_distance": round(tv / n, 4) if n else math.nan,
             "mean_confidence_drop": round(drop / n, 4) if n else math.nan}
+
+
+def score_runs(all_res: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
+    """Every block of a run's summary.json, from its systems' result rows (`<tag>.jsonl`)."""
+    out: dict[str, Any] = {}
+    for tag, rs in all_res.items():
+        by_bench: dict[str, list[dict[str, Any]]] = {}
+        for r in rs:
+            by_bench.setdefault(r["bench"], []).append(r)
+        out[tag] = {b: summarise(v) for b, v in by_bench.items()}
+        if by_bench.get("naturalbench"):
+            out[tag]["naturalbench"]["paired"] = naturalbench_paired(by_bench["naturalbench"])
+        ijb = by_bench.get("ijb_preview")
+        if ijb:
+            block = out[tag]["ijb_preview"]
+            block["exact_only"] = summarise([r for r in ijb if r.get("exact")])["all"]
+            per: dict[str, list[dict[str, Any]]] = {}
+            for r in ijb:
+                per.setdefault(r["dataset"], []).append(r)
+            block["by_dataset"] = {d: summarise(v)["all"] for d, v in sorted(per.items())}
+    for tag in list(all_res):
+        if not tag.endswith("-blind") and f"{tag}-blind" in all_res:
+            out[tag]["image_dependence"] = image_dependence(all_res[tag], all_res[f"{tag}-blind"])
+    return out

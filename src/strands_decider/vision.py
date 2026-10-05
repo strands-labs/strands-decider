@@ -14,6 +14,9 @@ image sits at `token index + rope_delta` (negative). Left to itself, a suffix-on
 forward after a cached prefix builds positions from the full prefix+suffix mask, and
 reads a `rope_deltas` left on the module by the previous request.
 
+How an image becomes prompt text and model inputs is one `ImagePrompt`: its processor,
+its placeholders and where the image block ends. `QwenImages` is Qwen3.5's.
+
 Needs transformers >= 5.18 and Pillow (`pip install "strands-decider[vision]"`).
 """
 
@@ -59,28 +62,30 @@ MIN_TRANSFORMERS = (5, 18)
 # ---- prompt ------------------------------------------------------------------------
 
 
-def render_image_state(state: Content, n_images: int) -> str:
+def render_image_state(state: Content, n_images: int, open_: str = VISION_START,
+                       slot: str = IMAGE_PAD, close: str = VISION_END) -> str:
     """`render_state(state)` with one unexpanded placeholder per image, before the text.
 
     Images come first so the expensive part of the prefix (the vision tower and the
     image tokens through the decoder) is identical across the questions of a request.
+    The markers default to Qwen's; another `ImagePrompt` passes its own.
     """
     text = render_state(state)
     if not n_images:
         return text
-    placeholders = "\n".join(f"{VISION_START}{IMAGE_PAD}{VISION_END}" for _ in range(n_images))
+    placeholders = "\n".join(f"{open_}{slot}{close}" for _ in range(n_images))
     body = text[len("<state>\n") : -len("\n</state>\n")]
     inner = f"{placeholders}\n{body}" if body else placeholders
     return f"<state>\n{inner}\n</state>\n"
 
 
-def expand_image_tokens(prompt: str, tokens_per_image: Sequence[int]) -> str:
-    """Replace the i-th `<|image_pad|>` with `tokens_per_image[i]` copies.
+def expand_image_tokens(prompt: str, tokens_per_image: Sequence[int], slot: str = IMAGE_PAD) -> str:
+    """Replace the i-th `slot` (`<|image_pad|>` by default) with `tokens_per_image[i]` copies.
 
     The processor does the same expansion; doing it on the string lets the tokeniser's
     offsets be read against exactly the text the model sees.
     """
-    parts = prompt.split(IMAGE_PAD)
+    parts = prompt.split(slot)
     if len(parts) - 1 != len(tokens_per_image):
         raise ValueError(
             f"prompt holds {len(parts) - 1} image placeholders but "
@@ -88,7 +93,7 @@ def expand_image_tokens(prompt: str, tokens_per_image: Sequence[int]) -> str:
         )
     out = [parts[0]]
     for n, tail in zip(tokens_per_image, parts[1:], strict=True):
-        out.append(IMAGE_PAD * int(n))
+        out.append(slot * int(n))
         out.append(tail)
     return "".join(out)
 
@@ -100,6 +105,55 @@ def image_tokens_for_grid(grid_thw: Sequence[Sequence[int]], merge_size: int) ->
 
 
 # ---- images ------------------------------------------------------------------------
+
+
+def load_image_processor(config: StrandsDeciderConfig) -> Any:
+    """The image processor of `config.base_model`, pinned to its PIL backend.
+
+    The torchvision backends (picked automatically when torchvision is installed) change
+    pixel values enough to flip some answers; the PIL backend gives the same answers
+    everywhere, and is what every result was measured on. Read at the base's pinned
+    revision (`base_revision`) when the checkpoint has one, as the torso is.
+    """
+    import transformers
+
+    return transformers.Qwen2VLImageProcessorPil.from_pretrained(config.base_model, revision=config.base_revision)
+
+
+class ImagePrompt:
+    """How a vision model takes images: its processor, and the placeholder text an image
+    becomes inside `<state>`. The engine, training and evaluation all build image prompts
+    through this, so the image format is defined in one place.
+
+    `process` returns the slot count of each image and the tensors the model's forward
+    takes beside `input_ids`; `state` renders the state with each image's slots expanded.
+    """
+
+    open_, slot, close = VISION_START, IMAGE_PAD, VISION_END
+
+    def __init__(self, processor: Any):
+        self.processor = processor
+
+    def process(self, images: Sequence[Image.Image]) -> tuple[list[int], dict[str, torch.Tensor]]:
+        raise NotImplementedError
+
+    def state(self, state: Content, counts: Sequence[int]) -> str:
+        return expand_image_tokens(
+            render_image_state(state, len(counts), self.open_, self.slot, self.close), counts, self.slot)
+
+    def keep(self, text: str, offsets: Sequence[Sequence[int]]) -> int:
+        """Tokens of `text` (offsets from the tokeniser) through the last image's closing marker."""
+        end = text.rfind(self.close) + len(self.close)
+        return max(i for i, (a, b) in enumerate(offsets) if b > a and a < end) + 1
+
+
+class QwenImages(ImagePrompt):
+    """Qwen3.5: `pixel_values` and `image_grid_thw`, t*h*w // merge_size**2 tokens per image."""
+
+    def process(self, images: Sequence[Image.Image]) -> tuple[list[int], dict[str, torch.Tensor]]:
+        out = self.processor(images=list(images), return_tensors="pt")
+        counts = image_tokens_for_grid(out["image_grid_thw"].tolist(), self.processor.merge_size)
+        return counts, {"pixel_values": out["pixel_values"], "image_grid_thw": out["image_grid_thw"]}
 
 
 def _pil() -> Any:
@@ -116,16 +170,21 @@ IMAGE_FORMATS = ("PNG", "JPEG", "WEBP", "GIF")
 
 
 def decode_image(data: str, max_pixels: int = 4096 * 4096) -> Image.Image:
-    """A base64 image (optionally a `data:image/...;base64,` URI) as an upright RGB image.
-
-    Only IMAGE_FORMATS are opened, and the size is checked from the header before any
-    pixel is decoded, so a small file that expands to a huge bitmap is refused cheaply.
-    """
+    """A base64 image (optionally a `data:image/...;base64,` URI) as an upright RGB image."""
     payload = re.sub(r"^data:image/[\w.+-]+;base64,", "", data.strip())
     try:
         raw = base64.b64decode(payload, validate=True)
     except (binascii.Error, ValueError) as e:
         raise ValueError(f"image is not valid base64: {e}") from e
+    return read_image(raw, max_pixels)
+
+
+def read_image(raw: bytes, max_pixels: int = 4096 * 4096) -> Image.Image:
+    """Encoded image bytes as an upright RGB image.
+
+    Only IMAGE_FORMATS are opened, and the size is checked from the header before any
+    pixel is decoded, so a small file that expands to a huge bitmap is refused cheaply.
+    """
     pil = _pil()
     try:
         img = pil.open(io.BytesIO(raw), formats=IMAGE_FORMATS)
@@ -150,13 +209,23 @@ def decode_image(data: str, max_pixels: int = 4096 * 4096) -> Image.Image:
     return fit_image(img, 0)
 
 
-def fit_image(img: Image.Image, long_side: int) -> Image.Image:
-    """RGB, scaled down (never up) so the longer side is at most `long_side` (0: as is)."""
+def fit_image(img: Image.Image, long_side: int, max_pixels: int = 0) -> Image.Image:
+    """RGB, scaled down (never up) so the longer side is at most `long_side` and the area
+    at most `max_pixels`, keeping the aspect ratio (0 disables either bound).
+
+    A pixel budget gives every image about the same token count whatever its shape: a
+    wide screenshot keeps more of its width than a long-side cap of the same cost allows.
+    """
     img = img.convert("RGB")
     w, h = img.size
+    s, floor = 1.0, False  # the long-side cap rounds, as it always has
     if long_side and max(w, h) > long_side:
         s = long_side / max(w, h)
-        img = img.resize((max(1, round(w * s)), max(1, round(h * s))), _pil().BICUBIC)
+    if max_pixels and w * h * s * s > max_pixels:
+        s, floor = (max_pixels / (w * h)) ** 0.5, True  # so the area stays within budget
+    if s < 1.0:
+        nw, nh = (max(1, int(x * s) if floor else round(x * s)) for x in (w, h))
+        img = img.resize((nw, nh), _pil().BICUBIC)
     return img
 
 
@@ -181,8 +250,9 @@ def mm_token_type_ids(torso: nn.Module, input_ids: torch.Tensor) -> torch.Tensor
     return is_image.to(torch.int32)
 
 
-def qwen_base(torso: nn.Module) -> nn.Module:
-    """The `Qwen3_5Model` under any PEFT wrapping (PeftModel -> LoraModel -> model)."""
+def mm_base(torso: nn.Module) -> nn.Module:
+    """The multimodal base (`Qwen3_5Model`) under any PEFT wrapping (PeftModel ->
+    LoraModel -> model)."""
     base = getattr(torso, "base_model", torso)
     found: nn.Module = getattr(base, "model", base)
     return found
@@ -195,6 +265,20 @@ class VisionDeciderModel(StrandsDeciderModel):
     # reference call `self.encode(input_ids, attention_mask, past_key_values=...)`,
     # which knows nothing of images; `forward` sets this for the duration of the call.
     _mm: tuple[torch.Tensor | None, torch.Tensor | None] = (None, None)
+
+    def image_prompt(self, processor: Any = None) -> ImagePrompt:
+        """The image prompt this model takes; its processor pinned to the PIL backend
+        (`load_image_processor`) unless one is given."""
+        if processor is None:
+            processor = load_image_processor(self.config)
+        return QwenImages(processor)
+
+    def reset_positions(self) -> None:
+        """Forget the `rope_deltas` a plain image forward stores on the torso, so the next
+        forward builds its own positions instead of reading the last one's."""
+        base: Any = mm_base(self.torso)
+        if hasattr(base, "rope_deltas"):
+            base.rope_deltas = None
 
     @staticmethod
     def hidden_size(torso: nn.Module) -> int:
@@ -334,13 +418,16 @@ class VisionDeciderModel(StrandsDeciderModel):
         *,
         device_map: str | None = None,
         attn_implementation: str | None = None,
+        trainable: bool = False,
     ) -> VisionDeciderModel:
-        """Load a Strands Decider checkpoint (e.g. v19) onto the multimodal torso.
+        """Load a Strands Decider checkpoint (e.g. v19) onto the multimodal torso, its
+        adapter frozen unless `trainable` (to continue training it on images).
 
         Text checkpoints trained their adapter on the bare decoder (`layers.N...`); in
         the multimodal torso the same decoder sits under `language_model.layers.N...`,
         so the adapter's keys are remapped onto it. Text behaviour is unchanged: the
-        weights the text path runs through are identical.
+        weights the text path runs through are identical. A checkpoint saved by image
+        training already has the multimodal keys and loads as it is.
         """
         from peft import set_peft_model_state_dict
         from safetensors.torch import load_file
@@ -374,6 +461,9 @@ class VisionDeciderModel(StrandsDeciderModel):
                     f"adapter does not fit the multimodal decoder: unexpected "
                     f"{res.unexpected_keys[:3]}, missing {missing[:3]}"
                 )
+            for name, p in model.torso.named_parameters():
+                if "lora_" in name:
+                    p.requires_grad_(trainable)
         model.head.load_state_dict(head_state)
         model.head.to(torch.float32)
         model.eval()
@@ -388,6 +478,8 @@ class VisionEngineConfig(EngineConfig):
     # Longest image side after resizing. Fixed per deployment so the token budget is
     # predictable: 448 px square is 196 tokens (patch 16, merge 2).
     image_long_side: int = 448
+    # Area cap per image after the long-side cap (0: none). 400_000 px is about 390 tokens.
+    image_max_pixels: int = 0
     max_images: int = 4
     # Refused before decoding: 4096 x 4096 covers a 12 MP phone photo and bounds memory.
     max_image_pixels: int = 4096 * 4096
@@ -407,25 +499,16 @@ class VisionEngine(SystemOneEngine):
         self.vcfg: VisionEngineConfig = (
             self.cfg if isinstance(self.cfg, VisionEngineConfig) else VisionEngineConfig()
         )
-        if image_processor is None:
-            # Pinned to the PIL backend. `Qwen2VLImageProcessor` picks torchvision when it is
-            # installed, and that changes pixel values enough to flip some answers; the PIL
-            # backend gives the same answers everywhere, and is what every result was measured on.
-            from transformers import Qwen2VLImageProcessorPil
-
-            image_processor = Qwen2VLImageProcessorPil.from_pretrained(
-                model.config.base_model, revision=model.config.base_revision
-            )
-        self.image_processor = image_processor
+        # The model's own image prompt, its processor pinned (see `load_image_processor`).
+        self.prompter: ImagePrompt = model.image_prompt(image_processor)
+        self.image_processor = self.prompter.processor
 
     def _reset_positions(self) -> None:
         # The text path leaves positions to transformers, which would read a
         # `rope_deltas` stored on the torso by any earlier plain image forward (a
         # training or evaluation step on the same model). The image path below passes
         # positions explicitly and stores none.
-        base: Any = qwen_base(self.model.torso)
-        if hasattr(base, "rope_deltas"):
-            base.rope_deltas = None
+        cast(VisionDeciderModel, self.model).reset_positions()
 
     def evaluate(self, request: SystemOneRequest) -> SystemOneResponse:
         self._reset_positions()
@@ -433,7 +516,8 @@ class VisionEngine(SystemOneEngine):
             return super().evaluate(request)
         if len(request.images) > self.vcfg.max_images:
             raise ValueError(f"{len(request.images)} images; this server takes at most {self.vcfg.max_images}")
-        images = [fit_image(decode_image(b, self.vcfg.max_image_pixels), self.vcfg.image_long_side)
+        images = [fit_image(decode_image(b, self.vcfg.max_image_pixels),
+                            self.vcfg.image_long_side, self.vcfg.image_max_pixels)
                   for b in request.images]
         names = list(request.questions)
         rendered = [render_question(request.questions[n]) for n in names]
@@ -457,6 +541,13 @@ class VisionEngine(SystemOneEngine):
             usage=Usage(input_tokens=total, output_tokens=len(names)),
         )
 
+    def _image_temperatures(self, kinds: list[str]) -> torch.Tensor:
+        """Questions over images use `image_temperature_by_kind` where fitted, else the text ones."""
+        image_t = self.model.config.image_temperature_by_kind
+        text_t = self._temperatures(kinds).tolist()
+        return torch.tensor([image_t.get(k, t) for k, t in zip(kinds, text_t, strict=True)],
+                            device=self.device, dtype=torch.float32)
+
     def ask_images(
         self, state: Content, questions: dict[str, Question], images: Sequence[str]
     ) -> SystemOneResponse:
@@ -476,14 +567,12 @@ class VisionEngine(SystemOneEngine):
         q, offs = enc["input_ids"], enc["offset_mapping"]
         longest = max(len(x) for x in q)
 
-        img = self.image_processor(images=images, return_tensors="pt")
-        counts = image_tokens_for_grid(img["image_grid_thw"].tolist(), self.image_processor.merge_size)
-        mm = {"pixel_values": img["pixel_values"].to(self.device),
-              "image_grid_thw": img["image_grid_thw"].to(self.device)}
-        s = self.tok(expand_image_tokens(render_image_state(state, len(images)), counts),
-                     add_special_tokens=True)["input_ids"]
-        vend = self.tok.convert_tokens_to_ids(VISION_END)
-        keep = max(i for i, t in enumerate(s) if t == vend) + 1  # through the last image
+        counts, mm = self.prompter.process(images)
+        mm = {k: v.to(self.device) for k, v in mm.items()}
+        text = self.prompter.state(state, counts)
+        enc_s = self.tok(text, add_special_tokens=True, return_offsets_mapping=True)
+        s = enc_s["input_ids"]
+        keep = self.prompter.keep(text, enc_s["offset_mapping"])  # through the last image
 
         if self.cfg.strict_window:
             if len(s) + longest > max_len:
@@ -515,10 +604,8 @@ class VisionEngine(SystemOneEngine):
         prefix_ids = torch.tensor([s], device=self.device)
         n = prefix_ids.size(1)
         tt = mm_token_type_ids(self.model.torso, prefix_ids)
-        base: Any = qwen_base(self.model.torso)
-        mpos, delta_t = base.get_rope_index(
-            prefix_ids, tt, image_grid_thw=mm["image_grid_thw"]
-        )
+        base: Any = mm_base(self.model.torso)
+        mpos, delta_t = base.get_rope_index(prefix_ids, tt, image_grid_thw=mm["image_grid_thw"])
         delta = int(delta_t.view(-1)[0])
         text_pos = torch.arange(n, device=self.device).view(1, 1, -1)
         prefix_out = self.model.torso(
@@ -546,7 +633,7 @@ class VisionEngine(SystemOneEngine):
         options = gather_options(hidden, self._option_idx(rendered, 0)).to(torch.float32)
         head: Any = self.model.head
         logits = apply_temperature(head(pooled, options),
-                                   self._temperatures([rq.kind for rq in rendered]))
+                                   self._image_temperatures([rq.kind for rq in rendered]))
         probs = masked_log_softmax(logits, torch.tensor([rq.n_slots for rq in rendered], device=self.device))
         return probs.exp(), n + int(suffix_mask.sum().item())
 
@@ -557,12 +644,14 @@ def load_vision_engine(
     *,
     attn_implementation: str | None = None,
     image_long_side: int = 448,
+    image_max_pixels: int = 0,
 ) -> VisionEngine:
     """A vision engine configured as `create_app` configures a text one (device, prefix
     cache, `strict_window`, `max_batch`, model name), plus the image settings."""
     base = config or EngineConfig()
     names = {f.name for f in fields(EngineConfig)}
     cfg = VisionEngineConfig(**{k: v for k, v in asdict(base).items() if k in names},
-                             image_long_side=image_long_side)
+                             image_long_side=image_long_side, image_max_pixels=image_max_pixels)
     model = VisionDeciderModel.load(checkpoint, attn_implementation=attn_implementation)
     return VisionEngine(model, cfg)
+

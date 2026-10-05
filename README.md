@@ -246,7 +246,23 @@ saves a 4096-token window, at which v19 scores 168. And 231 tasks are few: six r
 the v17 recipe had a standard deviation of 3.2 tasks, so treat a difference under about 10
 tasks between two single runs as unresolved. [evaluation/README.md](evaluation/README.md)
 has the scripts and the limitations, and links the results by version and the board
-position with its caveats.
+position with its caveats. [docs/evaluating.md](docs/evaluating.md) shows how to measure any
+checkpoint with a local proxy of JevBench v1.5's rules and on task families no model trains
+on, and how to check a reported number.
+
+## Candidate models (unofficial)
+
+Exploratory checkpoints offered for review; none of them is a published Strands release.
+Each document gives the base and its pinned revision, the size, the lineage, the results,
+the download with its sha256, the serve command, the commands to re-run every measure on
+the downloaded weights, and the commands to retrain. The numbers are local measures
+([docs/evaluating.md](docs/evaluating.md)); the board positions are estimates pending an
+official submission.
+
+| Model | Base, size | Answers | Estimated 2B-class position (unofficial) |
+| --- | --- | --- | --- |
+| [strands-decider-2B-hobson-v20](docs/models/strands-decider-2B-hobson-v20.md) | Qwen3.5-2B-Base, 2B | text | #1 strictly-2B text model |
+| [strands-decider-2B-hobson-v20-balanced](docs/models/strands-decider-2B-hobson-v20-balanced.md) | Qwen3.5-2B-Base, 2B | text and images | best text+image 2B candidate (the only 2B candidate on both boards); #2 on Image JevBench |
 
 ## Why 2B?
 
