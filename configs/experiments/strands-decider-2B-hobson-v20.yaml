@@ -1,0 +1,61 @@
+# strands-decider-2B-hobson-v20: the published v19 continued for one full epoch on its own
+# training data, with the two changes of v19-yn27b.yaml aimed at yes/no decisiveness:
+#   - Qwen3.5-27B's distributions on the yes/no rows, kept where they agree with gold,
+#     over v14's replay distributions on the multi-step rows (`training/recipe.sh teacher_yn`)
+#   - no frozen-KL anchor on yes/no rows (kl_frozen_skip_kinds)
+# Three seeds (this file, -seed1, -seed2) from one initialisation (init_seed), then their
+# weight average: `strands-decider soup` into checkpoints/strands-decider-2B-hobson-v20, the
+# model. checkpoints/v19 is the published v19 at its pinned revision. Every command:
+# docs/models/strands-decider-2B-hobson-v20.md.
+
+train_files: ["data/train_v5.jsonl", "data/multistep_v14.jsonl", "data/generated_v16.jsonl",
+              "data/generated_v18.jsonl", "data/adequacy_hs2.jsonl", "data/adequacy_gen.jsonl"]
+val_fraction: 0.03
+
+base_model: "Qwen/Qwen3.5-2B-Base"
+continue_from: "checkpoints/v19"   # adapter and head trainable, calibration reset
+num_slots: 24           # must match `data build --max-options`; also the KL reference width
+head_type: "pointer"    # scores each option from its own hidden state; see modeling.PointerHead
+pointer_dim: 256
+head_init: "random"     # unused: continue_from keeps v19's head
+kl_frozen_weight: 0.3   # KL(frozen || student) over the option-number readout...
+kl_frozen_skip_kinds: ["noul"]   # ...except on yes/no rows
+# The 27B's distributions where they agree with gold, over v14's own on the multi-step rows
+# (`training/recipe.sh teacher_yn`)
+teacher_file: "data/teacher_yn_qwen35-27b.jsonl"
+teacher_weight: 1.0
+head_dropout: 0.05
+max_length: 4096
+
+use_lora: true
+lora_r: 16
+lora_alpha: 32
+# Attention and MLP projections, plus the recurrent layers' own; without these LoRA
+# would reach only the 6 full-attention layers of 24.
+lora_targets: ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj",
+               "in_proj_qkv", "in_proj_z", "in_proj_a", "in_proj_b", "out_proj"]
+freeze_torso: false     # true = head-only training (much weaker, but very cheap)
+
+epochs: 1
+max_steps: 3738         # one full epoch: 119,623 training rows / 8 / 4
+micro_batch_size: 8
+grad_accum: 4           # effective batch 32
+lr: 0.0001              # LoRA
+head_lr: 0.001          # v19's head step, unchanged
+weight_decay: 0.01
+warmup_ratio: 0.03
+max_grad_norm: 1.0
+gradient_checkpointing: true
+precompute_frozen_kl: true   # speed only
+
+shuffle_options: true   # the whole point -- do not turn this off
+group_by_length: true   # on: ~2k-token documents among ~250-token rows would otherwise
+                        # pad most batches; it changes batch composition, not content
+ordinal_smoothing: 0.1
+reverse_score_prob: 0.5
+
+output_dir: "checkpoints/strands-decider-2B-hobson-v20-s0"
+seed: 0
+init_seed: 0            # the three seeds start from one point, so they can be averaged
+log_every: 20
+eval_every: 500

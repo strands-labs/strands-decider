@@ -19,6 +19,10 @@ import torch
 from ..prompting import build_prompt
 from .format import Example
 
+# Each row's kind as a number, emitted per batch as "kind_id" so that a loss term can
+# select rows by kind (TrainConfig.kl_frozen_skip_kinds).
+KIND_IDS = {"noul": 0, "choice": 1, "score": 2}
+
 
 @dataclass
 class CollatorConfig:
@@ -212,6 +216,7 @@ class SystemOneCollator:
             "n_slots": torch.tensor(n_slots, dtype=torch.long),
             "labels": torch.tensor(labels, dtype=torch.long),
             "weights": torch.tensor(weights, dtype=torch.float32),
+            "kind_id": torch.tensor([KIND_IDS[ex.kind] for ex in batch], dtype=torch.long),
         }
         width = self.cfg.num_slots
         if pointer:

@@ -334,8 +334,10 @@ class VisionDeciderModel(StrandsDeciderModel):
         *,
         device_map: str | None = None,
         attn_implementation: str | None = None,
+        trainable: bool = False,
     ) -> VisionDeciderModel:
-        """Load a Strands Decider checkpoint (e.g. v19) onto the multimodal torso.
+        """Load a Strands Decider checkpoint (e.g. v19) onto the multimodal torso, its
+        adapter frozen unless `trainable` (to continue training it on images).
 
         Text checkpoints trained their adapter on the bare decoder (`layers.N...`); in
         the multimodal torso the same decoder sits under `language_model.layers.N...`,
@@ -374,6 +376,9 @@ class VisionDeciderModel(StrandsDeciderModel):
                     f"adapter does not fit the multimodal decoder: unexpected "
                     f"{res.unexpected_keys[:3]}, missing {missing[:3]}"
                 )
+            for name, p in model.torso.named_parameters():
+                if "lora_" in name:
+                    p.requires_grad_(trainable)
         model.head.load_state_dict(head_state)
         model.head.to(torch.float32)
         model.eval()

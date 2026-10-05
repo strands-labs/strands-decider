@@ -28,7 +28,7 @@ from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import DataLoader, Dataset
 
 from . import distributed
-from .data.collate import CollatorConfig, SystemOneCollator
+from .data.collate import KIND_IDS, CollatorConfig, SystemOneCollator
 from .data.format import Example, load_examples, split_examples
 from .data.sampling import LengthGroupedBatchSampler, example_length, padding_fraction
 from .modeling import StrandsDeciderConfig, StrandsDeciderModel
@@ -82,6 +82,14 @@ class TrainConfig:
     # drops the adapter and freezes the *base* torso, which would train the new head
     # against unadapted features and silently measure the wrong thing.
     init_from: str | None = None
+    # Continue training an existing checkpoint as it is: its adapter stays trainable and
+    # its trained head is kept (`init_from` instead freezes the torso under a fresh head).
+    # The stored calibration is reset to 1.0, since forward() applies it; recalibrate after.
+    continue_from: str | None = None
+    # Row kinds ("noul", "choice", "score") that get no frozen-KL term. The frozen torso's
+    # option-number reading is near chance on yes/no questions, so anchoring yes/no rows
+    # to it pulls their answers toward 0.5.
+    kl_frozen_skip_kinds: list[str] = field(default_factory=list)
 
     # optimisation
     epochs: int = 1
@@ -108,7 +116,16 @@ class TrainConfig:
 
     # bookkeeping
     output_dir: str = "checkpoints/hobson-1.7b"
+    # `seed` drives everything drawn while training: the validation split, the data order,
+    # option shuffles, score reversals and dropout. `init_seed`, when set, drives only the
+    # random initialisation -- the fresh head and the LoRA A matrices -- after which the
+    # torch RNG is reseeded with `seed`. Runs that share an init_seed and differ in seed
+    # start from identical weights and see different data, which is what averaging their
+    # weights (strands_decider.soup) needs. None (the default) seeds the initialisation
+    # with `seed` and reseeds nothing, exactly as before the option existed. A
+    # continue_from run initialises nothing at random, so init_seed does not touch it.
     seed: int = 0
+    init_seed: int | None = None
     log_every: int = 20
     eval_every: int = 500
     save_every: int = 0  # 0 = only at the end
@@ -269,8 +286,8 @@ def _frozen_reference(model: StrandsDeciderModel, examples: list[Example], batch
 @distributed.entry_point  # under torchrun, this process is one rank of the run
 def train(cfg: TrainConfig) -> str:
     rank, _, world = distributed.env()
-    torch.manual_seed(cfg.seed)
-    random.seed(cfg.seed)
+    torch.manual_seed(cfg.seed if cfg.init_seed is None else cfg.init_seed)
+    random.seed(cfg.seed)  # model construction draws nothing from Python's RNG
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     print(f"[strands-decider] loading base model {cfg.base_model}")
@@ -293,7 +310,31 @@ def train(cfg: TrainConfig) -> str:
     )
     if cfg.lora_targets:
         model_cfg.lora_targets = list(cfg.lora_targets)
-    if cfg.init_from:
+    if cfg.continue_from and cfg.init_from:
+        raise ValueError("set at most one of continue_from and init_from")
+    unknown = set(cfg.kl_frozen_skip_kinds) - set(KIND_IDS)
+    if unknown:
+        raise ValueError(f"unknown kl_frozen_skip_kinds: {sorted(unknown)}")
+    if cfg.continue_from:
+        print(f"[strands-decider] continuing {cfg.continue_from} (adapter and head trainable)")
+        model = StrandsDeciderModel.load(cfg.continue_from, attn_implementation=cfg.attn_implementation,
+                                         trainable=True)
+        if model.config.head_type != cfg.head_type:
+            raise ValueError(f"continue_from has head_type {model.config.head_type!r}, "
+                             f"the config asks for {cfg.head_type!r}")
+        model.config.temperature = 1.0
+        model.config.temperature_by_kind = {}
+        # The checkpoint records this run's settings, as a fresh model's config would, and
+        # the head trains with this run's dropout (a dropout layer holds no weights).
+        model.config.kl_frozen_weight = cfg.kl_frozen_weight
+        model.config.max_length = cfg.max_length
+        model.config.ordinal_smoothing = cfg.ordinal_smoothing
+        model.config.head_dropout = cfg.head_dropout
+        for module in model.head.modules():
+            if isinstance(getattr(module, "dropout", None), (torch.nn.Dropout, torch.nn.Identity)):
+                module.dropout = (torch.nn.Dropout(cfg.head_dropout) if cfg.head_dropout > 0
+                                  else torch.nn.Identity())
+    elif cfg.init_from:
         from .modeling import SlotHead
 
         print(f"[strands-decider] loading torso + adapter from {cfg.init_from}")
@@ -327,6 +368,10 @@ def train(cfg: TrainConfig) -> str:
         print(f"[strands-decider] head seeded from lm_head rows for {seeded} slots")
     elif cfg.head_init != "random":
         raise ValueError(f"unknown head_init {cfg.head_init!r}")
+    if cfg.init_seed is not None:
+        # Initialisation is over: from here on the torch RNG (the unsorted DataLoader's
+        # order, dropout) follows `seed`, whatever init_seed was.
+        torch.manual_seed(cfg.seed)
     # Checkpointing needs a grad-requiring input; a frozen torso has none, and it
     # buys nothing anyway since no backward pass traverses it.
     if cfg.gradient_checkpointing and not (cfg.freeze_torso or cfg.init_from):
@@ -447,7 +492,8 @@ def train(cfg: TrainConfig) -> str:
     slots = model.slot_token_ids()  # the rows frozen_slot_log_probs covers
     kl_slots = max(slots) + 1 if slots else 0
     if world > 1:  # each rank iterates its share of every step's rows instead
-        train_loader = distributed.StepSlices(train_loader, kl_slots, cfg.grad_accum, total_steps)
+        train_loader = distributed.StepSlices(train_loader, kl_slots, cfg.grad_accum, total_steps,
+                                              frozenset(cfg.kl_frozen_skip_kinds))
 
     refs = None
     if cfg.precompute_frozen_kl and cfg.kl_frozen_weight > 0:
@@ -497,6 +543,8 @@ def train(cfg: TrainConfig) -> str:
                     m, a = (part.micro, part.start) if world > 1 else (micro, 0)
                     ref_lp = refs[m, a:a + batch["labels"].numel()]
                     eligible = batch["n_slots"] <= kl_slots
+                for kind in cfg.kl_frozen_skip_kinds:
+                    eligible = eligible & (batch["kind_id"] != KIND_IDS[kind])
                 if ref_lp.numel() and bool(eligible.any()):
                     ref = ref_lp[eligible]
                     stu = out["log_probs"][eligible]
@@ -521,7 +569,7 @@ def train(cfg: TrainConfig) -> str:
                         step_loss = step_loss + (coef * per_row).mean() * part.kl
                     else:
                         step_loss = step_loss + cfg.kl_frozen_weight * kl
-                    running_kl += float(kl)
+                    running_kl += float(kl.detach())
             if cfg.teacher_weight > 0 and "has_teacher" in batch and bool(batch["has_teacher"].any()):
                 has = batch["has_teacher"]
                 stu = out["log_probs"][has]
@@ -530,11 +578,11 @@ def train(cfg: TrainConfig) -> str:
                 diff = (tea.clamp_min(1e-12).log() - stu).masked_fill(~valid, 0.0)
                 tkl = (tea.masked_fill(~valid, 0.0) * diff).sum(dim=-1).mean() * part.teacher
                 step_loss = step_loss + cfg.teacher_weight * tkl
-                running_tkl += float(tkl)
+                running_tkl += float(tkl.detach())
             # DDP averages the ranks' gradients; `* world` makes that the 1-GPU sum.
             loss = step_loss * world / cfg.grad_accum
             loss.backward()
-            running += float(step_loss)
+            running += float(step_loss.detach())
             micro += 1
 
             ends_step = part.last if world > 1 else micro % cfg.grad_accum == 0
