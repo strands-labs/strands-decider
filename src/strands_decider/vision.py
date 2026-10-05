@@ -428,34 +428,41 @@ class VisionEngine(SystemOneEngine):
             base.rope_deltas = None
 
     def evaluate(self, request: SystemOneRequest) -> SystemOneResponse:
-        self._reset_positions()
+        # The text path delegates to the base `evaluate`, which takes `self._lock`; the
+        # image path below does its own forward and does not, so it holds the same lock
+        # itself. One evaluation at a time keeps requests off the device at once and
+        # stops them sharing `_last_offsets` (issue #9). `threading.Lock` is not
+        # reentrant, so the text branch must not already hold it when it calls super.
         if not request.images:
+            self._reset_positions()
             return super().evaluate(request)
-        if len(request.images) > self.vcfg.max_images:
-            raise ValueError(f"{len(request.images)} images; this server takes at most {self.vcfg.max_images}")
-        images = [fit_image(decode_image(b, self.vcfg.max_image_pixels), self.vcfg.image_long_side)
-                  for b in request.images]
-        names = list(request.questions)
-        rendered = [render_question(request.questions[n]) for n in names]
-        answers: dict[str, Answer] = {}
-        total = 0
-        for start in range(0, len(names), self.cfg.max_batch):
-            chunk = rendered[start : start + self.cfg.max_batch]
-            try:
-                probs, ntok = self._image_probs(request.state, images, chunk)
-            except UnforkableCache as e:
-                raise RuntimeError(f"hybrid cache could not be forked: {e}") from e
-            total += ntok
-            for i, name in enumerate(names[start : start + self.cfg.max_batch]):
-                rq = chunk[i]
-                answers[name] = _to_answer(
-                    rq, probs[i, : rq.n_slots].tolist(),
-                    ordinal_smoothing=self.model.config.ordinal_smoothing,
-                )
-        return SystemOneResponse(
-            model=self.cfg.model_name, answers=answers,
-            usage=Usage(input_tokens=total, output_tokens=len(names)),
-        )
+        with self._lock:
+            self._reset_positions()
+            if len(request.images) > self.vcfg.max_images:
+                raise ValueError(f"{len(request.images)} images; this server takes at most {self.vcfg.max_images}")
+            images = [fit_image(decode_image(b, self.vcfg.max_image_pixels), self.vcfg.image_long_side)
+                      for b in request.images]
+            names = list(request.questions)
+            rendered = [render_question(request.questions[n]) for n in names]
+            answers: dict[str, Answer] = {}
+            total = 0
+            for start in range(0, len(names), self.cfg.max_batch):
+                chunk = rendered[start : start + self.cfg.max_batch]
+                try:
+                    probs, ntok = self._image_probs(request.state, images, chunk)
+                except UnforkableCache as e:
+                    raise RuntimeError(f"hybrid cache could not be forked: {e}") from e
+                total += ntok
+                for i, name in enumerate(names[start : start + self.cfg.max_batch]):
+                    rq = chunk[i]
+                    answers[name] = _to_answer(
+                        rq, probs[i, : rq.n_slots].tolist(),
+                        ordinal_smoothing=self.model.config.ordinal_smoothing,
+                    )
+            return SystemOneResponse(
+                model=self.cfg.model_name, answers=answers,
+                usage=Usage(input_tokens=total, output_tokens=len(names)),
+            )
 
     def ask_images(
         self, state: Content, questions: dict[str, Question], images: Sequence[str]

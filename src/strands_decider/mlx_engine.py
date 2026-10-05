@@ -49,7 +49,6 @@ from .modeling import (
     masked_log_softmax,
 )
 from .prompting import RenderedQuestion
-from .schema import SystemOneRequest, SystemOneResponse
 
 # MLX keeps freed buffers for reuse, by default up to its memory limit (about 95% of RAM on
 # a 48 GB M4 Pro), and a new request shape allocates new ones. 1 GiB holds a 2B torso's
@@ -131,14 +130,12 @@ class MLXEngine(SystemOneEngine):
         self.device = "cpu"
         self._decoder = decoder
         self._cache_owner = cache_owner
-        # One evaluation at a time: `_fit` leaves the request's option offsets on the engine
-        # (`_last_offsets`) for `_option_idx` to read, so two requests in the server's thread
-        # pool would read each other's. The torch engine has the same race (#9).
+        # This constructor does not call super().__init__(), so create the lock the base
+        # `evaluate` acquires. One evaluation at a time: the model is not re-entrant and
+        # `_fit` leaves the request's option offsets on the engine (`_last_offsets`) for
+        # `_option_idx` to read, so two requests on the server's thread pool would read
+        # each other's (issue #9).
         self._lock = threading.Lock()
-
-    def evaluate(self, request: SystemOneRequest) -> SystemOneResponse:
-        with self._lock:
-            return super().evaluate(request)
 
     def _hidden(self, rows: list[list[int]], cache: list[Any] | None = None) -> Any:
         """Last hidden states [N, L, d] of right-padded rows. Both layer kinds are causal, so

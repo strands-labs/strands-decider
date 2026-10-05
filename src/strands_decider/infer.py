@@ -21,6 +21,7 @@ fallback is a safety valve rather than a different model.
 from __future__ import annotations
 
 import copy
+import threading
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from typing import Any
@@ -129,6 +130,14 @@ class SystemOneEngine:
 
     def __init__(self, model: StrandsDeciderModel, config: EngineConfig | None = None):
         self.cfg = config or EngineConfig()
+        # One evaluation at a time. `evaluate` runs on FastAPI's thread pool (server.py),
+        # so overlapping requests would otherwise touch the model concurrently. That
+        # crashes the Metal backend on MPS (issue #9), and on every device it races the
+        # per-request token offsets `_fit` leaves on the engine (`_last_offsets`), which
+        # `_option_idx` reads back -- two requests read each other's and point the readout
+        # at the wrong option. Serialising `evaluate` closes both. Subclasses that do not
+        # call this constructor (MLXEngine) create their own.
+        self._lock = threading.Lock()
         if str(self.cfg.device).startswith("mps"):
             # No fla/Triton on macOS; replace the reference chunk rule's slow MPS solver.
             from .mps_kernels import install
@@ -334,6 +343,11 @@ class SystemOneEngine:
     # ---- public ----------------------------------------------------------
 
     def evaluate(self, request: SystemOneRequest) -> SystemOneResponse:
+        # Serialise so requests take turns on the device and no two share `_last_offsets`.
+        with self._lock:
+            return self._evaluate(request)
+
+    def _evaluate(self, request: SystemOneRequest) -> SystemOneResponse:
         if request.images:
             raise ValueError("this engine has no vision tower; serve with --vision for images")
         names = list(request.questions.keys())
