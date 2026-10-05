@@ -29,7 +29,9 @@ script also runs on its own:
 | [`device_parity.py`](device_parity.py) | Whether two or more devices give one checkpoint the same answers: the largest probability difference and the answers that change, against the first device |
 | [`jevbench/jevbench.sh`](jevbench/jevbench.sh) | The JevBench public set against `strands-decider serve` on one GPU, at the JevBench commit the script pins |
 | [`jevbench/paired.py`](jevbench/paired.py) | A per-task comparison of two JevBench runs, with an exact McNemar test |
-| [`vision/run.py`](vision/run.py) | Image input (`--vision`): NaturalBench and POPE, with and without the image, against two baselines ([vision/](vision/README.md)) |
+| [`jevbench/v15_proxy.py`](jevbench/v15_proxy.py) | A **local proxy** for JevBench v1.5 scoring on v1 public results, not the official score: yes/no answers with 0.2 < P(yes) < 0.8 count as wrong, yes/no and choice credit chance-corrected, score tasks graded by the expected level against chance (gold levels from the run's `all.jsonl`), the three question types weighted equally; the yes/no answers in that band; and a paired bootstrap against a baseline run |
+| [`unseen/`](unseen/README.md) | Four question families no model trains on (StrategyQA, CommonsenseQA, ARC-Challenge, STS-B), plus RuleTaker at a held-out depth (5; depths 0-2 are trained on), pinned to dataset revisions, answered by a checkpoint or any other decider behind an adapter, and graded with the same v1.5 rules |
+| [`vision/run.py`](vision/run.py) | Image input (`--vision`): NaturalBench and POPE, with and without the image, against two baselines ([vision/](vision/README.md)); `vision/temps.py`, `vision/compare.py` and `vision/text_check.py` fit image temperatures, compare runs and check text after image training |
 | [`jevbench/jevbench_cold_warm.py`](jevbench/jevbench_cold_warm.py) | First-request against warm latency, one task asked twice (MPS) |
 
 Paths are relative to the repository root unless they are links. A module path such as

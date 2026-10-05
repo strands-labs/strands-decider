@@ -1,9 +1,5 @@
-"""Image input (src/strands_decider/vision.py), on a tiny random-weight Qwen3.5 built here.
-
-Nothing is downloaded: the multimodal checkpoint, the tokeniser and the image processor
-are all made in a temp dir. The tokeniser is a real `Qwen3_5Tokenizer` (byte-level BPE
-over the 256 byte symbols, no merges, plus the Qwen vision tokens), so it reloads as
-itself next to a qwen3_5 config and tokenises every character of a state or question.
+"""Image input (src/strands_decider/vision.py), on the tiny random-weight Qwen3.5 of
+tests/tiny_qwen35.py, built in a temp dir, so nothing is downloaded.
 The tests pin what the feature promises:
 
 * a text checkpoint loads onto the multimodal torso and answers text exactly as the
@@ -34,13 +30,10 @@ if tuple(int(x) for x in re.findall(r"\d+", transformers.__version__)[:2]) < (5,
 
 import torch  # noqa: E402
 from PIL import Image  # noqa: E402
+from tiny_qwen35 import save_base, save_checkpoint  # noqa: E402
 
 from strands_decider.infer import EngineConfig, SystemOneEngine, _option_token_index  # noqa: E402
-from strands_decider.modeling import (  # noqa: E402
-    StrandsDeciderConfig,
-    StrandsDeciderModel,
-    masked_log_softmax,
-)
+from strands_decider.modeling import StrandsDeciderModel, masked_log_softmax  # noqa: E402
 from strands_decider.prompting import render_question  # noqa: E402
 from strands_decider.schema import (  # noqa: E402
     ChoiceQuestion,
@@ -50,7 +43,6 @@ from strands_decider.schema import (  # noqa: E402
 )
 from strands_decider.vision import (  # noqa: E402
     IMAGE_PAD,
-    VISION_END,
     VisionDeciderModel,
     VisionEngine,
     VisionEngineConfig,
@@ -62,8 +54,6 @@ from strands_decider.vision import (  # noqa: E402
     render_image_state,
 )
 
-TARGETS = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj",
-           "in_proj_qkv", "in_proj_z", "in_proj_a", "in_proj_b", "out_proj"]
 STATE = "Help! My payouts have been failing for 3 days."
 QUESTIONS = {
     "signed": NoulQuestion(instructions="Is the form signed?"),
@@ -73,64 +63,14 @@ QUESTIONS = {
 }
 
 
-def _tokenizer():
-    from tokenizers import pre_tokenizers
-
-    alphabet = sorted(pre_tokenizers.ByteLevel.alphabet())
-    vocab = {"<|endoftext|>": 0, **{c: i + 1 for i, c in enumerate(alphabet)}}
-    tok = transformers.Qwen3_5Tokenizer(vocab=vocab, merges=[])
-    tok.add_special_tokens({"additional_special_tokens": ["<|vision_start|>", IMAGE_PAD, VISION_END]})
-    return tok
-
-
 @pytest.fixture(scope="module")
 def base_dir(tmp_path_factory):
-    """A tiny Qwen3.5 multimodal checkpoint: 3 Gated DeltaNet + 1 attention layer, 2-layer ViT."""
-    d = tmp_path_factory.mktemp("tiny-qwen35")
-    tok = _tokenizer()
-    ids = {t: tok.convert_tokens_to_ids(t) for t in ("<|vision_start|>", IMAGE_PAD, VISION_END)}
-    cfg = transformers.Qwen3_5Config(
-        text_config={
-            "hidden_size": 64, "num_hidden_layers": 4, "intermediate_size": 128, "head_dim": 64,
-            "num_attention_heads": 2, "num_key_value_heads": 1, "vocab_size": len(tok),
-            "layer_types": ["linear_attention"] * 3 + ["full_attention"],
-            "linear_num_key_heads": 4, "linear_num_value_heads": 4,
-            "linear_key_head_dim": 16, "linear_value_head_dim": 16, "linear_conv_kernel_dim": 4,
-            "attn_output_gate": True, "tie_word_embeddings": True, "mtp_num_hidden_layers": 0,
-            "rope_parameters": {"rope_type": "default", "rope_theta": 1e7, "partial_rotary_factor": 0.25,
-                                "mrope_section": [3, 3, 2], "mrope_interleaved": True},
-        },
-        vision_config={"depth": 2, "hidden_size": 64, "num_heads": 4, "intermediate_size": 128,
-                       "out_hidden_size": 64, "patch_size": 16, "spatial_merge_size": 2,
-                       "temporal_patch_size": 2, "num_position_embeddings": 2304},
-        image_token_id=ids[IMAGE_PAD], vision_start_token_id=ids["<|vision_start|>"],
-        vision_end_token_id=ids[VISION_END], tie_word_embeddings=True,
-    )
-    torch.manual_seed(0)
-    transformers.Qwen3_5ForConditionalGeneration(cfg).save_pretrained(d)
-    tok.save_pretrained(d)
-    transformers.Qwen2VLImageProcessorPil(
-        patch_size=16, temporal_patch_size=2, merge_size=2,
-        size={"shortest_edge": 65536, "longest_edge": 16777216},
-        image_mean=[0.5] * 3, image_std=[0.5] * 3,
-    ).save_pretrained(d)
-    return str(d)
+    return save_base(str(tmp_path_factory.mktemp("tiny-qwen35")))
 
 
 @pytest.fixture(scope="module")
 def ckpt(base_dir, tmp_path_factory):
-    """A text Strands Decider checkpoint on that base, with a non-trivial adapter."""
-    cfg = StrandsDeciderConfig(base_model=base_dir, head_type="pointer", pointer_dim=32,
-                               torch_dtype="float32", max_length=1024, lora_targets=TARGETS,
-                               temperature_by_kind={"noul": 0.9, "choice": 0.7})
-    model = StrandsDeciderModel.from_pretrained_base(cfg)
-    with torch.no_grad():
-        for n, p in model.torso.named_parameters():
-            if "lora_B" in n:
-                p.normal_(0, 0.05)
-    d = tmp_path_factory.mktemp("ckpt")
-    model.save_pretrained(str(d))
-    return str(d)
+    return save_checkpoint(base_dir, str(tmp_path_factory.mktemp("ckpt")))
 
 
 @pytest.fixture(scope="module")
@@ -169,6 +109,30 @@ def test_expansion_and_grid():
         expand_image_tokens("a<|image_pad|>b", [1, 2])
     assert fit_image(Image.new("RGB", (900, 300)), 448).size == (448, 149)
     assert fit_image(Image.new("RGB", (100, 50)), 448).size == (100, 50)  # never upscaled
+
+
+@pytest.mark.parametrize("size", [(1000, 800), (1280, 3000), (3000, 200)])
+def test_pixel_budget_keeps_the_aspect_and_stays_within_budget(size):
+    w, h = fit_image(Image.new("RGB", size), 0, 400_000).size
+    assert w * h <= 400_000 and w * h > 0.99 * 400_000
+    assert abs(w / h - size[0] / size[1]) < 0.02 * size[0] / size[1]
+    assert fit_image(Image.new("RGB", (640, 480)), 0, 400_000).size == (640, 480)  # never upscaled
+    assert fit_image(Image.new("RGB", (900, 301)), 448, 400_000).size == (448, 150)  # long side rounds
+    # the long side applies first, the budget after it
+    assert fit_image(Image.new("RGB", (900, 300)), 448, 400_000).size == (448, 149)
+    assert fit_image(Image.new("RGB", (900, 900)), 800, 400_000).size == (632, 632)
+    assert fit_image(Image.new("RGB", (1000, 1000)), 600, 400_000).size == (600, 600)
+
+
+def test_engine_applies_the_pixel_budget(ckpt):
+    req = SystemOneRequest(state="", questions={"signed": QUESTIONS["signed"]}, images=[_b64(640, 640, 7)])
+
+    def tokens(**image):
+        eng = load_vision_engine(ckpt, EngineConfig(device="cpu"), image_long_side=0, **image)
+        return eng.evaluate(req).usage.input_tokens
+
+    # 640 x 640 is 400 tokens whole; a 100k-pixel budget brings it to 316 x 316 (about 100)
+    assert tokens() - tokens(image_max_pixels=100_000) >= 250
 
 
 def test_checkpoint_tokenizer_reads_text(engines):
@@ -220,6 +184,14 @@ def test_adapter_lands_on_the_decoder_and_vision_is_frozen(engines):
     assert not any(p.requires_grad for p in vision.model.torso.base_model.model.visual.parameters())
 
 
+def test_adapter_is_trainable_only_when_asked(ckpt):
+    def lora_grads(model):
+        return {p.requires_grad for n, p in model.torso.named_parameters() if "lora_" in n}
+
+    assert lora_grads(VisionDeciderModel.load(ckpt)) == {False}
+    assert lora_grads(VisionDeciderModel.load(ckpt, trainable=True)) == {True}
+
+
 def test_text_requests_unchanged(engines):
     text, vision = engines
     req = SystemOneRequest(state=STATE, questions=QUESTIONS)
@@ -254,6 +226,36 @@ def test_image_answers_match_full_forward(engines, sizes):
         ref = _reference(vision, "Checkout page after the user tapped pay.", images, q)
         got = probs[i, : len(ref)].tolist()
         assert max(abs(x - y) for x, y in zip(got, ref, strict=True)) < 1e-5
+
+
+def test_image_temperatures_apply_to_image_questions_only(engines):
+    _, vision = engines
+    cfg = vision.model.config
+    rendered = [render_question(q) for q in QUESTIONS.values()]  # noul, choice, score
+    pil = [fit_image(decode_image(_b64(320, 320, 5)), 448)]
+    req = SystemOneRequest(state=STATE, questions=QUESTIONS)
+    plain, _ = vision._image_probs("Checkout page.", pil, rendered)
+    text = vision.evaluate(req).model_dump()["answers"]
+    try:
+        cfg.image_temperature_by_kind = {"noul": 0.3}
+        sharp, _ = vision._image_probs("Checkout page.", pil, rendered)
+        assert vision.evaluate(req).model_dump()["answers"] == text  # text questions keep theirs
+    finally:
+        cfg.image_temperature_by_kind = {}
+    assert torch.equal(sharp[1:], plain[1:])  # kinds without an image temperature keep the text one
+    # noul at 0.3 instead of the text temperature 0.9: the same logits, rescaled
+    expected = torch.softmax(plain[0, :2].log() * 0.9 / 0.3, -1)
+    assert torch.allclose(sharp[0, :2], expected, atol=1e-5)
+
+
+def test_evaluation_scores_blind_rows_at_the_text_temperatures(ckpt):
+    from vision.run import Strands
+
+    item = {"kind": "noul", "question": "Is the form signed?", "options": [("no", ""), ("yes", "")],
+            "gold": 1, "image": base64.b64decode(_b64(320, 320, 6))}
+    plain, sharp = Strands(ckpt), Strands(ckpt, image_temps={"noul": 0.3})
+    assert sharp.probs(item, blind=False) != pytest.approx(plain.probs(item, blind=False))
+    assert sharp.probs(item, blind=True) == plain.probs(item, blind=True)
 
 
 def test_image_forward_leaves_no_position_state(engines):
@@ -318,6 +320,32 @@ def test_load_vision_engine_keeps_the_server_settings(ckpt):
     assert (eng.cfg.strict_window, eng.cfg.max_batch, eng.cfg.model_name) == (True, 3, "vd-test")
 
 
+def test_server_sizes_images_as_asked(ckpt):
+    from fastapi.testclient import TestClient
+
+    from strands_decider import server
+
+    client = TestClient(server.create_app(ckpt, device="cpu", vision=True, image_long_side=0,
+                                          image_max_pixels=400_000))
+    eng = server.get_engine()
+    assert (eng.vcfg.image_long_side, eng.vcfg.image_max_pixels) == (0, 400_000)
+    assert client.get("/health").json()["image_max_pixels"] == 400_000
+
+
+def test_serve_cli_passes_the_image_size(monkeypatch):
+    from typer.testing import CliRunner
+
+    from strands_decider import server
+    from strands_decider.cli import app
+
+    seen = {}
+    monkeypatch.setattr(server, "serve", lambda checkpoint, **kw: seen.update(kw))
+    res = CliRunner().invoke(app, ["serve", "ckpt", "--device", "cpu", "--vision",
+                                   "--image-long-side", "0", "--image-max-pixels", "400000"])
+    assert res.exit_code == 0, res.output
+    assert (seen["vision"], seen["image_long_side"], seen["image_max_pixels"]) == (True, 0, 400_000)
+
+
 def test_server_routes_images(ckpt):
     from fastapi.testclient import TestClient
 
@@ -329,6 +357,7 @@ def test_server_routes_images(ckpt):
     r = vision_app.post("/v1/systemone", json=body)
     assert r.status_code == 200, r.text
     assert 0.0 <= r.json()["answers"]["signed"]["noul"] <= 1.0
-    assert vision_app.get("/health").json()["vision"] is True
+    health = vision_app.get("/health").json()
+    assert (health["vision"], health["image_long_side"], health["image_max_pixels"]) == (True, 448, 0)
     text_app = TestClient(server.create_app(ckpt, device="cpu"))
     assert text_app.post("/v1/systemone", json=body).status_code == 422

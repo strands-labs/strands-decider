@@ -1,0 +1,54 @@
+# strands-decider-2B-hobson-v20-vl: one checkpoint for text and images. The v20 soup
+# continued for one epoch on the image recipe of v19-images.yaml (~38K image questions at the
+# 400,000-pixel budget, image-removed copies of 15% of them; data/image/README.md), with the
+# two changes that keep v20's text gain, which plain image training undoes:
+#   - no frozen-KL anchor on yes/no rows (kl_frozen_skip_kinds), as in v20's text training
+#   - the replayed text rows train toward their 27B-teacher targets, not plain labels
+# Three seeds (this file, -seed1, -seed2); the published strands-decider-2B-hobson-v20-balanced
+# is this seed (0). Every command: docs/models/strands-decider-2B-hobson-v20-balanced.md.
+
+init_from: "checkpoints/strands-decider-2B-hobson-v20"   # the v20 soup, calibrated
+init_revision: null
+
+data_root: "data/image/build"
+train_files: ["vqa.jsonl", "count.jsonl", "m2w.jsonl", "charts.jsonl", "docs.jsonl", "tabfact.jsonl"]
+dedupe_drop: "data/image/build/dedupe_drop.txt"   # empty for the recorded build
+# 3,000 of v20's own text training rows (2,000 yes/no), each with its 27B-teacher target, so
+# the replay keeps v20's decisive yes/no answers (python -m strands_decider.data.teacher_yn replay)
+text_replay_files: ["data/replay_teacher_yn.jsonl"]
+text_replay_n: 3000
+teacher_weight: 1.0
+# An image-removed copy of 15% of the image rows with <= 9 options: no label, trained only
+# toward the frozen torso's reading of the text-only prompt (kl_only_weight). With
+# kl_frozen_skip_kinds ["noul"] below, only the choice and score copies train that way;
+# the yes/no copies carry no loss.
+ablation_fraction: 0.15
+kl_frozen_weight: 0.3   # KL(frozen || student) on the labelled rows, image in the prompt...
+kl_frozen_skip_kinds: ["noul"]   # ...except yes/no rows (and copies), as in v20's text training
+kl_only_weight: 1.0
+val_fraction: 0.03
+
+image_long_side: 0      # no long-side cap: the pixel budget alone
+image_max_pixels: 400000
+est_image_tokens: 400
+max_length: 4096
+shuffle_options: true
+ordinal_smoothing: 0.1
+
+epochs: 1
+lr: 0.00005             # LoRA
+head_lr: 0.0002         # a trained head: a smaller step than v19's fresh one
+weight_decay: 0.01
+warmup_ratio: 0.03
+max_grad_norm: 1.0
+micro_rows: 16
+micro_tokens: 12000
+rows_per_step: 32
+gradient_checkpointing: true
+workers: 8
+
+output_dir: "checkpoints/strands-decider-2B-hobson-v20-vl-s0"
+seed: 0
+log_every: 20
+eval_every: 400
+val_batches: 60

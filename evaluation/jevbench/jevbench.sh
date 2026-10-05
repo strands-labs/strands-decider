@@ -12,6 +12,9 @@
 #   EXPECT_MAX_LENGTH  window /health must report     (default: the checkpoint's own)
 #   MODEL_LABEL      --model / --run-label passed to JevBench       (default basename of ckpt)
 #   HEALTH_TIMEOUT_S seconds to wait for /health                    (default 1200)
+#   SERVE_ARGS       extra `serve` flags, e.g. --vision to answer JevBench through the
+#                    vision torso (text requests take the text path; /health must then
+#                    report "vision": true)                         (default none)
 #   baseline_run     a run in research/data/jevbench_results.csv (e.g. v17); if given,
 #                    evaluation/jevbench/paired.py writes <out_dir>/paired.{txt,json}
 #
@@ -96,7 +99,9 @@ if curl -s -m 3 -o /dev/null "$URL/health"; then
   die "something already answers on $URL; refusing to measure a stale server"
 fi
 log "serving $CKPT on GPU $GPU port $PORT"
-CUDA_VISIBLE_DEVICES=$GPU nohup "$HOBSON" serve "$CKPT" --host 127.0.0.1 --port "$PORT" \
+SERVE_ARGS=${SERVE_ARGS:-}
+# shellcheck disable=SC2086  # SERVE_ARGS is a list of flags
+CUDA_VISIBLE_DEVICES=$GPU nohup "$HOBSON" serve "$CKPT" --host 127.0.0.1 --port "$PORT" $SERVE_ARGS \
   > "$OUT/server.log" 2>&1 &
 SERVER_PID=$!
 cleanup() {
@@ -116,7 +121,7 @@ until curl -s -m 5 "$URL/health" > "$OUT/health.json" 2>/dev/null && [ -s "$OUT/
   sleep 5
 done
 LOAD_S=$(( $(date +%s) - T_LOAD0 ))
-"$PY" - "$OUT/health.json" "$CKPT" "$EXPECT_MAX_LENGTH" <<'EOF' || die "/health does not match the requested checkpoint (see health.json)"
+"$PY" - "$OUT/health.json" "$CKPT" "$EXPECT_MAX_LENGTH" "$SERVE_ARGS" <<'EOF' || die "/health does not match the requested checkpoint (see health.json)"
 import json, os, sys
 h = json.load(open(sys.argv[1]))
 want, want_len = sys.argv[2], int(sys.argv[3])
@@ -124,7 +129,8 @@ got = h.get("checkpoint")
 print("health:", json.dumps(h))
 ok = h.get("status") == "ok" and got is not None \
     and (got == want or os.path.realpath(got) == os.path.realpath(want)) \
-    and h.get("max_length") == want_len
+    and h.get("max_length") == want_len \
+    and bool(h.get("vision")) == ("--vision" in sys.argv[4].split())
 sys.exit(0 if ok else 1)
 EOF
 log "/health ok (checkpoint and max_length match) after ${LOAD_S}s"
@@ -173,7 +179,7 @@ meta = {
   "jevbench_commit": "$JB_HEAD", "tasks_sha256": "$TASKS_SHA", "n_tasks": $N_TASKS,
   "hobson_git_rev": "$HOBSON_REV", "hobson_src_dirty_files": "$HOBSON_DIRTY",
   "hobson_pkg": "$HOBSON_PKG", "hobson_pkg_py_sha256_16": "$HOBSON_SRC_SHA",
-  "gpu_index": "$GPU", "gpu": "$GPU_NAME", "port": $PORT,
+  "gpu_index": "$GPU", "gpu": "$GPU_NAME", "port": $PORT, "serve_args": "$SERVE_ARGS",
   "server_load_s": $LOAD_S, "jevbench_run_s": $RUN_S, "total_wall_s": $TOTAL_S,
   "n_attempted": s.get("n_attempted"), "n_failed": sum(1 for r in recs if not r["ok"]),
   "n_correct": s.get("n_correct"), "accuracy": s.get("accuracy"),

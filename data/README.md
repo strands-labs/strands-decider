@@ -13,7 +13,10 @@ Reproducing the recipe needs no paid API. To check every recorded file, run
 - [`generators/`](generators/README.md): the generators, their exports and the model backends.
   They need an API key, so the recipe never runs them.
 - [`synthetic/`](synthetic/): the committed generated rows and frozen teacher distributions.
-- [`checks/`](checks/): two scripts that re-derive the synthetic labels from the rendered documents.
+- [`checks/`](checks/): two scripts that re-derive the synthetic labels from the rendered documents,
+  and `dedupe_images.py`, which checks the image training set against every evaluation image.
+- [`image/`](image/README.md): the builders of the image training set, with its sources,
+  licences and the hashes of record.
 - [`SHA256SUMS`](SHA256SUMS): the manifest that `recipe.sh` checks before the stages that
   need a recorded file.
 
@@ -38,6 +41,20 @@ Public sources (the classification datasets, ContractNLI, MuSiQue,
 BoardgameQA, HotpotQA, HelpSteer2) are downloaded and converted by `build`, `fetch`,
 `multistep` and `adequacy`. Reproducing a recipe needs no paid model-API calls. It does
 need the public downloads above, and the base and teacher models from Hugging Face.
+
+One exception: the Qwen3.5-27B yes/no labels that the candidate models' configs train on
+(`training/recipe.sh teacher_yn`, `src/strands_decider/data/teacher_yn.py`;
+[strands-decider-2B-hobson-v20](../docs/models/strands-decider-2B-hobson-v20.md#retrain))
+are not committed; the step relabels them. Two labellings were recorded, each
+`data/teacher_yn_qwen35-27b.jsonl` with 58,246 rows (45,337 kept 27B rows of 54,857
+labelled, over v14's 12,909 replay rows): `configs/experiments/v19-yn27b*.yaml` trained on
+sha256 `5c381fb0237f464842fe2e8aa7301da9d33bfd53b9ef69d7943a997ca30fca0c`, and every later
+config on `c72780dc4ee144cb7199ffb7f3d30be62be50dc5754721a2ce8d13b2b3b7725e`. A relabel
+batches the rows differently, so its bf16 probabilities, and the hash, need not match byte
+for byte. The labels are keyed by position in the concatenation of the config's
+`train_files`, so they fit only the training files they were made from:
+`data/adequacy_hs2.jsonl`, built from HelpSteer2, is not in `data/SHA256SUMS`, and the
+recorded hashes hold only for a build from the same HelpSteer2 snapshot.
 
 ## Data sources and licences
 

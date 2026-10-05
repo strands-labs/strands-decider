@@ -36,7 +36,11 @@ def create_app(
     strict_window: bool = False,
     max_batch: int = 32,
     vision: bool = False,
+    image_long_side: int = 448,
+    image_max_pixels: int = 0,
 ) -> FastAPI:
+    """The app around one engine. `image_long_side` and `image_max_pixels` size images as
+    `VisionEngineConfig` does, with `vision` only."""
     global _engine
 
     app = FastAPI(
@@ -58,7 +62,9 @@ def create_app(
             raise ValueError("--vision runs on torch devices (cuda, mps, cpu), not mlx")
         from .vision import load_vision_engine
 
-        _engine = load_vision_engine(checkpoint, config, attn_implementation=attn_implementation)
+        _engine = load_vision_engine(checkpoint, config, attn_implementation=attn_implementation,
+                                     image_long_side=image_long_side,
+                                     image_max_pixels=image_max_pixels)
     elif device == "mlx":
         _engine = load_mlx(checkpoint, config)
     else:
@@ -79,6 +85,8 @@ def create_app(
             "device": eng.cfg.device,
             "prefix_cache": eng.cfg.use_prefix_cache,
             "vision": vision,
+            **({"image_long_side": image_long_side, "image_max_pixels": image_max_pixels}
+               if vision else {}),
         }
 
     @app.post("/v1/systemone", response_model=SystemOneResponse)
@@ -109,6 +117,8 @@ def serve(
     strict_window: bool = False,
     max_batch: int = 32,
     vision: bool = False,
+    image_long_side: int = 448,
+    image_max_pixels: int = 0,
 ) -> None:
     import uvicorn
 
@@ -120,6 +130,8 @@ def serve(
         strict_window=strict_window,
         max_batch=max_batch,
         vision=vision,
+        image_long_side=image_long_side,
+        image_max_pixels=image_max_pixels,
     )
     # Single worker: the model owns the GPU, and forking more would just duplicate it.
     uvicorn.run(app, host=host, port=port, workers=1)
