@@ -21,6 +21,8 @@ reports/
 
 # Upstream dataset releases (ContractNLI, MuSiQue), downloaded, never committed
 data/raw/
+# The image training set (data/image/README.md): rows and images, built, never committed
+data/image/build/
 
 # OS state
 .DS_Store

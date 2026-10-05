@@ -62,3 +62,26 @@ def test_v19_saved_configs_load():
     # The released run was configs/train.yaml under training/run_recipe.sh FAST=1, which
     # turns gradient checkpointing off and precomputes the frozen-KL reference (speed only).
     assert _differing_keys(saved, _load("configs", "train.yaml")) == {"gradient_checkpointing", "precompute_frozen_kl"}
+
+
+def _config(path: str) -> dict:
+    """Any shipped config, parsed by the class its directory belongs to."""
+    return dataclasses.asdict(TrainConfig.from_yaml(path))
+
+
+SEED_REPLICATES = sorted(glob.glob(os.path.join(ROOT, "configs", "**", "*-seed[0-9].yaml"), recursive=True))
+
+
+@pytest.mark.parametrize("path", SEED_REPLICATES, ids=[os.path.relpath(p, ROOT) for p in SEED_REPLICATES])
+def test_seed_replicates_differ_only_in_seed_and_output_dir(path):
+    seed = int(path[-len("0.yaml")])
+    rep, ref = _config(path), _config(path[: -len("-seed0.yaml")] + ".yaml")
+    assert _differing_keys(rep, ref) == {"seed", "output_dir"}
+    assert rep["seed"] == seed and str(seed) in rep["output_dir"]
+
+
+def test_v20_is_v19_yn27b_for_a_full_epoch_from_one_initialisation():
+    v20, yn = _load("configs", "experiments", "strands-decider-2B-hobson-v20.yaml"), _load(
+        "configs", "experiments", "v19-yn27b.yaml")
+    assert _differing_keys(v20, yn) == {"max_steps", "init_seed", "output_dir"}
+    assert (v20["continue_from"], v20["max_steps"], v20["init_seed"]) == ("checkpoints/v19", 3738, 0)

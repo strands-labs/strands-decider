@@ -64,6 +64,15 @@ def _same(a, b):
     return set(sa) == set(sb) and all(torch.equal(sa[k], sb[k]) for k in sa)
 
 
+def test_a_checkpoint_naming_the_revision_base_model_revision_loads(tmp_path):
+    """Checkpoints saved while the field was called `base_model_revision` keep their pin."""
+    path = tmp_path / "strands_decider_config.json"
+    path.write_text(json.dumps({"base_model": "org/base", "base_model_revision": "abc123"}))
+    assert StrandsDeciderConfig.from_json(str(path)).base_revision == "abc123"
+    path.write_text(json.dumps({"base_model": "org/base", "base_revision": "def456"}))
+    assert StrandsDeciderConfig.from_json(str(path)).base_revision == "def456"
+
+
 def test_a_complete_checkpoint_and_its_safetensors_head_load_unchanged(ckpt):
     path, model, loads = ckpt
     assert _same(StrandsDeciderModel.load(str(path)), model)

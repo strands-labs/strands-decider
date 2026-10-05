@@ -116,16 +116,21 @@ IMAGE_FORMATS = ("PNG", "JPEG", "WEBP", "GIF")
 
 
 def decode_image(data: str, max_pixels: int = 4096 * 4096) -> Image.Image:
-    """A base64 image (optionally a `data:image/...;base64,` URI) as an upright RGB image.
-
-    Only IMAGE_FORMATS are opened, and the size is checked from the header before any
-    pixel is decoded, so a small file that expands to a huge bitmap is refused cheaply.
-    """
+    """A base64 image (optionally a `data:image/...;base64,` URI) as an upright RGB image."""
     payload = re.sub(r"^data:image/[\w.+-]+;base64,", "", data.strip())
     try:
         raw = base64.b64decode(payload, validate=True)
     except (binascii.Error, ValueError) as e:
         raise ValueError(f"image is not valid base64: {e}") from e
+    return read_image(raw, max_pixels)
+
+
+def read_image(raw: bytes, max_pixels: int = 4096 * 4096) -> Image.Image:
+    """Encoded image bytes as an upright RGB image.
+
+    Only IMAGE_FORMATS are opened, and the size is checked from the header before any
+    pixel is decoded, so a small file that expands to a huge bitmap is refused cheaply.
+    """
     pil = _pil()
     try:
         img = pil.open(io.BytesIO(raw), formats=IMAGE_FORMATS)
@@ -334,8 +339,10 @@ class VisionDeciderModel(StrandsDeciderModel):
         *,
         device_map: str | None = None,
         attn_implementation: str | None = None,
+        trainable: bool = False,
     ) -> VisionDeciderModel:
-        """Load a Strands Decider checkpoint (e.g. v19) onto the multimodal torso.
+        """Load a Strands Decider checkpoint (e.g. v19) onto the multimodal torso, its
+        adapter frozen unless `trainable` (to continue training it on images).
 
         Text checkpoints trained their adapter on the bare decoder (`layers.N...`); in
         the multimodal torso the same decoder sits under `language_model.layers.N...`,
@@ -374,6 +381,9 @@ class VisionDeciderModel(StrandsDeciderModel):
                     f"adapter does not fit the multimodal decoder: unexpected "
                     f"{res.unexpected_keys[:3]}, missing {missing[:3]}"
                 )
+            for name, p in model.torso.named_parameters():
+                if "lora_" in name:
+                    p.requires_grad_(trainable)
         model.head.load_state_dict(head_state)
         model.head.to(torch.float32)
         model.eval()

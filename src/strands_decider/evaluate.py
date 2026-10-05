@@ -20,6 +20,11 @@ that minimises ECE where a primitive has enough rows. `calibrate_checkpoint` sav
 a per-kind value takes precedence where fitted. Neither can change any argmax, so
 accuracy is untouched -- they only fix over- or under-confidence, which is exactly the
 defect that breaks threshold routing.
+
+`calibrate_checkpoint(..., kinds=[...])` refits only the listed primitives and keeps the
+checkpoint's other temperatures, global one included: a yes/no temperature that makes
+answers decisive is not refitted, and so not softened, by a set that only needs its
+choice or score temperatures corrected.
 """
 
 from __future__ import annotations
@@ -28,6 +33,7 @@ import hashlib
 import math
 import random
 from collections import defaultdict
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -40,6 +46,8 @@ from .data.format import Example
 from .modeling import MASK_VALUE, StrandsDeciderModel, config_path, masked_log_softmax
 from .schema import derive_confidence, derive_score_confidence
 from .train import ExampleDataset
+
+KINDS = ("noul", "choice", "score")
 
 
 def partition_examples(examples: list[Example], part: str, *, seed: int = 0) -> list[Example]:
@@ -215,8 +223,9 @@ def fit_temperature_by_kind(
     min_examples: int = 200,
     objective: str = "ece",
     ordinal_smoothing: float = 0.0,
+    kinds: Sequence[str] = KINDS,
 ) -> dict[str, float]:
-    """Fit one temperature per primitive.
+    """Fit one temperature per primitive in `kinds`.
 
     noul, choice and score sit at very different accuracies, and a single scalar
     fitted across all three lands between them -- over-softening the easy primitive
@@ -224,7 +233,7 @@ def fit_temperature_by_kind(
     are left out and fall back to the global temperature.
     """
     out: dict[str, float] = {}
-    for kind in ("noul", "choice", "score"):
+    for kind in kinds:
         idx = [i for i, ex in enumerate(examples) if ex.kind == kind]
         if len(idx) < min_examples:
             continue
@@ -420,8 +429,18 @@ def calibrate_checkpoint(
     *,
     device: str = "cuda",
     batch_size: int = 16,
+    kinds: Sequence[str] | None = None,
+    objective: str = "ece",
 ) -> dict[str, Any]:
-    """Fit temperature on a held-out split and write it into the checkpoint config."""
+    """Fit temperature on a held-out split and write it into the checkpoint config.
+
+    With `kinds`, only those primitives' temperatures are refitted (by `objective`); the
+    checkpoint's global temperature and its other per-kind ones are kept.
+    """
+    if kinds is not None and set(kinds) - set(KINDS):
+        raise ValueError(f"kinds must be among {KINDS}, got {list(kinds)}")
+    if objective not in ("ece", "nll"):
+        raise ValueError(f"objective must be 'ece' or 'nll', got {objective!r}")
     import os
 
     # The fit ends by writing the config json into the checkpoint, so a Hub repo id,
@@ -439,12 +458,17 @@ def calibrate_checkpoint(
 
     eps = model.config.ordinal_smoothing
     before = summarise(predictions_from_logits(logits, labels, slots, exs, 1.0, eps))
-    t = fit_temperature(logits, labels, slots)
+    if kinds is None:
+        t = fit_temperature(logits, labels, slots)
+        by_kind = fit_temperature_by_kind(
+            logits, labels, slots, exs, objective=objective, ordinal_smoothing=eps
+        )
+    else:
+        t = model.config.temperature
+        by_kind = {**model.config.temperature_by_kind, **fit_temperature_by_kind(
+            logits, labels, slots, exs, objective=objective, ordinal_smoothing=eps, kinds=kinds
+        )}
     global_after = summarise(predictions_from_logits(logits, labels, slots, exs, t, eps))
-
-    by_kind = fit_temperature_by_kind(
-        logits, labels, slots, exs, objective="ece", ordinal_smoothing=eps
-    )
     after = summarise(predictions_from_logits(logits, labels, slots, exs, by_kind or t, eps))
 
     model.config.temperature = float(t)
