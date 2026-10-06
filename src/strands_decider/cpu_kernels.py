@@ -36,19 +36,24 @@ def causal_conv1d_cpu(
 
     `hidden_states` is [B, C, L] and `weight` is [C, K]. Output position t is
     sum_k weight[:, k] * x[t - (K - 1) + k], with zeros before the sequence starts.
-    Accumulation is in the weight dtype, as in the reference, and the result is cast
-    back to the input dtype.
+    The input is rounded to the weight dtype, as in the reference. A bf16 or fp16 weight
+    accumulates in fp32 and rounds once, as F.conv1d does; separate half-precision
+    multiplies and adds would each round. The activation runs in the weight dtype and the
+    result is cast back to the input dtype.
     """
     from transformers.activations import ACT2FN
 
     seq_len = hidden_states.shape[-1]
     width = weight.shape[-1]
-    x = F.pad(hidden_states.to(weight.dtype), (width - 1, 0))
-    out = x[:, :, width - 1 : width - 1 + seq_len] * weight[:, width - 1, None]
+    acc = torch.float32 if weight.dtype in (torch.float16, torch.bfloat16) else weight.dtype
+    x = F.pad(hidden_states.to(weight.dtype).to(acc), (width - 1, 0))
+    w = weight.to(acc)
+    out = x[:, :, width - 1 : width - 1 + seq_len] * w[:, width - 1, None]
     for k in range(width - 1):
-        out = out + x[:, :, k : k + seq_len] * weight[:, k, None]
+        out = out + x[:, :, k : k + seq_len] * w[:, k, None]
     if bias is not None:
-        out = out + bias[:, None]
+        out = out + bias.to(acc)[:, None]
+    out = out.to(weight.dtype)
     if activation is not None:
         out = ACT2FN[activation](out)
     return out.to(hidden_states.dtype)

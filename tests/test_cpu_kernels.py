@@ -38,6 +38,25 @@ def test_bf16_input_follows_weight_dtype():
     torch.testing.assert_close(got, want)
 
 
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16, torch.float16])
+def test_rounds_no_worse_than_f_conv1d(dtype):
+    # F.conv1d accumulates in fp32 and rounds once. Separate half-precision multiplies and
+    # adds round at every step, about 3x the reference's error in bf16 and fp16.
+    g = torch.Generator().manual_seed(0)
+    x = torch.randn(2, 256, 300, generator=g).to(dtype)
+    w = torch.randn(256, 4, generator=g).to(dtype)
+    b = torch.randn(256, generator=g).to(dtype)
+
+    def conv(x, w, b):
+        return torch.nn.functional.conv1d(x, w.unsqueeze(1), b, padding=3, groups=256)[..., :300]
+
+    exact = conv(x.double(), w.double(), b.double())
+    want = (conv(x, w, b).double() - exact).abs().max()
+    got = causal_conv1d_cpu(x, w, b)
+    assert got.dtype == dtype
+    assert (got.double() - exact).abs().max() <= 1.5 * want
+
+
 def test_install_routes_cpu_and_is_idempotent():
     from strands_decider import cpu_kernels
 
