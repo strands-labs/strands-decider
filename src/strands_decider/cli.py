@@ -7,6 +7,7 @@ calls them through `python -m strands_decider.cli`.
 
 from __future__ import annotations
 
+import atexit
 import json
 import logging
 import os
@@ -441,10 +442,13 @@ def main() -> None:
 
     Interpreter shutdown after `ask` takes about 0.5 s on an M3 Pro: torch, MPS and
     every imported module are finalized. A one-shot `ask` holds nothing that needs
-    that (no open files, no child processes, no atexit work), so once its answer is
-    printed and flushed it leaves with os._exit. Every other command, and anything
-    that calls `app` directly (typer's CliRunner, an embedding program), exits
-    normally.
+    that (no open files, no child processes), so once its answer is printed it runs
+    the atexit handlers, flushes and leaves with os._exit. The handlers take a few ms
+    and must run: multiprocessing's unlinks the named semaphore behind tqdm's lock (the
+    "Loading weights" bar), and without it the resource tracker warns of a leaked
+    semaphore after the prompt is back, wherever the start method is spawn or
+    forkserver (macOS). Every other command, and anything that calls `app` directly
+    (typer's CliRunner, an embedding program), exits normally.
     """
     try:
         app()
@@ -454,6 +458,7 @@ def main() -> None:
         code = 0
     if not (_exit_fast and code in (0, None)):
         sys.exit(code)
+    atexit._run_exitfuncs()  # noqa: SLF001 -- no public API runs the handlers early
     sys.stdout.flush()
     sys.stderr.flush()
     os._exit(0)
