@@ -244,6 +244,7 @@ src/strands_decider/
   evaluate.py     accuracy, ECE, NLL, MAE; temperature fitting; calib/test split
   infer.py        serving engine; shared-state cache, including hybrid torsos
   mps_kernels.py  Gated DeltaNet chunk rule for Apple-silicon serving (no fla on macOS)
+  cpu_kernels.py  the Gated DeltaNet depthwise causal conv for CPU inference
   mlx_engine.py   serving with the torso on MLX (--device mlx); the engine otherwise infer.py's
   server.py       FastAPI, POST /v1/systemone
   cli.py          the strands-decider command
@@ -296,7 +297,7 @@ research/         README.md -- the preregistration practice and the version tabl
                   tasks and results, latencies); figures/, and research/scripts/ that
                   collect the data and draw the figures
 tests/            pytest only: test_core (no GPU), test_server (stubbed), test_gpu_smoke,
-                  test_sampling, test_question_transforms, test_teacher,
+                  test_sampling, test_question_transforms, test_teacher, test_cpu_kernels,
                   test_multistep, test_hybrid, test_policy, test_generated,
                   test_prefix_cache, test_adequacy, test_mps_kernels, test_engine_dtype,
                   test_catchall, test_distill, test_hf_export, test_checkpoint_load,

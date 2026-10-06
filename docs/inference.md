@@ -78,8 +78,14 @@ strands-decider serve checkpoints/hobson-2b-recipe --device mlx --port 8099
 
 **CPU only.** The same commands as on macOS, with `--device cpu`. On Linux without a GPU,
 `pip install torch==2.7.1 --index-url https://download.pytorch.org/whl/cpu` skips the CUDA
-wheels. Both reference fallback paths above apply, and inference is much slower than on a
-GPU.
+wheels. `chunk_gated_delta_rule` falls back to its reference path, and inference is much
+slower than on a GPU. `causal_conv1d_fn` does not: on CPU, `cpu_kernels.py` replaces it with
+four shifted multiply-adds over channels-last rows, with the same answers to float rounding.
+Torch builds without oneDNN, such as the macOS wheels, run the reference as one convolution
+per channel: 2.0 of 2.7 s of a 70-token v19 forward on an M3 Pro, against 8 ms. Linux x86
+wheels have oneDNN, and the reference is fast there for short states. On a Xeon 8375C
+(8 threads), the conv takes 35 ms of a 1.6 s v21 ask either way, and on a 3,000-token state
+it takes 0.49 s instead of 1.18 s.
 
 ## Model artifact
 

@@ -135,7 +135,7 @@ class SystemOneEngine:
 
             install()
         elif str(self.cfg.device) == "cpu":
-            # The reference depthwise conv runs once per channel on CPU; see cpu_kernels.
+            # The reference depthwise conv is slow on CPU (per channel without oneDNN); see cpu_kernels.
             from .cpu_kernels import install as install_cpu
 
             install_cpu()
