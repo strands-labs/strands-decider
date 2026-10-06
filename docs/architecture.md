@@ -301,7 +301,7 @@ tests/            pytest only: test_core (no GPU), test_server (stubbed), test_g
                   test_prefix_cache, test_adequacy, test_mps_kernels, test_engine_dtype,
                   test_catchall, test_distill, test_hf_export, test_checkpoint_load,
                   test_cli_build, test_data_identity, test_configs, test_run_recipe,
-                  test_llm_client,
+                  test_llm_client, test_cli_exit,
                   test_ddp (`-m distributed` for the multi-GPU runs)
 docs/             architecture.md -- this document; inference.md -- serving a checkpoint:
                   install, ask, serve, the HTTP API, a Mac
