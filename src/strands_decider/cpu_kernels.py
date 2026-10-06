@@ -7,9 +7,11 @@ package, transformers' `causal_conv1d_fn` falls back to
 `_slow_conv2d_forward` call per channel: 6,144 channels times 18 layers is 110,592 calls
 per forward. Profiled on an M3 Pro, that was 2.0 of 2.7 s for a 70-token v19 question.
 
-With width 4, the convolution is four shifted multiply-adds over the whole
-[batch, channels, length] tensor. That takes 8 ms for all 18 layers instead of 2,026 ms,
-and agrees with the reference to within float rounding (`tests/test_cpu_kernels.py`).
+With width 4, the convolution is four shifted multiply-adds over the whole tensor. That
+takes 8 ms for all 18 layers instead of 2,026 ms, and agrees with the reference to within
+float rounding (`tests/test_cpu_kernels.py`). Linux x86 torch wheels have oneDNN, whose
+grouped conv is not per channel; the multiply-adds still beat it there, by 1.1-4x per
+layer (docs/inference.md).
 
 `install()` swaps it in for CPU tensors only, the same way `mps_kernels.install()` does
 for the chunk rule. Other devices still reach whatever transformers bound.
@@ -46,14 +48,17 @@ def causal_conv1d_cpu(
     seq_len = hidden_states.shape[-1]
     width = weight.shape[-1]
     acc = torch.float32 if weight.dtype in (torch.float16, torch.bfloat16) else weight.dtype
-    x = F.pad(hidden_states.to(weight.dtype).to(acc), (width - 1, 0))
-    w = weight.to(acc)
-    out = x[:, :, width - 1 : width - 1 + seq_len] * w[:, width - 1, None]
+    # Channels last, [B, L, C]: the forward passes a transposed view of a [B, L, C]
+    # projection and transposes the result back, so each multiply-add then runs over
+    # contiguous rows. On a 3,400-token state that is 2x faster than over [B, C, L].
+    x = F.pad(hidden_states.to(weight.dtype).to(acc).transpose(1, 2), (0, 0, width - 1, 0))
+    w = weight.t().to(acc)
+    out = x[:, width - 1 :] * w[width - 1]
     for k in range(width - 1):
-        out = out + x[:, :, k : k + seq_len] * w[:, k, None]
+        out.addcmul_(x[:, k : k + seq_len], w[k])
     if bias is not None:
-        out = out + bias.to(acc)[:, None]
-    out = out.to(weight.dtype)
+        out += bias.to(acc)
+    out = out.transpose(1, 2).to(weight.dtype)
     if activation is not None:
         out = ACT2FN[activation](out)
     return out.to(hidden_states.dtype)
