@@ -32,6 +32,7 @@ import subprocess
 import tempfile
 import zipfile
 from collections.abc import Sequence
+from dataclasses import dataclass, replace
 from typing import Any
 
 import torch
@@ -39,9 +40,6 @@ import torch
 from .modeling import CONFIG_NAME, LEGACY_CONFIG_NAME, config_path
 
 FORMAT = "hobson-hf-export/1"
-BASE_MODEL = "Qwen/Qwen3.5-2B-Base"
-# Hub `main` at every run so far (2026-04-23); training hosts did not pin it.
-BASE_REVISION = "b1485b2fa6dfa1287294f269f5fb618e03d52d7c"
 # The checkpoint's config json is copied and required too, under whichever of CONFIG_NAME
 # and LEGACY_CONFIG_NAME the checkpoint holds (`config_path`).
 COPY = ["train_config.json", "history.json", "tokenizer.json",
@@ -61,10 +59,96 @@ DATASETS = ["ccdv/arxiv-classification", "clinc/clinc_oos", "community-datasets/
             "tals/vitaminc", "tasksource/ruletaker", "ucberkeley-dlab/measuring-hate-speech",
             "ucirvine/sms_spam", "Yelp/yelp_review_full", "nvidia/HelpSteer2",
             "tasksource/Boardgame-QA", "hotpotqa/hotpot_qa"]
-# Its output distributions are training targets (data/teacher.py, data/distill.py).
-TEACHER = "Qwen/Qwen3.5-4B"
-TAGS = ["strands-decider", "decision-model", "hobson", "lora", "peft", "qwen3.5", "classification",
-        "calibration", "typed-decisions"]
+
+
+@dataclass(frozen=True)
+class Base:
+    """What the card, LICENSE.md and provenance.json say about one base model and the
+    recipe trained on it. Every checkpoint names its base in its config json; a base
+    without an entry in BASES is refused rather than described wrongly."""
+
+    model: str
+    revision: str
+    revision_note: str
+    teacher: str  # its output distributions are training targets (data/teacher.py, data/distill.py)
+    tags: list[str]
+    decoder: str  # where the PEFT adapter sits, as the card says it
+    example: str  # the card's `strands-decider ask` output; empty: `export --example` gives it
+    teacher_route: str  # how the teacher's distributions reach the model
+    trained_by: str  # the card's "Trained by" paragraph: {host} {gpu} {wall} {train}
+    retrain: str  # the card's "To retrain" paragraph
+
+
+QWEN = Base(
+    model="Qwen/Qwen3.5-2B-Base",
+    # Hub `main` at every run so far (2026-04-23); training hosts did not pin it.
+    revision="b1485b2fa6dfa1287294f269f5fb618e03d52d7c",
+    revision_note="inferred: Hub main at training time; hosts did not pin it",
+    teacher="Qwen/Qwen3.5-4B",
+    tags=["strands-decider", "decision-model", "hobson", "lora", "peft", "qwen3.5",
+          "classification", "calibration", "typed-decisions"],
+    decoder="the Qwen3.5 text decoder\n(`transformers.Qwen3_5ForCausalLM(...).model`)",
+    example="""The output of the v19 reference checkpoint (a retrain gives somewhat different numbers
+with the same answers):
+
+```
+noul_0 noul = 0.829
+choice_0 -> billing (confidence 0.769)
+  billing                  0.846
+  retail                   0.090
+  sales                    0.064
+score_0 score = 1.10 (confidence 0.519)
+  0: calm                                     0.163
+  1: frustrated                               0.574
+  2: depressed                                0.263
+```""",
+    teacher_route="They are training\n  targets, directly or through a parent model that the recipe trains first.",
+    trained_by="""Trained by `training/recipe.sh all` of the code repository on a `{host}`
+host ({gpu}): recipe wall clock {wall} s, training stage
+{train} s. Stage timings: `training/stages.jsonl`; data hashes:
+`training/data_sha256.txt`; configs: `train_config.json`, `training/configs/`.""",
+    retrain="""To retrain, run the same recipe on a Linux or WSL2 host with NVIDIA GPUs: about 11 hours
+on one RTX 3090, or about 1 h 10 min on eight H100s with `NGPU=8 FAST=1` through the AWS
+runner.""",
+)
+
+
+def _gemma4(size: str, revision: str) -> Base:
+    """A Gemma 4 -it torso with the recipe of the Gemma 4 releases: v26's c0001 recipe (the
+    Qwen3.5-4B teacher, a frozen-KL anchor toward the v19 checkpoint) on that torso."""
+    cls = "Gemma4UnifiedForConditionalGeneration" if size == "12B" else "Gemma4ForConditionalGeneration"
+    moe = "; it covers attention and the dense MLP, not the 128 experts or their router" \
+        if size == "26B-A4B" else ""
+    return Base(
+        model=f"google/gemma-4-{size}-it",
+        revision=revision,
+        revision_note="Hub main when the training configs were written (2026-10-06); the loader "
+        "did not pin it",
+        teacher="Qwen/Qwen3.5-4B",
+        tags=["strands-decider", "decision-model", "lora", "peft", "gemma4", "classification",
+              "calibration", "typed-decisions"],
+        decoder=f"the Gemma 4 text decoder\n(`transformers.{cls}(...).model.language_model`){moe}",
+        example="",
+        teacher_route="They are training\n  targets, next to a frozen-KL anchor toward the v19 "
+        "checkpoint's own distributions\n  (a Qwen3.5-2B decider; `kl_frozen_reference`).",
+        trained_by="""Trained by `strands-decider train` of the code repository under `torchrun` on a `{host}`
+host ({gpu}): recipe wall clock {wall} s, training stage {train} s. Configs:
+`train_config.json`, `training/configs/`.""",
+        retrain="""To retrain, train with the recipe in `train_config.json` on one 8-GPU H100 host, after
+`training/recipe.sh build fetch multistep generated adequacy distill`, with the v19
+checkpoint where its `kl_frozen_reference` points.""",
+    )
+
+
+BASES = {b.model: b for b in (
+    QWEN,
+    _gemma4("E2B", "3e22461f65e89153144f8adb70e3b8c2cc9845a7"),
+    _gemma4("E4B", "ee0ef6023621cff504d758262d4e04895a5af4a2"),
+    _gemma4("12B", "707f0a3b8a3c7ad586ed01e27eafbad8a27dd0f7"),
+    _gemma4("26B-A4B", "4d7ae4984b7db7de8f8457170b3f1a419ee76d52"),
+)}
+# Kept for callers that named the original single base.
+BASE_MODEL, BASE_REVISION, TEACHER, TAGS = QWEN.model, QWEN.revision, QWEN.teacher, QWEN.tags
 REPO_URL = "https://github.com/strands-labs/strands-decider"
 PICKLE_EXT = (".pt", ".pth", ".pkl", ".pickle", ".bin", ".ckpt")
 
@@ -330,7 +414,8 @@ def headline(internal: dict[str, dict]) -> dict[str, dict]:
 
 
 def card(name: str, run_id: str, role: str, prov: dict, arms: list[dict],
-         internal: dict[str, dict], repo_url: str = REPO_URL, hub_id: str | None = None) -> str:
+         internal: dict[str, dict], repo_url: str = REPO_URL, hub_id: str | None = None,
+         base: Base = QWEN) -> str:
     from huggingface_hub import EvalResult, ModelCardData
 
     # The Hub groups results by (task, dataset type, config, split, revision), not by
@@ -347,8 +432,8 @@ def card(name: str, run_id: str, role: str, prov: dict, arms: list[dict],
                            dataset_name=k, dataset_config=k, metric_type="accuracy",
                            metric_value=v["accuracy"], metric_name=f"accuracy (n={v['n']})")
                 for k, v in headline(internal).items()]
-    data = ModelCardData(base_model=BASE_MODEL, base_model_relation="adapter",
-                         library_name="peft", pipeline_tag="text-classification", tags=TAGS,
+    data = ModelCardData(base_model=base.model, base_model_relation="adapter",
+                         library_name="peft", pipeline_tag="text-classification", tags=base.tags,
                          license="apache-2.0", datasets=DATASETS, model_name=name,
                          eval_results=results or None)
     rows = "\n".join(f"| JevBench public, window {a['window']} | {a['n_correct']}/{a['n']} "
@@ -370,7 +455,7 @@ a scale, and every answer carries a calibrated confidence. It fits the decisions
 agentic workflow: model routing, tool selection, argument checking, triage, guardrails,
 evaluations, and the rote decisions of a hybrid agent that leaves the hard ones to an LLM.
 
-This repository holds one trained checkpoint: a LoRA adapter on `{BASE_MODEL}` plus a
+This repository holds one trained checkpoint: a LoRA adapter on `{base.model}` plus a
 small readout head that scores the options of a typed question (`noul`, a yes/no question;
 `choice`, one of N options; `score`, a level on an ordered scale). The code, the training
 recipe, the data inventory and the evaluations are at {repo_url}, under the same
@@ -393,20 +478,7 @@ strands-decider ask {model} \\
   --score "How frustrated is the writer?=calm,frustrated,depressed"
 ```
 
-The output of the v19 reference checkpoint (a retrain gives somewhat different numbers
-with the same answers):
-
-```
-noul_0 noul = 0.829
-choice_0 -> billing (confidence 0.769)
-  billing                  0.846
-  retail                   0.090
-  sales                    0.064
-score_0 score = 1.10 (confidence 0.519)
-  0: calm                                     0.163
-  1: frustrated                               0.574
-  2: depressed                                0.263
-```
+{base.example}
 
 Or serve it over HTTP. The server binds to `127.0.0.1` and has no authentication: use it
 for local experiments.
@@ -420,8 +492,7 @@ curl -s localhost:8000/v1/systemone -H 'content-type: application/json' -d '{{
 ```
 
 In Python, `strands_decider.modeling.StrandsDeciderModel.load("{model}")`. The adapter in
-`lora/` is a standard PEFT adapter on the Qwen3.5 text decoder
-(`transformers.Qwen3_5ForCausalLM(...).model`); the head is `head.safetensors`.
+`lora/` is a standard PEFT adapter on {base.decoder}; the head is `head.safetensors`.
 
 ## Results
 
@@ -462,8 +533,7 @@ The `datasets` list in the metadata holds the Hub datasets that the recipe reads
 
 - ContractNLI and MuSiQue, from their authors' releases (not from the Hub).
 - Synthetic rows that open-weight language models generated and checked.
-- The output distributions of the frozen teacher model `{TEACHER}`. They are training
-  targets, directly or through a parent model that the recipe trains first.
+- The output distributions of the frozen teacher model `{base.teacher}`. {base.teacher_route}
 
 In the code repository, `data/sources.md` lists every source with its revision, role,
 license and attribution, and `data/README.md` states what is committed, what is downloaded
@@ -471,14 +541,10 @@ and the reproduction contract.
 
 ## Training
 
-Trained by `training/recipe.sh all` of the code repository on a `{prov.get('host_shape')}`
-host ({prov.get('gpu')}): recipe wall clock {prov.get('pipeline_wall_s')} s, training stage
-{prov.get('train_wall_s')} s. Stage timings: `training/stages.jsonl`; data hashes:
-`training/data_sha256.txt`; configs: `train_config.json`, `training/configs/`.
+{base.trained_by.format(host=prov.get('host_shape'), gpu=prov.get('gpu'),
+                        wall=prov.get('pipeline_wall_s'), train=prov.get('train_wall_s'))}
 
-To retrain, run the same recipe on a Linux or WSL2 host with NVIDIA GPUs: about 11 hours
-on one RTX 3090, or about 1 h 10 min on eight H100s with `NGPU=8 FAST=1` through the AWS
-runner. `training/README.md` has the setup, the stages and the hardware notes.
+{base.retrain} `training/README.md` has the setup, the stages and the hardware notes.
 
 ## Provenance
 
@@ -490,7 +556,7 @@ their timings and results; host paths, cloud identifiers and cost fields are rem
 
 
 def provenance(name: str, run_id: str, role: str, ckpt: str, out: str, stages: list[dict],
-               pickle_sha: str) -> dict:
+               pickle_sha: str, base: Base = QWEN) -> dict:
     train = [s for s in stages if s.get("stage") in ("parent", "train")]
     mine = [s for s in train if s.get("stage") == ("parent" if role == "parent" else "train")]
     starts = [s["start_utc"] for s in stages if "start_utc" in s]
@@ -502,8 +568,8 @@ def provenance(name: str, run_id: str, role: str, ckpt: str, out: str, stages: l
 
     return {"format": FORMAT, "name": name, "run_id": run_id, "role": role,
             "code_commit": next((s.get("git_rev") for s in stages if s.get("git_rev")), "unknown"),
-            "base_model": BASE_MODEL, "base_model_revision": BASE_REVISION,
-            "base_model_revision_note": "inferred: Hub main at training time; hosts did not pin it",
+            "base_model": base.model, "base_model_revision": base.revision,
+            "base_model_revision_note": base.revision_note,
             "hobson_config_sha256": sha256(config_path(ckpt)),
             "train_config_sha256": sha256(os.path.join(ckpt, "train_config.json"))
             if os.path.exists(os.path.join(ckpt, "train_config.json")) else None,
@@ -539,7 +605,7 @@ def check(out: str) -> None:
     if bad:
         raise SystemExit(f"pickle files in the export: {bad}")
     meta = metadata_load(os.path.join(out, "README.md"))
-    if not meta or meta.get("base_model") != BASE_MODEL:
+    if not meta or meta.get("base_model") not in BASES:
         raise SystemExit("README.md: card metadata missing or wrong base_model")
     if meta.get("license") == "other" and not (meta.get("license_name") and meta.get("license_link")):
         raise SystemExit("README.md: license 'other' needs license_name and license_link")
@@ -569,7 +635,8 @@ RECORDS = {"train_config.json", "history.json"}
 
 def build(ckpt: str, out: str, run_dir: str | None, reports: str | None, jdirs: list[str],
           window_configs: list[str], name: str, run_id: str, role: str,
-          repo_url: str = REPO_URL, hub_id: str | None = None, redact: Sequence[str] = ()) -> dict:
+          repo_url: str = REPO_URL, hub_id: str | None = None, redact: Sequence[str] = (),
+          example: str | None = None) -> dict:
     cfg_path = config_path(ckpt)
     missing = [p for p in REQUIRED if not os.path.exists(os.path.join(ckpt, p))]
     if not os.path.exists(cfg_path):
@@ -577,11 +644,17 @@ def build(ckpt: str, out: str, run_dir: str | None, reports: str | None, jdirs: 
     if missing:
         raise SystemExit(f"{ckpt}: not a complete checkpoint, missing {missing}")
     cfg = json.load(open(cfg_path))
-    # The card and provenance.json name BASE_MODEL and its revision. StrandsDeciderModel.load reads
-    # the base from the config json, and without the key it uses the dataclass default.
-    if cfg.get("base_model") != BASE_MODEL:
+    # The card and provenance.json name the base and its revision (BASES). StrandsDeciderModel.load
+    # reads the base from the config json, and without the key it uses the dataclass default.
+    if cfg.get("base_model") not in BASES:
         raise SystemExit(f"{ckpt}: base_model is {cfg.get('base_model')!r}, but this exporter "
-                         f"describes {BASE_MODEL} only")
+                         f"describes {', '.join(BASES)} only")
+    base = BASES[cfg["base_model"]]
+    if example is not None:
+        base = replace(base, example=example.rstrip("\n"))
+    elif not base.example:
+        raise SystemExit(f"{base.model}: no card example for this base; give --example with the "
+                         "output of `strands-decider ask` on this checkpoint")
     for p in [os.path.basename(cfg_path), *COPY]:
         src = os.path.join(ckpt, p)
         if not os.path.exists(src):
@@ -625,14 +698,14 @@ def build(ckpt: str, out: str, run_dir: str | None, reports: str | None, jdirs: 
                "internal": internal}
     with open(_mk(os.path.join(out, "eval", "summary.json")), "w") as fh:
         json.dump(summary, fh, indent=2, sort_keys=True)
-    prov = provenance(name, run_id, role, ckpt, out, stages, pickle_sha)
+    prov = provenance(name, run_id, role, ckpt, out, stages, pickle_sha, base)
     with open(os.path.join(out, "provenance.json"), "w") as fh:
         json.dump(prov, fh, indent=2, sort_keys=True)
     with open(os.path.join(out, "LICENSE.md"), "w") as fh:
-        fh.write(LICENSE_TEXT.format(base=BASE_MODEL, datasets=", ".join(DATASETS),
-                                     teacher=TEACHER, repo=repo_url, apache=apache_license()))
+        fh.write(LICENSE_TEXT.format(base=base.model, datasets=", ".join(DATASETS),
+                                     teacher=base.teacher, repo=repo_url, apache=apache_license()))
     with open(os.path.join(out, "README.md"), "w") as fh:
-        fh.write(card(name, run_id, role, prov, arms, internal, repo_url, hub_id))
+        fh.write(card(name, run_id, role, prov, arms, internal, repo_url, hub_id, base))
     check(out)
     with open(os.path.join(out, "MANIFEST.sha256"), "w") as fh:
         fh.write(manifest(out))
@@ -794,6 +867,9 @@ def main(argv: list[str] | None = None) -> None:
     ex.add_argument("--hub-id", help="the Hub repo id (org/name) the card's examples name")
     ex.add_argument("--redact", action="append", default=[], metavar="TEXT",
                     help="text to replace by <redacted> in every run record (a private commit id)")
+    ex.add_argument("--example", metavar="FILE",
+                    help="markdown for the card's `strands-decider ask` output: required for a "
+                         "base other than Qwen3.5-2B-Base, whose v19 example is built in")
     ve = sub.add_parser("verify")
     ve.add_argument("path")
     ix = sub.add_parser("index", help="write INDEX.json and INDEX.md for every export under ROOT")
@@ -834,7 +910,7 @@ def main(argv: list[str] | None = None) -> None:
         stage = os.path.join(tmp, "export")
         os.makedirs(stage)
         summary = build(ckpt, stage, run_dir, reports, jdirs, wcfg, name, run_id, a.role, a.repo_url,
-                        a.hub_id, a.redact)
+                        a.hub_id, a.redact, open(a.example).read() if a.example else None)
         state = publish(stage, a.out, a.replace)
     jev = ", ".join(f"{j['arm']} {j['n_correct']}/{j['n']}" for j in summary["jevbench"]) or "no JevBench"
     print(f"{a.out}: {state} ({name} {run_id}, {jev}, {len(summary['internal'])} internal sets)")

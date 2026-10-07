@@ -462,3 +462,44 @@ def test_multistep_eval_lines_parse_back_whatever_the_name_length(tmp_path, monk
         f"eval: {long_name}": {"accuracy": 0.667, "n": 3},
         "eval: hotpotqa (held out)": {"accuracy": 1.0, "n": 2},
     }
+
+
+@pytest.mark.parametrize("size", ["E2B", "E4B", "12B", "26B-A4B"])
+def test_a_gemma4_checkpoint_is_described_as_gemma4(tmp_path, size):
+    """The card, LICENSE.md and provenance.json name the checkpoint's own base, its decoder
+    class and its recipe's teacher; a Gemma base needs the card example from the caller."""
+    ckpt = tmp_path / "ckpt"
+    _ckpt(str(ckpt))
+    cfg = json.load(open(ckpt / "hobson_config.json"))
+    cfg["base_model"] = f"google/gemma-4-{size}-it"
+    json.dump(cfg, open(ckpt / "hobson_config.json", "w"), indent=2)
+    with pytest.raises(SystemExit, match="--example"):
+        _export(tmp_path, ckpt, tmp_path / "no-example")
+    stage = tmp_path / "stage2"
+    os.makedirs(stage)
+    hf_export.build(str(ckpt), str(stage), str(tmp_path / "run"), None, [], [], "n", "r", "final",
+                    hub_id=f"org/strands-decider-{size}-gemma4", example="Output:\n\n```\nx\n```\n")
+    readme, licence = (stage / "README.md").read_text(), (stage / "LICENSE.md").read_text()
+    from huggingface_hub import metadata_load
+
+    meta = metadata_load(str(stage / "README.md"))
+    assert meta["base_model"] == f"google/gemma-4-{size}-it" and "gemma4" in meta["tags"]
+    assert "qwen3.5" not in meta["tags"]
+    prov = json.load(open(stage / "provenance.json"))
+    assert prov["base_model_revision"] == hf_export.BASES[meta["base_model"]].revision
+    assert "Qwen/Qwen3.5-4B" in readme and "Qwen/Qwen3.5-4B" in licence
+    assert ("Gemma4UnifiedForConditionalGeneration" in readme) == (size == "12B")
+    assert ("not the 128 experts" in readme) == (size == "26B-A4B")
+    assert "Output:\n\n```\nx\n```\n\nOr serve it" in readme and "v19 reference checkpoint" not in readme
+    assert "{" not in readme.split("## Training")[1]  # every paragraph's fields filled
+    hf_export.verify(str(stage))
+
+
+def test_an_unknown_base_is_refused(tmp_path):
+    ckpt = tmp_path / "ckpt"
+    _ckpt(str(ckpt))
+    cfg = json.load(open(ckpt / "hobson_config.json"))
+    cfg["base_model"] = "org/some-other-base"
+    json.dump(cfg, open(ckpt / "hobson_config.json", "w"), indent=2)
+    with pytest.raises(SystemExit, match=re.escape("describes Qwen/Qwen3.5-2B-Base, google/gemma-4-E2B-it")):
+        _export(tmp_path, ckpt, tmp_path / "out")
