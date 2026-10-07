@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import os
 import threading
+from collections import OrderedDict
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -33,7 +34,7 @@ from typing import Any
 import mlx.core as mx
 import torch
 from mlx.utils import tree_flatten
-from mlx_lm.models.cache import make_prompt_cache
+from mlx_lm.models.cache import BatchKVCache, KVCache, make_prompt_cache
 from mlx_lm.utils import load_model
 from transformers import AutoTokenizer
 
@@ -121,7 +122,8 @@ def merge_lora(lm: Any, adapter_dir: str, prefix: str) -> int:
 class MLXEngine(SystemOneEngine):
     """`SystemOneEngine` with the torso forward on MLX. Build one with `load_mlx_engine`."""
 
-    def __init__(self, decoder: Any, cache_owner: Any, readout: _Readout, config: EngineConfig) -> None:
+    def __init__(self, decoder: Any, cache_owner: Any, readout: _Readout, config: EngineConfig,
+                 state_cache_entries: int = 8) -> None:
         # Not super().__init__(): that moves a torch torso to a torch device. These are the
         # attributes the inherited helpers read; `device` is where their small index and
         # temperature tensors live, next to the head.
@@ -131,6 +133,14 @@ class MLXEngine(SystemOneEngine):
         self.device = "cpu"
         self._decoder = decoder
         self._cache_owner = cache_owner
+        # Cross-request state cache: state token ids -> a batch-1 snapshot of the prompt
+        # cache after encoding that state. Only `_slot_probs_shared_prefix` populates it
+        # (it already builds a state-only prefix), and both paths read it, so no request
+        # ever pays an extra forward to fill an entry. `evaluate` holds `_lock` throughout,
+        # which also guards this dict.
+        self.state_cache_entries = state_cache_entries
+        self._state_cache: OrderedDict[tuple[int, ...], list[Any]] = OrderedDict()
+        self.state_encodes = 0  # state-only forwards served, cache or not
         # One evaluation at a time: `_fit` leaves the request's option offsets on the engine
         # (`_last_offsets`) for `_option_idx` to read, so two requests in the server's thread
         # pool would read each other's. The torch engine has the same race (#9).
@@ -179,11 +189,29 @@ class MLXEngine(SystemOneEngine):
         assert rendered is not None
         return self._option_idx(rendered, base)
 
+    def _state_snapshot(self, state: list[int]) -> list[Any] | None:
+        """The cached batch-1 prompt-cache layers for this state, or None. LRU-touched."""
+        key = tuple(state)
+        snap = self._state_cache.get(key)
+        if snap is not None:
+            self._state_cache.move_to_end(key)
+        return snap
+
     def _slot_probs_batched(
         self, state_text: str, question_texts: list[str], n_slots: list[int], kinds: list[str],
         rendered: list[RenderedQuestion] | None = None,
     ) -> tuple[torch.Tensor, int]:
         state, questions = self._fit(state_text, question_texts)
+        snap = self._state_snapshot(state) if self.state_cache_entries else None
+        if snap is not None:
+            # A cached state serves even one question through the suffix-only path: the
+            # miss path's single whole-prompt forward is cheaper than state + suffix, but
+            # a hit skips the state's forward entirely.
+            batch = [type(layer).merge([layer] * len(questions)) for layer in snap]
+            hidden = self._hidden(questions, batch)
+            probs = self._probs(hidden, [len(question) - 1 for question in questions],
+                                self._option_positions(rendered, 0), n_slots, kinds)
+            return probs, len(state) + sum(len(question) for question in questions)
         rows = [state + question for question in questions]
         hidden = self._hidden(rows)
         probs = self._probs(hidden, [len(row) - 1 for row in rows],
@@ -195,14 +223,44 @@ class MLXEngine(SystemOneEngine):
         rendered: list[RenderedQuestion] | None = None,
     ) -> tuple[torch.Tensor, int]:
         state, questions = self._fit(state_text, question_texts)
-        prefix = make_prompt_cache(self._cache_owner)
-        self._hidden([state], prefix)
-        # `merge` copies each layer's state into a batch of len(questions); `prefix` is untouched.
-        batch = [type(layer).merge([layer] * len(questions)) for layer in prefix]
+        snap = self._state_snapshot(state) if self.state_cache_entries else None
+        if snap is None:
+            prefix = make_prompt_cache(self._cache_owner)
+            self._hidden([state], prefix)
+            self.state_encodes += 1
+            if self.state_cache_entries:
+                snap = [_snapshot(layer) for layer in prefix]
+                key = tuple(state)
+                self._state_cache[key] = snap
+                while len(self._state_cache) > self.state_cache_entries:
+                    self._state_cache.popitem(last=False)
+            else:
+                snap = list(prefix)
+        # `merge` copies each layer's state into a batch of len(questions); the snapshot is untouched.
+        batch = [type(layer).merge([layer] * len(questions)) for layer in snap]
         hidden = self._hidden(questions, batch)
         probs = self._probs(hidden, [len(question) - 1 for question in questions],
                             self._option_positions(rendered, 0), n_slots, kinds)
         return probs, len(state) + sum(len(question) for question in questions)
+
+
+def _snapshot(layer: Any) -> Any:
+    """A batch-1 copy of a prompt-cache layer that `merge` can consume again.
+
+    `KVCache.merge` returns a `BatchKVCache` whose `offset` is a per-row mx array; merging
+    that a second time slices with the array and raises ("Slice indices must be integers").
+    mlx-lm only ever merges a fresh cache, so the conversion back is on us: a plain KVCache
+    carrying the same keys/values merges as often as needed. `ArraysCache.merge` (the
+    Gated DeltaNet states) already returns a re-mergeable cache and passes through.
+    """
+    merged: Any = type(layer).merge([layer])  # Any: mlx-lm's cache stubs type keys as None
+    if type(merged) is BatchKVCache and type(layer) is not BatchKVCache:
+        plain = KVCache()
+        plain.keys, plain.values = merged.keys, merged.values
+        keys: Any = merged.keys  # Any: the type() narrowing above re-types merged from mlx-lm's stubs
+        plain.offset = int(keys.shape[2])  # the batch-1 seq length: the cached token count
+        return plain
+    return merged
 
 
 def _to_torch(array: Any) -> torch.Tensor:
@@ -239,11 +297,13 @@ def load_mlx_engine(
     config: EngineConfig | None = None,
     *,
     cache_limit_bytes: int | None = DEFAULT_CACHE_LIMIT,
+    state_cache_entries: int = 8,
 ) -> MLXEngine:
     """The MLX counterpart of `infer.load_engine`: a local checkpoint directory or a Hub repo id.
 
     `config` is the torch engine's `EngineConfig`, with its device set to "mlx".
     `cache_limit_bytes` sets MLX's process-wide buffer cache limit; None leaves it as it is.
+    `state_cache_entries` caps the cross-request state KV cache (LRU); 0 disables it.
     """
     path = checkpoint_dir(checkpoint)
     decider_config = StrandsDeciderConfig.from_json(config_path(path))
@@ -271,4 +331,5 @@ def load_mlx_engine(
     head.load_state_dict(head_state)
     head.to(torch.float32).eval()
     engine_config = replace(config or EngineConfig(), device="mlx")
-    return MLXEngine(decoder, owner, _Readout(decider_config, tokenizer, head), engine_config)
+    return MLXEngine(decoder, owner, _Readout(decider_config, tokenizer, head), engine_config,
+                     state_cache_entries=state_cache_entries)

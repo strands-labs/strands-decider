@@ -36,6 +36,7 @@ def create_app(
     strict_window: bool = False,
     max_batch: int = 32,
     vision: bool = False,
+    state_cache: int = 8,
 ) -> FastAPI:
     global _engine
 
@@ -60,7 +61,7 @@ def create_app(
 
         _engine = load_vision_engine(checkpoint, config, attn_implementation=attn_implementation)
     elif device == "mlx":
-        _engine = load_mlx(checkpoint, config)
+        _engine = load_mlx(checkpoint, config, state_cache_entries=state_cache)
     else:
         model = StrandsDeciderModel.load(checkpoint, attn_implementation=attn_implementation)
         _engine = SystemOneEngine(model, config)
@@ -78,6 +79,7 @@ def create_app(
             "temperature": eng.model.config.temperature,
             "device": eng.cfg.device,
             "prefix_cache": eng.cfg.use_prefix_cache,
+            "state_cache": getattr(eng, "state_cache_entries", None),
             "vision": vision,
         }
 
@@ -109,6 +111,7 @@ def serve(
     strict_window: bool = False,
     max_batch: int = 32,
     vision: bool = False,
+    state_cache: int = 8,
 ) -> None:
     import uvicorn
 
@@ -120,6 +123,7 @@ def serve(
         strict_window=strict_window,
         max_batch=max_batch,
         vision=vision,
+        state_cache=state_cache,
     )
     # Single worker: the model owns the GPU, and forking more would just duplicate it.
     uvicorn.run(app, host=host, port=port, workers=1)

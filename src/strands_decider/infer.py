@@ -511,12 +511,16 @@ def mlx_available() -> bool:
         return False
 
 
-def load_mlx(checkpoint: str, config: EngineConfig | None = None) -> SystemOneEngine:
-    """An engine with the torso on MLX (see mlx_engine.py), configured as a torch engine is."""
+def load_mlx(checkpoint: str, config: EngineConfig | None = None,
+             state_cache_entries: int = 8) -> SystemOneEngine:
+    """An engine with the torso on MLX (see mlx_engine.py), configured as a torch engine is.
+
+    `state_cache_entries` caps the MLX engine's cross-request state KV cache (LRU); 0 disables it.
+    """
     if not mlx_available():
         raise RuntimeError(
             "device 'mlx' needs Apple silicon and the mlx extra: pip install 'strands-decider[mlx]'"
         )
     from .mlx_engine import load_mlx_engine
 
-    return load_mlx_engine(checkpoint, config)
+    return load_mlx_engine(checkpoint, config, state_cache_entries=state_cache_entries)

@@ -224,6 +224,54 @@ def test_a_bf16_checkpoint_answers_from_another_thread(tmp_path):
     assert set(response.answers) == set(QUESTIONS)
 
 
+# ---- the cross-request state cache -----------------------------------------
+
+
+def _fresh_engine(path, **kwargs):
+    from strands_decider.mlx_engine import load_mlx_engine
+
+    return load_mlx_engine(str(path), None, **kwargs)
+
+
+def test_a_repeated_state_is_encoded_once(tmp_path):
+    engine = _fresh_engine(_checkpoint(tmp_path, "pointer"))
+    first = _probabilities(engine.evaluate(REQUESTS[1]))
+    assert engine.state_encodes == 1  # the multi-question request builds one state prefix
+    second = _probabilities(engine.evaluate(REQUESTS[1]))
+    assert engine.state_encodes == 1  # the second request reuses the snapshot
+    assert second == first
+
+
+def test_a_single_question_reuses_a_cached_state(tmp_path):
+    engine = _fresh_engine(_checkpoint(tmp_path, "pointer"))
+    _probabilities(engine.evaluate(REQUESTS[1]))  # populate the cache
+    encoded = engine.state_encodes
+    single = _probabilities(engine.evaluate(REQUESTS[0]))  # same state, one question
+    assert engine.state_encodes == encoded  # the whole-prompt path did not re-encode
+    engine._state_cache.clear()  # force the uncached path for the reference answers
+    reference = _probabilities(engine.evaluate(REQUESTS[0]))
+    for name in reference:
+        assert single[name] == pytest.approx(reference[name], abs=1e-4), name
+
+
+def test_the_state_cache_evicts_least_recently_used(tmp_path):
+    engine = _fresh_engine(_checkpoint(tmp_path, "pointer"), state_cache_entries=1)
+    _probabilities(engine.evaluate(REQUESTS[1]))  # state A cached
+    other = SystemOneRequest(state=POLICY * 2 + "A different question entirely.",
+                             questions=QUESTIONS)  # multi-question, so state B populates too
+    _probabilities(engine.evaluate(other))  # state B evicts A
+    assert engine.state_encodes == 2
+    _probabilities(engine.evaluate(REQUESTS[1]))  # A again: must miss after eviction
+    assert engine.state_encodes == 3
+
+
+def test_state_cache_entries_zero_disables_the_cache(tmp_path):
+    engine = _fresh_engine(_checkpoint(tmp_path, "pointer"), state_cache_entries=0)
+    _probabilities(engine.evaluate(REQUESTS[1]))
+    _probabilities(engine.evaluate(REQUESTS[1]))
+    assert engine.state_encodes == 2
+
+
 def test_mlx_loads_the_base_at_the_revision_in_provenance(tmp_path, monkeypatch):
     import strands_decider.mlx_engine as mlx_engine
 
