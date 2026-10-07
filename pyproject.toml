@@ -67,11 +67,13 @@ where = ["src"]
 # package-build smoke test still work on any branch.
 [tool.setuptools_scm]
 fallback_version = "0.0.0"
-# Only v<number> tags are package versions. Model release tags (model/hobson-v21) are not:
-# without --match, `git describe` finds them and the version fails to parse.
+# Only v<major>.<minor>... tags are package versions. Model release tags
+# (model/strands-decider-2B-qwen3.5-v1-2610) are not: without --match,
+# `git describe` finds them and the version fails to parse. The dot is required, so a short
+# tag such as `v1` or `v1-2610` (a recipe generation, not a package version) is ignored too.
 # ponytail: setuptools-scm 10 warns that this key is deprecated (scm.git.describe_command);
 # the new key is not read by 8.x, which build-system.requires still admits.
-git_describe_command = ["git", "describe", "--dirty", "--tags", "--long", "--match", "v[0-9]*"]
+git_describe_command = ["git", "describe", "--dirty", "--tags", "--long", "--match", "v[0-9]*.[0-9]*"]
 
 [tool.ruff]
 line-length = 100
