@@ -19,6 +19,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
@@ -37,6 +38,8 @@ DEFAULT_NUM_SLOTS = 24
 # Large negative rather than -inf: keeps softmax finite under autocast/bf16, where
 # -inf can produce NaNs if an entire row is masked by a malformed batch.
 MASK_VALUE = -1e4
+# Gemma 4 model types -> the multimodal class whose loader maps the text decoder's weights.
+GEMMA4_CLASSES = {"gemma4": "Gemma4ForConditionalGeneration"}
 
 
 @dataclass
@@ -86,6 +89,16 @@ class StrandsDeciderConfig:
             "gate_proj", "up_proj", "down_proj",
         ]
     )
+    # Start every prompt with the tokenizer's BOS token even when its own post-processor
+    # adds none (ensure_bos). gemma-4-E2B-it's tokenizer leaves BOS to its chat template,
+    # and without it the frozen -it torso reads JevBench at chance (73/231, against 135
+    # with it). Off by default, so earlier checkpoints load and retrain unchanged.
+    force_bos: bool = False
+    # Keep a torso's per-layer embedding table in host memory (HostEmbedding). Gemma 4
+    # E2B's is 262,144 x 8,960 (2.35B parameters, 4.4 GiB in bf16), read by token lookup
+    # only and never trained, so moving it off the GPU frees that memory at no measured
+    # cost in speed. Off by default; a torso without such a table ignores it.
+    host_embeddings: bool = False
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), indent=2)
@@ -94,6 +107,73 @@ class StrandsDeciderConfig:
     def from_json(cls, path: str) -> StrandsDeciderConfig:
         with open(path, encoding="utf-8") as fh:
             return cls(**json.load(fh))
+
+
+class HostEmbedding(nn.Module):
+    """A frozen embedding table kept in host memory whatever device the model moves to.
+
+    Token ids go to the CPU for the lookup and the rows come back to the ids' device.
+    `.to(device)` / `.cuda()` leave the table where it is; a dtype cast (`.float()` for
+    CPU serving) is applied, on the CPU. The wrapped module's own forward runs, so any
+    scaling it applies (Gemma's scaled embeddings) is kept. Never trained.
+    """
+
+    def __init__(self, inner: nn.Embedding):
+        super().__init__()
+        self.inner: nn.Embedding = inner.to("cpu").requires_grad_(False)
+        self._pin()
+
+    def _pin(self) -> None:
+        if torch.cuda.is_available() and not self.inner.weight.is_pinned():
+            self.inner.weight.data = self.inner.weight.data.pin_memory()
+
+    def _apply(
+        self, fn: Callable[[torch.Tensor], torch.Tensor], recurse: bool = True
+    ) -> HostEmbedding:
+        # Probe the conversion on an empty tensor: keep any dtype change, drop the move.
+        w = self.inner.weight
+        target = fn(torch.empty(0, dtype=w.dtype))
+        if target.dtype != w.dtype:
+            w.data = w.data.to(target.dtype)
+            self._pin()
+        return self
+
+    @property
+    def weight(self) -> torch.Tensor:
+        return self.inner.weight
+
+    def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
+        rows: torch.Tensor = self.inner(input_ids.to("cpu"))
+        if input_ids.device.type == "cpu":
+            return rows
+        if torch.cuda.is_available():
+            rows = rows.pin_memory()
+        return rows.to(input_ids.device, non_blocking=True)
+
+
+def ensure_bos(tok: Any) -> Any:
+    """Make a fast tokenizer prepend its BOS token whenever special tokens are added.
+
+    gemma-4-E2B-it's tokenizer adds none (its chat template writes `<bos>`), while the
+    base model's adds it; Gemma reads text without it badly. Replacing the post-processor
+    keeps `add_special_tokens=False` BOS-free, so a cached prefix's suffixes stay as they
+    were, and it is saved with the tokenizer. A tokenizer that already adds BOS, or has
+    none, is left alone.
+    """
+    bos, bos_id = tok.bos_token, tok.bos_token_id
+    if bos is None or bos_id is None:
+        return tok
+    ids = tok("x")["input_ids"]
+    if ids and ids[0] == bos_id:
+        return tok
+    from tokenizers import processors
+
+    tok.backend_tokenizer.post_processor = processors.TemplateProcessing(
+        single=f"{bos} $A", pair=f"{bos} $A $B", special_tokens=[(bos, bos_id)]
+    )
+    if tok("x")["input_ids"][0] != bos_id:
+        raise RuntimeError("ensure_bos: the tokenizer still adds no BOS")
+    return tok
 
 
 class SlotHead(nn.Module):
@@ -268,6 +348,8 @@ class StrandsDeciderModel(nn.Module):
         tok = AutoTokenizer.from_pretrained(config.base_model, revision=config.base_revision)
         if tok.pad_token is None:
             tok.pad_token = tok.eos_token
+        if config.force_bos:
+            ensure_bos(tok)
 
         torso = cls._load_torso(config, device_map, attn_implementation)
         model = cls(config, torso, tok)
@@ -301,8 +383,25 @@ class StrandsDeciderModel(nn.Module):
                 config.base_model, config=base_cfg.get_text_config(), **kwargs
             )
             torso = lm.model
+        elif base_cfg.model_type in GEMMA4_CLASSES:
+            # Gemma 4 checkpoints are multimodal too, but the Qwen trick does not carry
+            # over: Gemma4ForCausalLM does not map the checkpoint's `model.language_model.*`
+            # names and leaves every text weight randomly initialised, with only a
+            # missing-keys warning. Load the whole model, whose class maps them, keep the
+            # text decoder, and let the vision and audio encoders (0.47B) go.
+            import transformers
+
+            full = getattr(transformers, GEMMA4_CLASSES[base_cfg.model_type]).from_pretrained(
+                config.base_model, **kwargs
+            )
+            torso = full.model.language_model
+            del full
         else:
             torso = AutoModel.from_pretrained(config.base_model, **kwargs)
+        if config.host_embeddings:
+            table = getattr(torso, "embed_tokens_per_layer", None)
+            if table is not None:
+                torso.embed_tokens_per_layer = HostEmbedding(table)
         torso.config.use_cache = True
         return torso
 
@@ -432,6 +531,12 @@ class StrandsDeciderModel(nn.Module):
             pooled = pool_last_token(hidden, attention_mask).to(torch.float32)
             rows = table[[slots[k] for k in sorted(slots)]].to(torch.float32)
             logits = pooled @ rows.t()
+            # The LM's own final transform, where it has one: Gemma soft-caps its logits
+            # at 30. Without it the read distribution is not the model's (options 1-3:
+            # 0.37 / 0.50 / 0.14 raw against the model's 0.36 / 0.40 / 0.24).
+            cap = getattr(getattr(self.torso, "config", None), "final_logit_softcapping", None)
+            if cap:
+                logits = cap * torch.tanh(logits / cap)
             pad = self.config.num_slots - logits.size(-1)
             if pad > 0:
                 logits = F.pad(logits, (0, pad), value=MASK_VALUE)
@@ -519,6 +624,8 @@ class StrandsDeciderModel(nn.Module):
         tok = AutoTokenizer.from_pretrained(path)
         if tok.pad_token is None:
             tok.pad_token = tok.eos_token
+        if config.force_bos:  # saved with the tokenizer; this only guards a lossy save
+            ensure_bos(tok)
 
         torso = cls._load_torso(config, device_map, attn_implementation)
 

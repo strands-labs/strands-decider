@@ -74,10 +74,16 @@ class UnforkableCache(TypeError):
 # `values`; a linear-attention (Gated DeltaNet) layer's `conv_states` and
 # `recurrent_states`, each a dict of tensors keyed by state index. First dim is the batch.
 _ROW_STATES = ("keys", "values", "conv_states", "recurrent_states")
+# Tensors a cache layer may hold that describe the layer, not a row, and so are shared
+# by every fork unchanged: a sliding-window layer's window size (Gemma 4), a 0-dim tensor.
+_SHARED_TENSORS = ("_sliding_window_tensor",)
 
 
 def _fork_layered_cache(cache: Any, n: int) -> Any:
     """`n` copies of a batch-1 cache that keeps one object per layer (transformers 5).
+
+    Covers sliding-window layers (Gemma 4 E2B: four of every five), whose only extra
+    tensor is the window size, shared by every fork.
 
     Covers hybrid torsos: Qwen3.5 mixes attention layers with Gated DeltaNet layers
     whose recurrent and convolution states must be repeated too, or the suffix forward
@@ -97,6 +103,8 @@ def _fork_layered_cache(cache: Any, n: int) -> Any:
         for name, v in list(vars(nl).items()):
             is_state = name in _ROW_STATES
             if isinstance(v, torch.Tensor):
+                if name in _SHARED_TENSORS and v.dim() == 0:
+                    continue  # per-layer, not per-row: every fork keeps it as it is
                 if not is_state:
                     raise UnforkableCache(f"cache layer {type(layer).__name__} holds tensor {name!r}")
                 if v.numel():

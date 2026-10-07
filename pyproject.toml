@@ -118,6 +118,7 @@ module = [
     "mlx.*",
     "mlx_lm.*",
     "PIL.*",
+    "tokenizers",
 ]
 ignore_missing_imports = true
 
