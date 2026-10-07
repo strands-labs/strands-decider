@@ -64,6 +64,11 @@ class EngineConfig:
     # Refuse a prompt that does not fit the window instead of shortening it, for
     # benchmarks that forbid truncation. The message names the "context window".
     strict_window: bool = False
+    # Also cap the tokens of one forward: a chunk of up to max_batch questions is cut
+    # where the state plus its questions would pass this many tokens (one question at
+    # least). Questions are scored independently, so answers only move by float
+    # rounding; long-context Gemma torsos need it at a 32,768 window. None: off.
+    max_batch_tokens: int | None = None
 
 
 class UnforkableCache(TypeError):
@@ -374,8 +379,7 @@ class SystemOneEngine:
         answers: dict[str, Answer] = {}
         total_tokens = 0
 
-        for start in range(0, len(names), self.cfg.max_batch):
-            chunk = slice(start, start + self.cfg.max_batch)
+        for chunk in self._chunks(state_text, rendered):
             chunk_rendered = rendered[chunk]
             chunk_slots = n_slots[chunk]
             chunk_kinds = [rq.kind for rq in chunk_rendered]
@@ -414,6 +418,24 @@ class SystemOneEngine:
             # One slot decision per question: the output side really is this cheap.
             usage=Usage(input_tokens=total_tokens, output_tokens=len(names)),
         )
+
+    def _chunks(self, state_text: str, rendered: list[RenderedQuestion]) -> list[slice]:
+        """Consecutive runs of at most max_batch questions, and of at most max_batch_tokens
+        tokens (the state counted once per question) when that is set."""
+        n, k = len(rendered), self.cfg.max_batch
+        if not self.cfg.max_batch_tokens:
+            return [slice(s, s + k) for s in range(0, n, k)]
+        enc = self.model.tokenizer
+        base = len(enc.encode(state_text, add_special_tokens=False)) if state_text else 0
+        cost = [base + len(enc.encode(rq.text, add_special_tokens=False)) for rq in rendered]
+        out, start, used = [], 0, 0
+        for i, c in enumerate(cost):
+            if i > start and (i - start >= k or used + c > self.cfg.max_batch_tokens):
+                out.append(slice(start, i))
+                start, used = i, 0
+            used += c
+        out.append(slice(start, n))
+        return out
 
     def ask(self, state: Content, questions: dict[str, Question]) -> SystemOneResponse:
         return self.evaluate(SystemOneRequest(state=state, questions=questions))

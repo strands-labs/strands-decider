@@ -120,3 +120,49 @@ def test_a_research_build_config_with_no_full_weight_targets_loads(tmp_path):
     path.write_text(json.dumps({"full_weight_targets": ["q_proj"]}))
     with pytest.raises(ValueError, match="full_weight_targets"):
         StrandsDeciderConfig.from_json(str(path))
+
+
+def test_a_token_budget_per_forward_keeps_the_answers(tmp_path):
+    """max_batch_tokens splits a request's forwards (long-context serving); every answer is the
+    unsplit one up to float rounding, and the chunks respect both caps."""
+    from strands_decider.infer import EngineConfig, SystemOneEngine
+    from strands_decider.schema import ChoiceQuestion, NoulQuestion, SystemOneRequest
+
+    rows = [ex for ex in _examples(40, seed=1) if ex.n_options <= 9]
+    write_jsonl(str(tmp_path / "train.jsonl"), rows)
+    write_jsonl(str(tmp_path / "val.jsonl"), _examples(10, seed=2))
+    base = tmp_path / "base"
+    tok = _tokenizer(base, rows)
+    _checkpoint(base, "e2b", len(tok))
+    T.train(T.TrainConfig(
+        train_files=[str(tmp_path / "train.jsonl")], val_files=[str(tmp_path / "val.jsonl")],
+        base_model=str(base), head_type="pointer", pointer_dim=16, lora_targets=GEMMA_TARGETS,
+        force_bos=True, head_dropout=0.0, max_length=2048, micro_batch_size=4, grad_accum=1,
+        max_steps=1, eval_every=0, output_dir=str(tmp_path / "out")))
+    model = StrandsDeciderModel.load(str(tmp_path / "out")).eval()
+    state = " ".join(ex.state if isinstance(ex.state, str) else "x" for ex in rows[:3])
+    qs = {f"q{i}": (NoulQuestion(instructions=rows[i].instructions + " ok?") if i % 2 else
+                    ChoiceQuestion(instructions=rows[i].instructions, criteria={"a": None, "b": "bee", "c": None}))
+          for i in range(7)}
+    req = SystemOneRequest(state=state, questions=qs)
+    for prefix in (True, False):
+        plain = SystemOneEngine(model, EngineConfig(device="cpu", max_batch=4, use_prefix_cache=prefix))
+        tight = SystemOneEngine(model, EngineConfig(device="cpu", max_batch=4, use_prefix_cache=prefix,
+                                                    max_batch_tokens=1))
+        a, b = plain.evaluate(req).answers, tight.evaluate(req).answers
+        for k in qs:
+            x, y = a[k].model_dump(), b[k].model_dump()
+            for f in x:
+                if isinstance(x[f], dict):
+                    assert all(abs(x[f][o] - y[f][o]) <= 2e-3 for o in x[f]), (k, f)
+                elif isinstance(x[f], float):
+                    assert abs(x[f] - y[f]) <= 2e-3, (k, f)
+                else:
+                    assert x[f] == y[f], (k, f)
+    from strands_decider.infer import render_question, render_state
+
+    rendered = [render_question(q) for q in qs.values()]
+    st = render_state(state)
+    sizes = lambda e: [len(range(*c.indices(7))) for c in e._chunks(st, rendered)]  # noqa: E731
+    assert sizes(tight) == [1] * 7  # the budget binds
+    assert sizes(plain) == [4, 3]  # off: max_batch only, as before
