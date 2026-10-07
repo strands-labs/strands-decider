@@ -39,7 +39,8 @@ DEFAULT_NUM_SLOTS = 24
 # -inf can produce NaNs if an entire row is masked by a malformed batch.
 MASK_VALUE = -1e4
 # Gemma 4 model types -> the multimodal class whose loader maps the text decoder's weights.
-GEMMA4_CLASSES = {"gemma4": "Gemma4ForConditionalGeneration"}
+GEMMA4_CLASSES = {"gemma4": "Gemma4ForConditionalGeneration",
+                  "gemma4_unified": "Gemma4UnifiedForConditionalGeneration"}
 
 
 @dataclass
@@ -106,7 +107,13 @@ class StrandsDeciderConfig:
     @classmethod
     def from_json(cls, path: str) -> StrandsDeciderConfig:
         with open(path, encoding="utf-8") as fh:
-            return cls(**json.load(fh))
+            d = json.load(fh)
+        # Written, empty, by the research builds the Gemma 4 releases were trained with: the
+        # torso matrices a full-weight optimizer trained. Empty means LoRA, as here.
+        if d.pop("full_weight_targets", []):
+            raise ValueError(f"{path}: full_weight_targets is set; this version loads LoRA "
+                             "checkpoints only")
+        return cls(**d)
 
 
 class HostEmbedding(nn.Module):
@@ -388,7 +395,9 @@ class StrandsDeciderModel(nn.Module):
             # over: Gemma4ForCausalLM does not map the checkpoint's `model.language_model.*`
             # names and leaves every text weight randomly initialised, with only a
             # missing-keys warning. Load the whole model, whose class maps them, keep the
-            # text decoder, and let the vision and audio encoders (0.47B) go.
+            # text decoder, and let the vision and audio encoders (0.47B) go. The 12B is
+            # `gemma4_unified`, a class of its own with the same layout; the 26B-A4B is
+            # `gemma4` with a mixture-of-experts block in every layer.
             import transformers
 
             full = getattr(transformers, GEMMA4_CLASSES[base_cfg.model_type]).from_pretrained(

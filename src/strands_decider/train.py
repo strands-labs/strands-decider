@@ -302,6 +302,8 @@ def train(cfg: TrainConfig) -> str:
     rank, _, world = distributed.env()
     if cfg.kl_frozen_reference and not (cfg.precompute_frozen_kl and cfg.kl_frozen_weight > 0):
         raise ValueError("kl_frozen_reference needs kl_frozen_weight > 0 and precompute_frozen_kl")
+    if cfg.host_embeddings and world > 1:  # DDP refuses a module with parameters on the CPU
+        raise ValueError("host_embeddings is for one GPU; under torchrun keep the table on the GPU")
     torch.manual_seed(cfg.seed)
     random.seed(cfg.seed)
     device = "cuda" if torch.cuda.is_available() else "cpu"

@@ -46,3 +46,45 @@ def test_prompt_is_byte_identical_to_semif(ex):
     ids, _, _ = semif.encode_prompt(tok, row, 4096)
     assert tok.encode(render(tok, row), add_special_tokens=False) == ids
 
+
+class _StubTok:
+    """Just enough tokenizer for label(): letters are ids 100.., other text is char codes."""
+
+    pad_token_id = 0
+
+    def apply_chat_template(self, messages, **_):
+        return "".join(m["content"] for m in messages)[:48]
+
+    def encode(self, text, add_special_tokens=False):
+        if len(text) == 1 and text in LETTERS:
+            return [100 + LETTERS.index(text)]
+        return [1 + ord(c) % 90 for c in text]
+
+    def decode(self, ids):
+        return LETTERS[ids[0] - 100]
+
+
+def test_label_matches_the_models_own_softcapped_head():
+    """A soft-capped LM (Gemma) must be read through its cap, as its own head does."""
+    torch = pytest.importorskip("torch")
+    transformers = pytest.importorskip("transformers")
+    if not hasattr(transformers, "Gemma4TextConfig"):
+        pytest.skip("this transformers has no Gemma 4")
+    from strands_decider.data.teacher import label
+
+    torch.manual_seed(0)
+    cfg = transformers.Gemma4TextConfig(
+        vocab_size=128, hidden_size=64, intermediate_size=128, num_hidden_layers=2,
+        num_attention_heads=2, num_key_value_heads=1, head_dim=16, global_head_dim=16,
+        hidden_size_per_layer_input=8, vocab_size_per_layer_input=128,
+        layer_types=["sliding_attention", "full_attention"], sliding_window=4,
+        num_kv_shared_layers=0, final_logit_softcapping=2.0, tie_word_embeddings=True,
+        pad_token_id=0)
+    model = transformers.Gemma4ForCausalLM(cfg).eval()
+    tok = _StubTok()
+    probs = label(model, tok, [CHOICE], log_every=0)[0]
+    row, _ = to_row(CHOICE)
+    ids = torch.tensor([tok.encode(render(tok, row))])
+    with torch.inference_mode():
+        own = model(input_ids=ids).logits[0, -1, [100, 101]].float().softmax(-1).tolist()
+    assert probs == pytest.approx(own, abs=1e-4)
