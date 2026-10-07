@@ -92,6 +92,46 @@ under `/mnt/c`; reads across the boundary are slow enough to bottleneck loading.
 kernel needs the CUDA compiler). torch 2.7 matters: `fla` wants Triton 3.3, which torch
 2.6 does not ship.
 
+### Gemma 4 torsos
+
+Four Gemma 4 instruction-tuned checkpoints work as torsos, all Apache-2.0. Set `base_model`
+to one of them; transformers 5.15, the lowest version the package admits, has their classes.
+
+| `base_model` | loaded through | per-layer table | peak GPU memory per rank |
+| --- | --- | --- | --- |
+| `google/gemma-4-E2B-it` | `Gemma4ForConditionalGeneration` | yes | 14.5 GiB |
+| `google/gemma-4-E4B-it` | `Gemma4ForConditionalGeneration` | yes | 19.9 GiB |
+| `google/gemma-4-12B-it` | `Gemma4UnifiedForConditionalGeneration` | no | 28.6 GiB |
+| `google/gemma-4-26B-A4B-it` | `Gemma4ForConditionalGeneration` (mixture of experts) | no | 52.9 GiB |
+
+The loader keeps the text decoder and drops the vision and audio encoders. The memory
+column is what our training runs peaked at on H100s, at micro-batch 8 with
+`gradient_checkpointing: true` and a 4,096-token window, so every size trains on one
+8-GPU host.
+
+Settings for a Gemma torso:
+
+- `force_bos: true`. The -it tokenizers add no BOS token (their chat template writes
+  it), and Gemma reads a prompt without it badly: the frozen E2B torso reads JevBench at
+  chance without it.
+- `lora_targets: ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj",
+  "down_proj"]`. Gemma has no recurrent layers, so Qwen3.5's `in_proj_*` and `out_proj`
+  targets do not apply.
+- `host_embeddings: true` (one GPU only) keeps the E2B/E4B per-layer embedding table
+  (E2B: 2.35B parameters, 4.4 GiB in bf16) in host memory. It is a lookup table and never
+  trained. Under `torchrun` it is refused, because DDP refuses parameters on the CPU.
+
+**26B-A4B: the experts are not adapted.** Each layer has a mixture-of-experts block (128
+experts, top 8) beside a dense MLP. LoRA attaches by module name, so it reaches attention
+and the dense MLP. The experts are stored as 3-D parameters, not as linear modules, and
+neither they nor the router get an adapter: they keep their base weights.
+
+The frozen option-number readout and the teacher labeller apply Gemma's final logit
+soft-cap, so both read the model's own distribution. At serving time, a 32,768-token
+window with several long questions in one forward can run a Gemma torso out of memory:
+`strands-decider serve --max-batch-tokens N` caps the tokens of one forward
+([Serve](../docs/inference.md#serve)).
+
 ### Training on several GPUs
 
 `NGPU=8 training/recipe.sh all` runs the recipe on eight GPUs with the commands below. The same

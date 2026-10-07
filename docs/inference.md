@@ -223,6 +223,11 @@ cut, and the question keeps its options. `--strict-window` refuses such a prompt
 with HTTP 422 and a message that names the context window, for an evaluation that forbids
 truncation. `--max-batch N` (default 32) sets how many questions one forward pass encodes;
 lower it when a very long state with many questions does not fit in GPU memory.
+`--max-batch-tokens N` also caps the tokens of one forward, counting the state once per
+question: a forward then ends early, before it would pass N tokens, and always holds at
+least one question. Questions are scored independently, so answers change only by float
+rounding. Long-context torsos (Gemma 4 at a 32,768-token window) need it; unset, only
+`--max-batch` applies.
 
 ## Asking many questions is nearly free
 
