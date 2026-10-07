@@ -93,6 +93,56 @@ one epoch, length-grouped batching. Each writes to the `output_dir` of its confi
 Head-only training (`freeze_torso: true`) is much cheaper and much weaker —
 useful to sanity-check a pipeline, not to produce a usable model.
 
+### Seeds and soups
+
+Two seeds of one recipe differ by about 3 tasks on JevBench (seed SD 3.1 over 18 seeds of
+v26's c0001 recipe). That is the spread you get when each of the ~60 items near the decision
+boundary falls either way at its own rate, so the top seed by JevBench is a lucky draw, not a
+better model. A release is therefore made from 3 seeds, not by picking one. Train the recipe
+three times, with `seed: 0`, `1` and `2` and an `output_dir` each (here `checkpoints/r-s0` to
+`r-s2`), then soup and calibrate them:
+
+```bash
+strands-decider soup checkpoints/r-s0 checkpoints/r-s1 checkpoints/r-s2 --out checkpoints/r-soup
+strands-decider calibrate checkpoints/r-soup --data data/holdout_v5_norule.jsonl
+```
+
+`soup` writes one checkpoint whose weights average the seeds' by what they compute, not
+tensor by tensor:
+
+- **LoRA**: for each adapted layer, the soup's update ΔW = s · B @ A (s = lora_alpha / r)
+  is exactly the mean of the seeds' updates. Averaging A and B separately would mean nothing,
+  since each seed's adapter is defined only up to an invertible r × r mixing. The soup stores
+  the mean as a rank-N·r adapter: the A matrices stacked, the B matrices stacked and divided
+  by N, and lora_alpha scaled so that s is unchanged. Three rank-16 seeds give a rank-48
+  adapter, which the loader, `serve` and the Hugging Face export read as any adapter.
+- **Head**: the soup's head logit is exactly the mean of the seeds' head logits. A pointer
+  head's logit is a dot product q · k, unchanged by any rotation of the q/k space, so heads
+  initialised independently have unrelated bases and averaging their tensors gives a
+  different, wrong head. Each head's LayerNorm is folded into its q and k projections and
+  the heads are stacked (pointer_dim N · d). A linear slot head is averaged directly; an
+  MLP slot head stacks its hidden units.
+- **Temperatures** are reset to 1: the seeds' fitted temperatures do not describe the soup,
+  so calibrate it before you evaluate or serve it.
+
+The checkpoints must share one recipe: their configs may differ only in the fitted
+temperatures, and their adapters must be plain LoRA (no DoRA, rank or alpha patterns, or
+`modules_to_save`) over the same modules. Otherwise `soup` refuses them. It writes
+`soup.json` with the input paths; the Hugging Face export leaves that file out.
+
+Two training options help compare seeds. Both are off by default, and off, training is
+unchanged:
+
+- `val_split_seed: <int>` fixes the train/validation split across seeds, so every seed
+  trains on the same rows. Without it each seed holds out its own `val_fraction`.
+  Initialisation, data order and option order still follow `seed`.
+- `ema_decay: <d>` keeps an fp32 exponential moving average of the trained weights, updated
+  after every optimizer step with decay min(d, (1 + step) / (10 + step)). The average is
+  validated at the end and saved, also by mid-run saves, which then train on from the live
+  weights. We measured it once, `ema_decay: 0.998` on Gemma 4 E4B against the same 3 seeds
+  without it: JevBench +1.7 tasks and Brier -0.010, but 5.7 more yes/no answers near 0.5,
+  which failed our release gate. No recipe turns it on.
+
 ## 4. Calibrate
 
 ```bash
