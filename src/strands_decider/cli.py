@@ -322,7 +322,7 @@ def serve_cmd(
     ),
     max_batch_tokens: int | None = typer.Option(
         None, "--max-batch-tokens",
-        help="Also cap one forward's tokens (state counted per question); for long-context torsos.",
+        help="Also cap one forward's padded tokens (questions x longest state + question); for long-context torsos.",
     ),
 ) -> None:
     """Serve POST /v1/systemone. JevBench's typesafe adapter runs against it unchanged."""

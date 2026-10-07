@@ -65,9 +65,10 @@ class EngineConfig:
     # benchmarks that forbid truncation. The message names the "context window".
     strict_window: bool = False
     # Also cap the tokens of one forward: a chunk of up to max_batch questions is cut
-    # where the state plus its questions would pass this many tokens (one question at
-    # least). Questions are scored independently, so answers only move by float
-    # rounding; long-context Gemma torsos need it at a 32,768 window. None: off.
+    # where its rows, fitted to the window and padded to the longest (state + question),
+    # would pass this many tokens (one question at least). Questions are fitted before the
+    # cut and scored independently, so answers only move by float rounding; long-context
+    # Gemma torsos need it at a 32,768 window. None: off.
     max_batch_tokens: int | None = None
 
 
@@ -265,18 +266,18 @@ class SystemOneEngine:
 
     @torch.inference_mode()  # type: ignore[untyped-decorator]
     def _slot_probs_batched(
-        self, state_text: str, question_texts: list[str],
+        self, s: list[int], q: list[list[int]],
         n_slots: list[int], kinds: list[str],
         rendered: list[RenderedQuestion] | None = None,
     ) -> tuple[torch.Tensor, int]:
-        """Fallback: encode each full prompt independently.
+        """Fallback: encode each full prompt independently, from `_fit`'s state `s` and
+        questions `q`.
 
         Previously this concatenated state and question into one string and let the
         tokeniser truncate, which cuts from the right -- removing the options and the
         `<answer>` marker the head pools at. Now it shares `_fit` with the cached path,
         so both truncate the same thing in the same direction.
         """
-        s, q = self._fit(state_text, question_texts)
         ids, mask = self._pad([s + qi for qi in q])
         # This path forwards the whole prompt, so option positions sit after the state.
         assert rendered is not None or self.model.config.head_type != "pointer"
@@ -294,17 +295,16 @@ class SystemOneEngine:
     @torch.inference_mode()  # type: ignore[untyped-decorator]
     def _slot_probs_shared_prefix(
         self,
-        state_text: str,
-        question_texts: list[str],
+        s: list[int],
+        q: list[list[int]],
         n_slots: list[int],
         kinds: list[str],
         rendered: list[RenderedQuestion] | None = None,
     ) -> tuple[torch.Tensor, int]:
-        """Encode the state once, then all question suffixes against that cache."""
-        m = len(question_texts)
+        """Encode the state `s` once, then all question suffixes `q` against that cache."""
+        m = len(q)
         # The suffixes continue an already-tokenised sequence, so _fit adds no BOS to
         # them -- one mid-sequence would be a token training never saw.
-        s, q = self._fit(state_text, question_texts)
         prefix_ids = torch.tensor([s], device=self.device)
         prefix_len = prefix_ids.size(1)
 
@@ -379,7 +379,8 @@ class SystemOneEngine:
         answers: dict[str, Answer] = {}
         total_tokens = 0
 
-        for chunk in self._chunks(state_text, rendered):
+        for chunk, state_ids, question_ids, offsets in self._chunks(state_text, rendered):
+            self._last_offsets = offsets  # what _option_idx reads
             chunk_rendered = rendered[chunk]
             chunk_slots = n_slots[chunk]
             chunk_kinds = [rq.kind for rq in chunk_rendered]
@@ -391,8 +392,7 @@ class SystemOneEngine:
             if self.cfg.use_prefix_cache and len(chunk_rendered) > 1:
                 try:
                     probs, ntok = self._slot_probs_shared_prefix(
-                        state_text, [rq.text for rq in chunk_rendered], chunk_slots,
-                        chunk_kinds, rendered=chunk_rendered,
+                        state_ids, question_ids, chunk_slots, chunk_kinds, rendered=chunk_rendered,
                     )
                     total_tokens += ntok
                 except UnforkableCache as e:
@@ -400,8 +400,7 @@ class SystemOneEngine:
                     self.cfg = replace(self.cfg, use_prefix_cache=False)
             if probs is None:
                 probs, ntok = self._slot_probs_batched(
-                    state_text, [rq.text for rq in chunk_rendered], chunk_slots,
-                    chunk_kinds, rendered=chunk_rendered,
+                    state_ids, question_ids, chunk_slots, chunk_kinds, rendered=chunk_rendered,
                 )
                 total_tokens += ntok
 
@@ -419,22 +418,24 @@ class SystemOneEngine:
             usage=Usage(input_tokens=total_tokens, output_tokens=len(names)),
         )
 
-    def _chunks(self, state_text: str, rendered: list[RenderedQuestion]) -> list[slice]:
-        """Consecutive runs of at most max_batch questions, and of at most max_batch_tokens
-        tokens (the state counted once per question) when that is set."""
-        n, k = len(rendered), self.cfg.max_batch
-        if not self.cfg.max_batch_tokens:
-            return [slice(s, s + k) for s in range(0, n, k)]
-        enc = self.model.tokenizer
-        base = len(enc.encode(state_text, add_special_tokens=False)) if state_text else 0
-        cost = [base + len(enc.encode(rq.text, add_special_tokens=False)) for rq in rendered]
-        out, start, used = [], 0, 0
-        for i, c in enumerate(cost):
-            if i > start and (i - start >= k or used + c > self.cfg.max_batch_tokens):
-                out.append(slice(start, i))
-                start, used = i, 0
-            used += c
-        out.append(slice(start, n))
+    def _chunks(
+        self, state_text: str, rendered: list[RenderedQuestion]
+    ) -> list[tuple[slice, list[int], list[list[int]], list[Any]]]:
+        """Consecutive runs of at most max_batch questions, each with its fitted state,
+        questions and option offsets. A run of max_batch is fitted to the window once; with
+        max_batch_tokens set it is then cut where rows x (state + longest question) would
+        pass the cap, which bounds the padded forward and leaves every input as fitted."""
+        k, cap = self.cfg.max_batch, self.cfg.max_batch_tokens
+        out = []
+        for g in range(0, len(rendered), k):
+            s, q = self._fit(state_text, [rq.text for rq in rendered[g : g + k]])
+            offsets, start, longest = self._last_offsets, 0, 0
+            for i, qi in enumerate(q):
+                if cap and i > start and (i - start + 1) * (len(s) + max(longest, len(qi))) > cap:
+                    out.append((slice(g + start, g + i), s, q[start:i], offsets[start:i]))
+                    start, longest = i, 0
+                longest = max(longest, len(qi))
+            out.append((slice(g + start, g + len(q)), s, q[start:], offsets[start:]))
         return out
 
     def ask(self, state: Content, questions: dict[str, Question]) -> SystemOneResponse:

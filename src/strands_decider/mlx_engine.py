@@ -180,10 +180,9 @@ class MLXEngine(SystemOneEngine):
         return self._option_idx(rendered, base)
 
     def _slot_probs_batched(
-        self, state_text: str, question_texts: list[str], n_slots: list[int], kinds: list[str],
+        self, state: list[int], questions: list[list[int]], n_slots: list[int], kinds: list[str],
         rendered: list[RenderedQuestion] | None = None,
     ) -> tuple[torch.Tensor, int]:
-        state, questions = self._fit(state_text, question_texts)
         rows = [state + question for question in questions]
         hidden = self._hidden(rows)
         probs = self._probs(hidden, [len(row) - 1 for row in rows],
@@ -191,10 +190,9 @@ class MLXEngine(SystemOneEngine):
         return probs, sum(len(row) for row in rows)
 
     def _slot_probs_shared_prefix(
-        self, state_text: str, question_texts: list[str], n_slots: list[int], kinds: list[str],
+        self, state: list[int], questions: list[list[int]], n_slots: list[int], kinds: list[str],
         rendered: list[RenderedQuestion] | None = None,
     ) -> tuple[torch.Tensor, int]:
-        state, questions = self._fit(state_text, question_texts)
         prefix = make_prompt_cache(self._cache_owner)
         self._hidden([state], prefix)
         # `merge` copies each layer's state into a batch of len(questions); `prefix` is untouched.

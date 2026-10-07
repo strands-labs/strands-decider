@@ -163,6 +163,6 @@ def test_a_token_budget_per_forward_keeps_the_answers(tmp_path):
 
     rendered = [render_question(q) for q in qs.values()]
     st = render_state(state)
-    sizes = lambda e: [len(range(*c.indices(7))) for c in e._chunks(st, rendered)]  # noqa: E731
+    sizes = lambda e: [len(range(*c[0].indices(7))) for c in e._chunks(st, rendered)]  # noqa: E731
     assert sizes(tight) == [1] * 7  # the budget binds
     assert sizes(plain) == [4, 3]  # off: max_batch only, as before
