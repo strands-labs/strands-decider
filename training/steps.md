@@ -126,9 +126,13 @@ tensor by tensor:
   so calibrate it before you evaluate or serve it.
 
 The checkpoints must share one recipe: their configs may differ only in the fitted
-temperatures, and their adapters must be plain LoRA (no DoRA, rank or alpha patterns, or
-`modules_to_save`) over the same modules. Otherwise `soup` refuses them. It writes
-`soup.json` with the input paths; the Hugging Face export leaves that file out.
+temperatures, they must resolve to one base revision (the config's `base_revision`, else
+their `provenance.json`'s, as the loader resolves it), and their adapters must be plain LoRA
+(no DoRA, rank or alpha patterns, `modules_to_save` or `target_parameters`) over the same
+modules. Otherwise `soup` refuses them. The soup's config pins that base revision. `--out`
+must not overlap an input and must be absent or empty; `--replace` deletes what it holds
+first. It writes `soup.json` with the input paths; the Hugging Face export leaves that file
+out.
 
 Two training options help compare seeds. Both are off by default, and off, training is
 unchanged:
@@ -139,7 +143,8 @@ unchanged:
 - `ema_decay: <d>` keeps an fp32 exponential moving average of the trained weights, updated
   after every optimizer step with decay min(d, (1 + step) / (10 + step)). The average is
   validated at the end and saved, also by mid-run saves, which then train on from the live
-  weights. We measured it once, `ema_decay: 0.998` on Gemma 4 E4B against the same 3 seeds
+  weights. Periodic validation (`eval_every`) scores the live weights, while periodic saves
+  hold the EMA weights, so read a mid-run history's validation loss accordingly. We measured it once, `ema_decay: 0.998` on Gemma 4 E4B against the same 3 seeds
   without it: JevBench +1.7 tasks and Brier -0.010, but 5.7 more yes/no answers near 0.5,
   which failed our release gate. No recipe turns it on.
 
