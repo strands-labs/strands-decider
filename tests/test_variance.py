@@ -194,6 +194,23 @@ def test_a_regex_target_is_kept(ckpts, tmp_path):
     assert set(da) == set(db) and all(torch.equal(da[k], db[k]) for k in da)
 
 
+def test_base_revisions_resolve_as_the_loader_does(ckpts, tmp_path):
+    def provenance(c, rev):
+        with open(f"{c}/provenance.json", "w") as fh:
+            json.dump({"base_model": hf_export.BASE_MODEL, "base_model_revision": rev}, fh)
+
+    provenance(ckpts[0], "rev-a")
+    provenance(ckpts[1], "rev-b")
+    with pytest.raises(ValueError, match="base revisions"):
+        soup(ckpts, str(tmp_path / "mixed"))
+    # One pinned by its config, two by provenance: one base, and the soup pins it.
+    provenance(ckpts[1], "rev-a")
+    cfg = json.load(open(f"{ckpts[2]}/strands_decider_config.json"))
+    json.dump({**cfg, "base_revision": "rev-a"}, open(f"{ckpts[2]}/strands_decider_config.json", "w"))
+    soup(ckpts, str(tmp_path / "soup"))
+    assert json.load(open(tmp_path / "soup" / "strands_decider_config.json"))["base_revision"] == "rev-a"
+
+
 # ---------------------------------------------------------------- training
 
 

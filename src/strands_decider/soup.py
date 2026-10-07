@@ -28,7 +28,7 @@ import shutil
 
 import torch
 
-from .modeling import CONFIG_NAME, config_path, load_head_state
+from .modeling import CONFIG_NAME, StrandsDeciderConfig, base_revision, config_path, load_head_state
 
 ADAPTER = "lora/adapter_model.safetensors"
 ADAPTER_CONFIG = "lora/adapter_config.json"
@@ -118,10 +118,14 @@ def soup(checkpoints: list[str], out: str, replace: bool = False) -> str:
     _check_paths(checkpoints, out, replace)
     n = len(checkpoints)
     cfgs = [_json(config_path(c)) for c in checkpoints]
-    recipe = [{k: v for k, v in c.items() if k not in FITTED} for c in cfgs]
+    recipe = [{k: v for k, v in c.items() if k not in FITTED | {"base_revision"}} for c in cfgs]
     if any(r != recipe[0] for r in recipe):
         raise ValueError("the checkpoints' configs differ beyond their temperatures: not one recipe")
-    cfg = cfgs[0]
+    # The base revision is compared as the loader resolves it (config, else provenance.json).
+    revisions = {base_revision(c, StrandsDeciderConfig(**cf)) for c, cf in zip(checkpoints, cfgs, strict=True)}
+    if len(revisions) > 1:
+        raise ValueError(f"the checkpoints were trained on different base revisions: {sorted(map(str, revisions))}")
+    cfg = {**cfgs[0], "base_revision": revisions.pop()}  # pinned: no provenance fallback needed
     if cfg.get("full_weight_targets"):  # a research build's torso-matrix checkpoint
         raise ValueError("soup reads LoRA checkpoints; full-weight checkpoints are not supported")
 
