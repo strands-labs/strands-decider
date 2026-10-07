@@ -184,6 +184,16 @@ def test_a_nonempty_out_is_refused_unless_replaced(ckpts, tmp_path):
     assert StrandsDeciderModel.load(str(out)).config.base_revision is None
 
 
+def test_a_regex_target_is_kept(ckpts, tmp_path):
+    regex = r".*self_attn\.(q_proj|v_proj)"
+    acfg = json.load(open(f"{ckpts[0]}/lora/adapter_config.json"))
+    json.dump({**acfg, "target_modules": regex}, open(f"{ckpts[0]}/lora/adapter_config.json", "w"))
+    soup([ckpts[0]], str(tmp_path / "soup"))
+    assert json.load(open(tmp_path / "soup" / "lora" / "adapter_config.json"))["target_modules"] == regex
+    da, db = _delta_w(StrandsDeciderModel.load(ckpts[0])), _delta_w(StrandsDeciderModel.load(str(tmp_path / "soup")))
+    assert set(da) == set(db) and all(torch.equal(da[k], db[k]) for k in da)
+
+
 # ---------------------------------------------------------------- training
 
 

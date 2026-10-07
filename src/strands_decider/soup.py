@@ -127,8 +127,9 @@ def soup(checkpoints: list[str], out: str, replace: bool = False) -> str:
 
     if cfg.get("use_lora"):
         acfgs = [_json(os.path.join(c, ADAPTER_CONFIG)) for c in checkpoints]
-        for a in acfgs:  # PEFT writes this set in no fixed order
-            a["target_modules"] = sorted(a["target_modules"] or [])
+        for a in acfgs:  # PEFT writes a list in no fixed order; a string is a regex, kept as is
+            if isinstance(a.get("target_modules"), list):
+                a["target_modules"] = sorted(a["target_modules"])
         acfg = acfgs[0]
         if any(a != acfg for a in acfgs):
             raise ValueError("the adapter configs differ")
