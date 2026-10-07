@@ -170,6 +170,20 @@ def test_expert_parameter_adapters_are_refused(ckpts, tmp_path):
     assert not (tmp_path / "soup").exists()
 
 
+def test_a_nonempty_out_is_refused_unless_replaced(ckpts, tmp_path):
+    out = tmp_path / "soup"
+    out.mkdir()
+    (out / "head.safetensors").write_bytes(b"stale")  # an earlier export's head
+    (out / "provenance.json").write_text(json.dumps(
+        {"base_model": hf_export.BASE_MODEL, "base_model_revision": "unrelated"}))
+    with pytest.raises(ValueError, match="not empty"):
+        soup(ckpts, str(out))
+    assert (out / "head.safetensors").read_bytes() == b"stale"
+    soup(ckpts, str(out), replace=True)
+    assert not (out / "head.safetensors").exists() and not (out / "provenance.json").exists()
+    assert StrandsDeciderModel.load(str(out)).config.base_revision is None
+
+
 # ---------------------------------------------------------------- training
 
 

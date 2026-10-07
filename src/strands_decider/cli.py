@@ -184,7 +184,8 @@ def train_cmd(
 @app.command("soup", hidden=True)
 def soup_cmd(
     checkpoints: list[str] = typer.Argument(..., help="Checkpoints of one recipe (other seeds)."),
-    out: str = typer.Option(..., "--out", help="Directory for the souped checkpoint."),
+    out: str = typer.Option(..., "--out", help="Directory for the souped checkpoint: absent or empty."),
+    replace: bool = typer.Option(False, "--replace", help="Delete what --out holds first."),
 ) -> None:
     """Average same-recipe checkpoints by their LoRA updates and head logits (soup.py).
 
@@ -192,7 +193,7 @@ def soup_cmd(
     """
     from .soup import soup
 
-    soup(checkpoints, out)
+    soup(checkpoints, out, replace=replace)
     console.print(f"[green]soup of {len(checkpoints)} checkpoints -> {out}[/] (calibrate it next)")
 
 

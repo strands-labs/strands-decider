@@ -97,22 +97,25 @@ def soup_adapters(adapters: list[dict[str, torch.Tensor]]) -> dict[str, torch.Te
     return out
 
 
-def _check_paths(checkpoints: list[str], out: str) -> None:
-    """Refuse an `out` that overlaps an input."""
+def _check_paths(checkpoints: list[str], out: str, replace: bool) -> None:
+    """Refuse an `out` that overlaps an input, and a nonempty `out` unless `replace`."""
     dst = os.path.realpath(out)
     for c in checkpoints:
         src = os.path.realpath(c)
         if os.path.commonpath([src, dst]) in (src, dst):
             raise ValueError(f"--out {out} overlaps the input {c}")
+    if os.path.isdir(dst) and os.listdir(dst) and not replace:
+        raise ValueError(f"--out {out} is not empty; pass --replace to replace its contents")
 
 
-def soup(checkpoints: list[str], out: str) -> str:
-    """Write the soup of `checkpoints` (local directories of one recipe) to `out`."""
+def soup(checkpoints: list[str], out: str, replace: bool = False) -> str:
+    """Write the soup of `checkpoints` (local directories of one recipe) to `out`, which must
+    be empty or absent; `replace` deletes what it holds first."""
     from safetensors.torch import load_file, save_file
 
     if not checkpoints:
         raise ValueError("no checkpoints")
-    _check_paths(checkpoints, out)
+    _check_paths(checkpoints, out, replace)
     n = len(checkpoints)
     cfgs = [_json(config_path(c)) for c in checkpoints]
     recipe = [{k: v for k, v in c.items() if k not in FITTED} for c in cfgs]
@@ -133,6 +136,8 @@ def soup(checkpoints: list[str], out: str) -> str:
                 or acfg.get("modules_to_save") or acfg.get("target_parameters"):
             raise ValueError("soup supports plain LoRA (no DoRA, rank/alpha patterns, modules_to_save "
                              "or target_parameters)")
+    if replace and os.path.isdir(out):
+        shutil.rmtree(out)
     os.makedirs(os.path.join(out, "lora"), exist_ok=True)
 
     if cfg.get("use_lora"):
