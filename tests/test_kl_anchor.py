@@ -5,6 +5,7 @@ CPU only, with test_ddp.py's tiny Qwen3 torso and test-trained tokenizer.
 from __future__ import annotations
 
 import json
+import math
 
 import pytest
 import torch
@@ -168,3 +169,24 @@ def test_reverse_kl_changes_training_and_unknown_direction_is_refused(corpus, tm
     assert _same(plain, fwd) and not _same(fwd, rev)
     with pytest.raises(ValueError, match="kl_direction"):
         _train(corpus, tmp_path / "bad", monkeypatch, kl_direction="sideways")
+
+
+def test_teacher_forward_kl_is_unchanged():
+    stu, _, tea = _dists(2)
+    tv = (tea > 0) & torch.isfinite(stu)
+    old = T._kl(tea.clamp_min(1e-12).log(), stu, tv, "forward", tea)
+    assert torch.equal(T._teacher_kl(tea, stu, "forward"), old)
+
+
+def test_reverse_teacher_kl_charges_mass_on_a_zero_target():
+    # A rounded teacher [1, 0] against a uniform student: the review's reproducer.
+    tea = torch.tensor([[1.0, 0.0, 0.0]], dtype=torch.float64)
+    logits = torch.tensor([[0.0, 0.0, float("-inf")]], dtype=torch.float64, requires_grad=True)
+    loss = T._teacher_kl(tea, logits.log_softmax(-1), "reverse").sum()
+    loss.backward()
+    assert loss.item() > 0
+    after = (logits.detach() - 0.1 * logits.grad).softmax(-1)
+    assert after[0, 0].item() > 0.5  # one step moves the student toward the teacher
+    floor = T.REVERSE_KL_TARGET_FLOOR
+    want = 0.5 * math.log(0.5 / (1 / (1 + floor))) + 0.5 * math.log(0.5 / (floor / (1 + floor)))
+    assert loss.item() == pytest.approx(want)

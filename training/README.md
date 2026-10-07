@@ -185,7 +185,9 @@ default, training is unchanged.
 **KL direction.** `kl_direction: reverse` turns both KL terms, the teacher's and the frozen
 anchor's, from KL(target || student), which covers the target's mass, into KL(student ||
 target), which seeks its mode. The default, `forward`, is the formula of every earlier run,
-bit for bit.
+bit for bit. A teacher file rounds to six decimals, so an option can have probability 0;
+reverse KL floors the teacher on every real option at 1e-6 and renormalises, so student
+mass there is penalised rather than skipped.
 
 **Is it the same training?** On CPU (`pytest -m distributed`: a tiny Qwen3 with LoRA and
 the pointer readout, frozen KL, a partial teacher, mixed row weights, KL-only rows, across

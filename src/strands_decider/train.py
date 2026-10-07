@@ -312,6 +312,23 @@ def _kl(target: torch.Tensor, student: torch.Tensor, valid: torch.Tensor, direct
     return (w.masked_fill(~valid, 0.0) * diff).sum(dim=-1)
 
 
+# The teacher writer rounds to six decimals, so a real option can carry a target of exactly 0.
+REVERSE_KL_TARGET_FLOOR = 1e-6
+
+
+def _teacher_kl(tea: torch.Tensor, stu: torch.Tensor, direction: str) -> torch.Tensor:
+    """Per-row KL between a teacher's option probabilities `tea` (0 past a row's options) and
+    the student's log-probabilities `stu` (-inf past them). Forward skips the teacher's zeros,
+    which carry no weight in KL(teacher || student). Reverse must charge student mass on them,
+    so it floors the target on every real option at REVERSE_KL_TARGET_FLOOR and renormalises."""
+    real = torch.isfinite(stu)
+    if direction == "forward":
+        return _kl(tea.clamp_min(1e-12).log(), stu, (tea > 0) & real, direction, tea)
+    floored = tea.clamp_min(REVERSE_KL_TARGET_FLOOR).masked_fill(~real, 0.0)
+    target = floored / floored.sum(dim=-1, keepdim=True)
+    return _kl(target.clamp_min(1e-12).log(), stu, real, direction)
+
+
 @distributed.entry_point  # under torchrun, this process is one rank of the run
 def train(cfg: TrainConfig) -> str:
     rank, _, world = distributed.env()
@@ -589,8 +606,7 @@ def train(cfg: TrainConfig) -> str:
                 has = batch["has_teacher"]
                 stu = out["log_probs"][has]
                 tea = batch["teacher"][has][:, : stu.shape[-1]]
-                valid = (tea > 0) & torch.isfinite(stu)
-                tkl = _kl(tea.clamp_min(1e-12).log(), stu, valid, cfg.kl_direction, tea).mean() * part.teacher
+                tkl = _teacher_kl(tea, stu, cfg.kl_direction).mean() * part.teacher
                 step_loss = step_loss + cfg.teacher_weight * tkl
                 running_tkl += float(tkl)
             # DDP averages the ranks' gradients; `* world` makes that the 1-GPU sum.
