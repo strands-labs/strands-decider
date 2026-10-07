@@ -125,3 +125,46 @@ def test_train_with_a_reference(corpus, tmp_path, monkeypatch, tokenizer):
     assert all(h["kl"] > 0 for h in history if "kl" in h)
     assert not all(torch.equal(x, y) for p, q in zip(plain, grads, strict=True)
                    for x, y in zip(p, q, strict=True))
+
+
+def _same(a, b):
+    return all(torch.equal(x, y) for p, q in zip(a, b, strict=True)
+               for x, y in zip(p, q, strict=True))
+
+
+def _dists(seed):
+    g = torch.Generator().manual_seed(seed)
+    stu = torch.log_softmax(torch.randn(6, 5, generator=g), -1)
+    ref = torch.log_softmax(torch.randn(6, 5, generator=g), -1)
+    stu[:, 4] = ref[:, 4] = float("-inf")  # a masked slot, as past a row's options
+    tea = ref.exp()
+    tea[0] = 0.0  # a row without a teacher
+    return stu, ref, tea
+
+
+def test_forward_kl_is_the_formula_every_run_so_far_used():
+    stu, ref, tea = _dists(0)
+    valid = torch.isfinite(ref) & torch.isfinite(stu)
+    old = (ref.exp().masked_fill(~valid, 0.0) * (ref - stu).masked_fill(~valid, 0.0)).sum(-1)
+    assert torch.equal(T._kl(ref, stu, valid, "forward"), old)
+    tv = (tea > 0) & torch.isfinite(stu)
+    old_t = (tea.masked_fill(~tv, 0.0)
+             * (tea.clamp_min(1e-12).log() - stu).masked_fill(~tv, 0.0)).sum(-1)
+    assert torch.equal(T._kl(tea.clamp_min(1e-12).log(), stu, tv, "forward", tea), old_t)
+
+
+def test_reverse_kl_is_student_against_target():
+    stu, ref, _ = _dists(1)
+    valid = torch.isfinite(ref) & torch.isfinite(stu)
+    want = (stu.exp()[:, :4] * (stu[:, :4] - ref[:, :4])).sum(-1)
+    assert torch.allclose(T._kl(ref, stu, valid, "reverse"), want)
+    assert not torch.allclose(T._kl(ref, stu, valid, "forward"), want)
+
+
+def test_reverse_kl_changes_training_and_unknown_direction_is_refused(corpus, tmp_path, monkeypatch):
+    plain, _ = _train(corpus, tmp_path / "plain", monkeypatch)
+    fwd, _ = _train(corpus, tmp_path / "fwd", monkeypatch, kl_direction="forward")
+    rev, _ = _train(corpus, tmp_path / "rev", monkeypatch, kl_direction="reverse")
+    assert _same(plain, fwd) and not _same(fwd, rev)
+    with pytest.raises(ValueError, match="kl_direction"):
+        _train(corpus, tmp_path / "bad", monkeypatch, kl_direction="sideways")

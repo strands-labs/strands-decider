@@ -142,6 +142,11 @@ draws option order and instruction phrasing from its seed before it tokenises, s
 reference sees every row with the same options in the same slots as the student. Unset, the
 default, training is unchanged.
 
+**KL direction.** `kl_direction: reverse` turns both KL terms, the teacher's and the frozen
+anchor's, from KL(target || student), which covers the target's mass, into KL(student ||
+target), which seeks its mode. The default, `forward`, is the formula of every earlier run,
+bit for bit.
+
 **Is it the same training?** On CPU (`pytest -m distributed`: a tiny Qwen3 with LoRA and
 the pointer readout, frozen KL, a partial teacher, mixed row weights, KL-only rows, across
 epoch boundaries), the all-reduced gradient at 2, 3, 4 and 8 ranks matches one process to

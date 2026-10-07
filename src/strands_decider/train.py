@@ -89,6 +89,10 @@ class TrainConfig:
     # Rows it covers get teacher_weight * KL(teacher || student) on top of the label loss.
     teacher_file: str | None = None
     teacher_weight: float = 0.0
+    # Direction of both KL terms, the teacher's and the frozen anchor's: "forward" =
+    # KL(target || student) (mass-covering, every run so far); "reverse" = KL(student ||
+    # target) (mode-seeking).
+    kl_direction: str = "forward"
     # Continue from an existing checkpoint, keeping its trained LoRA adapter and
     # attaching a freshly-initialised head. `freeze_torso` alone cannot do this: it
     # drops the adapter and freezes the *base* torso, which would train the new head
@@ -297,11 +301,24 @@ def _frozen_reference(model: StrandsDeciderModel, examples: list[Example], batch
     return ref
 
 
+def _kl(target: torch.Tensor, student: torch.Tensor, valid: torch.Tensor, direction: str,
+        target_probs: torch.Tensor | None = None) -> torch.Tensor:
+    """Per-row KL between two log-distributions over the `valid` entries: forward =
+    KL(target || student), reverse = KL(student || target). `target_probs`, when the caller
+    has them, weight the forward sum in place of exp(target)."""
+    p, q = (target, student) if direction == "forward" else (student, target)
+    diff = (p - q).masked_fill(~valid, 0.0)
+    w = target_probs if direction == "forward" and target_probs is not None else p.exp()
+    return (w.masked_fill(~valid, 0.0) * diff).sum(dim=-1)
+
+
 @distributed.entry_point  # under torchrun, this process is one rank of the run
 def train(cfg: TrainConfig) -> str:
     rank, _, world = distributed.env()
     if cfg.kl_frozen_reference and not (cfg.precompute_frozen_kl and cfg.kl_frozen_weight > 0):
         raise ValueError("kl_frozen_reference needs kl_frozen_weight > 0 and precompute_frozen_kl")
+    if cfg.kl_direction not in ("forward", "reverse"):
+        raise ValueError(f"kl_direction must be forward or reverse, not {cfg.kl_direction!r}")
     if cfg.host_embeddings and world > 1:  # DDP refuses a module with parameters on the CPU
         raise ValueError("host_embeddings is for one GPU; under torchrun keep the table on the GPU")
     torch.manual_seed(cfg.seed)
@@ -557,9 +574,7 @@ def train(cfg: TrainConfig) -> str:
                     # the sum to entries finite on both sides rather than patching
                     # the NaN afterwards.
                     valid = torch.isfinite(ref) & torch.isfinite(stu)
-                    p = ref.exp().masked_fill(~valid, 0.0)
-                    diff = (ref - stu).masked_fill(~valid, 0.0)
-                    per_row = (p * diff).sum(dim=-1)
+                    per_row = _kl(ref, stu, valid, cfg.kl_direction)
                     kl = per_row.mean() * part.kl
                     if cfg.kl_only_files:
                         # KL-only rows (weight 0) carry their own KL weight; with none
@@ -575,8 +590,7 @@ def train(cfg: TrainConfig) -> str:
                 stu = out["log_probs"][has]
                 tea = batch["teacher"][has][:, : stu.shape[-1]]
                 valid = (tea > 0) & torch.isfinite(stu)
-                diff = (tea.clamp_min(1e-12).log() - stu).masked_fill(~valid, 0.0)
-                tkl = (tea.masked_fill(~valid, 0.0) * diff).sum(dim=-1).mean() * part.teacher
+                tkl = _kl(tea.clamp_min(1e-12).log(), stu, valid, cfg.kl_direction, tea).mean() * part.teacher
                 step_loss = step_loss + cfg.teacher_weight * tkl
                 running_tkl += float(tkl)
             # DDP averages the ranks' gradients; `* world` makes that the 1-GPU sum.

@@ -318,6 +318,7 @@ def test_ddp_matches_single_process(corpus, plain_run, tmp_path, world):
 @pytest.mark.parametrize("over", [
     dict(group_by_length=False, eval_every=3),                 # epoch 2's order is drawn after evals
     dict(epochs=1, max_steps=10, eval_every=3, save_every=2),  # runs out of data; saves on rank 0
+    dict(kl_direction="reverse"),                              # both KL terms reversed
 ])
 def test_ddp_matches_single_process_variants(corpus, tmp_path, over):
     ref = _run(corpus, tmp_path / "a", 1, **over)
