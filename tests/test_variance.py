@@ -145,6 +145,22 @@ def test_checkpoints_of_different_recipes_are_refused(ckpts, tmp_path):
         soup(ckpts, str(tmp_path / "soup"))
 
 
+def _tree(path):
+    return {str(p.relative_to(path)): p.read_bytes() for p in sorted(path.rglob("*")) if p.is_file()}
+
+
+@pytest.mark.parametrize("where", ["same", "inside", "parent"])
+def test_an_out_overlapping_an_input_is_refused_before_any_write(ckpts, tmp_path, where):
+    from pathlib import Path
+
+    first = Path(ckpts[0])
+    out = {"same": first, "inside": first / "soup", "parent": tmp_path}[where]
+    before = _tree(first)
+    with pytest.raises(ValueError, match="overlaps"):
+        soup(ckpts, str(out))
+    assert _tree(first) == before
+
+
 # ---------------------------------------------------------------- training
 
 

@@ -97,12 +97,22 @@ def soup_adapters(adapters: list[dict[str, torch.Tensor]]) -> dict[str, torch.Te
     return out
 
 
+def _check_paths(checkpoints: list[str], out: str) -> None:
+    """Refuse an `out` that overlaps an input."""
+    dst = os.path.realpath(out)
+    for c in checkpoints:
+        src = os.path.realpath(c)
+        if os.path.commonpath([src, dst]) in (src, dst):
+            raise ValueError(f"--out {out} overlaps the input {c}")
+
+
 def soup(checkpoints: list[str], out: str) -> str:
     """Write the soup of `checkpoints` (local directories of one recipe) to `out`."""
     from safetensors.torch import load_file, save_file
 
     if not checkpoints:
         raise ValueError("no checkpoints")
+    _check_paths(checkpoints, out)
     n = len(checkpoints)
     cfgs = [_json(config_path(c)) for c in checkpoints]
     recipe = [{k: v for k, v in c.items() if k not in FITTED} for c in cfgs]
