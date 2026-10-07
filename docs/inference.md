@@ -79,7 +79,11 @@ strands-decider serve checkpoints/hobson-2b-recipe --device mlx --port 8099
 **CPU only.** The same commands as on macOS, with `--device cpu`. On Linux without a GPU,
 `pip install torch==2.7.1 --index-url https://download.pytorch.org/whl/cpu` skips the CUDA
 wheels. Both reference fallback paths above apply, and inference is much slower than on a
-GPU.
+GPU. The engine upcasts the bf16 torso to fp32 on CPU, which is faster where bf16 kernels
+are emulated (x86, Apple silicon). On CPUs with native bf16 matmul, such as Graviton 3/4,
+pass `--cpu-torso-dtype checkpoint` (or `EngineConfig(cpu_torso_dtype="checkpoint")`) to
+keep it in bf16: on a Graviton 4 at 64 threads that took a question from 3.11 s to 1.15 s,
+with top-1 agreeing with a GPU run on 339 of 342 questions of a routing set (fp32: 338).
 
 ## Model artifact
 

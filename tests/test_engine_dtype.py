@@ -1,4 +1,4 @@
-"""SystemOneEngine runs a half-precision torso in fp32 on CPU, and leaves it alone elsewhere."""
+"""SystemOneEngine runs a half-precision torso in fp32 on CPU unless asked to keep it, and leaves it alone elsewhere."""
 
 from __future__ import annotations
 
@@ -38,3 +38,18 @@ def test_cpu_upcasts_half_precision_torso(dtype, under_inference_mode):
 def test_mps_keeps_bf16():
     eng = _build(torch.bfloat16, "mps", under_inference_mode=True)
     assert {p.dtype for p in eng.model.torso.parameters()} == {torch.bfloat16}
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+def test_cpu_checkpoint_dtype_keeps_half_precision_torso(dtype):
+    with torch.inference_mode():
+        eng = SystemOneEngine(_TinyModel(dtype),
+                              EngineConfig(device="cpu", cpu_torso_dtype="checkpoint"))
+    assert {p.dtype for p in eng.model.torso.parameters()} == {dtype}
+    assert {p.dtype for p in eng.model.head.parameters()} == {torch.float32}
+
+
+def test_unknown_cpu_torso_dtype_is_rejected():
+    with pytest.raises(ValueError, match="cpu_torso_dtype"):
+        SystemOneEngine(_TinyModel(torch.bfloat16),
+                        EngineConfig(device="cpu", cpu_torso_dtype="bf16"))

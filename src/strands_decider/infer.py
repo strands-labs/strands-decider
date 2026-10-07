@@ -51,6 +51,8 @@ from .schema import (
     derive_score_confidence,
 )
 
+CPU_TORSO_DTYPES = ("float32", "checkpoint")
+
 
 @dataclass
 class EngineConfig:
@@ -64,6 +66,10 @@ class EngineConfig:
     # Refuse a prompt that does not fit the window instead of shortening it, for
     # benchmarks that forbid truncation. The message names the "context window".
     strict_window: bool = False
+    # Torso dtype on CPU: "float32" upcasts a half-precision torso (faster on x86 and
+    # Apple silicon); "checkpoint" keeps the checkpoint's dtype (faster on CPUs with
+    # native bf16 matmul, such as Graviton 3/4). Ignored on other devices.
+    cpu_torso_dtype: str = "float32"
 
 
 class UnforkableCache(TypeError):
@@ -134,8 +140,11 @@ class SystemOneEngine:
             from .mps_kernels import install
 
             install()
+        if self.cfg.cpu_torso_dtype not in CPU_TORSO_DTYPES:
+            raise ValueError(f"cpu_torso_dtype must be one of {CPU_TORSO_DTYPES}, "
+                             f"got {self.cfg.cpu_torso_dtype!r}")
         self.model = model.to(self.cfg.device).eval()
-        if str(self.cfg.device) == "cpu":
+        if str(self.cfg.device) == "cpu" and self.cfg.cpu_torso_dtype == "float32":
             self._upcast_torso_for_cpu()
         self.tok = model.tokenizer
         self.device = self.cfg.device
@@ -145,7 +154,9 @@ class SystemOneEngine:
 
         CPU kernels for bf16 are slower than fp32, not faster: on an M3 Pro a
         256-token v19 question takes 7.7 s in bf16 and 3.5 s in fp32, with the same
-        answer. The cost is memory, about 7 GiB of torso weights instead of 3.5. The
+        answer. The cost is memory, about 7 GiB of torso weights instead of 3.5.
+        CPUs with native bf16 matmul invert this (Graviton 4: 1.15 s bf16 vs 3.11 s
+        fp32 at 64 threads), so `cpu_torso_dtype="checkpoint"` skips it. The
         readout is already fp32. Done under inference_mode because `load_engine`
         builds the model there, and inference tensors cannot be modified outside it.
         """
@@ -474,13 +485,15 @@ def load_engine(
     device: str = "cuda",
     use_prefix_cache: bool = True,
     attn_implementation: str | None = None,
+    cpu_torso_dtype: str = "float32",
 ) -> SystemOneEngine:
     """An engine on a torch device ("cuda", "mps", "cpu"), or on MLX with `device="mlx"`."""
     if device == "mlx":
         return load_mlx(checkpoint, EngineConfig(device="mlx", use_prefix_cache=use_prefix_cache))
     model = StrandsDeciderModel.load(checkpoint, attn_implementation=attn_implementation)
     return SystemOneEngine(
-        model, EngineConfig(device=device, use_prefix_cache=use_prefix_cache)
+        model, EngineConfig(device=device, use_prefix_cache=use_prefix_cache,
+                            cpu_torso_dtype=cpu_torso_dtype)
     )
 
 

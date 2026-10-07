@@ -318,6 +318,11 @@ def serve_cmd(
     max_batch: int = typer.Option(
         32, "--max-batch", help="Questions encoded per forward pass; lower it for very long states.",
     ),
+    cpu_torso_dtype: str = typer.Option(
+        "float32", "--cpu-torso-dtype",
+        help="On --device cpu: float32 upcasts the torso; checkpoint keeps its bf16 "
+        "(faster on CPUs with native bf16 matmul, such as Graviton 3/4).",
+    ),
 ) -> None:
     """Serve POST /v1/systemone. JevBench's typesafe adapter runs against it unchanged."""
     from .server import serve
@@ -329,6 +334,7 @@ def serve_cmd(
         checkpoint, host=host, port=port, device=selected_device,
         use_prefix_cache=not no_prefix_cache, model_name=model_name,
         strict_window=strict_window, max_batch=max_batch, vision=vision,
+        cpu_torso_dtype=cpu_torso_dtype,
     )
 
 
