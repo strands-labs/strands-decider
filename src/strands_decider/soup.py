@@ -121,7 +121,6 @@ def soup(checkpoints: list[str], out: str) -> str:
     cfg = cfgs[0]
     if cfg.get("full_weight_targets"):  # a research build's torso-matrix checkpoint
         raise ValueError("soup reads LoRA checkpoints; full-weight checkpoints are not supported")
-    os.makedirs(os.path.join(out, "lora"), exist_ok=True)
 
     if cfg.get("use_lora"):
         acfgs = [_json(os.path.join(c, ADAPTER_CONFIG)) for c in checkpoints]
@@ -131,8 +130,12 @@ def soup(checkpoints: list[str], out: str) -> str:
         if any(a != acfg for a in acfgs):
             raise ValueError("the adapter configs differ")
         if acfg.get("use_dora") or acfg.get("rank_pattern") or acfg.get("alpha_pattern") \
-                or acfg.get("modules_to_save"):
-            raise ValueError("soup supports plain LoRA (no DoRA, rank/alpha patterns or modules_to_save)")
+                or acfg.get("modules_to_save") or acfg.get("target_parameters"):
+            raise ValueError("soup supports plain LoRA (no DoRA, rank/alpha patterns, modules_to_save "
+                             "or target_parameters)")
+    os.makedirs(os.path.join(out, "lora"), exist_ok=True)
+
+    if cfg.get("use_lora"):
         r = acfg["r"]
         # PEFT scales by alpha / r, or alpha / sqrt(r) with rsLoRA: keep that scale at rank n * r
         alpha = acfg["lora_alpha"] * (math.sqrt(n) if acfg.get("use_rslora") else n)

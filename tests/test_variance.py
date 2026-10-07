@@ -161,6 +161,15 @@ def test_an_out_overlapping_an_input_is_refused_before_any_write(ckpts, tmp_path
     assert _tree(first) == before
 
 
+def test_expert_parameter_adapters_are_refused(ckpts, tmp_path):
+    for c in ckpts:
+        acfg = json.load(open(f"{c}/lora/adapter_config.json"))
+        json.dump({**acfg, "target_parameters": ["experts.weight"]}, open(f"{c}/lora/adapter_config.json", "w"))
+    with pytest.raises(ValueError, match="target_parameters"):
+        soup(ckpts, str(tmp_path / "soup"))
+    assert not (tmp_path / "soup").exists()
+
+
 # ---------------------------------------------------------------- training
 
 
