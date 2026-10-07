@@ -40,6 +40,10 @@ class TrainConfig:
     train_files: list[str] = field(default_factory=list)
     val_files: list[str] = field(default_factory=list)
     val_fraction: float = 0.03
+    # Seed of that train/validation split alone. None: `seed`, so every seed holds out (and
+    # so never trains on) its own val_fraction of the rows. Fixed, every seed trains on the
+    # same rows; initialisation, data order and option order still follow `seed`.
+    val_split_seed: int | None = None
 
     # model
     base_model: str = "Qwen/Qwen3-1.7B-Base"
@@ -94,6 +98,11 @@ class TrainConfig:
     weight_decay: float = 0.01
     warmup_ratio: float = 0.03
     max_grad_norm: float = 1.0
+    # > 0 keeps an exponential moving average of the trained weights (adapter and head), in
+    # fp32, updated after every optimizer step with decay min(ema_decay, (1 + step) /
+    # (10 + step)); the average is what is validated at the end and saved. 0 = off: the last
+    # step's weights, as before.
+    ema_decay: float = 0.0
     gradient_checkpointing: bool = True
 
     # data augmentation
@@ -176,6 +185,36 @@ def _build_optimizer(model: StrandsDeciderModel, cfg: TrainConfig) -> torch.opti
         groups.append({"params": torso_params, "lr": cfg.lr, "weight_decay": 0.0})
     groups = [g for g in groups if g["params"]]
     return torch.optim.AdamW(groups, betas=(0.9, 0.95), eps=1e-8)
+
+
+class _Ema:
+    """An fp32 exponential moving average of `model`'s trainable parameters."""
+
+    def __init__(self, model: torch.nn.Module, decay: float):
+        self.decay = decay
+        self.params = [p for p in model.parameters() if p.requires_grad]
+        self.avg = [p.detach().float().clone() for p in self.params]
+        self.live: list[torch.Tensor] = []
+
+    @torch.no_grad()  # type: ignore[untyped-decorator]
+    def update(self, step: int) -> None:
+        # The warm-up keeps the first steps' weights, far from the end ones, out of the average.
+        d = min(self.decay, (1 + step) / (10 + step))
+        for a, p in zip(self.avg, self.params, strict=True):
+            a.mul_(d).add_(p.detach().float(), alpha=1 - d)
+
+    @torch.no_grad()  # type: ignore[untyped-decorator]
+    def apply(self) -> None:
+        """Put the average in the model, keeping the live weights for `restore`."""
+        self.live = [p.detach().clone() for p in self.params]
+        for a, p in zip(self.avg, self.params, strict=True):
+            p.copy_(a)
+
+    @torch.no_grad()  # type: ignore[untyped-decorator]
+    def restore(self) -> None:
+        for w, p in zip(self.live, self.params, strict=True):
+            p.copy_(w)
+        self.live = []
 
 
 def _lr_lambda(step: int, warmup: int, total: int) -> float:
@@ -364,7 +403,8 @@ def train(cfg: TrainConfig) -> str:
         val_examples = load_examples(cfg.val_files)
     else:
         train_examples, val_examples = split_examples(
-            train_examples, val_fraction=cfg.val_fraction, seed=cfg.seed
+            train_examples, val_fraction=cfg.val_fraction,
+            seed=cfg.seed if cfg.val_split_seed is None else cfg.val_split_seed,
         )
     if cfg.kl_only_files:
         if cfg.kl_frozen_weight <= 0:
@@ -461,6 +501,7 @@ def train(cfg: TrainConfig) -> str:
         print(f"[strands-decider] frozen-KL reference for {refs.shape[0]:,} micro-batches "
               f"in {time.time() - t_ref:.0f} s")
 
+    ema = _Ema(model, cfg.ema_decay) if cfg.ema_decay > 0 else None
     print(f"[strands-decider] {total_steps} optimizer steps (warmup {warmup})")
     model.train()
     step, micro, running, t0 = 0, 0, 0.0, time.time()
@@ -548,6 +589,8 @@ def train(cfg: TrainConfig) -> str:
             sched.step()
             optim.zero_grad(set_to_none=True)
             step += 1
+            if ema is not None:
+                ema.update(step)
 
             if step % cfg.log_every == 0:
                 running, running_kl, running_tkl = distributed.all_reduce(
@@ -578,7 +621,11 @@ def train(cfg: TrainConfig) -> str:
                 history.append({"step": step, **metrics})
 
             if cfg.save_every and step % cfg.save_every == 0 and rank == 0:
+                if ema is not None:
+                    ema.apply()  # save the average, then train on from the live weights
                 model.save_pretrained(cfg.output_dir)
+                if ema is not None:
+                    ema.restore()
 
             if step >= total_steps:
                 done = True
@@ -586,6 +633,8 @@ def train(cfg: TrainConfig) -> str:
 
     if rank != 0:
         return cfg.output_dir
+    if ema is not None:
+        ema.apply()
     metrics = evaluate_loss(model, val_loader, device)
     print(f"[strands-decider] final eval: {metrics}")
     history.append({"step": step, **metrics})

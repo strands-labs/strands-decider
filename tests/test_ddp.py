@@ -303,6 +303,7 @@ def test_ddp_matches_single_process(corpus, plain_run, tmp_path, world):
 
 @pytest.mark.distributed
 @pytest.mark.parametrize("over", [
+    dict(ema_decay=0.9, save_every=3, val_split_seed=5, val_files=[]),  # EMA; a fixed split
     dict(group_by_length=False, eval_every=3),                 # epoch 2's order is drawn after evals
     dict(epochs=1, max_steps=10, eval_every=3, save_every=2),  # runs out of data; saves on rank 0
 ])
