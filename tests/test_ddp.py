@@ -76,14 +76,14 @@ def _examples(n: int, seed: int) -> list:
     return out
 
 
-def _tokenizer_file(path: str, examples: list) -> None:
+def _tokenizer_file(path: str, examples: list, vocab_size: int = 400) -> None:
     from tokenizers import Tokenizer, decoders, models, pre_tokenizers, processors, trainers
 
     tok = Tokenizer(models.BPE())
     tok.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
     tok.decoder = decoders.ByteLevel()
     tok.post_processor = processors.ByteLevel(trim_offsets=True)
-    trainer = trainers.BpeTrainer(vocab_size=400, special_tokens=["<pad>", "<eos>"],
+    trainer = trainers.BpeTrainer(vocab_size=vocab_size, special_tokens=["<pad>", "<eos>"],
                                   initial_alphabet=pre_tokenizers.ByteLevel.alphabet())
     from strands_decider.prompting import build_prompt
 
@@ -134,6 +134,7 @@ def corpus(tmp_path_factory):
                 p = [rng.random() + 0.01 for _ in range(ex.n_options)]
                 fh.write(json.dumps({"i": i, "probs": [x / sum(p) for x in p]}) + "\n")
     _tokenizer_file(str(d / "tokenizer.json"), train)
+    _tokenizer_file(str(d / "other_tokenizer.json"), _examples(60, seed=7), vocab_size=300)
     return d
 
 
@@ -150,6 +151,18 @@ def worker(cfg_path: str) -> None:
     with open(cfg_path, encoding="utf-8") as fh:
         spec = json.load(fh)
     StrandsDeciderModel.from_pretrained_base = staticmethod(_tiny_model_factory(spec.pop("tokenizer")))
+    ref_tokenizer = spec.pop("ref_tokenizer", None)
+    if ref_tokenizer:  # kl_frozen_reference: a tiny checkpoint, the same on every rank
+
+        def load(path, **k):
+            from strands_decider.modeling import StrandsDeciderConfig
+
+            with torch.random.fork_rng():
+                torch.manual_seed(123)
+                cfg = StrandsDeciderConfig(base_model="tiny", head_type="pointer", pointer_dim=16)
+                return _tiny_model_factory(ref_tokenizer)(cfg)
+
+        StrandsDeciderModel.load = staticmethod(load)
     rank = int(os.environ.get("RANK", "0"))
 
     grads, init = [], []
@@ -320,6 +333,17 @@ def test_precomputed_frozen_reference_matches_single_process(corpus, plain_run, 
     got = _run(corpus, tmp_path, world, precompute_frozen_kl=True)
     assert "frozen-KL reference for 32 micro-batches" in got["stdout"]
     _assert_same_run(plain_run, got, world)
+
+
+@pytest.mark.distributed
+@pytest.mark.parametrize("tokenizer", ["tokenizer.json", "other_tokenizer.json"])
+def test_ddp_frozen_reference_checkpoint_matches_single_process(corpus, tmp_path, tokenizer):
+    """kl_frozen_reference: each rank renders its micro-batches with the reference's tokenizer."""
+    over = dict(precompute_frozen_kl=True, kl_frozen_reference="tiny-ref",
+                ref_tokenizer=str(corpus / tokenizer))
+    ref = _run(corpus, tmp_path / "a", 1, **over)
+    assert "frozen-KL reference: tiny-ref" in ref["stdout"]
+    _assert_same_run(ref, _run(corpus, tmp_path / "b", 3, **over), 3)
 
 
 @pytest.fixture(scope="module")

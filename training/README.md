@@ -130,6 +130,18 @@ With 80 GB GPUs, `gradient_checkpointing: false` and `precompute_frozen_kl: true
 one pass before step 1 instead of a second forward every step, which changes only bf16
 rounding. Neither fits a 24 GB card, so the committed configs keep them off.
 
+**A trained checkpoint as the frozen-KL reference.** `kl_frozen_reference: <checkpoint>`
+replaces the untouched torso's option-number readout with that checkpoint's own option
+distribution, at temperature 1 and without its calibration. The same rows get the term (at
+most as many options as the readout covers), weighted by `kl_frozen_weight` as before. It
+needs `precompute_frozen_kl: true` and `kl_frozen_weight > 0`: the reference is loaded
+once, fills the table before step 1, and is freed before training starts. The
+checkpoint may use another tokenizer than the student, for example a Qwen3.5 reference for
+a Gemma 4 student. The reference renders each row with its own tokenizer. The collator
+draws option order and instruction phrasing from its seed before it tokenises, so the
+reference sees every row with the same options in the same slots as the student. Unset, the
+default, training is unchanged.
+
 **Is it the same training?** On CPU (`pytest -m distributed`: a tiny Qwen3 with LoRA and
 the pointer readout, frozen KL, a partial teacher, mixed row weights, KL-only rows, across
 epoch boundaries), the all-reduced gradient at 2, 3, 4 and 8 ranks matches one process to

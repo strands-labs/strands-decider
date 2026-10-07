@@ -64,6 +64,12 @@ class TrainConfig:
     head_init: str = "random"
     # >0 adds KL(frozen || student) so training cannot drift away from that readout.
     kl_frozen_weight: float = 0.0
+    # A trained checkpoint whose option distribution (temperature 1, no calibration) is the
+    # frozen-KL reference in place of the untouched torso's option-number readout. The same
+    # rows are eligible (at most as many options as the readout covers). It may have
+    # another tokenizer than the student (`_frozen_reference`). Needs precompute_frozen_kl:
+    # the reference is computed once, before step 1. None: the untouched torso, as before.
+    kl_frozen_reference: str | None = None
     # Rows trained ONLY by that KL term: no label loss, never in the validation split.
     # For prompts with no gold answer -- e.g. changed questions, where the frozen
     # torso's own reading is the target (data/question_transforms.py). Each needs <= 9
@@ -222,7 +228,8 @@ FROZEN_PASS_TOKENS = 32768
 
 
 def _frozen_reference(model: StrandsDeciderModel, examples: list[Example], batches: list[list[int]],
-                      coll_cfg: CollatorConfig, device: str) -> torch.Tensor:
+                      coll_cfg: CollatorConfig, device: str,
+                      ref_model: StrandsDeciderModel | None = None) -> torch.Tensor:
     """`frozen_slot_log_probs` for every row the run trains on: ref[micro-batch, row].
 
     A fresh collator with the training collator's seed walks the run's micro-batches in
@@ -233,9 +240,17 @@ def _frozen_reference(model: StrandsDeciderModel, examples: list[Example], batch
     recurrence), the reference is the adapter-disabled torso whose weights training never
     changes, and it draws no random numbers -- so only the batch shapes differ from
     computing it inside each step.
+
+    With `ref_model` (kl_frozen_reference), each rendered micro-batch goes through that
+    checkpoint as it is, at temperature 1, instead; columns past a row's options are -inf.
+    The reference renders with its own tokenizer, so it may have another than the
+    student's (a Gemma student, a Qwen reference): the table is over option slots, and the
+    collator draws option order and phrasing from its seed alone, before any tokenisation,
+    so both see each row with the same options in the same slots.
     """
     rank, _, world = distributed.env()
-    coll = SystemOneCollator(model.tokenizer, coll_cfg, train=True)
+    tok = model.tokenizer if ref_model is None else ref_model.tokenizer
+    coll = SystemOneCollator(tok, coll_cfg, train=True)
     ref = torch.zeros(len(batches), max(map(len, batches)), model.config.num_slots,
                       device=device)
     todo: list[Any] = []  # (micro-batch, row, token ids, option count)
@@ -245,6 +260,16 @@ def _frozen_reference(model: StrandsDeciderModel, examples: list[Example], batch
             coll.skip(rows)
             continue
         b = coll(rows)
+        if ref_model is not None:
+            with torch.no_grad():
+                lp = ref_model(input_ids=b["input_ids"].to(device),
+                               attention_mask=b["attention_mask"].to(device),
+                               n_slots=b["n_slots"].to(device), opt_idx=b["opt_idx"].to(device)
+                               if "opt_idx" in b else None, temperature=1.0)["log_probs"]
+            w = min(lp.shape[-1], ref.shape[-1])
+            ref[m, : len(rows)] = float("-inf")
+            ref[m, : len(rows), :w] = lp[:, :w]
+            continue
         for r in range(len(rows)):
             n = int(b["attention_mask"][r].sum())
             todo.append((m, r, b["input_ids"][r, :n], int(b["n_slots"][r])))
@@ -269,6 +294,8 @@ def _frozen_reference(model: StrandsDeciderModel, examples: list[Example], batch
 @distributed.entry_point  # under torchrun, this process is one rank of the run
 def train(cfg: TrainConfig) -> str:
     rank, _, world = distributed.env()
+    if cfg.kl_frozen_reference and not (cfg.precompute_frozen_kl and cfg.kl_frozen_weight > 0):
+        raise ValueError("kl_frozen_reference needs kl_frozen_weight > 0 and precompute_frozen_kl")
     torch.manual_seed(cfg.seed)
     random.seed(cfg.seed)
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -456,8 +483,19 @@ def train(cfg: TrainConfig) -> str:
         run = [b for e in range(cfg.epochs) for b in sampler.batches(e)]
         t_ref = time.time()
         model.train()  # the mode the in-step reference forward runs in
+        ref_model = None
+        if cfg.kl_frozen_reference:
+            ref_model = StrandsDeciderModel.load(cfg.kl_frozen_reference,
+                                                 attn_implementation=cfg.attn_implementation)
+            ref_model.to(device).eval()
+            own = ref_model.tokenizer.get_vocab() == model.tokenizer.get_vocab()
+            print(f"[strands-decider] frozen-KL reference: {cfg.kl_frozen_reference}"
+                  + ("" if own else " (its own tokenizer, not the student's)"))
         refs = _frozen_reference(model, train_examples, run[: total_steps * cfg.grad_accum],
-                                 coll_cfg, device)
+                                 coll_cfg, device, ref_model)
+        del ref_model
+        if device == "cuda":
+            torch.cuda.empty_cache()
         print(f"[strands-decider] frozen-KL reference for {refs.shape[0]:,} micro-batches "
               f"in {time.time() - t_ref:.0f} s")
 
