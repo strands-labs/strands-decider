@@ -43,6 +43,19 @@ GEMMA4_CLASSES = {"gemma4": "Gemma4ForConditionalGeneration",
                   "gemma4_unified": "Gemma4UnifiedForConditionalGeneration"}
 
 
+def serving_attn_implementation(torso_cfg: Any) -> str | None:
+    """The attention a loaded checkpoint is served with when the caller names none.
+
+    Gemma 4 E2B (one key/value head): torch 2.7's CUDA SDPA returns wrong attention for a forward
+    over a KV cache with 64k+1 query tokens, which the shared-prefix path in infer.py runs (g27,
+    research/g27/READING-g27.md: a yes/no answer 0.726 against 0.860; relative error up to 0.68).
+    HF's eager attention is exact there. Every other torso keeps the default.
+    """
+    if str(getattr(torso_cfg, "model_type", "")).startswith("gemma4") and torso_cfg.num_key_value_heads == 1:
+        return "eager"
+    return None
+
+
 @dataclass
 class StrandsDeciderConfig:
     base_model: str = "Qwen/Qwen3-1.7B-Base"
@@ -637,6 +650,9 @@ class StrandsDeciderModel(nn.Module):
             ensure_bos(tok)
 
         torso = cls._load_torso(config, device_map, attn_implementation)
+        # load() serves; training builds its torso in from_pretrained_base, unchanged
+        if attn_implementation is None and serving_attn_implementation(torso.config):
+            torso.set_attn_implementation(serving_attn_implementation(torso.config))
 
         if config.use_lora:
             from peft import PeftModel
