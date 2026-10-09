@@ -1,7 +1,7 @@
 # Images
 
 Strands Decider answers questions about images when it is loaded with `--vision`. This was
-built and measured on v19 and checked again on v21, the current release
+built and measured on v19 and checked again on v21 and on v1, the current release
 ([How well it does](#how-well-it-does)). No weights change: the published checkpoint is used as is, and the images are read by the
 vision tower that already ships inside Qwen3.5-2B-Base. Text-only requests to a vision
 server get the same answers as from a text server.
@@ -10,7 +10,7 @@ server get the same answers as from a text server.
 
 ```bash
 pip install "strands-decider[vision]"     # Pillow; needs transformers >= 5.18
-strands-decider serve StrandsAgents/strands-decider-2B-hobson-v21 --vision --port 8000
+strands-decider serve StrandsAgents/strands-decider-2B-qwen3.5-v1-2610 --vision --port 8000
 ```
 
 A request adds `images`: a list of base64 images, PNG, JPEG, WebP or GIF (a
@@ -141,6 +141,24 @@ With the image removed both fall to chance, but v21 answers more confidently tha
 mean confidence 0.722 on NaturalBench and 0.792 on POPE (v19 0.652 and 0.725), ECE 0.222
 and 0.292 (v19 0.152 and 0.225; paired 95% CIs of the difference +0.054 to +0.087 and +0.065
 to +0.070). Its confidence does not tell you that an image is missing or unreadable.
+
+### v1
+
+v1 (`StrandsAgents/strands-decider-2B-qwen3.5-v1-2610`) was measured the same way, with v21
+beside it, both on one NVIDIA L4. v21 there reproduces its L4 figures above to 0.001.
+
+| | NaturalBench acc | G-Acc | Brier | ECE | POPE-adv acc | Brier | ECE |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| v1, `--vision` | 0.776 | 0.310 | 0.307 | 0.039 | 0.872 | 0.192 | 0.023 |
+| v21, `--vision` | 0.785 | 0.313 | 0.311 | 0.043 | 0.877 | 0.179 | 0.037 |
+| v1 minus v21, paired bootstrap 95% CI | -0.009 (-0.022 to +0.003) | -0.003 | -0.005 (-0.013 to +0.004) | -0.004 (-0.019 to +0.016) | -0.005 (-0.020 to +0.008) | +0.013 (+0.003 to +0.023) | -0.014 (-0.036 to +0.010) |
+
+The same accuracy as v21 within the intervals; POPE Brier is a little worse.
+
+With the image removed both fall to chance. v1 still answers: mean confidence 0.711 on
+NaturalBench and 0.834 on POPE (v21 0.722 and 0.792), ECE 0.211 and 0.334 (v21 0.222 and 0.292).
+On POPE it is more overconfident than v21 (ECE +0.042, 95% CI +0.039 to +0.044). Its confidence
+does not tell you that an image is missing: check that the image is there before you ask.
 
 The script is `evaluation/vision/run.py`; [evaluation/vision/README.md](../evaluation/vision/README.md)
 has the exact command and a link to the recorded runs: per-item probabilities for v19 and

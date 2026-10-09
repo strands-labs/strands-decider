@@ -1,12 +1,77 @@
 # Results
 
-The measurements of v21 (the released model), v19 and the versions before them: v21's
-seeds and release checks, the AWS retrain, the summary by version,
+The measurements of v1 (the released model), v21, v19 and the versions before them: the
+seeds and release checks of v1 and v21, the AWS retrain, the summary by version,
 calibration, and accuracy and latency on a Mac. [README.md](README.md) says how to run them, and
 [jevbench.md](jevbench.md) has the external benchmark. Paths are relative to the repository
 root unless they are links. A module path such as `infer.py` is relative to `src/strands_decider/`.
 
-## v21, the released model
+## v1, the released model
+
+`StrandsAgents/strands-decider-2B-qwen3.5-v1-2610` ([docs/naming.md](../docs/naming.md) explains
+the name). What is new against v21:
+
+- **A balanced data mix** of 246,678 rows, about twice v21's: v21's rows without the 20,000 from
+  datasets whose terms restrict commercial use, 24,533 code-task rows, 96,638 rows from more
+  public datasets for the decision types v21 had few rows for, and 22,168 new rule-application
+  rows (apply a written policy to a case). In the rule-application rows, gemma-4-31B-it
+  (Apache-2.0) wrote the policy text and the case files, and code computed the gold answers.
+  Claude was used only as an independent check to filter rows: a row was kept only where gemma's
+  and Claude's answers both agree with the code. Claude's text is not in the data.
+- **A larger teacher:** gemma-4-31B-it's output distributions are training targets where its
+  answer agrees with the gold label.
+- **The v19 anchor:** training keeps the answers close to the released v19 (a KL term, weight
+  0.3), not to the untrained base model.
+- **A soup** of three training runs (below).
+
+The four held-out sets are MuSiQue, ContractNLI and BoardgameQA, dev splits of sets whose train
+splits are in the training data, and HotpotQA, which is never trained on (the mix has
+2WikiMultihopQA, a similar multi-hop task). The configs are in the Hub repository
+(`train_config.json`, `training/configs/`). The anchor setting, the soup command and the data
+builders are not in this repository yet (pull requests to come), so v1 cannot be rebuilt from
+`main` until they are merged.
+
+This checkpoint is a **soup** of three training runs of one recipe (seeds 0, 1 and 2). Each layer's
+LoRA update is the exact mean of the three runs' updates (stored as one rank-48 adapter), and the
+three readout heads are stacked so that the soup's score for an option is the mean of theirs. The
+soup was then calibrated like any trained checkpoint. A soup needs no choice between seeds. It
+scores at or above its seeds' mean on most measures below.
+
+Seeds: their training runs (8x A100). Soup: these files through the code repository's `main`
+(one NVIDIA L4).
+
+| measure | seed 0 | seed 1 | seed 2 | seeds, mean ± SD | **soup (this checkpoint)** |
+| --- | --- | --- | --- | --- | --- |
+| JevBench public, tasks right of 231 (window 4096) | 178 | 177 | 184 | 179.7 ± 3.8 | **180** |
+| JevBench Brier | 0.305 | 0.288 | 0.289 | 0.294 ± 0.010 | **0.280** |
+| JevBench ECE | 0.079 | 0.088 | 0.060 | 0.076 ± 0.014 | **0.072** |
+| MuSiQue (dev split; train split trained on) | 0.882 | 0.894 | 0.887 | 0.888 ± 0.006 | **0.882** |
+| ContractNLI (dev split; train split trained on) | 0.866 | 0.871 | 0.870 | 0.869 ± 0.003 | **0.878** |
+| BoardgameQA (dev split; train split trained on) | 0.800 | 0.803 | 0.801 | 0.801 ± 0.002 | **0.810** |
+| HotpotQA (never trained on) | 0.822 | 0.825 | 0.823 | 0.823 ± 0.002 | **0.832** |
+| held-out short tasks (6,000) | 0.660 | 0.649 | 0.642 | 0.650 ± 0.009 | **0.653** |
+| code tasks, held out (1,996) | 0.826 | 0.833 | 0.831 | 0.830 ± 0.004 | **0.836** |
+| HelpSteer2 adequacy (234) | 0.718 | 0.714 | 0.705 | 0.712 ± 0.007 | **0.709** |
+| generated adequacy (302) | 0.818 | 0.788 | 0.808 | 0.805 ± 0.015 | **0.828** |
+| generated documents, v16's set | 0.849 | 0.849 | 0.863 | 0.853 ± 0.008 | **0.857** |
+| generated documents, v18's set | 0.745 | 0.753 | 0.737 | 0.745 ± 0.008 | **0.781** |
+| JevBench tiers, easy / standard / hard | 48 / 65 / 65 | 48 / 66 / 63 | 48 / 64 / 72 | | **48 / 67 / 65** |
+
+On the Decision Index (balanced skill) the soup scores 30.82, measured with the training harness.
+
+**Release checks.** The released files through the code on `main`, not the training harness:
+
+| check | result |
+| --- | --- |
+| JevBench public (window 4096), on one NVIDIA L4 | 180/231, Brier 0.280, ECE 0.072, strict schema 1.000 |
+| the same on CPU | the same answer on all 231 tasks |
+| against the training harness (A100) | the same answer on 230 of 231 tasks (181/231 there); the one other task is a near tie (0.346 against 0.345) |
+| internal sets (`training/recipe.sh eval`) and the code tasks, on the L4 | the soup column above, each within 2 items of the harness |
+| README examples, `--device cpu` and `--device cuda` | the same answers; probabilities within 0.006 |
+| code: test suite (CPU), ruff and mypy, as CI runs them | pass |
+| images, `--vision` ([docs/vision.md](../docs/vision.md#v1)) | NaturalBench 0.776, POPE 0.872; hobson-v21 on the same GPU 0.785, 0.877 |
+
+## v21, the previous release
 
 `StrandsAgents/strands-decider-2B-hobson-v21` is v21b of the research notes:
 [configs/experiments/v21b.yaml](../configs/experiments/v21b.yaml), v19's recipe plus v20's

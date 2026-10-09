@@ -89,13 +89,18 @@ it takes 0.49 s instead of 1.18 s.
 
 ## Model artifact
 
-The v21 reference weights are published as
-[`StrandsAgents/strands-decider-2B-hobson-v21`](https://huggingface.co/StrandsAgents/strands-decider-2B-hobson-v21),
-and the same files as [`amazon/strands-decider-2B-hobson-v21`](https://huggingface.co/amazon/strands-decider-2B-hobson-v21).
-The earlier v19 weights stay at
-[`StrandsAgents/strands-decider-2B-hobson-v19`](https://huggingface.co/StrandsAgents/strands-decider-2B-hobson-v19).
+The reference weights are published as
+[`StrandsAgents/strands-decider-2B-qwen3.5-v1-2610`](https://huggingface.co/StrandsAgents/strands-decider-2B-qwen3.5-v1-2610)
+([naming.md](naming.md) explains the name). The earlier releases stay at
+[`StrandsAgents/strands-decider-2B-hobson-v21`](https://huggingface.co/StrandsAgents/strands-decider-2B-hobson-v21)
+(the same files also at [`amazon/strands-decider-2B-hobson-v21`](https://huggingface.co/amazon/strands-decider-2B-hobson-v21))
+and [`StrandsAgents/strands-decider-2B-hobson-v19`](https://huggingface.co/StrandsAgents/strands-decider-2B-hobson-v19).
 Every command that takes a checkpoint path also takes that id, and the loader downloads the
-repository to the Hub cache. You can equally train your own with the recipe
+repository's `main` to the Hub cache. Every upload to a release repository is tagged with
+its date (`YYMMDD`), and a second release in the same month updates `main` of the same
+repository. To pin one, download it by its tag and pass the folder:
+`hf download StrandsAgents/strands-decider-2B-qwen3.5-v1-2610 --revision YYMMDD --local-dir v1`,
+then `strands-decider serve v1`. You can equally train your own with the recipe
 ([training/README.md](../training/README.md#usage)); `recipe.sh` writes it to
 `checkpoints/hobson-2b-recipe`.
 
@@ -127,7 +132,7 @@ adapter, the tokenizer and configuration files, and a model card (`README.md`).
 `python -m strands_decider.hf_export verify DIR` checks a folder. `StrandsDeciderModel.load` reads the
 folder as it reads a checkpoint, and the base weights still download separately from
 Hugging Face. Where a command takes a checkpoint path (`strands-decider serve`, `strands-decider ask`,
-`strands-decider info`), a Hub model repo id such as `StrandsAgents/strands-decider-2B-hobson-v21` also works: the loader
+`strands-decider info`), a Hub model repo id such as `StrandsAgents/strands-decider-2B-qwen3.5-v1-2610` also works: the loader
 downloads the repo to the Hub cache. `strands-decider calibrate` writes into the checkpoint, so it
 needs a local directory. OUT can be a local directory or an `s3://` URI. The exporter does not upload to
 the Hugging Face Hub.

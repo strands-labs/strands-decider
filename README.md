@@ -51,27 +51,30 @@ On an Apple-silicon Mac, `--device mlx` runs the model through MLX, 1.4 to 1.6x 
 It needs the `mlx` extra, which ships with the next release; until then, install from a clone with
 `pip install -e ".[mlx]"`. The `cuda`, `mps` and `cpu` extras name the other devices
 ([docs/inference.md](docs/inference.md#environments-for-serving)).
+The example outputs below are from `strands-decider-2B-qwen3.5-v1-2610`, recorded with
+`--device cpu`; other devices differ in the last digits.
+
 ### Choice question
 You can ask the model to choose based on some state and a question:
 ```bash
-strands-decider ask StrandsAgents/strands-decider-2B-hobson-v21 \
+strands-decider ask StrandsAgents/strands-decider-2B-qwen3.5-v1-2610 \
   --state "Help! My payouts have been failing for 3 days! " \
   --choice "Which team should handle this?=billing,sales,retail" 
 ```
 Example Output:
 
 ```bash
-choice_0 -> billing (confidence 0.835)
-  billing                  0.890
-  sales                    0.056
-  retail                   0.054
+choice_0 -> billing (confidence 0.659)
+  billing                  0.773
+  sales                    0.121
+  retail                   0.106
 ```
 
 ### Noul question
 You can also ask the model a Yes/No question:
 
 ```bash
-strands-decider ask StrandsAgents/strands-decider-2B-hobson-v21 \
+strands-decider ask StrandsAgents/strands-decider-2B-qwen3.5-v1-2610 \
   --state "Help! My payouts have been failing for 3 days! " \
   --noul "Does this convey urgency?" 
 ```
@@ -79,24 +82,24 @@ strands-decider ask StrandsAgents/strands-decider-2B-hobson-v21 \
 Example Output:
 
 ```bash
-noul_0 noul = 0.875
+noul_0 noul = 0.858
 ```
 Closer to 1 is leaning more toward Yes
 
 ### Score question
 Or give a question a score:
 ```bash
-strands-decider ask StrandsAgents/strands-decider-2B-hobson-v21 \
+strands-decider ask StrandsAgents/strands-decider-2B-qwen3.5-v1-2610 \
   --state "Help! My payouts have been failing for 3 days! " \
   --score "How frustrated is the writer?=calm,frustrated,depressed"
 ```
 Example Output:
 
 ```bash
-score_0 score = 1.07 (confidence 0.602)
-  0: calm                                     0.140
-  1: frustrated                               0.648
-  2: depressed                                0.212
+score_0 score = 1.03 (confidence 0.509)
+  0: calm                                     0.196
+  1: frustrated                               0.574
+  2: depressed                                0.230
 ```
 
 ### Multiple question types
@@ -104,7 +107,7 @@ score_0 score = 1.07 (confidence 0.602)
 You can combine multiple questions into a single command. This is more efficient as you only need to load the state for the model once:
 
 ```bash
-strands-decider ask StrandsAgents/strands-decider-2B-hobson-v21 \
+strands-decider ask StrandsAgents/strands-decider-2B-qwen3.5-v1-2610 \
   --state "Help! My payouts have been failing for 3 days! " \
   --choice "Which team should handle this?=billing,sales,retail" \
   --noul "Does this convey urgency?" \
@@ -114,15 +117,15 @@ strands-decider ask StrandsAgents/strands-decider-2B-hobson-v21 \
   <summary>Example Output</summary>
 
   ```bash
-  noul_0 noul = 0.875
-  choice_0 -> billing (confidence 0.837)
-    billing                  0.891
-    sales                    0.055
-    retail                   0.054
-  score_0 score = 1.07 (confidence 0.603)
-    0: calm                                     0.140
-    1: frustrated                               0.649
-    2: depressed                                0.211
+  noul_0 noul = 0.858
+  choice_0 -> billing (confidence 0.659)
+    billing                  0.773
+    sales                    0.121
+    retail                   0.106
+  score_0 score = 1.03 (confidence 0.509)
+    0: calm                                     0.196
+    1: frustrated                               0.574
+    2: depressed                                0.230
   ```
 </details>
 
@@ -130,7 +133,7 @@ strands-decider ask StrandsAgents/strands-decider-2B-hobson-v21 \
 
 You can also run the model as a server, and ask questions via http requests:
 ```bash
-strands-decider serve StrandsAgents/strands-decider-2B-hobson-v21 --port 8000
+strands-decider serve StrandsAgents/strands-decider-2B-qwen3.5-v1-2610 --port 8000
 ```
 
 ```bash
@@ -149,18 +152,18 @@ curl -s localhost:8000/v1/systemone \
 
   ```bash
   {
-    "model": "strands-decider-2B-hobson-v21",
+    "model": "strands-decider-2B-qwen3.5-v1-2610",
     "answers": {
       "is_urgent": {
         "type": "noul",
-        "noul": 0.8751
+        "noul": 0.8581
       }
     },
     "usage": {
       "input_tokens": 86,
       "output_tokens": 1
     },
-    "latency_ms": 140.03
+    "latency_ms": 489.01
   }          
   ```
 </details>
@@ -169,19 +172,37 @@ curl -s localhost:8000/v1/systemone \
 
 Qwen3.5-2B-Base is natively multimodal. With `--vision` the server keeps its vision tower,
 and a request may carry `images` (base64) as part of the state; the published checkpoints
-(v21, and v19 before it) answer over them with no image training. Needs `pip install "strands-decider[vision]"` and
+(v1, and hobson-v21 and v19 before it) answer over them with no image training. Needs `pip install "strands-decider[vision]"` and
 transformers 5.18 or later.
 
 ```bash
-strands-decider serve StrandsAgents/strands-decider-2B-hobson-v21 --vision --port 8000
-strands-decider ask StrandsAgents/strands-decider-2B-hobson-v21 --state "" --image page.png \
+strands-decider serve StrandsAgents/strands-decider-2B-qwen3.5-v1-2610 --vision --port 8000
+strands-decider ask StrandsAgents/strands-decider-2B-qwen3.5-v1-2610 --state "" --image page.png \
   --noul "Is the signature block filled in?"
 ```
 
 v19 matches an image-trained 2B decider on accuracy, and on NaturalBench is much better
 calibrated (ECE 0.014 against 0.080). v21 has v19's image accuracy, is better calibrated on
-POPE, and is more confident than v19 when the image is missing. See
+POPE, and is more confident than v19 when the image is missing. v1 has v21's image accuracy;
+with the image missing it is more overconfident than v21 on POPE
+([docs/vision.md](docs/vision.md#v1)). See
 [docs/vision.md](docs/vision.md) for the request shape, how it works and the measurements.
+
+## Model names
+
+Model names now use the pattern `strands-decider-<size>-<base>-v<N>-<YYMM>`:
+
+- `<size>` is the size of the base model, as its Hugging Face id writes it (`2B`, `E4B`).
+- `<base>` is the base model family (`qwen3.5`, `gemma4`).
+- `v<N>` is the recipe generation. It starts again at `v1`. It changes only when users can see
+  the change, for example new training data, a new head or a new objective. One recipe has the
+  same `N` on all bases and sizes.
+- `<YYMM>` is the release month.
+
+Examples: `strands-decider-2B-qwen3.5-v1-2610` (Qwen3.5) and `strands-decider-E4B-gemma4-v1-2610`
+(Gemma 4, planned). The earlier models keep their names: `strands-decider-2B-hobson-v19` and
+`strands-decider-2B-hobson-v21`. A second release in the same month updates the same Hub
+repository and adds a revision tag `YYMMDD`. [docs/naming.md](docs/naming.md) has the full rules.
 
 ## About the model
 
@@ -212,29 +233,38 @@ the same masked softmax, read back differently: `noul` (yes/no), `choice` (one o
 As you browse the research, you will find that this is the second major iteration of the
 architecture. The first used a slot head, which mapped the final hidden state to a fixed set
 of slots and performed significantly worse. Every change since is captured in the research
-so you can follow along with the work. The reference model today is **v21**
-(`strands-decider-2B-hobson-v21`, v21b in the research notes): v19's recipe plus v20's
-checked question paraphrases and distillation from Qwen3.5-4B where it agrees with the gold
-label. It is one of six seeds, picked by a rule written before the seeds were ranked
-([evaluation/results.md](evaluation/results.md#v21-the-released-model)). v19 stays published.
+so you can follow along with the work. The reference model today is **v1**
+(`strands-decider-2B-qwen3.5-v1-2610`; [docs/naming.md](docs/naming.md) explains the name).
+It trains on a new, balanced data mix of 246,678 rows, about twice v21's: it adds code tasks,
+new rule-application rows (apply a written policy to a case) and rows from more public datasets,
+so that the mix follows the kinds of decisions in the evaluations. Its teacher is
+gemma-4-31B-it, and training keeps its answers close to the released v19. The released
+checkpoint is a soup of three training runs: their LoRA updates and head scores averaged
+exactly, then calibrated
+([evaluation/results.md](evaluation/results.md#v1-the-released-model)).
+`strands-decider-2B-hobson-v21` and `-v19` stay published.
 [docs/architecture.md](docs/architecture.md#the-architecture) has the full design, the
 training objective, and the decisions behind them.
 
 ## Performance
 
-Three targets matter: **accuracy**, **calibration** and **latency**. v21 and v19 measure:
+Three targets matter: **accuracy**, **calibration** and **latency**. v1, v21 and v19 measure:
 
-| Measurement | v21 | v19 | Source |
-| --- | --- | --- | --- |
-| JevBench v1 public set, 231 tasks, accuracy | 0.762 (176 of 231); six-seed mean 0.758 (175.0, SD 2.4) | 0.723 (167 of 231) | [evaluation/results.md](evaluation/results.md#v21-the-released-model) |
-| JevBench Brier score / expected calibration error | 0.323 / 0.064 | 0.342 / 0.052 | [evaluation/README.md](evaluation/README.md) |
-| Tiers (this repository's split of the public tasks): easy / standard / hard | 1.000 / 0.931 / 0.550 | 1.000 / 0.875 / 0.505 | [evaluation/jevbench.md](evaluation/jevbench.md#board-position-v142-25-september-2026) |
-| Latency per JevBench question, RTX 3090 under WSL2, median / 95th percentile | same architecture and size as v19 | 115 ms / 299 ms | [evaluation/results.md](evaluation/results.md#summary) |
-| Latency per question, M3 Pro (Apple silicon), warm median, under 300 tokens / all tasks | same architecture and size as v19 | 153 ms / 234 ms | [evaluation/results.md](evaluation/results.md#serving-on-a-mac-accuracy-and-latency) |
+| Measurement | v1 | v21 | v19 | Source |
+| --- | --- | --- | --- | --- |
+| JevBench v1 public set, 231 tasks, accuracy | 0.779 (180 of 231); its three seeds 179.7 ± 3.8 | 0.762 (176 of 231); six-seed mean 0.758 (175.0, SD 2.4) | 0.723 (167 of 231) | [evaluation/results.md](evaluation/results.md#v1-the-released-model) |
+| JevBench Brier score / expected calibration error | 0.280 / 0.072 | 0.323 / 0.064 | 0.342 / 0.052 | [evaluation/README.md](evaluation/README.md) |
+| Tiers (this repository's split of the public tasks): easy / standard / hard | 1.000 / 0.931 / 0.586 | 1.000 / 0.931 / 0.550 | 1.000 / 0.875 / 0.505 | [evaluation/jevbench.md](evaluation/jevbench.md#board-position-v142-25-september-2026) |
+| Latency per JevBench question, RTX 3090 under WSL2, median / 95th percentile | same architecture and size as v19 | same architecture and size as v19 | 115 ms / 299 ms | [evaluation/results.md](evaluation/results.md#summary) |
+| Latency per question, M3 Pro (Apple silicon), warm median, under 300 tokens / all tasks | same architecture and size as v19 | same architecture and size as v19 | 153 ms / 234 ms | [evaluation/results.md](evaluation/results.md#serving-on-a-mac-accuracy-and-latency) |
 
 Every task in the easy tier is answered correctly, and the nearest comparison is
 `decider-2b`, which shares v19's torso with a different recipe
 ([evaluation/jevbench.md](evaluation/jevbench.md#against-the-nearest-open-systems)).
+
+v1's column is measured through `main` (the training harness gives 181; one task is a near tie).
+v1 also answers code questions: 0.836 on 1,996 held-out code tasks
+([evaluation/results.md](evaluation/results.md#v1-the-released-model)).
 
 Read the v21 and v19 columns as two single runs, not as a measured gain. Trained on one
 host with six seeds each, the v19 recipe and v21's average 172.8 and 172.3 JevBench tasks:
