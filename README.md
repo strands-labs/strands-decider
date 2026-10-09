@@ -204,6 +204,11 @@ Examples: `strands-decider-2B-qwen3.5-v1-2610` (Qwen3.5) and `strands-decider-E4
 `strands-decider-2B-hobson-v21`. A second release in the same month updates the same Hub
 repository and adds a revision tag `YYMMDD`. [docs/naming.md](docs/naming.md) has the full rules.
 
+The models live in the [`StrandsAgents`](https://huggingface.co/StrandsAgents) organization on
+Hugging Face, their main home. The five v1 models are also in the
+[`amazon`](https://huggingface.co/amazon) organization, with the same files and the same names:
+for example `amazon/strands-decider-E4B-gemma4-v1-2610`.
+
 ## Gemma 4 models
 
 Four models on the Gemma 4 instruction-tuned base models (`google/gemma-4-*-it`, Apache-2.0). They
