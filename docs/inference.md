@@ -95,6 +95,12 @@ The reference weights are published as
 [`StrandsAgents/strands-decider-2B-hobson-v21`](https://huggingface.co/StrandsAgents/strands-decider-2B-hobson-v21)
 (the same files also at [`amazon/strands-decider-2B-hobson-v21`](https://huggingface.co/amazon/strands-decider-2B-hobson-v21))
 and [`StrandsAgents/strands-decider-2B-hobson-v19`](https://huggingface.co/StrandsAgents/strands-decider-2B-hobson-v19).
+The Gemma 4 models are
+[`StrandsAgents/strands-decider-E2B-gemma4-v1-2610`](https://huggingface.co/StrandsAgents/strands-decider-E2B-gemma4-v1-2610),
+[`-E4B-`](https://huggingface.co/StrandsAgents/strands-decider-E4B-gemma4-v1-2610),
+[`-12B-`](https://huggingface.co/StrandsAgents/strands-decider-12B-gemma4-v1-2610) and
+[`-26B-A4B-gemma4-v1-2610`](https://huggingface.co/StrandsAgents/strands-decider-26B-A4B-gemma4-v1-2610)
+([Gemma 4 models](#gemma-4-models)).
 Every command that takes a checkpoint path also takes that id, and the loader downloads the
 repository's `main` to the Hub cache. Every upload to a release repository is tagged with
 its date (`YYMMDD`), and a second release in the same month updates `main` of the same
@@ -234,6 +240,40 @@ then ends early, before it would pass N tokens, and always holds at least one qu
 Questions are fitted before the cut and scored independently, so answers change only by
 float rounding. Long-context torsos (Gemma 4 at a 32,768-token window) need it; unset, only
 `--max-batch` applies.
+
+## Gemma 4 models
+
+The four Gemma 4 models serve with the same commands as the Qwen3.5 model. They need the code on
+`main` (`pip install "strands-decider @ git+https://github.com/strands-labs/strands-decider"`); the
+package on PyPI does not have Gemma 4 support yet. They read text only, so `--vision` does not apply.
+
+**E2B uses eager attention on CUDA.** The loader selects it for the E2B model on every device.
+On CUDA, PyTorch's default attention kernel gives wrong results for E2B (one key/value head) when a
+forward continues a cached state with 65, 129, 193 or another 64k+1 number of tokens. That happens
+when a request asks several questions; eager attention is correct there. The other sizes keep the default
+attention.
+
+**Memory.** The loader keeps only the text decoder: the vision and audio encoders of the base model
+are dropped.
+
+| model | GPU, weights in bf16 | CPU, weights in fp32 |
+| --- | --- | --- |
+| E2B | about 9 GB | about 19 GB |
+| E4B | about 15 GB | about 30 GB |
+| 12B | about 23 GB | about 46 GB |
+| 26B-A4B | about 51 GB | about 101 GB |
+
+Activations come on top and grow with the window and with the questions per forward pass. The
+models are trained and served at a 4,096-token window. At a 32,768-token window, use
+`--max-batch 4 --max-batch-tokens 34000`: with these settings the 26B-A4B needed at most 57 GiB on one
+80 GB H100 ([Serve](#serve)).
+
+**CPU and GPU.** On CPU the torso runs in fp32. On 50 JevBench tasks the CPU gives the same answer as
+the GPU on every task, with probabilities within 0.05 (0.13 for the 26B-A4B). CPU is much slower: with
+16 threads per model, and all four models running at once on one 64-vCPU host, a JevBench question
+took 4.9 s (E2B), 7.2 s (E4B), 13.5 s (12B) and 7.8 s (26B-A4B). The 26B-A4B is faster than the 12B
+there, because it computes with 4B of its parameters per token. On one H100, the median is
+102 ms, 139 ms, 136 ms and 245 ms.
 
 ## Asking many questions is nearly free
 

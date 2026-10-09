@@ -6,19 +6,22 @@ Released models are named
 strands-decider-{size}-{base}-v{N}-{YYMM}
 ```
 
-for example `StrandsAgents/strands-decider-2B-qwen3.5-v1-2610`.
+for example `StrandsAgents/strands-decider-2B-qwen3.5-v1-2610`. Released so far:
+`strands-decider-2B-qwen3.5-v1-2610` and `strands-decider-{E2B,E4B,12B,26B-A4B}-gemma4-v1-2610`.
 
 | part | meaning | values so far |
 | --- | --- | --- |
 | `size` | the base model's own size token, as its Hub id writes it | `2B` (Qwen/Qwen3.5-2B-Base); `E2B`, `E4B`, `12B`, `26B-A4B` (google/gemma-4-*) |
 | `base` | the base model family, one token | `qwen3.5`, `gemma4` |
-| `v{N}` | the public recipe generation | `v1` |
+| `v{N}` | the release on this base family, from `v1` | `v1` |
 | `YYMM` | the release month, as on the Hub (Qwen's `-2507`) | `2610` |
 
-- **`v{N}`** counts recipes, not training runs. It goes up only when a change is visible to
-  users: new kinds of training data (code, for example), a new head, a new objective. The
-  same recipe has the same N on every base and size, so `strands-decider-E4B-gemma4-v1-2610`
-  and `strands-decider-2B-qwen3.5-v1-2610` are the same recipe on two bases.
+- **`v{N}`** counts the releases on one base family: `v1` is the first release on each base.
+  Releases with the same N on different bases can use different recipes, and each model card
+  says what its model trained on. For example, `strands-decider-E4B-gemma4-v1-2610` and
+  `strands-decider-2B-qwen3.5-v1-2610` are both v1: the Gemma 4 models train on hobson-v21's data
+  with code tasks added, and the Qwen3.5 model on a new data mix with another teacher
+  ([evaluation/results.md](../evaluation/results.md#gemma-4-v1)).
 - **A second release in the same month** goes to the same repository. Every upload is
   tagged on the Hub with its date, `YYMMDD`, and the card gets a changelog line. To pin a
   version, download it by its tag ([inference.md](inference.md#model-artifact)).

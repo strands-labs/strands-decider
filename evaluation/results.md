@@ -1,7 +1,7 @@
 # Results
 
-The measurements of v1 (the released model), v21, v19 and the versions before them: the
-seeds and release checks of v1 and v21, the AWS retrain, the summary by version,
+The measurements of v1 (the released model), the Gemma 4 v1 models, v21, v19 and the versions
+before them: the seeds and release checks of v1, the Gemma 4 v1 models and v21, the AWS retrain, the summary by version,
 calibration, and accuracy and latency on a Mac. [README.md](README.md) says how to run them, and
 [jevbench.md](jevbench.md) has the external benchmark. Paths are relative to the repository
 root unless they are links. A module path such as `infer.py` is relative to `src/strands_decider/`.
@@ -70,6 +70,126 @@ On the Decision Index (balanced skill) the soup scores 30.82, measured with the 
 | README examples, `--device cpu` and `--device cuda` | the same answers; probabilities within 0.006 |
 | code: test suite (CPU), ruff and mypy, as CI runs them | pass |
 | images, `--vision` ([docs/vision.md](../docs/vision.md#v1)) | NaturalBench 0.776, POPE 0.872; hobson-v21 on the same GPU 0.785, 0.877 |
+
+## Gemma 4 v1
+
+`StrandsAgents/strands-decider-{E2B,E4B,12B,26B-A4B}-gemma4-v1-2610`: four models on the Gemma 4
+instruction-tuned base models (`google/gemma-4-*-it`, Apache-2.0), with the pointer head of v1. What
+they train on:
+
+- **hobson-v21's data plus code tasks:** v21's 123,339 rows and 12,263 code-task rows (seven kinds:
+  execution-checked outputs and inputs of generated programs, which function fits a description,
+  CuBERT, CommitPackFT, CodeReviewer, CodeContests and Juliet), 135,602 rows. This is not the
+  Qwen3.5 v1 data mix. The rows come from 25 public Hugging Face datasets, five of them code
+  datasets, plus ContractNLI, MuSiQue and generated rows
+  ([data/sources.md](../data/sources.md) lists them with their licences).
+- **Qwen3.5-4B as the teacher:** its output distributions are training targets where its answer
+  agrees with the gold label. The code rows have gold labels only.
+- **The v19 anchor:** training keeps the answers close to the released v19 (a KL term, weight 0.3).
+- **A soup** of three training runs per size, as for v1: each layer's LoRA update is the exact mean of
+  the three runs' updates (stored as one rank-48 adapter), the soup's score for an option is the mean
+  of the three heads' scores, and the soup was then calibrated.
+
+The vision and audio encoders of the base models are dropped at load: the models read text only.
+Seeds and soups: their training and evaluation runs (8x NVIDIA H100). The configs are in each Hub
+repository (`train_config.json`).
+
+### E2B
+
+| measure | seed 0 | seed 1 | seed 2 | seeds, mean ± SD | **soup (this checkpoint)** |
+| --- | --- | --- | --- | --- | --- |
+| JevBench public, tasks right of 231 (window 4096) | 181 | 171 | 171 | 174.3 ± 5.8 | **180** |
+| JevBench Brier | 0.310 | 0.323 | 0.327 | 0.320 ± 0.009 | **0.313** |
+| JevBench ECE | 0.046 | 0.058 | 0.080 | 0.061 ± 0.017 | **0.053** |
+| MuSiQue (dev split; train split trained on) | 0.899 | 0.906 | 0.910 | 0.905 ± 0.006 | **0.913** |
+| ContractNLI (dev split; train split trained on) | 0.848 | 0.844 | 0.851 | 0.848 ± 0.004 | **0.856** |
+| BoardgameQA (dev split; train split trained on) | 0.784 | 0.807 | 0.790 | 0.794 ± 0.012 | **0.793** |
+| HotpotQA (never trained on) | 0.726 | 0.741 | 0.738 | 0.735 ± 0.008 | **0.734** |
+| held-out short tasks (6,000) | 0.650 | 0.656 | 0.656 | 0.654 ± 0.003 | **0.652** |
+| code tasks, held out (1,996) | 0.768 | 0.766 | 0.777 | 0.771 ± 0.006 | **0.773** |
+| HelpSteer2 adequacy (234) | 0.722 | 0.709 | 0.744 | 0.725 ± 0.018 | **0.739** |
+| generated adequacy (302) | 0.781 | 0.791 | 0.775 | 0.782 ± 0.008 | **0.785** |
+| generated documents, v16's set | 0.849 | 0.857 | 0.869 | 0.858 ± 0.010 | **0.854** |
+| generated documents, v18's set | 0.806 | 0.777 | 0.806 | 0.796 ± 0.016 | **0.802** |
+| JevBench tiers, easy / standard / hard | 48 / 68 / 65 | 48 / 68 / 55 | 48 / 68 / 55 | | **48 / 68 / 64** |
+
+On the Decision Index (balanced skill) the soup scores 29.78, measured with the training harness before the E2B attention fix; on requests with several questions its yes/no answers went through the faulty kernel path, so the figure may be off.
+
+### E4B
+
+| measure | seed 0 | seed 1 | seed 2 | seeds, mean ± SD | **soup (this checkpoint)** |
+| --- | --- | --- | --- | --- | --- |
+| JevBench public, tasks right of 231 (window 4096) | 186 | 186 | 188 | 186.7 ± 1.2 | **187** |
+| JevBench Brier | 0.251 | 0.252 | 0.265 | 0.256 ± 0.008 | **0.243** |
+| JevBench ECE | 0.032 | 0.059 | 0.036 | 0.043 ± 0.015 | **0.037** |
+| MuSiQue (dev split; train split trained on) | 0.920 | 0.917 | 0.917 | 0.918 ± 0.002 | **0.922** |
+| ContractNLI (dev split; train split trained on) | 0.869 | 0.869 | 0.886 | 0.875 ± 0.010 | **0.872** |
+| BoardgameQA (dev split; train split trained on) | 0.834 | 0.844 | 0.833 | 0.837 ± 0.006 | **0.844** |
+| HotpotQA (never trained on) | 0.828 | 0.822 | 0.823 | 0.824 ± 0.003 | **0.829** |
+| held-out short tasks (6,000) | 0.685 | 0.680 | 0.680 | 0.682 ± 0.003 | **0.684** |
+| code tasks, held out (1,996) | 0.811 | 0.812 | 0.824 | 0.815 ± 0.007 | **0.815** |
+| HelpSteer2 adequacy (234) | 0.765 | 0.778 | 0.769 | 0.771 ± 0.007 | **0.786** |
+| generated adequacy (302) | 0.815 | 0.858 | 0.825 | 0.833 ± 0.023 | **0.838** |
+| generated documents, v16's set | 0.880 | 0.868 | 0.886 | 0.878 ± 0.009 | **0.871** |
+| generated documents, v18's set | 0.850 | 0.850 | 0.854 | 0.852 ± 0.002 | **0.846** |
+| JevBench tiers, easy / standard / hard | 48 / 69 / 69 | 48 / 70 / 68 | 48 / 68 / 72 | | **48 / 69 / 70** |
+
+On the Decision Index (balanced skill) the soup scores 39.42, measured with the training harness.
+
+### 12B
+
+| measure | seed 0 | seed 1 | seed 2 | seeds, mean ± SD | **soup (this checkpoint)** |
+| --- | --- | --- | --- | --- | --- |
+| JevBench public, tasks right of 231 (window 4096) | 202 | 200 | 201 | 201.0 ± 1.0 | **200** |
+| JevBench Brier | 0.189 | 0.181 | 0.175 | 0.182 ± 0.007 | **0.173** |
+| JevBench ECE | 0.049 | 0.057 | 0.076 | 0.061 ± 0.014 | **0.061** |
+| MuSiQue (dev split; train split trained on) | 0.922 | 0.932 | 0.931 | 0.928 ± 0.006 | **0.936** |
+| ContractNLI (dev split; train split trained on) | 0.865 | 0.859 | 0.865 | 0.863 ± 0.003 | **0.876** |
+| BoardgameQA (dev split; train split trained on) | 0.862 | 0.881 | 0.884 | 0.876 ± 0.012 | **0.891** |
+| HotpotQA (never trained on) | 0.886 | 0.908 | 0.907 | 0.900 ± 0.012 | **0.911** |
+| held-out short tasks (6,000) | 0.698 | 0.701 | 0.701 | 0.700 ± 0.002 | **0.708** |
+| code tasks, held out (1,996) | 0.846 | 0.867 | 0.862 | 0.858 ± 0.011 | **0.870** |
+| HelpSteer2 adequacy (234) | 0.778 | 0.791 | 0.795 | 0.788 ± 0.009 | **0.795** |
+| generated adequacy (302) | 0.848 | 0.911 | 0.858 | 0.872 ± 0.034 | **0.884** |
+| generated documents, v16's set | 0.891 | 0.900 | 0.923 | 0.905 ± 0.016 | **0.917** |
+| generated documents, v18's set | 0.895 | 0.883 | 0.891 | 0.889 ± 0.006 | **0.903** |
+| JevBench tiers, easy / standard / hard | 48 / 72 / 82 | 48 / 72 / 80 | 48 / 71 / 82 | | **48 / 71 / 81** |
+
+On the Decision Index (balanced skill) the soup scores 47.14, measured with the training harness.
+
+### 26B-A4B
+
+| measure | seed 0 | seed 1 | seed 2 | seeds, mean ± SD | **soup (this checkpoint)** |
+| --- | --- | --- | --- | --- | --- |
+| JevBench public, tasks right of 231 (window 4096) | 201 | 199 | 197 | 199.0 ± 2.0 | **207** |
+| JevBench Brier | 0.194 | 0.186 | 0.206 | 0.195 ± 0.010 | **0.162** |
+| JevBench ECE | 0.030 | 0.066 | 0.046 | 0.047 ± 0.018 | **0.051** |
+| MuSiQue (dev split; train split trained on) | 0.925 | 0.922 | 0.912 | 0.920 ± 0.007 | **0.922** |
+| ContractNLI (dev split; train split trained on) | 0.873 | 0.858 | 0.866 | 0.866 ± 0.008 | **0.870** |
+| BoardgameQA (dev split; train split trained on) | 0.863 | 0.847 | 0.867 | 0.859 ± 0.011 | **0.869** |
+| HotpotQA (never trained on) | 0.895 | 0.892 | 0.886 | 0.891 ± 0.005 | **0.897** |
+| held-out short tasks (6,000) | 0.696 | 0.705 | 0.705 | 0.702 ± 0.005 | **0.708** |
+| code tasks, held out (1,996) | 0.863 | 0.855 | 0.857 | 0.858 ± 0.004 | **0.859** |
+| HelpSteer2 adequacy (234) | 0.791 | 0.812 | 0.812 | 0.805 ± 0.012 | **0.808** |
+| generated adequacy (302) | 0.921 | 0.907 | 0.917 | 0.915 ± 0.007 | **0.911** |
+| generated documents, v16's set | 0.917 | 0.897 | 0.871 | 0.895 ± 0.023 | **0.903** |
+| generated documents, v18's set | 0.911 | 0.939 | 0.878 | 0.910 ± 0.030 | **0.911** |
+| JevBench tiers, easy / standard / hard | 48 / 70 / 83 | 48 / 72 / 79 | 48 / 69 / 80 | | **48 / 72 / 87** |
+
+On the Decision Index (balanced skill) the soup scores 48.69, measured with the training harness.
+
+**Release checks.** The files on the Hub, downloaded into a clean folder, are byte-identical to the
+exported files, and `python -m strands_decider.hf_export verify` passes. Through the code on `main`, on CPU
+(the test suite and ruff pass on that code):
+
+| check | E2B | E4B | 12B | 26B-A4B |
+| --- | --- | --- | --- | --- |
+| the card's example, `--device cpu` | the card's output | the card's output | the card's output | the card's output |
+| 50 JevBench tasks: the same answer as the soup on the GPU | 50 of 50 | 50 of 50 | 50 of 50 | 50 of 50 |
+| 50 JevBench tasks: largest probability difference from the GPU | 0.050 | 0.014 | 0.038 | 0.126 |
+
+On one NVIDIA A100, with the E2B attention fix, the E2B card example's yes/no answer is 0.861 (0.708
+with PyTorch's default attention kernel; 0.863 on CPU) ([docs/inference.md](../docs/inference.md#gemma-4-models)).
 
 ## v21, the previous release
 

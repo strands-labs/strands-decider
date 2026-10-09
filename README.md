@@ -194,15 +194,74 @@ Model names now use the pattern `strands-decider-<size>-<base>-v<N>-<YYMM>`:
 
 - `<size>` is the size of the base model, as its Hugging Face id writes it (`2B`, `E4B`).
 - `<base>` is the base model family (`qwen3.5`, `gemma4`).
-- `v<N>` is the recipe generation. It starts again at `v1`. It changes only when users can see
-  the change, for example new training data, a new head or a new objective. One recipe has the
-  same `N` on all bases and sizes.
+- `v<N>` counts the releases on one base family: `v1` is the first release on each base.
+  Releases with the same `N` on different bases can use different recipes; each model card says
+  what its model trained on.
 - `<YYMM>` is the release month.
 
 Examples: `strands-decider-2B-qwen3.5-v1-2610` (Qwen3.5) and `strands-decider-E4B-gemma4-v1-2610`
-(Gemma 4, planned). The earlier models keep their names: `strands-decider-2B-hobson-v19` and
+(Gemma 4). The earlier models keep their names: `strands-decider-2B-hobson-v19` and
 `strands-decider-2B-hobson-v21`. A second release in the same month updates the same Hub
 repository and adds a revision tag `YYMMDD`. [docs/naming.md](docs/naming.md) has the full rules.
+
+## Gemma 4 models
+
+Four models on the Gemma 4 instruction-tuned base models (`google/gemma-4-*-it`, Apache-2.0). They
+have the same pointer head and answer the same three question types as the Qwen3.5 model.
+
+| model | JevBench (231) | Brier | held-out short tasks | held-out code tasks | Decision Index | GPU memory for the weights (bf16) | median latency per JevBench question, one H100 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| [`strands-decider-E2B-gemma4-v1-2610`](https://huggingface.co/StrandsAgents/strands-decider-E2B-gemma4-v1-2610) | 180 | 0.313 | 0.652 | 0.773 | 29.78 | about 9 GB | 102 ms |
+| [`strands-decider-E4B-gemma4-v1-2610`](https://huggingface.co/StrandsAgents/strands-decider-E4B-gemma4-v1-2610) | 187 | 0.243 | 0.684 | 0.815 | 39.42 | about 15 GB | 139 ms |
+| [`strands-decider-12B-gemma4-v1-2610`](https://huggingface.co/StrandsAgents/strands-decider-12B-gemma4-v1-2610) | 200 | 0.173 | 0.708 | 0.870 | 47.14 | about 23 GB | 136 ms |
+| [`strands-decider-26B-A4B-gemma4-v1-2610`](https://huggingface.co/StrandsAgents/strands-decider-26B-A4B-gemma4-v1-2610) | 207 | 0.162 | 0.708 | 0.859 | 48.69 | about 51 GB | 245 ms |
+
+For comparison, `strands-decider-2B-qwen3.5-v1-2610` scores 180, Brier 0.280. The E2B Decision Index
+was measured before the E2B attention fix (see [docs/inference.md](docs/inference.md#gemma-4-models)),
+so it may be off. Every model is a soup of three training runs, calibrated afterwards
+([evaluation/results.md](evaluation/results.md#gemma-4-v1)).
+
+**Choose a size.** A larger model is more accurate and better calibrated, and needs more memory.
+The 12B and the 26B-A4B are the most accurate; the 26B-A4B is better calibrated, but needs about
+twice the memory and twice the latency of the 12B. The E4B is a good choice when the model
+must share one GPU with other work. The E2B is the smallest: use it where memory is tightest, or on
+CPU. All four serve on CPU ([docs/inference.md](docs/inference.md#gemma-4-models)).
+
+**Install.** Gemma 4 support is on `main` and not yet in the package on PyPI:
+
+```bash
+pip install "strands-decider @ git+https://github.com/strands-labs/strands-decider"
+strands-decider ask StrandsAgents/strands-decider-E4B-gemma4-v1-2610 \
+  --state "Help! My payouts have been failing for 3 days! " \
+  --choice "Which team should handle this?=billing,sales,retail" \
+  --noul "Does this convey urgency?" \
+  --score "How frustrated is the writer?=calm,frustrated,depressed"
+```
+
+<details>
+  <summary>Example Output (`--device cpu`)</summary>
+
+  ```bash
+  noul_0 noul = 0.959
+  choice_0 -> billing (confidence 0.951)
+    billing                  0.967
+    sales                    0.019
+    retail                   0.013
+  score_0 score = 0.97 (confidence 0.848)
+    0: calm                                     0.102
+    1: frustrated                               0.823
+    2: depressed                                0.075
+  ```
+</details>
+
+**What they train on.** The Gemma 4 models do not use the Qwen3.5 v1 data mix. They train on
+hobson-v21's data (123,339 rows) plus 12,263 code-task rows, 135,602 rows in all. Qwen3.5-4B is the
+teacher, where its answer agrees with the gold label, and training keeps the answers close to the
+released v19. The rows come from 25 public Hugging Face datasets, five of them code datasets, and from
+ContractNLI, MuSiQue, generated rows and generated code tasks. [data/sources.md](data/sources.md)
+lists every source with its licence.
+
+The Gemma 4 models read text only: `--vision` is for the Qwen3.5 model.
 
 ## About the model
 

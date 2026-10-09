@@ -3,7 +3,8 @@
     python -m strands_decider.naming BASE_MODEL N YYMM     (prints the release name)
 
 size is the base model's own size token as its Hub id writes it (2B, E2B, 26B-A4B); base is
-one token per base family; N is the public recipe generation; YYMM is the release month.
+one token per base family; N counts the releases on that base family (v1 is the first); YYMM is
+the release month.
 The names released before this convention (strands-decider-2B-hobson-v19, -v21) keep theirs.
 """
 
@@ -21,7 +22,7 @@ NAME = re.compile(rf"strands-decider-({SIZE})-({'|'.join(map(re.escape, BASES.va
 
 
 def release_name(base_model: str, generation: int, yymm: str) -> str:
-    """The public name of recipe generation `generation` on `base_model`, released in `yymm`."""
+    """The public name of release `generation` on `base_model`'s family, released in `yymm`."""
     prefix = next((p for p in BASES if base_model.startswith(p)), "")
     size = re.match(SIZE, base_model[len(prefix):]) if prefix else None
     if not size:

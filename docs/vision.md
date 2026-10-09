@@ -4,7 +4,8 @@ Strands Decider answers questions about images when it is loaded with `--vision`
 built and measured on v19 and checked again on v21 and on v1, the current release
 ([How well it does](#how-well-it-does)). No weights change: the published checkpoint is used as is, and the images are read by the
 vision tower that already ships inside Qwen3.5-2B-Base. Text-only requests to a vision
-server get the same answers as from a text server.
+server get the same answers as from a text server. Images work with the Qwen3.5 models only: the
+Gemma 4 models load the text decoder of their base model and drop its vision encoder, so they read text only.
 
 ## Using it
 
