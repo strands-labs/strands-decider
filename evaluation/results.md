@@ -27,9 +27,9 @@ the name). What is new against v21:
 The four held-out sets are MuSiQue, ContractNLI and BoardgameQA, dev splits of sets whose train
 splits are in the training data, and HotpotQA, which is never trained on (the mix has
 2WikiMultihopQA, a similar multi-hop task). The configs are in the Hub repository
-(`train_config.json`, `training/configs/`). The anchor setting, the soup command and the data
-builders are not in this repository yet (pull requests to come), so v1 cannot be rebuilt from
-`main` until they are merged.
+(`train_config.json`, `training/configs/`). The anchor setting (`kl_frozen_reference`, #56) and
+the soup command (#58) are on `main`; the builders of this data mix are not yet, so the training
+data cannot be rebuilt from `main`.
 
 This checkpoint is a **soup** of three training runs of one recipe (seeds 0, 1 and 2). Each layer's
 LoRA update is the exact mean of the three runs' updates (stored as one rank-48 adapter), and the
