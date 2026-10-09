@@ -246,7 +246,9 @@ saves a 4096-token window, at which v19 scores 168. And 231 tasks are few: six r
 the v17 recipe had a standard deviation of 3.2 tasks, so treat a difference under about 10
 tasks between two single runs as unresolved. [evaluation/README.md](evaluation/README.md)
 has the scripts and the limitations, and links the results by version and the board
-position with its caveats.
+position with its caveats. [docs/evaluating.md](docs/evaluating.md) shows how to measure any
+checkpoint with a local proxy of JevBench v1.5's rules and on task families no model trains
+on, and how to check a reported number.
 
 ## Why 2B?
 

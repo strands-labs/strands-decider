@@ -202,11 +202,21 @@ def soup_cmd(
 @app.command("calibrate", hidden=True)
 def calibrate_cmd(
     checkpoint: str = typer.Argument(...),
-    data: str = typer.Option(..., "--data", help="Held-out JSONL for fitting temperature."),
-    limit: int = typer.Option(4000, help="Cap examples used."),
+    data: list[str] = typer.Option(
+        ..., "--data", help="Held-out JSONL for fitting temperature; repeat to pool several."
+    ),
+    limit: int = typer.Option(4000, help="Cap examples used from each --data file."),
     batch_size: int = typer.Option(16),
     split: str = typer.Option(
         "calib", help="Half of --data to use: calib|test|all. Disjoint from `eval --split test`."
+    ),
+    kinds: str | None = typer.Option(
+        None, "--kinds",
+        help="Refit only these primitives, comma-separated (e.g. choice,score), keeping the "
+        "checkpoint's other temperatures. Default: fit everything.",
+    ),
+    objective: str = typer.Option(
+        "ece", "--objective", help="What the per-primitive temperatures minimise: ece|nll."
     ),
 ) -> None:
     """Fit a temperature on held-out data and write it into the checkpoint.
@@ -220,8 +230,13 @@ def calibrate_cmd(
 
     from .evaluate import calibrate_checkpoint, partition_examples, sample_examples
 
-    examples = sample_examples(partition_examples(list(read_jsonl(data)), split), limit)
-    result = calibrate_checkpoint(checkpoint, examples, batch_size=batch_size)
+    # Each file is split and capped on its own, so one large set does not crowd out the rest.
+    examples = [ex for path in data
+                for ex in sample_examples(partition_examples(list(read_jsonl(path)), split), limit)]
+    result = calibrate_checkpoint(
+        checkpoint, examples, batch_size=batch_size, objective=objective,
+        kinds=[k.strip() for k in kinds.split(",") if k.strip()] if kinds is not None else None,
+    )
     console.print(f"[green]global temperature = {result['temperature']:.4f}[/]")
     by_kind = result.get("temperature_by_kind") or {}
     if by_kind:
