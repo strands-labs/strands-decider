@@ -6,56 +6,122 @@ and the scripts under `data/generators/` and `data/checks/`, are relative to the
 root.
 
 This table lists every input of the current recipe (`recipe.sh`), the v19 route and the v20
-route. The licence column copies only the licences that this repository states. "Not
-recorded here" means that the repository does not state one. Read the source's own terms
-before you redistribute data built from it.
+route. The licence column gives the licence or terms that each source states, with a link to
+the page that states them. Where a Hugging Face card and the original release disagree, the
+column gives the two. Card fields are informational, because a card licence is the uploader's
+claim.
 
 | Source | Pinned revision | Role | Transformation | Committed or downloaded | Licence | Attribution |
 | --- | --- | --- | --- | --- | --- | --- |
-| 21 short-task classification datasets on Hugging Face ([Short-task datasets](#short-task-datasets)) | No: `load_dataset` gets no revision | Train | `strands-decider data build` (`data/recipes.py`) turns each row into a typed question. Large label sets are subsampled to at most 24 options, and each task is capped at a fixed row count. | Downloaded | Not recorded here | The dataset card of each Hugging Face id |
-| 7 held-out short tasks ([Short-task datasets](#short-task-datasets)) | No | Held out: `emotion`, `hate_severity`, `massive_intent` and `sarcasm` calibrate and evaluate. The three RuleTaker depths are held out of training only. | The same build. `--holdout` writes them to `data/train_v5.holdout.jsonl`. `data/holdout_v5_norule.jsonl` drops the RuleTaker depths. | Downloaded | Not recorded here | The dataset card of each Hugging Face id |
-| ContractNLI (release zip) | No (hash-checked after `fetch`) | Train and evaluation | `data/multistep.py`: 17 claims per NDA, balanced per claim | Downloaded by `recipe.sh fetch` | CC BY 4.0 | Koreeda & Manning (Findings of EMNLP 2021), Hitachi America |
-| MuSiQue, full v1.0 (release zip) | No (hash-checked after `fetch`) | Train and evaluation | `data/multistep.py`: each question with its answerable and unanswerable versions | Downloaded by `recipe.sh fetch` | CC BY 4.0 | Trivedi et al., TACL 2022 |
-| BoardgameQA (`tasksource/Boardgame-QA`) | No | Train and evaluation | `data/multistep.py`: at most a quarter of the multi-step rows | Downloaded | CC BY 4.0 | Kazemi et al., NeurIPS 2023 |
-| HotpotQA (`hotpotqa/hotpot_qa`, distractor) | No | Evaluation only | `data/multistep.py`: comparison questions as yes/no or a choice between two titles | Downloaded | CC BY-SA 4.0 | Yang et al., EMNLP 2018 |
-| HelpSteer2 (`nvidia/HelpSteer2`) | No: `resolve/main` (hash-checked after `fetch`) | Train and evaluation | `data/adequacy.py`: ratings thresholded to adequate or inadequate, classes balanced | Downloaded by `recipe.sh fetch`, not redistributed | CC BY 4.0 | Wang et al. (NVIDIA, 2024), arXiv:2406.08673 |
-| Generated document questions, v16 and v18 (`data/synthetic/generated_v16*.jsonl`, `generated_v18*.jsonl`) | Yes: committed files | Train, and evaluation on held-out domains | Written by Qwen3.6-27B and kept when Qwen3.5-397B-A17B agreed, through OpenRouter. `data/generated.py` balances them. | Committed, with the raw exports in `data/generators/gen_*/` | Models: Apache-2.0. Generated text: not recorded here. | Qwen3.6-27B, Qwen3.5-397B-A17B |
-| Generated adequacy items, v19 (`data/synthetic/adequacy_gen*.jsonl`) | Yes: committed files | Train and evaluation | The same writer and verifier. Each inadequate response carries one assigned defect. | Committed (`data/generators/gen_adequacy/`) | Models: Apache-2.0. Generated text: not recorded here. | Qwen3.6-27B, Qwen3.5-397B-A17B |
-| Instruction-flip pairs, v20 (`data/synthetic/flips_v20*.jsonl`) | Yes: committed files | Train (v20) and evaluation | The same writer and verifier. Each short policy is asked twice, with instructions that reverse the answer. | Committed (`data/generators/gen_flips/`) | Models: Apache-2.0. Generated text: not recorded here. | Qwen3.6-27B, Qwen3.5-397B-A17B |
-| Question paraphrases, v20 (`data/generators/gen_paraphrases/paraphrases.jsonl`) | Yes: committed file | Train (v20) and the paired consistency evaluation | Written by Qwen3.6-27B and checked by Qwen3.5-397B-A17B. `recipe.sh generated` attaches them as instruction variants. | Committed | Models: Apache-2.0. Generated text: not recorded here. | Qwen3.6-27B, Qwen3.5-397B-A17B |
+| 21 short-task classification datasets on Hugging Face ([Short-task datasets](#short-task-datasets)) | No: `load_dataset` gets no revision | Train | `strands-decider data build` (`data/recipes.py`) turns each row into a typed question. Large label sets are subsampled to at most 24 options, and each task is capped at a fixed row count. | Downloaded | Per dataset, in [Short-task datasets](#short-task-datasets). | The dataset card of each Hugging Face id |
+| 7 held-out short tasks ([Short-task datasets](#short-task-datasets)) | No | Held out: `emotion`, `hate_severity`, `massive_intent` and `sarcasm` calibrate and evaluate. The three RuleTaker depths are held out of training only. | The same build. `--holdout` writes them to `data/train_v5.holdout.jsonl`. `data/holdout_v5_norule.jsonl` drops the RuleTaker depths. | Downloaded | Per dataset, in [Short-task datasets](#short-task-datasets). `emotion` is for educational and research use only. | The dataset card of each Hugging Face id |
+| ContractNLI (release zip) | No (hash-checked after `fetch`) | Train and evaluation | `data/multistep.py`: 17 claims per NDA, balanced per claim | Downloaded by `recipe.sh fetch` | CC BY 4.0 ([project page](https://stanfordnlp.github.io/contract-nli/)) | Koreeda & Manning (Findings of EMNLP 2021), Hitachi America |
+| MuSiQue, full v1.0 (release zip) | No (hash-checked after `fetch`) | Train and evaluation | `data/multistep.py`: each question with its answerable and unanswerable versions | Downloaded by `recipe.sh fetch` | CC BY 4.0 ([repository](https://github.com/StonyBrookNLP/musique)) | Trivedi et al., TACL 2022 |
+| BoardgameQA (`tasksource/Boardgame-QA`) | No | Train and evaluation | `data/multistep.py`: at most a quarter of the multi-step rows | Downloaded | CC BY 4.0 ([card](https://huggingface.co/datasets/tasksource/Boardgame-QA)) | Kazemi et al., NeurIPS 2023 |
+| HotpotQA (`hotpotqa/hotpot_qa`, distractor) | No | Evaluation only | `data/multistep.py`: comparison questions as yes/no or a choice between two titles | Downloaded | CC BY-SA 4.0, ShareAlike ([card](https://huggingface.co/datasets/hotpotqa/hotpot_qa)) | Yang et al., EMNLP 2018 |
+| HelpSteer2 (`nvidia/HelpSteer2`) | No: `resolve/main` (hash-checked after `fetch`) | Train and evaluation | `data/adequacy.py`: ratings thresholded to adequate or inadequate, classes balanced | Downloaded by `recipe.sh fetch`, not redistributed | CC BY 4.0 ([card](https://huggingface.co/datasets/nvidia/HelpSteer2)) | Wang et al. (NVIDIA, 2024), arXiv:2406.08673 |
+| Generated document questions, v16 and v18 (`data/synthetic/generated_v16*.jsonl`, `generated_v18*.jsonl`) | Yes: committed files | Train, and evaluation on held-out domains | Written by Qwen3.6-27B and kept when Qwen3.5-397B-A17B agreed, through OpenRouter. `data/generated.py` balances them. | Committed, with the raw exports in `data/generators/gen_*/` | Models: Apache-2.0 ([Qwen3.6-27B](https://huggingface.co/Qwen/Qwen3.6-27B), [Qwen3.5-397B-A17B](https://huggingface.co/Qwen/Qwen3.5-397B-A17B)). The model licence sets no terms on the generated text. The committed files are under the repository licence, Apache-2.0 ([LICENSE](../LICENSE)). | Qwen3.6-27B, Qwen3.5-397B-A17B |
+| Generated adequacy items, v19 (`data/synthetic/adequacy_gen*.jsonl`) | Yes: committed files | Train and evaluation | The same writer and verifier. Each inadequate response carries one assigned defect. | Committed (`data/generators/gen_adequacy/`) | Models: Apache-2.0 ([Qwen3.6-27B](https://huggingface.co/Qwen/Qwen3.6-27B), [Qwen3.5-397B-A17B](https://huggingface.co/Qwen/Qwen3.5-397B-A17B)). The model licence sets no terms on the generated text. The committed files are under the repository licence, Apache-2.0 ([LICENSE](../LICENSE)). | Qwen3.6-27B, Qwen3.5-397B-A17B |
+| Instruction-flip pairs, v20 (`data/synthetic/flips_v20*.jsonl`) | Yes: committed files | Train (v20) and evaluation | The same writer and verifier. Each short policy is asked twice, with instructions that reverse the answer. | Committed (`data/generators/gen_flips/`) | Models: Apache-2.0 ([Qwen3.6-27B](https://huggingface.co/Qwen/Qwen3.6-27B), [Qwen3.5-397B-A17B](https://huggingface.co/Qwen/Qwen3.5-397B-A17B)). The model licence sets no terms on the generated text. The committed files are under the repository licence, Apache-2.0 ([LICENSE](../LICENSE)). | Qwen3.6-27B, Qwen3.5-397B-A17B |
+| Question paraphrases, v20 (`data/generators/gen_paraphrases/paraphrases.jsonl`) | Yes: committed file | Train (v20) and the paired consistency evaluation | Written by Qwen3.6-27B and checked by Qwen3.5-397B-A17B. `recipe.sh generated` attaches them as instruction variants. | Committed | Models: Apache-2.0 ([Qwen3.6-27B](https://huggingface.co/Qwen/Qwen3.6-27B), [Qwen3.5-397B-A17B](https://huggingface.co/Qwen/Qwen3.5-397B-A17B)). The model licence sets no terms on the generated text. The committed files are under the repository licence, Apache-2.0 ([LICENSE](../LICENSE)). | Qwen3.6-27B, Qwen3.5-397B-A17B |
 | Catch-all rows, v20 (`data/catchall_v20*.jsonl`) | Follows the short-task corpus | Train (v20) and evaluation | `data/catchall.py` adds "other" or "none of these" options to the corpus's choice rows | Derived by `recipe.sh catchall`, not committed | Follows the short-task datasets | Not applicable |
-| Frozen-teacher distributions from `Qwen/Qwen3.5-4B` | Yes: revision `851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a` (`data/teacher.py`) | Training targets | v19 route: `recipe.sh teacher` labels the multi-step rows, and the parent trains toward them. v20 route: `distill` uses the committed labels of the short-task corpus (`data/synthetic/teacher_v5_qwen35-4b.jsonl`). | The model is downloaded. The short-task labels are committed, without the 21,000 `score` rows (Yelp, SST-5, app_reviews, formality), removed pending a rights check; `python -m strands_decider.data.teacher` regenerates them. `data/synthetic/teacher_multistep_v14.jsonl` is committed too, but no step reads it. | Not recorded here | Qwen |
-| Replay distributions | v19 route: regenerated. v20 route: yes, committed file. | Training targets | v19 route: `recipe.sh replay` labels the multi-step rows with the parent checkpoint's own distributions, and v19 trains toward them. v20 route: `distill` uses v14's distributions (`data/synthetic/replay_v14_multistep.jsonl`). | Regenerated, or committed | Not applicable | Not applicable |
-| Base model `Qwen/Qwen3.5-2B-Base` | No: the loader passes no revision ([Model artifact](../docs/inference.md#model-artifact)) | The torso for training and inference | LoRA adapters and the readout are trained on it | Downloaded from Hugging Face | Apache-2.0 | Qwen |
+| Frozen-teacher distributions from `Qwen/Qwen3.5-4B` | Yes: revision `851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a` (`data/teacher.py`) | Training targets | v19 route: `recipe.sh teacher` labels the multi-step rows, and the parent trains toward them. v20 route: `distill` uses the committed labels of the short-task corpus (`data/synthetic/teacher_v5_qwen35-4b.jsonl`). | The model is downloaded. The short-task labels are committed, without the 21,000 `score` rows (Yelp, SST-5, app_reviews, formality); `python -m strands_decider.data.teacher` regenerates them. `data/synthetic/teacher_multistep_v14.jsonl` is committed too, but no step reads it. | Model: Apache-2.0 ([card](https://huggingface.co/Qwen/Qwen3.5-4B)). The distributions label the short-task and multi-step rows, so the terms of those rows also apply. | Qwen |
+| Code-task rows (the Gemma 4 v1 models) | Yes: the build pins its sources (dataset revisions, repository commits) | Train, and 1,996 held-out code tasks for evaluation | 12,263 rows of seven task kinds: the value a generated function returns or the input that produced an output (execution-checked); which function in a code context fits a description; CuBERT (variable misuse, swapped operands, wrong operator, exception type, docstring match); which commit message describes a change (CommitPackFT); whether a reviewer commented on a diff (CodeReviewer); which submission is accepted (CodeContests); which weakness a C/C++ function has (Juliet). Rows over 4,096 tokens are dropped | Built outside this repository; not committed | Generated programs: none (written here). Repositories: MIT, Apache-2.0, BSD-2-Clause, BSD-3-Clause or ISC, per repository. CuBERT ETH Py150 Open (`claudios/cubert_ETHPy150Open`): Apache-2.0. CommitPackFT (`bigcode/commitpackft`): MIT, plus each row's repository licence. CodeReviewer (`fasterinnerlooper/codereviewer`, a mirror of Zenodo 6900648): CC BY 4.0. CodeContests (`deepmind/code_contests`): CC BY 4.0 for the non-code material. Juliet C/C++ 1.3 (`LorenzH/juliet_test_suite_c_1_3`): public domain (NIST), CC0 1.0 for foreign rights | Per repository; Google (CuBERT); BigCode (CommitPackFT); Microsoft (CodeReviewer); DeepMind (CodeContests); NIST (Juliet) |
+| Replay distributions | v19 route: regenerated. v20 route: yes, committed file. | Training targets | v19 route: `recipe.sh replay` labels the multi-step rows with the parent checkpoint's own distributions, and v19 trains toward them. v20 route: `distill` uses v14's distributions (`data/synthetic/replay_v14_multistep.jsonl`). | Regenerated, or committed | Not applicable: the outputs of this project's own checkpoints | Not applicable |
+| Base model `Qwen/Qwen3.5-2B-Base` | No: the loader passes no revision ([Model artifact](../docs/inference.md#model-artifact)) | The torso for training and inference | LoRA adapters and the readout are trained on it | Downloaded from Hugging Face | Apache-2.0 ([card](https://huggingface.co/Qwen/Qwen3.5-2B-Base)) | Qwen |
+| Base models `google/gemma-4-E2B-it`, `-E4B-it`, `-12B-it`, `-26B-A4B-it` | No: the loader passes no revision ([Model artifact](../docs/inference.md#model-artifact)) | The torsos of the Gemma 4 v1 models | LoRA adapters and the readout are trained on the text decoder; the vision and audio encoders are dropped at load | Downloaded from Hugging Face (not gated) | Apache-2.0 ([Gemma 4 license page](https://ai.google.dev/gemma/docs/gemma_4_license)) | Google |
 
 ## Short-task datasets
 
 `strands-decider data build` reads these Hugging Face datasets through `data/recipes.py`. The
-repository does not record their licences.
+licence column gives the card's licence field first, then the terms of the original release
+when the card says `unknown`, `other` or nothing. All links were read on 2026-10-03.
+"ShareAlike" marks a CC BY-SA source.
 
-| Recipe | Hugging Face id (config) | Question type | Role |
-| --- | --- | --- | --- |
-| `ag_news` | `fancyzhx/ag_news` | choice | train |
-| `banking77` | `legacy-datasets/banking77` | choice | train |
-| `clinc150` | `clinc/clinc_oos` (`plus`) | choice | train |
-| `dbpedia` | `fancyzhx/dbpedia_14` | choice | train |
-| `lang_id` | `papluca/language-identification` | choice | train |
-| `yahoo_topics` | `community-datasets/yahoo_answers_topics` | choice | train |
-| `spam` | `ucirvine/sms_spam` | noul | train |
-| `toxicity` | `google/civil_comments` | noul | train |
-| `mnli_entail` | `nyu-mll/glue` (`mnli`) | noul | train |
-| `boolq` | `google/boolq` | noul | train |
-| `paws` | `google-research-datasets/paws` (`labeled_final`) | noul | train |
-| `vitaminc` | `tals/vitaminc` | noul | train |
-| `wnli` | `nyu-mll/glue` (`wnli`) | noul | train |
-| `pubmed_qa` | `qiaojin/PubMedQA` (`pqa_labeled`) | noul | train |
-| `yelp_stars` | `Yelp/yelp_review_full` | score | train |
-| `sst5_sentiment` | `SetFit/sst5` | score | train |
-| `app_reviews` | `sealuzh/app_reviews` | score | train |
-| `formality` | `osyvokon/pavlick-formality-scores` | score | train |
-| `ruletaker_d0`, `ruletaker_d1`, `ruletaker_d2` | `tasksource/ruletaker` (depths 0, 1 and 2) | noul | train |
-| `emotion` | `dair-ai/emotion` | choice | held out: calibration and evaluation |
-| `massive_intent` | `mteb/amazon_massive_intent` (`en`) | choice | held out: calibration and evaluation |
-| `sarcasm` | `raquiba/Sarcasm_News_Headline` | noul | held out: calibration and evaluation |
-| `hate_severity` | `ucberkeley-dlab/measuring-hate-speech` | score | held out: calibration and evaluation |
-| `ruletaker_d3`, `ruletaker_d5`, `ruletaker_natlang` | `tasksource/ruletaker` (depths 3 and 5, NatLang) | noul | held out of training, not used for calibration |
+| Recipe | Hugging Face id (config) | Question type | Role | Licence |
+| --- | --- | --- | --- | --- |
+| `ag_news` | `fancyzhx/ag_news` | choice | train | Card: unknown. Original: non-commercial use only ([card](https://huggingface.co/datasets/fancyzhx/ag_news), [AG corpus page](http://groups.di.unipi.it/~gulli/AG_corpus_of_news_articles.html)). |
+| `banking77` | `legacy-datasets/banking77` | choice | train | CC BY 4.0 ([card](https://huggingface.co/datasets/legacy-datasets/banking77), [LICENSE](https://github.com/PolyAI-LDN/task-specific-datasets/blob/master/LICENSE)) |
+| `clinc150` | `clinc/clinc_oos` (`plus`) | choice | train | CC BY 3.0 ([card](https://huggingface.co/datasets/clinc/clinc_oos), [LICENSE](https://github.com/clinc/oos-eval/blob/master/LICENSE)) |
+| `dbpedia` | `fancyzhx/dbpedia_14` | choice | train | CC BY-SA 3.0, ShareAlike ([card](https://huggingface.co/datasets/fancyzhx/dbpedia_14)) |
+| `lang_id` | `papluca/language-identification` | choice | train | Card: none. Its sources include XNLI, CC BY-NC 4.0 ([LICENSE](https://github.com/facebookresearch/XNLI/blob/main/LICENSE)), and the Multilingual Amazon Reviews Corpus, academic research only ([card](https://huggingface.co/datasets/defunct-datasets/amazon_reviews_multi)). |
+| `yahoo_topics` | `community-datasets/yahoo_answers_topics` | choice | train | Card: unknown. Original: non-commercial research under a signed Yahoo data agreement ([card](https://huggingface.co/datasets/community-datasets/yahoo_answers_topics), [dataset readme](https://github.com/SALT-NLP/MixText/blob/master/data/yahoo_answers_csv/readme.md)). |
+| `spam` | `ucirvine/sms_spam` | noul | train | Card: unknown. Original: CC BY 4.0 ([card](https://huggingface.co/datasets/ucirvine/sms_spam), [UCI page](https://archive.ics.uci.edu/dataset/228/sms+spam+collection)) |
+| `toxicity` | `google/civil_comments` | noul | train | CC0 1.0 ([card](https://huggingface.co/datasets/google/civil_comments)) |
+| `mnli_entail` | `nyu-mll/glue` (`mnli`) | noul | train | Card: other, per task. MultiNLI card: CC BY 3.0, CC BY-SA 3.0, MIT and other (the OANC licence). ShareAlike for one fiction source ([GLUE card](https://huggingface.co/datasets/nyu-mll/glue), [MultiNLI card](https://huggingface.co/datasets/nyu-mll/multi_nli)). |
+| `boolq` | `google/boolq` | noul | train | CC BY-SA 3.0, ShareAlike ([card](https://huggingface.co/datasets/google/boolq), [repository](https://github.com/google-research-datasets/boolean-questions)) |
+| `paws` | `google-research-datasets/paws` (`labeled_final`) | noul | train | Card: other. Original: custom terms, "may be freely used for any purpose" ([card](https://huggingface.co/datasets/google-research-datasets/paws), [LICENSE](https://github.com/google-research-datasets/paws/blob/master/LICENSE)). The sentences come from Wikipedia. |
+| `vitaminc` | `tals/vitaminc` | noul | train | CC BY-SA 3.0, ShareAlike ([card](https://huggingface.co/datasets/tals/vitaminc)) |
+| `wnli` | `nyu-mll/glue` (`wnli`) | noul | train | Card: other, per task. Original: the Winograd Schema collection, CC BY 4.0 ([GLUE card](https://huggingface.co/datasets/nyu-mll/glue), [collection page](https://cs.nyu.edu/~davise/papers/WinogradSchemas/WS.html)) |
+| `pubmed_qa` | `qiaojin/PubMedQA` (`pqa_labeled`) | noul | train | MIT ([card](https://huggingface.co/datasets/qiaojin/PubMedQA), [LICENSE](https://github.com/pubmedqa/pubmedqa/blob/master/LICENSE)) |
+| `yelp_stars` | `Yelp/yelp_review_full` | score | train | Card: other, which points to the Yelp Dataset Terms of Use: non-commercial use only, no redistribution ([card](https://huggingface.co/datasets/Yelp/yelp_review_full), [terms](https://s3-media3.fl.yelpcdn.com/assets/srv0/engineering_pages/bea5c1e92bf3/assets/vendor/yelp-dataset-agreement.pdf)). |
+| `sst5_sentiment` | `SetFit/sst5` | score | train | Unknown after checking. The card, the [SST page](https://nlp.stanford.edu/sentiment/) and the [`stanfordnlp/sst` card](https://huggingface.co/datasets/stanfordnlp/sst) state no licence ([card](https://huggingface.co/datasets/SetFit/sst5)). |
+| `app_reviews` | `sealuzh/app_reviews` | score | train | Unknown after checking. The card says unknown, and the [repository](https://github.com/sealuzh/user_quality) states no licence ([card](https://huggingface.co/datasets/sealuzh/app_reviews)). |
+| `formality` | `osyvokon/pavlick-formality-scores` | score | train | Card: CC BY 3.0. The [paper](https://aclanthology.org/Q16-1005/) states no data licence, and part of the text comes from Yahoo Answers ([card](https://huggingface.co/datasets/osyvokon/pavlick-formality-scores)). |
+| `ruletaker_d0`, `ruletaker_d1`, `ruletaker_d2` | `tasksource/ruletaker` (depths 0, 1 and 2) | noul | train | Apache-2.0 ([card](https://huggingface.co/datasets/tasksource/ruletaker), [AllenAI repository](https://github.com/allenai/ruletaker)) |
+| `emotion` | `dair-ai/emotion` | choice | held out: calibration and evaluation | Card: other, "educational and research purposes only" ([card](https://huggingface.co/datasets/dair-ai/emotion), [repository](https://github.com/dair-ai/emotion_dataset)). |
+| `massive_intent` | `mteb/amazon_massive_intent` (`en`) | choice | held out: calibration and evaluation | Card: Apache-2.0. Original: CC BY 4.0 ([card](https://huggingface.co/datasets/mteb/amazon_massive_intent), [NOTICE.md](https://github.com/alexa/massive/blob/main/NOTICE.md)) |
+| `sarcasm` | `raquiba/Sarcasm_News_Headline` | noul | held out: calibration and evaluation | Card: none. Original: CC BY 4.0 on the author's Kaggle page. The headlines come from TheOnion and HuffPost ([card](https://huggingface.co/datasets/raquiba/Sarcasm_News_Headline), [Kaggle page](https://www.kaggle.com/datasets/rmisra/news-headlines-dataset-for-sarcasm-detection)). |
+| `hate_severity` | `ucberkeley-dlab/measuring-hate-speech` | score | held out: calibration and evaluation | CC BY 4.0 ([card](https://huggingface.co/datasets/ucberkeley-dlab/measuring-hate-speech)) |
+| `ruletaker_d3`, `ruletaker_d5`, `ruletaker_natlang` | `tasksource/ruletaker` (depths 3 and 5, NatLang) | noul | held out of training, not used for calibration | Apache-2.0 ([card](https://huggingface.co/datasets/tasksource/ruletaker)) |
+
+### Registered probes, not in the current recipe
+
+`data/recipes.py` also registers seven held-out probes. The current recipe does not build them.
+[research/history.md](../research/history.md) reports their transfer results.
+
+| Recipe | Hugging Face id (config) | Licence |
+| --- | --- | --- |
+| `newsgroups` | `SetFit/20_newsgroups` | Card: none. Original: CC BY 4.0 ([card](https://huggingface.co/datasets/SetFit/20_newsgroups), [UCI page](https://archive.ics.uci.edu/dataset/113/twenty+newsgroups)) |
+| `trec_qc` | `SetFit/TREC-QC` | Unknown after checking. The card, the [CogComp page](https://cogcomp.seas.upenn.edu/Data/QA/QC/) and the [`CogComp/trec` card](https://huggingface.co/datasets/CogComp/trec) state none ([card](https://huggingface.co/datasets/SetFit/TREC-QC)). |
+| `arxiv_class` | `ccdv/arxiv-classification` (`no_ref`) | Unknown after checking. The card states none. The text is the full text of arXiv papers, and each paper has the licence that its authors selected ([card](https://huggingface.co/datasets/ccdv/arxiv-classification), [arXiv licences](https://info.arxiv.org/help/license/index.html)). |
+| `rte` | `nyu-mll/glue` (`rte`) | Unknown after checking. The GLUE card refers to the original licences, and the RTE releases state none ([GLUE card](https://huggingface.co/datasets/nyu-mll/glue)). |
+| `qnli` | `nyu-mll/glue` (`qnli`) | CC BY-SA 4.0, ShareAlike, from SQuAD ([SQuAD page](https://rajpurkar.github.io/SQuAD-explorer/)) |
+| `cola` | `nyu-mll/glue` (`cola`) | Unknown after checking. The README of the [CoLA release](https://nyu-mll.github.io/CoLA/) states no licence. |
+| `subjectivity` | `SetFit/subj` | Unknown after checking. The card and the [movie-review data page](https://www.cs.cornell.edu/people/pabo/movie-review-data/) state none ([card](https://huggingface.co/datasets/SetFit/subj)). |
+
+## Planned sources (not yet in the recipe)
+
+These candidates come from two read-only data reports of 2026-10-03, `CALIBRATION-DATA.md`
+(soft labels) and `SCALE-DATA.md` (volume and breadth). They are not in this repository. "SA" = ShareAlike.
+Each licence was read on the linked page on 2026-10-03.
+
+| Source | Report | Licence (link) | SA | Attribution | Condition |
+| --- | --- | --- | --- | --- | --- |
+| Wikipedia Talk Labels: Toxicity, Aggression, Personal Attacks | Calibration | CC0 ([figshare](https://figshare.com/articles/dataset/Wikipedia_Talk_Labels_Toxicity/4563973)) | No | Wulczyn, Thain & Dixon, WWW 2017 (Wikimedia Foundation, Jigsaw) | None |
+| HelpSteer2 `disagreements` file (`nvidia/HelpSteer2`) | Calibration | CC BY 4.0 ([card](https://huggingface.co/datasets/nvidia/HelpSteer2)) | No | Wang et al. (NVIDIA, 2024), arXiv:2406.08673 | None |
+| UNLI (`Zhengping/UNLI`) | Calibration | MIT on the card, uploaded by a co-author. The text is SNLI, CC BY-SA 4.0 ([card](https://huggingface.co/datasets/Zhengping/UNLI), [SNLI](https://nlp.stanford.edu/projects/snli/)) | Yes | Chen et al., ACL 2020. SNLI: Bowman et al., EMNLP 2015 | The project page states no licence |
+| SNLI and MultiNLI annotator labels (original release JSONL) | Calibration | SNLI: CC BY-SA 4.0 ([card](https://huggingface.co/datasets/stanfordnlp/snli)). MultiNLI: CC BY 3.0, CC BY-SA 3.0, MIT and OANC ([card](https://huggingface.co/datasets/nyu-mll/multi_nli)) | Yes | Bowman et al., EMNLP 2015. Williams, Nangia & Bowman, NAACL 2018 | None |
+| BBQ (`heegyu/bbq`) | Calibration | CC BY 4.0 ([repository](https://github.com/nyu-mll/BBQ), [card](https://huggingface.co/datasets/heegyu/bbq)) | No | Parrish et al., Findings of ACL 2022 | None |
+| DICES | Calibration | CC BY 4.0 ([repository](https://github.com/google-research-datasets/dices-dataset)) | No | Aroyo et al., NeurIPS 2023 (Google) | None |
+| AmbiEnt (`tasksource/ambient`) | Calibration | CC BY 4.0 ([repository](https://github.com/alisawuffles/ambient)) | No | Liu et al., EMNLP 2023 | None |
+| δ-NLI, Defeasible NLI (`tasksource/defeasible-nli`) | Calibration | MIT ([repository](https://github.com/rudinger/defeasible-nli)). The card says Apache-2.0. The SNLI subset is CC BY-SA 4.0 | Yes, SNLI subset | Rudinger et al., Findings of EMNLP 2020 | None |
+| HelpSteer3 `preference` (`nvidia/HelpSteer3`) | Calibration, scale | CC BY 4.0 ([card](https://huggingface.co/datasets/nvidia/HelpSteer3)) | No | NVIDIA, 2025 | None |
+| FOLIO (`tasksource/folio`) | Calibration | CC BY-SA 4.0 ([repository](https://github.com/Yale-LILY/FOLIO)) | Yes | Han et al., 2022, arXiv:2209.00840 | None |
+| SQuAD 2.0 (`rajpurkar/squad_v2`) | Calibration, scale | CC BY-SA 4.0 ([card](https://huggingface.co/datasets/rajpurkar/squad_v2)) | Yes | Rajpurkar, Jia & Liang, ACL 2018 | None |
+| tasksource-jev-typed-decisions, `full` config | Scale | Per source. The card says other, and gives a `license_use` field for each row ([card](https://huggingface.co/datasets/tasksource/tasksource-jev-typed-decisions)) | Yes, for about 150k rows | tasksource (Sileo), and the attribution of each source | Drop the "unspecified", NC and GPL or AGPL sources. The `license_use` field is best effort |
+| CFPB consumer complaints (`BEE-spoke-data/consumer-finance-complaints`) | Scale | CC0 ([card](https://huggingface.co/datasets/BEE-spoke-data/consumer-finance-complaints)) | No | Consumer Financial Protection Bureau | None |
+| hh-rlhf (`Anthropic/hh-rlhf`) | Scale | MIT ([card](https://huggingface.co/datasets/Anthropic/hh-rlhf)) | No | Bai et al. (Anthropic, 2022) | The responses are Anthropic model outputs, released by Anthropic under MIT |
+| HelpSteer v1 (`nvidia/HelpSteer`) | Scale | CC BY 4.0 ([card](https://huggingface.co/datasets/nvidia/HelpSteer)) | No | Wang et al. (NVIDIA, 2023) | None |
+| OASST2 (`OpenAssistant/oasst2`) | Scale | Apache-2.0 ([card](https://huggingface.co/datasets/OpenAssistant/oasst2)) | No | Köpf et al., 2023 (OpenAssistant) | None |
+| DocNLI (`tasksource/doc-nli`) | Scale | BSD-3-Clause ([repository](https://github.com/salesforce/DocNLI), [card](https://huggingface.co/datasets/tasksource/doc-nli)) | No | Yin, Radev & Xiong, Findings of ACL 2021 (Salesforce) | Part of the text is CNN/DailyMail news |
+| CUAD (`theatticusproject/cuad-qa`) | Scale | CC BY 4.0 ([card](https://huggingface.co/datasets/theatticusproject/cuad-qa)) | No | Hendrycks et al., NeurIPS 2021 (The Atticus Project) | The card makes no representations about the rights in the contracts |
+| MAUD (`theatticusproject/maud`) | Scale | CC BY 4.0 ([card](https://huggingface.co/datasets/theatticusproject/maud)) | No | Wang et al., EMNLP 2023 (The Atticus Project) | None |
+| CaseHOLD and LEDGAR, from LexGLUE (`coastalcph/lex_glue`) | Scale | CC BY 4.0 ([card](https://huggingface.co/datasets/coastalcph/lex_glue)) | No | Chalkidis et al., ACL 2022. Zheng et al., ICAIL 2021. Tuggener et al., LREC 2020 | None |
+| 2WikiMultihopQA | Scale | Apache-2.0 ([repository](https://github.com/Alab-NII/2wikimultihop)). The Wikipedia text is CC BY-SA | Yes | Ho et al., COLING 2020 | None |
+| glaive-function-calling-v2 (`glaiveai/glaive-function-calling-v2`) | Scale | Apache-2.0 ([card](https://huggingface.co/datasets/glaiveai/glaive-function-calling-v2)) | No | Glaive AI | The card does not name the generator model. |
+| hermes-function-calling-v1 (`NousResearch/hermes-function-calling-v1`) | Scale | Apache-2.0 ([card](https://huggingface.co/datasets/NousResearch/hermes-function-calling-v1)) | No | Nous Research | The card does not name the generator models. |
+| FEVER-NLI (`pietrolesci/nli_fever`) | Scale | Wikipedia terms, or CC BY-SA 3.0 ([`fever/fever` card](https://huggingface.co/datasets/fever/fever)) | Yes | Thorne et al., NAACL 2018 | The `fever/fever` card also lists GPL-3.0. |
+| SNLI, more rows (`stanfordnlp/snli`) | Scale | CC BY-SA 4.0 ([card](https://huggingface.co/datasets/stanfordnlp/snli)) | Yes | Bowman et al., EMNLP 2015 | None |
+| MedMCQA (`openlifescienceai/medmcqa`) | Scale | Apache-2.0 ([card](https://huggingface.co/datasets/openlifescienceai/medmcqa)) | No | Pal et al., CHIL 2022 | None |
+| AQuA-RAT (`deepmind/aqua_rat`) | Scale | Apache-2.0 ([card](https://huggingface.co/datasets/deepmind/aqua_rat)) | No | Ling et al., ACL 2017 (DeepMind) | None |
+| ALFWorld expert trajectories | Scale | MIT ([repository](https://github.com/alfworld/alfworld)) | No | Shridhar et al., ICLR 2021 | None |
+| Mind2Web, train split (`osunlp/Mind2Web`) | Scale | CC BY 4.0 ([card](https://huggingface.co/datasets/osunlp/Mind2Web)) | No | Deng et al., NeurIPS 2023 | None |
+| tasksource procedural-typed-decisions | Scale | Apache-2.0 ([card](https://huggingface.co/datasets/tasksource/procedural-typed-decisions)) | No | tasksource (Sileo) | None |
+| ShARC (`tasksource/sharc`) | Scale | CC BY-SA 3.0 ([data README](README.md)). The tasksource card states none | Yes | Saeidi et al., EMNLP 2018 | None |
+| Natural Questions (`google-research-datasets/natural_questions`), reserve | Scale | CC BY-SA 3.0 ([card](https://huggingface.co/datasets/google-research-datasets/natural_questions)) | Yes | Kwiatkowski et al., TACL 2019 | None |
+| BIGPATENT (`NortheasternUniversity/big_patent`), reserve | Scale | CC BY 4.0 ([card](https://huggingface.co/datasets/NortheasternUniversity/big_patent)) | No | Sharma et al., ACL 2019 | None |
+
+The two reports also propose more rows or soft labels from current sources: `civil_comments`
+(CC0), `dbpedia_14` (CC BY-SA 3.0), MultiNLI and VitaminC. These rows keep the licence of the
+current source.
