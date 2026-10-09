@@ -51,9 +51,13 @@ def serving_attn_implementation(torso_cfg: Any) -> str | None:
     research/g27/READING-g27.md: a yes/no answer 0.726 against 0.860; relative error up to 0.68).
     HF's eager attention is exact there. Every other torso keeps the default.
     """
-    if str(getattr(torso_cfg, "model_type", "")).startswith("gemma4") and torso_cfg.num_key_value_heads == 1:
-        return "eager"
-    return None
+    if not str(getattr(torso_cfg, "model_type", "")).startswith("gemma4"):
+        return None
+    try:  # 12B / 26B-A4B configs hold the head counts per layer and refuse the global read
+        kv_heads = torso_cfg.num_key_value_heads
+    except Exception:
+        return None
+    return "eager" if kv_heads == 1 else None
 
 
 @dataclass
