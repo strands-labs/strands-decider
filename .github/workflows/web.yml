@@ -1,0 +1,219 @@
+# The browser demo (web/): convert the newest Strands Decider release when there is a new one, check it against
+# the Python implementation, publish the converted weights to Hugging Face, and deploy the site to GitHub Pages.
+#
+# A release is a new Hub repo, not a commit here, so GitHub sees no event when one is published. The workflow looks
+# on every push to main (a release usually comes with a docs change) and once a day, and stops after a few seconds
+# when the site already serves the newest release and no web files changed. `gh workflow run web.yml` picks a
+# release up at once. Converted weights go to `<release>/<inputs id>/<converter id>/` in the weights repo; a folder
+# that exists is reused, so a conversion runs only for a new release or a changed converter. See web/README.md.
+#
+# One-time setup: MAINTAINING.md, "The browser demo".
+name: web
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main, staging]
+    paths: ['web/**', 'src/strands_decider/**', '.github/workflows/web.yml']
+  schedule:
+    - cron: '23 5 * * *'
+  workflow_dispatch:
+    inputs:
+      release:
+        description: 'Release to serve (org/repo) until the next run; set the DECIDER_RELEASE variable to pin one'
+        required: false
+        type: string
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  WEIGHTS_REPO: ${{ vars.WEIGHTS_REPO }}
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pages: read
+    outputs:
+      release: ${{ steps.r.outputs.release }}
+      revision: ${{ steps.r.outputs.revision }}
+      folder: ${{ steps.r.outputs.folder }}
+      exists: ${{ steps.r.outputs.exists }}
+      repo: ${{ steps.r.outputs.repo }}
+      url: ${{ steps.r.outputs.url }}
+      live: ${{ steps.live.outputs.folder }}
+      # Nothing to do: the site serves this release already, and this is not a change to the site or a manual run.
+      skip: >-
+        ${{ steps.r.outputs.folder == steps.live.outputs.folder && (github.event_name == 'schedule'
+        || (github.event_name == 'push' && steps.changed.outputs.site == 'false')) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.12"
+      - run: python -m pip install huggingface_hub pytest
+      - run: python -m pytest -q web/convert/test_publish.py
+      - id: r
+        env:
+          RELEASE: ${{ inputs.release || vars.DECIDER_RELEASE }}
+        run: |
+          set -euo pipefail
+          python web/convert/publish.py resolve ${RELEASE:+--release "$RELEASE"} | tee -a "$GITHUB_OUTPUT"
+      - name: Folder the live site serves
+        id: live
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          site=$(gh api "repos/$GITHUB_REPOSITORY/pages" --jq .html_url 2>/dev/null || true)
+          echo "folder=${site:+$(python web/convert/publish.py live "$site")}" | tee -a "$GITHUB_OUTPUT"
+      - name: Whether the push changed the site
+        id: changed
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RANGE: ${{ github.event.before }}...${{ github.sha }}
+        run: |
+          set -euo pipefail
+          # The compare API lists at most 300 files; a bigger (or unknown) range counts as a change.
+          if ! files=$(gh api "repos/$GITHUB_REPOSITORY/compare/$RANGE" --jq '[.files[].filename] | if length < 300 then .[] else "web/" end' 2>/dev/null); then
+            files=web/
+          fi
+          if grep -qE '^(web/|src/strands_decider/|\.github/workflows/web\.yml$)' <<< "$files"; then site=true; else site=false; fi
+          echo "site=$site" | tee -a "$GITHUB_OUTPUT"
+
+  # Only when the release has no folder for this converter yet: about 20 minutes on CPU.
+  convert:
+    needs: resolve
+    if: needs.resolve.outputs.skip != 'true' && needs.resolve.outputs.exists != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Free disk space
+        # The base model, the merged fp16 copy and the ONNX export need about 12 GB at once.
+        run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL && df -h /
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.12"
+      # The CPU torch wheel first: the default Linux wheel also installs several GB of CUDA libraries.
+      - run: python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+      - run: python -m pip install -e . -r web/convert/requirements.txt
+      - name: Convert
+        env:
+          RELEASE: ${{ needs.resolve.outputs.release }}
+          REVISION: ${{ needs.resolve.outputs.revision }}
+        run: python web/convert/convert.py "$RELEASE" --revision "$REVISION" --out dist/weights --work "$RUNNER_TEMP"
+      - name: Check against strands_decider
+        run: python web/convert/check.py dist/weights
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: weights
+          path: dist/weights
+          if-no-files-found: error
+          retention-days: 1
+
+  test:
+    needs: [resolve, convert]
+    if: ${{ !cancelled() && needs.resolve.result == 'success' && needs.resolve.outputs.skip != 'true' && needs.convert.result != 'failure' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.12"
+      - run: python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+      - run: python -m pip install -e .
+      - if: needs.convert.result == 'success'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: weights
+          path: dist/weights
+      - if: needs.convert.result != 'success'
+        name: Download the published weights
+        env:
+          FOLDER: ${{ needs.resolve.outputs.folder }}
+          REPO: ${{ needs.resolve.outputs.repo }}
+        run: |
+          set -euo pipefail
+          hf download "$REPO" --include "$FOLDER/*" --local-dir dist/hub
+          mv "dist/hub/$FOLDER" dist/weights
+      # Token ids, option positions and answers from the strands_decider checked out here, not the one that wrote
+      # the published reference: a change to prompting or tokenization is held against the JavaScript port.
+      - run: python web/convert/check.py dist/weights --prompts-only
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        with:
+          node-version: lts/*
+      - run: npm ci --ignore-scripts && npx playwright install --with-deps chromium firefox webkit
+        working-directory: web
+      # Prompts and answers against the Python engine, then the built site on WASM in Chromium, Firefox and WebKit.
+      - run: npm test
+        working-directory: web
+        env:
+          WEIGHTS: ${{ github.workspace }}/dist/weights
+
+  publish:
+    needs: [resolve, convert, test]
+    if: ${{ !cancelled() && needs.test.result == 'success' && github.event_name != 'pull_request' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    env:
+      FOLDER: ${{ needs.resolve.outputs.folder }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.12"
+      - run: python -m pip install huggingface_hub
+      - if: needs.convert.result == 'success'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: weights
+          path: dist/weights
+      - if: needs.convert.result == 'success'
+        name: Upload the converted weights
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: python web/convert/publish.py upload dist/weights "$FOLDER"
+      - uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d  # v6.0.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        with:
+          node-version: lts/*
+      - run: npm ci --ignore-scripts && node build.mjs --out ../dist/site --weights "$URL"
+        working-directory: web
+        env:
+          URL: ${{ needs.resolve.outputs.url }}
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9  # v5.0.0
+        with:
+          path: dist/site
+      - id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346  # v5.0.1
+      - name: Remove converted weights nothing serves
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          PREVIOUS: ${{ needs.resolve.outputs.live }}
+        run: python web/convert/publish.py prune "$FOLDER" ${PREVIOUS:+"$PREVIOUS"}

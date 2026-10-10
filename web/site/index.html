@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="data:,">
+<!-- build.mjs sets this to the converted release the deployment serves (the directory holding manifest.json). -->
+<meta name="decider-weights" content="weights/">
+<title>Strands Decider 2B · in your browser</title>
+<style>
+  :root { --bg: #0d1117; --panel: #161b22; --line: #30363d; --text: #e6edf3; --dim: #8b949e; --accent: #58a6ff; --good: #3fb950; --warn: #d29922; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+  main { max-width: 980px; margin: 0 auto; padding: 32px 20px 60px; }
+  h1 { font-size: 28px; margin: 0 0 4px; letter-spacing: -0.02em; }
+  h1 span { color: var(--accent); }
+  .sub { color: var(--dim); margin: 0 0 20px; }
+  .pills { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 20px; }
+  .pill { border: 1px solid var(--line); border-radius: 999px; padding: 3px 12px; font-size: 13px; color: var(--dim); background: var(--panel); }
+  .pill b { color: var(--text); font-weight: 600; }
+  .pill.ok { border-color: #238636; } .pill.ok b { color: var(--good); }
+  .pill a { color: var(--accent); }
+  #loadbar { height: 3px; background: var(--line); border-radius: 2px; overflow: hidden; margin: -8px 0 20px; }
+  #loadbar div { height: 100%; width: 0; background: var(--accent); transition: width .2s; }
+  .chips { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; }
+  .chip { cursor: pointer; border: 1px solid var(--line); background: transparent; color: var(--text); border-radius: 8px; padding: 6px 12px; font: inherit; font-size: 13px; }
+  .chip:hover, .chip.on { border-color: var(--accent); color: var(--accent); }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 760px) { .grid { grid-template-columns: 1fr; } }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 16px; }
+  label { display: block; font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--dim); margin: 10px 0 4px; }
+  label:first-child { margin-top: 0; }
+  textarea, input, select { width: 100%; background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; font: inherit; }
+  textarea { resize: vertical; min-height: 110px; }
+  textarea:focus, input:focus, select:focus { outline: none; border-color: var(--accent); }
+  .row { display: flex; gap: 8px; } .row > * { flex: 1; } .row > select { flex: 0 0 120px; }
+  .live { display: flex; align-items: center; gap: 8px; margin-top: 12px; color: var(--dim); font-size: 13px; }
+  .live input { width: auto; }
+  #answer { font-size: 26px; font-weight: 650; min-height: 40px; letter-spacing: -0.01em; }
+  #answer small { font-size: 14px; color: var(--dim); font-weight: 400; }
+  .bars { margin-top: 12px; }
+  .bar { display: grid; grid-template-columns: minmax(70px, 30%) 1fr 56px; align-items: center; gap: 10px; margin: 6px 0; font-size: 14px; }
+  .bar .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .track { height: 10px; background: var(--bg); border-radius: 5px; overflow: hidden; }
+  .fill { height: 100%; width: 0; background: #30363d; border-radius: 5px; transition: width .25s ease, background .25s; }
+  .bar.top .fill { background: var(--accent); } .bar.top .name { color: var(--accent); font-weight: 600; }
+  .pct { text-align: right; font-variant-numeric: tabular-nums; color: var(--dim); }
+  .stats { display: flex; gap: 18px; margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line); font-size: 13px; color: var(--dim); }
+  .stats b { color: var(--text); font-variant-numeric: tabular-nums; }
+  #spark { display: flex; align-items: flex-end; gap: 2px; height: 36px; margin-top: 10px; }
+  #spark div { width: 6px; background: var(--accent); opacity: .7; border-radius: 2px 2px 0 0; }
+  .busy #answer { opacity: .55; }
+  footer { margin-top: 28px; color: var(--dim); font-size: 13px; }
+  footer a { color: var(--accent); }
+  code { background: var(--panel); padding: 1px 5px; border-radius: 4px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Strands Decider 2B, <span>in your browser</span></h1>
+  <p class="sub">A 2B-parameter decision model (Qwen3.5 hybrid + pointer head) running entirely in your browser, on the GPU through WebGPU or on the CPU. No server inference, no API calls. Edit anything and it re-decides as you type.</p>
+
+  <div class="pills">
+    <span class="pill" id="p-status">loading…</span>
+    <span class="pill" id="p-backend"></span>
+    <span class="pill" id="p-gpu"></span>
+    <span class="pill" id="p-load"></span>
+  </div>
+  <div id="loadbar"><div></div></div>
+
+  <div class="chips" id="examples"></div>
+
+  <div class="grid">
+    <div class="card">
+      <label for="state">State: what the model sees</label>
+      <textarea id="state"></textarea>
+      <label for="instructions">Question</label>
+      <input id="instructions">
+      <label for="options">Options <span id="opt-hint"></span></label>
+      <div class="row">
+        <select id="qtype"><option value="choice">choice</option><option value="noul">true/false</option><option value="score">score</option></select>
+        <input id="options">
+      </div>
+      <div class="live"><input type="checkbox" id="live" checked><span>Re-decide as you type</span>
+        <button class="chip" id="go" style="margin-left:auto">Decide</button></div>
+    </div>
+
+    <div class="card" id="out">
+      <label>Decision</label>
+      <div id="answer" data-testid="answer">…</div>
+      <div class="bars" id="bars"></div>
+      <div class="stats">
+        <span>forward <b id="s-fwd">–</b></span>
+        <span>tokens <b id="s-tok">–</b></span>
+        <span>decisions <b id="s-n">0</b></span>
+      </div>
+      <div id="spark" title="forward latency, last 40 decisions"></div>
+    </div>
+  </div>
+
+  <footer>
+    Model: <a id="f-source" href="https://huggingface.co/StrandsAgents">Strands Decider</a>, its LoRA merged into the base and quantized to int4,
+    run by ONNX Runtime Web and cached in the browser's private storage (OPFS) after the first load.
+    <a href="https://github.com/strands-labs/strands-decider/tree/main/web">Source</a>.
+  </footer>
+</main>
+
+<script type="module" src="js/demo.js"></script>
+</body>
+</html>

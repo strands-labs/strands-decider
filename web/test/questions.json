@@ -1,0 +1,683 @@
+{
+ "fixtures": [
+  {
+   "name": "payouts_team",
+   "state": "Help! My payouts have been failing for 3 days!",
+   "questions": {
+    "q": {
+     "type": "choice",
+     "instructions": "Which team should handle this?",
+     "criteria": {
+      "billing": null,
+      "sales": null,
+      "retail": null
+     }
+    }
+   }
+  },
+  {
+   "name": "payouts_team_perm",
+   "state": "Help! My payouts have been failing for 3 days!",
+   "questions": {
+    "q": {
+     "type": "choice",
+     "instructions": "Which team should handle this?",
+     "criteria": {
+      "retail": null,
+      "billing": null,
+      "sales": null
+     }
+    }
+   }
+  },
+  {
+   "name": "urgency_noul",
+   "state": "Help! My payouts have been failing for 3 days!",
+   "questions": {
+    "q": {
+     "type": "noul",
+     "instructions": "Does this convey urgency?"
+    }
+   }
+  },
+  {
+   "name": "frustration_score",
+   "state": "Help! My payouts have been failing for 3 days!",
+   "questions": {
+    "q": {
+     "type": "score",
+     "instructions": "How frustrated is the writer?",
+     "criteria": [
+      "calm",
+      "frustrated",
+      "depressed"
+     ]
+    }
+   }
+  },
+  {
+   "name": "zulu",
+   "state": "sihamba ngokushesha",
+   "questions": {
+    "q": {
+     "type": "choice",
+     "instructions": "What language is this phrase in?",
+     "criteria": {
+      "English": null,
+      "Zulu": null,
+      "Dutch": null
+     }
+    }
+   }
+  },
+  {
+   "name": "strawberry",
+   "state": "strawberry",
+   "questions": {
+    "q": {
+     "type": "noul",
+     "instructions": "Are there three r's in this word?"
+    }
+   }
+  },
+  {
+   "name": "ambiguous",
+   "state": "ok",
+   "questions": {
+    "q": {
+     "type": "choice",
+     "instructions": "What is the user's favourite colour?",
+     "criteria": {
+      "red": null,
+      "green": null,
+      "blue": null,
+      "yellow": null
+     }
+    }
+   }
+  }
+ ],
+ "bench": [
+  {
+   "name": "sent_pos",
+   "state": "This is the best doc I've ever read.",
+   "questions": {
+    "q": {
+     "type": "choice",
+     "instructions": "What is the sentiment?",
+     "criteria": {
+      "positive": null,
+      "negative": null,
+      "neutral": null
+     }
+    }
+   }
+  },
+  {
+   "name": "sent_neg",
+   "state": "The update broke everything and support never replied.",
+   "questions": {
+    "q": {
+     "type": "choice",
+     "instructions": "What is the sentiment?",
+     "criteria": {
+      "positive": null,
+      "negative": null,
+      "neutral": null
+     }
+    }
+   }
+  },
+  {
+   "name": "lang_fr",
+   "state": "Je voudrais un café, s'il vous plaît.",
+   "questions": {
+    "q": {
+     "type": "choice",
+     "instructions": "What language is this?",
+     "criteria": {
+      "English": null,
+      "French": null,
+      "German": null,
+      "Spanish": null
+     }
+    }
+   }
+  },
+  {
+   "name": "lang_de",
+   "state": "Wo ist der Bahnhof?",
+   "questions": {
+    "q": {
+     "type": "choice",
+     "instructions": "What language is this?",
+     "criteria": {
+      "English": null,
+      "French": null,
+      "German": null,
+      "Spanish": null
+     }
+    }
+   }
+  },
+  {
+   "name": "topic_sport",
+   "state": "The striker scored twice in the second half to secure the title.",
+   "questions": {
+    "q": {
+     "type": "choice",
+     "instructions": "What is the topic?",
+     "criteria": {
+      "sports": null,
+      "politics": null,
+      "technology": null,
+      "finance": null
+     }
+    }
+   }
+  },
+  {
+   "name": "topic_tech",
+   "state": "The new chip doubles inference throughput while halving power draw.",
+   "questions": {
+    "q": {
+     "type": "choice",
+     "instructions": "What is the topic?",
+     "criteria": {
+      "sports": null,
+      "politics": null,
+      "technology": null,
+      "finance": null
+     }
+    }
+   }
+  },
+  {
+   "name": "route_tech",
+   "state": "The app crashes every time I open the settings page.",
+   "questions": {
+    "q": {
+     "type": "choice",
+     "instructions": "Which team should handle this?",
+     "criteria": {
+      "billing": null,
+      "technical support": null,
+      "sales": null
+     }
+    }
+   }
+  },
+  {
+   "name": "route_sales",
+   "state": "Can I get a quote for 200 seats on the enterprise plan?",
+   "questions": {
+    "q": {
+     "type": "choice",
+     "instructions": "Which team should handle this?",
+     "criteria": {
+      "billing": null,
+      "technical support": null,
+      "sales": null
+     }
+    }
+   }
+  },
+  {
+   "name": "tool_weather",
+   "state": "User: will it rain in Seattle tomorrow?",
+   "questions": {
+    "q": {
+     "type": "choice",
+     "instructions": "Which tool should the agent call?",
+     "criteria": {
+      "get_weather": null,
+      "search_flights": null,
+      "send_email": null,
+      "calculator": null
+     }
+    }
+   }
+  },
+  {
+   "name": "tool_calc",
+   "state": "User: what is 17% of 2,340?",
+   "questions": {
+    "q": {
+     "type": "choice",
+     "instructions": "Which tool should the agent call?",
+     "criteria": {
+      "get_weather": null,
+      "search_flights": null,
+      "send_email": null,
+      "calculator": null
+     }
+    }
+   }
+  },
+  {
+   "name": "tool_email",
+   "state": "User: let Dana know the meeting moved to 3pm.",
+   "questions": {
+    "q": {
+     "type": "choice",
+     "instructions": "Which tool should the agent call?",
+     "criteria": {
+      "get_weather": null,
+      "search_flights": null,
+      "send_email": null,
+      "calculator": null
+     }
+    }
+   }
+  },
+  {
+   "name": "intent_cancel",
+   "state": "I want to stop my subscription at the end of this month.",
+   "questions": {
+    "q": {
+     "type": "choice",
+     "instructions": "What does the user want?",
+     "criteria": {
+      "cancel subscription": null,
+      "upgrade plan": null,
+      "report a bug": null,
+      "change password": null
+     }
+    }
+   }
+  },
+  {
+   "name": "fact_paris",
+   "state": "Paris is the capital of France.",
+   "questions": {
+    "q": {
+     "type": "noul",
+     "instructions": "Is this statement true?"
+    }
+   }
+  },
+  {
+   "name": "fact_sun",
+   "state": "The sun orbits the earth once a day.",
+   "questions": {
+    "q": {
+     "type": "noul",
+     "instructions": "Is this statement true?"
+    }
+   }
+  },
+  {
+   "name": "pii",
+   "state": "My card number is 4111 1111 1111 1111, exp 04/29.",
+   "questions": {
+    "q": {
+     "type": "noul",
+     "instructions": "Does the text contain payment card details?"
+    }
+   }
+  },
+  {
+   "name": "no_pii",
+   "state": "The weather was lovely during our trip to Lisbon.",
+   "questions": {
+    "q": {
+     "type": "noul",
+     "instructions": "Does the text contain payment card details?"
+    }
+   }
+  },
+  {
+   "name": "guard_delete",
+   "state": {
+    "pending_action": "DELETE FROM users;",
+    "user_request": "show me the 10 newest users"
+   },
+   "questions": {
+    "q": {
+     "type": "noul",
+     "instructions": "Is the pending action consistent with the user's request?"
+    }
+   }
+  },
+  {
+   "name": "guard_ok",
+   "state": {
+    "pending_action": "SELECT * FROM users ORDER BY created_at DESC LIMIT 10;",
+    "user_request": "show me the 10 newest users"
+   },
+   "questions": {
+    "q": {
+     "type": "noul",
+     "instructions": "Is the pending action consistent with the user's request?"
+    }
+   }
+  },
+  {
+   "name": "stars_5",
+   "state": "Absolutely fantastic, would buy again in a heartbeat!",
+   "questions": {
+    "q": {
+     "type": "score",
+     "instructions": "How positive is this review?",
+     "criteria": [
+      "very negative",
+      "negative",
+      "neutral",
+      "positive",
+      "very positive"
+     ]
+    }
+   }
+  },
+  {
+   "name": "stars_1",
+   "state": "Broke after one day. Total waste of money.",
+   "questions": {
+    "q": {
+     "type": "score",
+     "instructions": "How positive is this review?",
+     "criteria": [
+      "very negative",
+      "negative",
+      "neutral",
+      "positive",
+      "very positive"
+     ]
+    }
+   }
+  },
+  {
+   "name": "urgency",
+   "state": "Production is down for all customers!!",
+   "questions": {
+    "q": {
+     "type": "score",
+     "instructions": "How urgent is this?",
+     "criteria": [
+      "low",
+      "medium",
+      "high"
+     ]
+    }
+   }
+  },
+  {
+   "name": "route_tech_perm_sale",
+   "state": "The app crashes every time I open the settings page.",
+   "questions": {
+    "q": {
+     "type": "choice",
+     "instructions": "Which team should handle this?",
+     "criteria": {
+      "sales": null,
+      "billing": null,
+      "technical support": null
+     }
+    }
+   }
+  },
+  {
+   "name": "route_tech_perm_tech",
+   "state": "The app crashes every time I open the settings page.",
+   "questions": {
+    "q": {
+     "type": "choice",
+     "instructions": "Which team should handle this?",
+     "criteria": {
+      "technical support": null,
+      "sales": null,
+      "billing": null
+     }
+    }
+   }
+  },
+  {
+   "name": "long_route_20",
+   "state": "[000] The customer thanked the agent and mentioned a holiday.\n[001] The customer thanked the agent and mentioned a holiday.\n[002] The customer wrote in about their account.\n[003] An agent confirmed the order number and apologised for the delay.\n[004] There was a short exchange about the loyalty programme and points balance.\n[005] The customer thanked the agent and mentioned a holiday.\n[006] The customer thanked the agent and mentioned a holiday.\n[007] An agent confirmed the order number and apologised for the delay.\n[008] The customer thanked the agent and mentioned a holiday.\n[009] An agent confirmed the order number and apologised for the delay.\n[010] There was a short exchange about the loyalty programme and points balance.\n[011] Earlier messages discussed shipping times and address changes.\n[012] There was a short exchange about the loyalty programme and points balance.\n[KEY] Latest message: I was charged twice for my last invoice and need one charge reversed.\n[013] Earlier messages discussed shipping times and address changes.\n[014] An agent confirmed the order number and apologised for the delay.\n[015] Earlier messages discussed shipping times and address changes.\n[016] The customer wrote in about their account.\n[017] There was a short exchange about the loyalty programme and points balance.\n[018] An agent confirmed the order number and apologised for the delay.\n[019] There was a short exchange about the loyalty programme and points balance.",
+   "questions": {
+    "q": {
+     "type": "choice",
+     "instructions": "Which team should handle the latest message?",
+     "criteria": {
+      "billing": null,
+      "technical support": null,
+      "sales": null,
+      "shipping": null
+     }
+    }
+   }
+  },
+  {
+   "name": "long_route_60",
+   "state": "[000] There was a short exchange about the loyalty programme and points balance.\n[001] Earlier messages discussed shipping times and address changes.\n[002] An agent confirmed the order number and apologised for the delay.\n[003] The customer wrote in about their account.\n[004] The customer wrote in about their account.\n[005] An agent confirmed the order number and apologised for the delay.\n[006] The customer thanked the agent and mentioned a holiday.\n[007] There was a short exchange about the loyalty programme and points balance.\n[008] The customer wrote in about their account.\n[009] An agent confirmed the order number and apologised for the delay.\n[010] The customer thanked the agent and mentioned a holiday.\n[011] An agent confirmed the order number and apologised for the delay.\n[012] There was a short exchange about the loyalty programme and points balance.\n[013] Earlier messages discussed shipping times and address changes.\n[014] There was a short exchange about the loyalty programme and points balance.\n[015] The customer thanked the agent and mentioned a holiday.\n[016] The customer thanked the agent and mentioned a holiday.\n[017] There was a short exchange about the loyalty programme and points balance.\n[018] An agent confirmed the order number and apologised for the delay.\n[019] The customer wrote in about their account.\n[020] There was a short exchange about the loyalty programme and points balance.\n[021] The customer wrote in about their account.\n[022] The customer wrote in about their account.\n[023] The customer thanked the agent and mentioned a holiday.\n[024] The customer wrote in about their account.\n[025] There was a short exchange about the loyalty programme and points balance.\n[026] The customer thanked the agent and mentioned a holiday.\n[027] An agent confirmed the order number and apologised for the delay.\n[028] Earlier messages discussed shipping times and address changes.\n[029] An agent confirmed the order number and apologised for the delay.\n[030] The customer wrote in about their account.\n[031] Earlier messages discussed shipping times and address changes.\n[032] There was a short exchange about the loyalty programme and points balance.\n[033] Earlier messages discussed shipping times and address changes.\n[034] Earlier messages discussed shipping times and address changes.\n[035] Earlier messages discussed shipping times and address changes.\n[036] There was a short exchange about the loyalty programme and points balance.\n[037] The customer thanked the agent and mentioned a holiday.\n[038] The customer wrote in about their account.\n[039] The customer wrote in about their account.\n[KEY] Latest message: I was charged twice for my last invoice and need one charge reversed.\n[040] An agent confirmed the order number and apologised for the delay.\n[041] There was a short exchange about the loyalty programme and points balance.\n[042] The customer thanked the agent and mentioned a holiday.\n[043] The customer wrote in about their account.\n[044] An agent confirmed the order number and apologised for the delay.\n[045] There was a short exchange about the loyalty programme and points balance.\n[046] An agent confirmed the order number and apologised for the delay.\n[047] The customer wrote in about their account.\n[048] There was a short exchange about the loyalty programme and points balance.\n[049] An agent confirmed the order number and apologised for the delay.\n[050] There was a short exchange about the loyalty programme and points balance.\n[051] Earlier messages discussed shipping times and address changes.\n[052] There was a short exchange about the loyalty programme and points balance.\n[053] There was a short exchange about the loyalty programme and points balance.\n[054] There was a short exchange about the loyalty programme and points balance.\n[055] An agent confirmed the order number and apologised for the delay.\n[056] The customer thanked the agent and mentioned a holiday.\n[057] The customer wrote in about their account.\n[058] There was a short exchange about the loyalty programme and points balance.\n[059] The customer thanked the agent and mentioned a holiday.",
+   "questions": {
+    "q": {
+     "type": "choice",
+     "instructions": "Which team should handle the latest message?",
+     "criteria": {
+      "billing": null,
+      "technical support": null,
+      "sales": null,
+      "shipping": null
+     }
+    }
+   }
+  },
+  {
+   "name": "long_route_120",
+   "state": "[000] An agent confirmed the order number and apologised for the delay.\n[001] There was a short exchange about the loyalty programme and points balance.\n[002] Earlier messages discussed shipping times and address changes.\n[003] An agent confirmed the order number and apologised for the delay.\n[004] Earlier messages discussed shipping times and address changes.\n[005] Earlier messages discussed shipping times and address changes.\n[006] Earlier messages discussed shipping times and address changes.\n[007] The customer wrote in about their account.\n[008] There was a short exchange about the loyalty programme and points balance.\n[009] An agent confirmed the order number and apologised for the delay.\n[010] The customer thanked the agent and mentioned a holiday.\n[011] The customer wrote in about their account.\n[012] The customer wrote in about their account.\n[013] Earlier messages discussed shipping times and address changes.\n[014] Earlier messages discussed shipping times and address changes.\n[015] The customer wrote in about their account.\n[016] The customer wrote in about their account.\n[017] There was a short exchange about the loyalty programme and points balance.\n[018] The customer thanked the agent and mentioned a holiday.\n[019] There was a short exchange about the loyalty programme and points balance.\n[020] An agent confirmed the order number and apologised for the delay.\n[021] There was a short exchange about the loyalty programme and points balance.\n[022] Earlier messages discussed shipping times and address changes.\n[023] Earlier messages discussed shipping times and address changes.\n[024] There was a short exchange about the loyalty programme and points balance.\n[025] The customer thanked the agent and mentioned a holiday.\n[026] There was a short exchange about the loyalty programme and points balance.\n[027] An agent confirmed the order number and apologised for the delay.\n[028] The customer thanked the agent and mentioned a holiday.\n[029] The customer thanked the agent and mentioned a holiday.\n[030] An agent confirmed the order number and apologised for the delay.\n[031] The customer wrote in about their account.\n[032] An agent confirmed the order number and apologised for the delay.\n[033] There was a short exchange about the loyalty programme and points balance.\n[034] The customer wrote in about their account.\n[035] The customer thanked the agent and mentioned a holiday.\n[036] There was a short exchange about the loyalty programme and points balance.\n[037] An agent confirmed the order number and apologised for the delay.\n[038] Earlier messages discussed shipping times and address changes.\n[039] Earlier messages discussed shipping times and address changes.\n[040] The customer wrote in about their account.\n[041] An agent confirmed the order number and apologised for the delay.\n[042] The customer wrote in about their account.\n[043] Earlier messages discussed shipping times and address changes.\n[044] An agent confirmed the order number and apologised for the delay.\n[045] Earlier messages discussed shipping times and address changes.\n[046] An agent confirmed the order number and apologised for the delay.\n[047] The customer thanked the agent and mentioned a holiday.\n[048] The customer wrote in about their account.\n[049] The customer wrote in about their account.\n[050] Earlier messages discussed shipping times and address changes.\n[051] Earlier messages discussed shipping times and address changes.\n[052] The customer wrote in about their account.\n[053] There was a short exchange about the loyalty programme and points balance.\n[054] There was a short exchange about the loyalty programme and points balance.\n[055] There was a short exchange about the loyalty programme and points balance.\n[056] The customer wrote in about their account.\n[057] The customer wrote in about their account.\n[058] The customer wrote in about their account.\n[059] Earlier messages discussed shipping times and address changes.\n[060] There was a short exchange about the loyalty programme and points balance.\n[061] There was a short exchange about the loyalty programme and points balance.\n[062] The customer wrote in about their account.\n[063] The customer thanked the agent and mentioned a holiday.\n[064] The customer wrote in about their account.\n[065] An agent confirmed the order number and apologised for the delay.\n[066] The customer wrote in about their account.\n[067] The customer wrote in about their account.\n[068] There was a short exchange about the loyalty programme and points balance.\n[069] The customer wrote in about their account.\n[070] Earlier messages discussed shipping times and address changes.\n[071] Earlier messages discussed shipping times and address changes.\n[072] The customer wrote in about their account.\n[073] The customer thanked the agent and mentioned a holiday.\n[074] Earlier messages discussed shipping times and address changes.\n[075] The customer wrote in about their account.\n[076] The customer wrote in about their account.\n[077] There was a short exchange about the loyalty programme and points balance.\n[078] The customer thanked the agent and mentioned a holiday.\n[079] There was a short exchange about the loyalty programme and points balance.\n[KEY] Latest message: I was charged twice for my last invoice and need one charge reversed.\n[080] The customer wrote in about their account.\n[081] An agent confirmed the order number and apologised for the delay.\n[082] The customer wrote in about their account.\n[083] Earlier messages discussed shipping times and address changes.\n[084] The customer wrote in about their account.\n[085] An agent confirmed the order number and apologised for the delay.\n[086] An agent confirmed the order number and apologised for the delay.\n[087] The customer thanked the agent and mentioned a holiday.\n[088] Earlier messages discussed shipping times and address changes.\n[089] The customer wrote in about their account.\n[090] There was a short exchange about the loyalty programme and points balance.\n[091] The customer thanked the agent and mentioned a holiday.\n[092] The customer wrote in about their account.\n[093] There was a short exchange about the loyalty programme and points balance.\n[094] The customer wrote in about their account.\n[095] The customer thanked the agent and mentioned a holiday.\n[096] Earlier messages discussed shipping times and address changes.\n[097] An agent confirmed the order number and apologised for the delay.\n[098] An agent confirmed the order number and apologised for the delay.\n[099] The customer thanked the agent and mentioned a holiday.\n[100] There was a short exchange about the loyalty programme and points balance.\n[101] Earlier messages discussed shipping times and address changes.\n[102] Earlier messages discussed shipping times and address changes.\n[103] The customer wrote in about their account.\n[104] Earlier messages discussed shipping times and address changes.\n[105] Earlier messages discussed shipping times and address changes.\n[106] An agent confirmed the order number and apologised for the delay.\n[107] There was a short exchange about the loyalty programme and points balance.\n[108] An agent confirmed the order number and apologised for the delay.\n[109] The customer wrote in about their account.\n[110] There was a short exchange about the loyalty programme and points balance.\n[111] The customer thanked the agent and mentioned a holiday.\n[112] Earlier messages discussed shipping times and address changes.\n[113] The customer wrote in about their account.\n[114] The customer thanked the agent and mentioned a holiday.\n[115] The customer thanked the agent and mentioned a holiday.\n[116] There was a short exchange about the loyalty programme and points balance.\n[117] There was a short exchange about the loyalty programme and points balance.\n[118] An agent confirmed the order number and apologised for the delay.\n[119] An agent confirmed the order number and apologised for the delay.",
+   "questions": {
+    "q": {
+     "type": "choice",
+     "instructions": "Which team should handle the latest message?",
+     "criteria": {
+      "billing": null,
+      "technical support": null,
+      "sales": null,
+      "shipping": null
+     }
+    }
+   }
+  },
+  {
+   "name": "long_noul_60",
+   "state": "[000] The customer thanked the agent and mentioned a holiday.\n[001] An agent confirmed the order number and apologised for the delay.\n[002] Earlier messages discussed shipping times and address changes.\n[003] There was a short exchange about the loyalty programme and points balance.\n[004] The customer wrote in about their account.\n[005] The customer thanked the agent and mentioned a holiday.\n[006] The customer wrote in about their account.\n[007] An agent confirmed the order number and apologised for the delay.\n[008] The customer wrote in about their account.\n[009] There was a short exchange about the loyalty programme and points balance.\n[010] An agent confirmed the order number and apologised for the delay.\n[011] Earlier messages discussed shipping times and address changes.\n[012] Earlier messages discussed shipping times and address changes.\n[013] The customer thanked the agent and mentioned a holiday.\n[014] An agent confirmed the order number and apologised for the delay.\n[015] There was a short exchange about the loyalty programme and points balance.\n[016] An agent confirmed the order number and apologised for the delay.\n[017] An agent confirmed the order number and apologised for the delay.\n[018] There was a short exchange about the loyalty programme and points balance.\n[019] There was a short exchange about the loyalty programme and points balance.\n[020] Earlier messages discussed shipping times and address changes.\n[021] An agent confirmed the order number and apologised for the delay.\n[022] The customer thanked the agent and mentioned a holiday.\n[023] The customer thanked the agent and mentioned a holiday.\n[024] The customer wrote in about their account.\n[025] The customer wrote in about their account.\n[026] There was a short exchange about the loyalty programme and points balance.\n[027] Earlier messages discussed shipping times and address changes.\n[028] An agent confirmed the order number and apologised for the delay.\n[029] Earlier messages discussed shipping times and address changes.\n[030] Earlier messages discussed shipping times and address changes.\n[031] Earlier messages discussed shipping times and address changes.\n[032] The customer thanked the agent and mentioned a holiday.\n[033] The customer thanked the agent and mentioned a holiday.\n[034] There was a short exchange about the loyalty programme and points balance.\n[035] The customer thanked the agent and mentioned a holiday.\n[036] The customer wrote in about their account.\n[037] The customer thanked the agent and mentioned a holiday.\n[038] There was a short exchange about the loyalty programme and points balance.\n[039] The customer thanked the agent and mentioned a holiday.\n[KEY] Latest message: our whole team is locked out and the launch is in one hour!\n[040] The customer wrote in about their account.\n[041] Earlier messages discussed shipping times and address changes.\n[042] The customer thanked the agent and mentioned a holiday.\n[043] The customer wrote in about their account.\n[044] An agent confirmed the order number and apologised for the delay.\n[045] Earlier messages discussed shipping times and address changes.\n[046] The customer thanked the agent and mentioned a holiday.\n[047] There was a short exchange about the loyalty programme and points balance.\n[048] The customer thanked the agent and mentioned a holiday.\n[049] There was a short exchange about the loyalty programme and points balance.\n[050] There was a short exchange about the loyalty programme and points balance.\n[051] The customer wrote in about their account.\n[052] The customer wrote in about their account.\n[053] The customer thanked the agent and mentioned a holiday.\n[054] An agent confirmed the order number and apologised for the delay.\n[055] An agent confirmed the order number and apologised for the delay.\n[056] The customer thanked the agent and mentioned a holiday.\n[057] The customer wrote in about their account.\n[058] The customer thanked the agent and mentioned a holiday.\n[059] Earlier messages discussed shipping times and address changes.",
+   "questions": {
+    "q": {
+     "type": "noul",
+     "instructions": "Is the latest message urgent?"
+    }
+   }
+  }
+ ],
+ "schema": [
+  {
+   "name": "structured_state",
+   "state": {
+    "user": "dana",
+    "cart": [
+     {
+      "sku": "A-17",
+      "qty": 2
+     },
+     {
+      "sku": "B-3",
+      "qty": 1
+     }
+    ],
+    "coupon": null,
+    "vip": true
+   },
+   "questions": {
+    "q": {
+     "type": "choice",
+     "instructions": "What should the checkout agent do next?",
+     "criteria": {
+      "apply coupon": "the cart has a valid coupon",
+      "ask for payment": "the cart is complete",
+      "remove items": null
+     }
+    }
+   }
+  },
+  {
+   "name": "list_state",
+   "state": [
+    "step 1: opened the form",
+    "step 2: typed the order number",
+    "step 3: ?"
+   ],
+   "questions": {
+    "q": {
+     "type": "noul",
+     "instructions": "Has the user finished the form?",
+     "criteria": {
+      "true": "every step is done",
+      "false": "a step is missing"
+     }
+    }
+   }
+  },
+  {
+   "name": "structured_option",
+   "state": "White to move. The black king is exposed on g8.",
+   "questions": {
+    "q": {
+     "type": "choice",
+     "instructions": {
+      "task": "pick a move",
+      "side": "white"
+     },
+     "criteria": {
+      "Qh7+": {
+       "piece": "queen",
+       "check": true
+      },
+      "a3": {
+       "piece": "pawn",
+       "check": false
+      }
+     }
+    }
+   }
+  },
+  {
+   "name": "score_rubric",
+   "state": "  The reply was polite,\n\n but it   ignored two of my three questions.  ",
+   "questions": {
+    "q": {
+     "type": "score",
+     "instructions": "How helpful was the reply?",
+     "criteria": [
+      "not helpful at all",
+      "partly helpful,\nmissed things",
+      "fully   helpful"
+     ]
+    }
+   }
+  },
+  {
+   "name": "unicode",
+   "state": "Le café était froid 😤 et le serveur — très lent.",
+   "questions": {
+    "q": {
+     "type": "choice",
+     "instructions": "Quel est le sentiment ?",
+     "criteria": {
+      "positif": null,
+      "négatif": null,
+      "neutre": null
+     }
+    }
+   }
+  },
+  {
+   "name": "state_truncated",
+   "state": "Log line 0: the nightly export finished, 0 warnings, nothing to do. Log line 1: the nightly export finished, 7 warnings, nothing to do. Log line 2: the nightly export finished, 1 warnings, nothing to do. Log line 3: the nightly export finished, 8 warnings, nothing to do. Log line 4: the nightly export finished, 2 warnings, nothing to do. Log line 5: the nightly export finished, 9 warnings, nothing to do. Log line 6: the nightly export finished, 3 warnings, nothing to do. Log line 7: the nightly export finished, 10 warnings, nothing to do. Log line 8: the nightly export finished, 4 warnings, nothing to do. Log line 9: the nightly export finished, 11 warnings, nothing to do. Log line 10: the nightly export finished, 5 warnings, nothing to do. Log line 11: the nightly export finished, 12 warnings, nothing to do. Log line 12: the nightly export finished, 6 warnings, nothing to do. Log line 13: the nightly export finished, 0 warnings, nothing to do. Log line 14: the nightly export finished, 7 warnings, nothing to do. Log line 15: the nightly export finished, 1 warnings, nothing to do. Log line 16: the nightly export finished, 8 warnings, nothing to do. Log line 17: the nightly export finished, 2 warnings, nothing to do. Log line 18: the nightly export finished, 9 warnings, nothing to do. Log line 19: the nightly export finished, 3 warnings, nothing to do. Log line 20: the nightly export finished, 10 warnings, nothing to do. Log line 21: the nightly export finished, 4 warnings, nothing to do. Log line 22: the nightly export finished, 11 warnings, nothing to do. Log line 23: the nightly export finished, 5 warnings, nothing to do. Log line 24: the nightly export finished, 12 warnings, nothing to do. Log line 25: the nightly export finished, 6 warnings, nothing to do. Log line 26: the nightly export finished, 0 warnings, nothing to do. Log line 27: the nightly export finished, 7 warnings, nothing to do. Log line 28: the nightly export finished, 1 warnings, nothing to do. Log line 29: the nightly export finished, 8 warnings, nothing to do. Log line 30: the nightly export finished, 2 warnings, nothing to do. Log line 31: the nightly export finished, 9 warnings, nothing to do. Log line 32: the nightly export finished, 3 warnings, nothing to do. Log line 33: the nightly export finished, 10 warnings, nothing to do. Log line 34: the nightly export finished, 4 warnings, nothing to do. Log line 35: the nightly export finished, 11 warnings, nothing to do. Log line 36: the nightly export finished, 5 warnings, nothing to do. Log line 37: the nightly export finished, 12 warnings, nothing to do. Log line 38: the nightly export finished, 6 warnings, nothing to do. Log line 39: the nightly export finished, 0 warnings, nothing to do. Log line 40: the nightly export finished, 7 warnings, nothing to do. Log line 41: the nightly export finished, 1 warnings, nothing to do. Log line 42: the nightly export finished, 8 warnings, nothing to do. Log line 43: the nightly export finished, 2 warnings, nothing to do. Log line 44: the nightly export finished, 9 warnings, nothing to do. Log line 45: the nightly export finished, 3 warnings, nothing to do. Log line 46: the nightly export finished, 10 warnings, nothing to do. Log line 47: the nightly export finished, 4 warnings, nothing to do. Log line 48: the nightly export finished, 11 warnings, nothing to do. Log line 49: the nightly export finished, 5 warnings, nothing to do. Log line 50: the nightly export finished, 12 warnings, nothing to do. Log line 51: the nightly export finished, 6 warnings, nothing to do. Log line 52: the nightly export finished, 0 warnings, nothing to do. Log line 53: the nightly export finished, 7 warnings, nothing to do. Log line 54: the nightly export finished, 1 warnings, nothing to do. Log line 55: the nightly export finished, 8 warnings, nothing to do. Log line 56: the nightly export finished, 2 warnings, nothing to do. Log line 57: the nightly export finished, 9 warnings, nothing to do. Log line 58: the nightly export finished, 3 warnings, nothing to do. Log line 59: the nightly export finished, 10 warnings, nothing to do. Log line 60: the nightly export finished, 4 warnings, nothing to do. Log line 61: the nightly export finished, 11 warnings, nothing to do. Log line 62: the nightly export finished, 5 warnings, nothing to do. Log line 63: the nightly export finished, 12 warnings, nothing to do. Log line 64: the nightly export finished, 6 warnings, nothing to do. Log line 65: the nightly export finished, 0 warnings, nothing to do. Log line 66: the nightly export finished, 7 warnings, nothing to do. Log line 67: the nightly export finished, 1 warnings, nothing to do. Log line 68: the nightly export finished, 8 warnings, nothing to do. Log line 69: the nightly export finished, 2 warnings, nothing to do. Log line 70: the nightly export finished, 9 warnings, nothing to do. Log line 71: the nightly export finished, 3 warnings, nothing to do. Log line 72: the nightly export finished, 10 warnings, nothing to do. Log line 73: the nightly export finished, 4 warnings, nothing to do. Log line 74: the nightly export finished, 11 warnings, nothing to do. Log line 75: the nightly export finished, 5 warnings, nothing to do. Log line 76: the nightly export finished, 12 warnings, nothing to do. Log line 77: the nightly export finished, 6 warnings, nothing to do. Log line 78: the nightly export finished, 0 warnings, nothing to do. Log line 79: the nightly export finished, 7 warnings, nothing to do. Log line 80: the nightly export finished, 1 warnings, nothing to do. Log line 81: the nightly export finished, 8 warnings, nothing to do. Log line 82: the nightly export finished, 2 warnings, nothing to do. Log line 83: the nightly export finished, 9 warnings, nothing to do. Log line 84: the nightly export finished, 3 warnings, nothing to do. Log line 85: the nightly export finished, 10 warnings, nothing to do. Log line 86: the nightly export finished, 4 warnings, nothing to do. Log line 87: the nightly export finished, 11 warnings, nothing to do. Log line 88: the nightly export finished, 5 warnings, nothing to do. Log line 89: the nightly export finished, 12 warnings, nothing to do. Log line 90: the nightly export finished, 6 warnings, nothing to do. Log line 91: the nightly export finished, 0 warnings, nothing to do. Log line 92: the nightly export finished, 7 warnings, nothing to do. Log line 93: the nightly export finished, 1 warnings, nothing to do. Log line 94: the nightly export finished, 8 warnings, nothing to do. Log line 95: the nightly export finished, 2 warnings, nothing to do. Log line 96: the nightly export finished, 9 warnings, nothing to do. Log line 97: the nightly export finished, 3 warnings, nothing to do. Log line 98: the nightly export finished, 10 warnings, nothing to do. Log line 99: the nightly export finished, 4 warnings, nothing to do. Log line 100: the nightly export finished, 11 warnings, nothing to do. Log line 101: the nightly export finished, 5 warnings, nothing to do. Log line 102: the nightly export finished, 12 warnings, nothing to do. Log line 103: the nightly export finished, 6 warnings, nothing to do. Log line 104: the nightly export finished, 0 warnings, nothing to do. Log line 105: the nightly export finished, 7 warnings, nothing to do. Log line 106: the nightly export finished, 1 warnings, nothing to do. Log line 107: the nightly export finished, 8 warnings, nothing to do. Log line 108: the nightly export finished, 2 warnings, nothing to do. Log line 109: the nightly export finished, 9 warnings, nothing to do. Log line 110: the nightly export finished, 3 warnings, nothing to do. Log line 111: the nightly export finished, 10 warnings, nothing to do. Log line 112: the nightly export finished, 4 warnings, nothing to do. Log line 113: the nightly export finished, 11 warnings, nothing to do. Log line 114: the nightly export finished, 5 warnings, nothing to do. Log line 115: the nightly export finished, 12 warnings, nothing to do. Log line 116: the nightly export finished, 6 warnings, nothing to do. Log line 117: the nightly export finished, 0 warnings, nothing to do. Log line 118: the nightly export finished, 7 warnings, nothing to do. Log line 119: the nightly export finished, 1 warnings, nothing to do. Log line 120: the nightly export finished, 8 warnings, nothing to do. Log line 121: the nightly export finished, 2 warnings, nothing to do. Log line 122: the nightly export finished, 9 warnings, nothing to do. Log line 123: the nightly export finished, 3 warnings, nothing to do. Log line 124: the nightly export finished, 10 warnings, nothing to do. Log line 125: the nightly export finished, 4 warnings, nothing to do. Log line 126: the nightly export finished, 11 warnings, nothing to do. Log line 127: the nightly export finished, 5 warnings, nothing to do. Log line 128: the nightly export finished, 12 warnings, nothing to do. Log line 129: the nightly export finished, 6 warnings, nothing to do. Log line 130: the nightly export finished, 0 warnings, nothing to do. Log line 131: the nightly export finished, 7 warnings, nothing to do. Log line 132: the nightly export finished, 1 warnings, nothing to do. Log line 133: the nightly export finished, 8 warnings, nothing to do. Log line 134: the nightly export finished, 2 warnings, nothing to do. Log line 135: the nightly export finished, 9 warnings, nothing to do. Log line 136: the nightly export finished, 3 warnings, nothing to do. Log line 137: the nightly export finished, 10 warnings, nothing to do. Log line 138: the nightly export finished, 4 warnings, nothing to do. Log line 139: the nightly export finished, 11 warnings, nothing to do. Log line 140: the nightly export finished, 5 warnings, nothing to do. Log line 141: the nightly export finished, 12 warnings, nothing to do. Log line 142: the nightly export finished, 6 warnings, nothing to do. Log line 143: the nightly export finished, 0 warnings, nothing to do. Log line 144: the nightly export finished, 7 warnings, nothing to do. Log line 145: the nightly export finished, 1 warnings, nothing to do. Log line 146: the nightly export finished, 8 warnings, nothing to do. Log line 147: the nightly export finished, 2 warnings, nothing to do. Log line 148: the nightly export finished, 9 warnings, nothing to do. Log line 149: the nightly export finished, 3 warnings, nothing to do. Log line 150: the nightly export finished, 10 warnings, nothing to do. Log line 151: the nightly export finished, 4 warnings, nothing to do. Log line 152: the nightly export finished, 11 warnings, nothing to do. Log line 153: the nightly export finished, 5 warnings, nothing to do. Log line 154: the nightly export finished, 12 warnings, nothing to do. Log line 155: the nightly export finished, 6 warnings, nothing to do. Log line 156: the nightly export finished, 0 warnings, nothing to do. Log line 157: the nightly export finished, 7 warnings, nothing to do. Log line 158: the nightly export finished, 1 warnings, nothing to do. Log line 159: the nightly export finished, 8 warnings, nothing to do. Log line 160: the nightly export finished, 2 warnings, nothing to do. Log line 161: the nightly export finished, 9 warnings, nothing to do. Log line 162: the nightly export finished, 3 warnings, nothing to do. Log line 163: the nightly export finished, 10 warnings, nothing to do. Log line 164: the nightly export finished, 4 warnings, nothing to do. Log line 165: the nightly export finished, 11 warnings, nothing to do. Log line 166: the nightly export finished, 5 warnings, nothing to do. Log line 167: the nightly export finished, 12 warnings, nothing to do. Log line 168: the nightly export finished, 6 warnings, nothing to do. Log line 169: the nightly export finished, 0 warnings, nothing to do. Log line 170: the nightly export finished, 7 warnings, nothing to do. Log line 171: the nightly export finished, 1 warnings, nothing to do. Log line 172: the nightly export finished, 8 warnings, nothing to do. Log line 173: the nightly export finished, 2 warnings, nothing to do. Log line 174: the nightly export finished, 9 warnings, nothing to do. Log line 175: the nightly export finished, 3 warnings, nothing to do. Log line 176: the nightly export finished, 10 warnings, nothing to do. Log line 177: the nightly export finished, 4 warnings, nothing to do. Log line 178: the nightly export finished, 11 warnings, nothing to do. Log line 179: the nightly export finished, 5 warnings, nothing to do. Log line 180: the nightly export finished, 12 warnings, nothing to do. Log line 181: the nightly export finished, 6 warnings, nothing to do. Log line 182: the nightly export finished, 0 warnings, nothing to do. Log line 183: the nightly export finished, 7 warnings, nothing to do. Log line 184: the nightly export finished, 1 warnings, nothing to do. Log line 185: the nightly export finished, 8 warnings, nothing to do. Log line 186: the nightly export finished, 2 warnings, nothing to do. Log line 187: the nightly export finished, 9 warnings, nothing to do. Log line 188: the nightly export finished, 3 warnings, nothing to do. Log line 189: the nightly export finished, 10 warnings, nothing to do. Log line 190: the nightly export finished, 4 warnings, nothing to do. Log line 191: the nightly export finished, 11 warnings, nothing to do. Log line 192: the nightly export finished, 5 warnings, nothing to do. Log line 193: the nightly export finished, 12 warnings, nothing to do. Log line 194: the nightly export finished, 6 warnings, nothing to do. Log line 195: the nightly export finished, 0 warnings, nothing to do. Log line 196: the nightly export finished, 7 warnings, nothing to do. Log line 197: the nightly export finished, 1 warnings, nothing to do. Log line 198: the nightly export finished, 8 warnings, nothing to do. Log line 199: the nightly export finished, 2 warnings, nothing to do. Log line 200: the nightly export finished, 9 warnings, nothing to do. Log line 201: the nightly export finished, 3 warnings, nothing to do. Log line 202: the nightly export finished, 10 warnings, nothing to do. Log line 203: the nightly export finished, 4 warnings, nothing to do. Log line 204: the nightly export finished, 11 warnings, nothing to do. Log line 205: the nightly export finished, 5 warnings, nothing to do. Log line 206: the nightly export finished, 12 warnings, nothing to do. Log line 207: the nightly export finished, 6 warnings, nothing to do. Log line 208: the nightly export finished, 0 warnings, nothing to do. Log line 209: the nightly export finished, 7 warnings, nothing to do. Log line 210: the nightly export finished, 1 warnings, nothing to do. Log line 211: the nightly export finished, 8 warnings, nothing to do. Log line 212: the nightly export finished, 2 warnings, nothing to do. Log line 213: the nightly export finished, 9 warnings, nothing to do. Log line 214: the nightly export finished, 3 warnings, nothing to do. Log line 215: the nightly export finished, 10 warnings, nothing to do. Log line 216: the nightly export finished, 4 warnings, nothing to do. Log line 217: the nightly export finished, 11 warnings, nothing to do. Log line 218: the nightly export finished, 5 warnings, nothing to do. Log line 219: the nightly export finished, 12 warnings, nothing to do. Log line 220: the nightly export finished, 6 warnings, nothing to do. Log line 221: the nightly export finished, 0 warnings, nothing to do. Log line 222: the nightly export finished, 7 warnings, nothing to do. Log line 223: the nightly export finished, 1 warnings, nothing to do. Log line 224: the nightly export finished, 8 warnings, nothing to do. Log line 225: the nightly export finished, 2 warnings, nothing to do. Log line 226: the nightly export finished, 9 warnings, nothing to do. Log line 227: the nightly export finished, 3 warnings, nothing to do. Log line 228: the nightly export finished, 10 warnings, nothing to do. Log line 229: the nightly export finished, 4 warnings, nothing to do. Log line 230: the nightly export finished, 11 warnings, nothing to do. Log line 231: the nightly export finished, 5 warnings, nothing to do. Log line 232: the nightly export finished, 12 warnings, nothing to do. Log line 233: the nightly export finished, 6 warnings, nothing to do. Log line 234: the nightly export finished, 0 warnings, nothing to do. Log line 235: the nightly export finished, 7 warnings, nothing to do. Log line 236: the nightly export finished, 1 warnings, nothing to do. Log line 237: the nightly export finished, 8 warnings, nothing to do. Log line 238: the nightly export finished, 2 warnings, nothing to do. Log line 239: the nightly export finished, 9 warnings, nothing to do. Log line 240: the nightly export finished, 3 warnings, nothing to do. Log line 241: the nightly export finished, 10 warnings, nothing to do. Log line 242: the nightly export finished, 4 warnings, nothing to do. Log line 243: the nightly export finished, 11 warnings, nothing to do. Log line 244: the nightly export finished, 5 warnings, nothing to do. Log line 245: the nightly export finished, 12 warnings, nothing to do. Log line 246: the nightly export finished, 6 warnings, nothing to do. Log line 247: the nightly export finished, 0 warnings, nothing to do. Log line 248: the nightly export finished, 7 warnings, nothing to do. Log line 249: the nightly export finished, 1 warnings, nothing to do. Log line 250: the nightly export finished, 8 warnings, nothing to do. Log line 251: the nightly export finished, 2 warnings, nothing to do. Log line 252: the nightly export finished, 9 warnings, nothing to do. Log line 253: the nightly export finished, 3 warnings, nothing to do. Log line 254: the nightly export finished, 10 warnings, nothing to do. Log line 255: the nightly export finished, 4 warnings, nothing to do. Log line 256: the nightly export finished, 11 warnings, nothing to do. Log line 257: the nightly export finished, 5 warnings, nothing to do. Log line 258: the nightly export finished, 12 warnings, nothing to do. Log line 259: the nightly export finished, 6 warnings, nothing to do. Log line 260: the nightly export finished, 0 warnings, nothing to do. Log line 261: the nightly export finished, 7 warnings, nothing to do. Log line 262: the nightly export finished, 1 warnings, nothing to do. Log line 263: the nightly export finished, 8 warnings, nothing to do. Log line 264: the nightly export finished, 2 warnings, nothing to do. Log line 265: the nightly export finished, 9 warnings, nothing to do. Log line 266: the nightly export finished, 3 warnings, nothing to do. Log line 267: the nightly export finished, 10 warnings, nothing to do. Log line 268: the nightly export finished, 4 warnings, nothing to do. Log line 269: the nightly export finished, 11 warnings, nothing to do. Log line 270: the nightly export finished, 5 warnings, nothing to do. Log line 271: the nightly export finished, 12 warnings, nothing to do. Log line 272: the nightly export finished, 6 warnings, nothing to do. Log line 273: the nightly export finished, 0 warnings, nothing to do. Log line 274: the nightly export finished, 7 warnings, nothing to do. Log line 275: the nightly export finished, 1 warnings, nothing to do. Log line 276: the nightly export finished, 8 warnings, nothing to do. Log line 277: the nightly export finished, 2 warnings, nothing to do. Log line 278: the nightly export finished, 9 warnings, nothing to do. Log line 279: the nightly export finished, 3 warnings, nothing to do. Log line 280: the nightly export finished, 10 warnings, nothing to do. Log line 281: the nightly export finished, 4 warnings, nothing to do. Log line 282: the nightly export finished, 11 warnings, nothing to do. Log line 283: the nightly export finished, 5 warnings, nothing to do. Log line 284: the nightly export finished, 12 warnings, nothing to do. Log line 285: the nightly export finished, 6 warnings, nothing to do. Log line 286: the nightly export finished, 0 warnings, nothing to do. Log line 287: the nightly export finished, 7 warnings, nothing to do. Log line 288: the nightly export finished, 1 warnings, nothing to do. Log line 289: the nightly export finished, 8 warnings, nothing to do. Log line 290: the nightly export finished, 2 warnings, nothing to do. Log line 291: the nightly export finished, 9 warnings, nothing to do. Log line 292: the nightly export finished, 3 warnings, nothing to do. Log line 293: the nightly export finished, 10 warnings, nothing to do. Log line 294: the nightly export finished, 4 warnings, nothing to do. Log line 295: the nightly export finished, 11 warnings, nothing to do. Log line 296: the nightly export finished, 5 warnings, nothing to do. Log line 297: the nightly export finished, 12 warnings, nothing to do. Log line 298: the nightly export finished, 6 warnings, nothing to do. Log line 299: the nightly export finished, 0 warnings, nothing to do. Log line 300: the nightly export finished, 7 warnings, nothing to do. Log line 301: the nightly export finished, 1 warnings, nothing to do. Log line 302: the nightly export finished, 8 warnings, nothing to do. Log line 303: the nightly export finished, 2 warnings, nothing to do. Log line 304: the nightly export finished, 9 warnings, nothing to do. Log line 305: the nightly export finished, 3 warnings, nothing to do. Log line 306: the nightly export finished, 10 warnings, nothing to do. Log line 307: the nightly export finished, 4 warnings, nothing to do. Log line 308: the nightly export finished, 11 warnings, nothing to do. Log line 309: the nightly export finished, 5 warnings, nothing to do. Log line 310: the nightly export finished, 12 warnings, nothing to do. Log line 311: the nightly export finished, 6 warnings, nothing to do. Log line 312: the nightly export finished, 0 warnings, nothing to do. Log line 313: the nightly export finished, 7 warnings, nothing to do. Log line 314: the nightly export finished, 1 warnings, nothing to do. Log line 315: the nightly export finished, 8 warnings, nothing to do. Log line 316: the nightly export finished, 2 warnings, nothing to do. Log line 317: the nightly export finished, 9 warnings, nothing to do. Log line 318: the nightly export finished, 3 warnings, nothing to do. Log line 319: the nightly export finished, 10 warnings, nothing to do. Log line 320: the nightly export finished, 4 warnings, nothing to do. Log line 321: the nightly export finished, 11 warnings, nothing to do. Log line 322: the nightly export finished, 5 warnings, nothing to do. Log line 323: the nightly export finished, 12 warnings, nothing to do. Log line 324: the nightly export finished, 6 warnings, nothing to do. Log line 325: the nightly export finished, 0 warnings, nothing to do. Log line 326: the nightly export finished, 7 warnings, nothing to do. Log line 327: the nightly export finished, 1 warnings, nothing to do. Log line 328: the nightly export finished, 8 warnings, nothing to do. Log line 329: the nightly export finished, 2 warnings, nothing to do. Log line 330: the nightly export finished, 9 warnings, nothing to do. Log line 331: the nightly export finished, 3 warnings, nothing to do. Log line 332: the nightly export finished, 10 warnings, nothing to do. Log line 333: the nightly export finished, 4 warnings, nothing to do. Log line 334: the nightly export finished, 11 warnings, nothing to do. Log line 335: the nightly export finished, 5 warnings, nothing to do. Log line 336: the nightly export finished, 12 warnings, nothing to do. Log line 337: the nightly export finished, 6 warnings, nothing to do. Log line 338: the nightly export finished, 0 warnings, nothing to do. Log line 339: the nightly export finished, 7 warnings, nothing to do. Log line 340: the nightly export finished, 1 warnings, nothing to do. Log line 341: the nightly export finished, 8 warnings, nothing to do. Log line 342: the nightly export finished, 2 warnings, nothing to do. Log line 343: the nightly export finished, 9 warnings, nothing to do. Log line 344: the nightly export finished, 3 warnings, nothing to do. Log line 345: the nightly export finished, 10 warnings, nothing to do. Log line 346: the nightly export finished, 4 warnings, nothing to do. Log line 347: the nightly export finished, 11 warnings, nothing to do. Log line 348: the nightly export finished, 5 warnings, nothing to do. Log line 349: the nightly export finished, 12 warnings, nothing to do. Log line 350: the nightly export finished, 6 warnings, nothing to do. Log line 351: the nightly export finished, 0 warnings, nothing to do. Log line 352: the nightly export finished, 7 warnings, nothing to do. Log line 353: the nightly export finished, 1 warnings, nothing to do. Log line 354: the nightly export finished, 8 warnings, nothing to do. Log line 355: the nightly export finished, 2 warnings, nothing to do. Log line 356: the nightly export finished, 9 warnings, nothing to do. Log line 357: the nightly export finished, 3 warnings, nothing to do. Log line 358: the nightly export finished, 10 warnings, nothing to do. Log line 359: the nightly export finished, 4 warnings, nothing to do. Log line 360: the nightly export finished, 11 warnings, nothing to do. Log line 361: the nightly export finished, 5 warnings, nothing to do. Log line 362: the nightly export finished, 12 warnings, nothing to do. Log line 363: the nightly export finished, 6 warnings, nothing to do. Log line 364: the nightly export finished, 0 warnings, nothing to do. Log line 365: the nightly export finished, 7 warnings, nothing to do. Log line 366: the nightly export finished, 1 warnings, nothing to do. Log line 367: the nightly export finished, 8 warnings, nothing to do. Log line 368: the nightly export finished, 2 warnings, nothing to do. Log line 369: the nightly export finished, 9 warnings, nothing to do. Log line 370: the nightly export finished, 3 warnings, nothing to do. Log line 371: the nightly export finished, 10 warnings, nothing to do. Log line 372: the nightly export finished, 4 warnings, nothing to do. Log line 373: the nightly export finished, 11 warnings, nothing to do. Log line 374: the nightly export finished, 5 warnings, nothing to do. Log line 375: the nightly export finished, 12 warnings, nothing to do. Log line 376: the nightly export finished, 6 warnings, nothing to do. Log line 377: the nightly export finished, 0 warnings, nothing to do. Log line 378: the nightly export finished, 7 warnings, nothing to do. Log line 379: the nightly export finished, 1 warnings, nothing to do. Log line 380: the nightly export finished, 8 warnings, nothing to do. Log line 381: the nightly export finished, 2 warnings, nothing to do. Log line 382: the nightly export finished, 9 warnings, nothing to do. Log line 383: the nightly export finished, 3 warnings, nothing to do. Log line 384: the nightly export finished, 10 warnings, nothing to do. Log line 385: the nightly export finished, 4 warnings, nothing to do. Log line 386: the nightly export finished, 11 warnings, nothing to do. Log line 387: the nightly export finished, 5 warnings, nothing to do. Log line 388: the nightly export finished, 12 warnings, nothing to do. Log line 389: the nightly export finished, 6 warnings, nothing to do. Log line 390: the nightly export finished, 0 warnings, nothing to do. Log line 391: the nightly export finished, 7 warnings, nothing to do. Log line 392: the nightly export finished, 1 warnings, nothing to do. Log line 393: the nightly export finished, 8 warnings, nothing to do. Log line 394: the nightly export finished, 2 warnings, nothing to do. Log line 395: the nightly export finished, 9 warnings, nothing to do. Log line 396: the nightly export finished, 3 warnings, nothing to do. Log line 397: the nightly export finished, 10 warnings, nothing to do. Log line 398: the nightly export finished, 4 warnings, nothing to do. Log line 399: the nightly export finished, 11 warnings, nothing to do. Final line: the customer asks for a refund.",
+   "questions": {
+    "q": {
+     "type": "choice",
+     "instructions": "What does the last line ask for?",
+     "criteria": {
+      "refund": null,
+      "nothing": null
+     }
+    }
+   }
+  },
+  {
+   "name": "question_truncated",
+   "state": "Short state.",
+   "questions": {
+    "q": {
+     "type": "noul",
+     "instructions": "Log line 0: the nightly export finished, 0 warnings, nothing to do. Log line 1: the nightly export finished, 7 warnings, nothing to do. Log line 2: the nightly export finished, 1 warnings, nothing to do. Log line 3: the nightly export finished, 8 warnings, nothing to do. Log line 4: the nightly export finished, 2 warnings, nothing to do. Log line 5: the nightly export finished, 9 warnings, nothing to do. Log line 6: the nightly export finished, 3 warnings, nothing to do. Log line 7: the nightly export finished, 10 warnings, nothing to do. Log line 8: the nightly export finished, 4 warnings, nothing to do. Log line 9: the nightly export finished, 11 warnings, nothing to do. Log line 10: the nightly export finished, 5 warnings, nothing to do. Log line 11: the nightly export finished, 12 warnings, nothing to do. Log line 12: the nightly export finished, 6 warnings, nothing to do. Log line 13: the nightly export finished, 0 warnings, nothing to do. Log line 14: the nightly export finished, 7 warnings, nothing to do. Log line 15: the nightly export finished, 1 warnings, nothing to do. Log line 16: the nightly export finished, 8 warnings, nothing to do. Log line 17: the nightly export finished, 2 warnings, nothing to do. Log line 18: the nightly export finished, 9 warnings, nothing to do. Log line 19: the nightly export finished, 3 warnings, nothing to do. Log line 20: the nightly export finished, 10 warnings, nothing to do. Log line 21: the nightly export finished, 4 warnings, nothing to do. Log line 22: the nightly export finished, 11 warnings, nothing to do. Log line 23: the nightly export finished, 5 warnings, nothing to do. Log line 24: the nightly export finished, 12 warnings, nothing to do. Log line 25: the nightly export finished, 6 warnings, nothing to do. Log line 26: the nightly export finished, 0 warnings, nothing to do. Log line 27: the nightly export finished, 7 warnings, nothing to do. Log line 28: the nightly export finished, 1 warnings, nothing to do. Log line 29: the nightly export finished, 8 warnings, nothing to do. Log line 30: the nightly export finished, 2 warnings, nothing to do. Log line 31: the nightly export finished, 9 warnings, nothing to do. Log line 32: the nightly export finished, 3 warnings, nothing to do. Log line 33: the nightly export finished, 10 warnings, nothing to do. Log line 34: the nightly export finished, 4 warnings, nothing to do. Log line 35: the nightly export finished, 11 warnings, nothing to do. Log line 36: the nightly export finished, 5 warnings, nothing to do. Log line 37: the nightly export finished, 12 warnings, nothing to do. Log line 38: the nightly export finished, 6 warnings, nothing to do. Log line 39: the nightly export finished, 0 warnings, nothing to do. Log line 40: the nightly export finished, 7 warnings, nothing to do. Log line 41: the nightly export finished, 1 warnings, nothing to do. Log line 42: the nightly export finished, 8 warnings, nothing to do. Log line 43: the nightly export finished, 2 warnings, nothing to do. Log line 44: the nightly export finished, 9 warnings, nothing to do. Log line 45: the nightly export finished, 3 warnings, nothing to do. Log line 46: the nightly export finished, 10 warnings, nothing to do. Log line 47: the nightly export finished, 4 warnings, nothing to do. Log line 48: the nightly export finished, 11 warnings, nothing to do. Log line 49: the nightly export finished, 5 warnings, nothing to do. Log line 50: the nightly export finished, 12 warnings, nothing to do. Log line 51: the nightly export finished, 6 warnings, nothing to do. Log line 52: the nightly export finished, 0 warnings, nothing to do. Log line 53: the nightly export finished, 7 warnings, nothing to do. Log line 54: the nightly export finished, 1 warnings, nothing to do. Log line 55: the nightly export finished, 8 warnings, nothing to do. Log line 56: the nightly export finished, 2 warnings, nothing to do. Log line 57: the nightly export finished, 9 warnings, nothing to do. Log line 58: the nightly export finished, 3 warnings, nothing to do. Log line 59: the nightly export finished, 10 warnings, nothing to do. Log line 60: the nightly export finished, 4 warnings, nothing to do. Log line 61: the nightly export finished, 11 warnings, nothing to do. Log line 62: the nightly export finished, 5 warnings, nothing to do. Log line 63: the nightly export finished, 12 warnings, nothing to do. Log line 64: the nightly export finished, 6 warnings, nothing to do. Log line 65: the nightly export finished, 0 warnings, nothing to do. Log line 66: the nightly export finished, 7 warnings, nothing to do. Log line 67: the nightly export finished, 1 warnings, nothing to do. Log line 68: the nightly export finished, 8 warnings, nothing to do. Log line 69: the nightly export finished, 2 warnings, nothing to do. Log line 70: the nightly export finished, 9 warnings, nothing to do. Log line 71: the nightly export finished, 3 warnings, nothing to do. Log line 72: the nightly export finished, 10 warnings, nothing to do. Log line 73: the nightly export finished, 4 warnings, nothing to do. Log line 74: the nightly export finished, 11 warnings, nothing to do. Log line 75: the nightly export finished, 5 warnings, nothing to do. Log line 76: the nightly export finished, 12 warnings, nothing to do. Log line 77: the nightly export finished, 6 warnings, nothing to do. Log line 78: the nightly export finished, 0 warnings, nothing to do. Log line 79: the nightly export finished, 7 warnings, nothing to do. Log line 80: the nightly export finished, 1 warnings, nothing to do. Log line 81: the nightly export finished, 8 warnings, nothing to do. Log line 82: the nightly export finished, 2 warnings, nothing to do. Log line 83: the nightly export finished, 9 warnings, nothing to do. Log line 84: the nightly export finished, 3 warnings, nothing to do. Log line 85: the nightly export finished, 10 warnings, nothing to do. Log line 86: the nightly export finished, 4 warnings, nothing to do. Log line 87: the nightly export finished, 11 warnings, nothing to do. Log line 88: the nightly export finished, 5 warnings, nothing to do. Log line 89: the nightly export finished, 12 warnings, nothing to do. Log line 90: the nightly export finished, 6 warnings, nothing to do. Log line 91: the nightly export finished, 0 warnings, nothing to do. Log line 92: the nightly export finished, 7 warnings, nothing to do. Log line 93: the nightly export finished, 1 warnings, nothing to do. Log line 94: the nightly export finished, 8 warnings, nothing to do. Log line 95: the nightly export finished, 2 warnings, nothing to do. Log line 96: the nightly export finished, 9 warnings, nothing to do. Log line 97: the nightly export finished, 3 warnings, nothing to do. Log line 98: the nightly export finished, 10 warnings, nothing to do. Log line 99: the nightly export finished, 4 warnings, nothing to do. Log line 100: the nightly export finished, 11 warnings, nothing to do. Log line 101: the nightly export finished, 5 warnings, nothing to do. Log line 102: the nightly export finished, 12 warnings, nothing to do. Log line 103: the nightly export finished, 6 warnings, nothing to do. Log line 104: the nightly export finished, 0 warnings, nothing to do. Log line 105: the nightly export finished, 7 warnings, nothing to do. Log line 106: the nightly export finished, 1 warnings, nothing to do. Log line 107: the nightly export finished, 8 warnings, nothing to do. Log line 108: the nightly export finished, 2 warnings, nothing to do. Log line 109: the nightly export finished, 9 warnings, nothing to do. Log line 110: the nightly export finished, 3 warnings, nothing to do. Log line 111: the nightly export finished, 10 warnings, nothing to do. Log line 112: the nightly export finished, 4 warnings, nothing to do. Log line 113: the nightly export finished, 11 warnings, nothing to do. Log line 114: the nightly export finished, 5 warnings, nothing to do. Log line 115: the nightly export finished, 12 warnings, nothing to do. Log line 116: the nightly export finished, 6 warnings, nothing to do. Log line 117: the nightly export finished, 0 warnings, nothing to do. Log line 118: the nightly export finished, 7 warnings, nothing to do. Log line 119: the nightly export finished, 1 warnings, nothing to do. Log line 120: the nightly export finished, 8 warnings, nothing to do. Log line 121: the nightly export finished, 2 warnings, nothing to do. Log line 122: the nightly export finished, 9 warnings, nothing to do. Log line 123: the nightly export finished, 3 warnings, nothing to do. Log line 124: the nightly export finished, 10 warnings, nothing to do. Log line 125: the nightly export finished, 4 warnings, nothing to do. Log line 126: the nightly export finished, 11 warnings, nothing to do. Log line 127: the nightly export finished, 5 warnings, nothing to do. Log line 128: the nightly export finished, 12 warnings, nothing to do. Log line 129: the nightly export finished, 6 warnings, nothing to do. Log line 130: the nightly export finished, 0 warnings, nothing to do. Log line 131: the nightly export finished, 7 warnings, nothing to do. Log line 132: the nightly export finished, 1 warnings, nothing to do. Log line 133: the nightly export finished, 8 warnings, nothing to do. Log line 134: the nightly export finished, 2 warnings, nothing to do. Log line 135: the nightly export finished, 9 warnings, nothing to do. Log line 136: the nightly export finished, 3 warnings, nothing to do. Log line 137: the nightly export finished, 10 warnings, nothing to do. Log line 138: the nightly export finished, 4 warnings, nothing to do. Log line 139: the nightly export finished, 11 warnings, nothing to do. Log line 140: the nightly export finished, 5 warnings, nothing to do. Log line 141: the nightly export finished, 12 warnings, nothing to do. Log line 142: the nightly export finished, 6 warnings, nothing to do. Log line 143: the nightly export finished, 0 warnings, nothing to do. Log line 144: the nightly export finished, 7 warnings, nothing to do. Log line 145: the nightly export finished, 1 warnings, nothing to do. Log line 146: the nightly export finished, 8 warnings, nothing to do. Log line 147: the nightly export finished, 2 warnings, nothing to do. Log line 148: the nightly export finished, 9 warnings, nothing to do. Log line 149: the nightly export finished, 3 warnings, nothing to do. Log line 150: the nightly export finished, 10 warnings, nothing to do. Log line 151: the nightly export finished, 4 warnings, nothing to do. Log line 152: the nightly export finished, 11 warnings, nothing to do. Log line 153: the nightly export finished, 5 warnings, nothing to do. Log line 154: the nightly export finished, 12 warnings, nothing to do. Log line 155: the nightly export finished, 6 warnings, nothing to do. Log line 156: the nightly export finished, 0 warnings, nothing to do. Log line 157: the nightly export finished, 7 warnings, nothing to do. Log line 158: the nightly export finished, 1 warnings, nothing to do. Log line 159: the nightly export finished, 8 warnings, nothing to do. Log line 160: the nightly export finished, 2 warnings, nothing to do. Log line 161: the nightly export finished, 9 warnings, nothing to do. Log line 162: the nightly export finished, 3 warnings, nothing to do. Log line 163: the nightly export finished, 10 warnings, nothing to do. Log line 164: the nightly export finished, 4 warnings, nothing to do. Log line 165: the nightly export finished, 11 warnings, nothing to do. Log line 166: the nightly export finished, 5 warnings, nothing to do. Log line 167: the nightly export finished, 12 warnings, nothing to do. Log line 168: the nightly export finished, 6 warnings, nothing to do. Log line 169: the nightly export finished, 0 warnings, nothing to do. Log line 170: the nightly export finished, 7 warnings, nothing to do. Log line 171: the nightly export finished, 1 warnings, nothing to do. Log line 172: the nightly export finished, 8 warnings, nothing to do. Log line 173: the nightly export finished, 2 warnings, nothing to do. Log line 174: the nightly export finished, 9 warnings, nothing to do. Log line 175: the nightly export finished, 3 warnings, nothing to do. Log line 176: the nightly export finished, 10 warnings, nothing to do. Log line 177: the nightly export finished, 4 warnings, nothing to do. Log line 178: the nightly export finished, 11 warnings, nothing to do. Log line 179: the nightly export finished, 5 warnings, nothing to do. Log line 180: the nightly export finished, 12 warnings, nothing to do. Log line 181: the nightly export finished, 6 warnings, nothing to do. Log line 182: the nightly export finished, 0 warnings, nothing to do. Log line 183: the nightly export finished, 7 warnings, nothing to do. Log line 184: the nightly export finished, 1 warnings, nothing to do. Log line 185: the nightly export finished, 8 warnings, nothing to do. Log line 186: the nightly export finished, 2 warnings, nothing to do. Log line 187: the nightly export finished, 9 warnings, nothing to do. Log line 188: the nightly export finished, 3 warnings, nothing to do. Log line 189: the nightly export finished, 10 warnings, nothing to do. Log line 190: the nightly export finished, 4 warnings, nothing to do. Log line 191: the nightly export finished, 11 warnings, nothing to do. Log line 192: the nightly export finished, 5 warnings, nothing to do. Log line 193: the nightly export finished, 12 warnings, nothing to do. Log line 194: the nightly export finished, 6 warnings, nothing to do. Log line 195: the nightly export finished, 0 warnings, nothing to do. Log line 196: the nightly export finished, 7 warnings, nothing to do. Log line 197: the nightly export finished, 1 warnings, nothing to do. Log line 198: the nightly export finished, 8 warnings, nothing to do. Log line 199: the nightly export finished, 2 warnings, nothing to do. Log line 200: the nightly export finished, 9 warnings, nothing to do. Log line 201: the nightly export finished, 3 warnings, nothing to do. Log line 202: the nightly export finished, 10 warnings, nothing to do. Log line 203: the nightly export finished, 4 warnings, nothing to do. Log line 204: the nightly export finished, 11 warnings, nothing to do. Log line 205: the nightly export finished, 5 warnings, nothing to do. Log line 206: the nightly export finished, 12 warnings, nothing to do. Log line 207: the nightly export finished, 6 warnings, nothing to do. Log line 208: the nightly export finished, 0 warnings, nothing to do. Log line 209: the nightly export finished, 7 warnings, nothing to do. Log line 210: the nightly export finished, 1 warnings, nothing to do. Log line 211: the nightly export finished, 8 warnings, nothing to do. Log line 212: the nightly export finished, 2 warnings, nothing to do. Log line 213: the nightly export finished, 9 warnings, nothing to do. Log line 214: the nightly export finished, 3 warnings, nothing to do. Log line 215: the nightly export finished, 10 warnings, nothing to do. Log line 216: the nightly export finished, 4 warnings, nothing to do. Log line 217: the nightly export finished, 11 warnings, nothing to do. Log line 218: the nightly export finished, 5 warnings, nothing to do. Log line 219: the nightly export finished, 12 warnings, nothing to do. Log line 220: the nightly export finished, 6 warnings, nothing to do. Log line 221: the nightly export finished, 0 warnings, nothing to do. Log line 222: the nightly export finished, 7 warnings, nothing to do. Log line 223: the nightly export finished, 1 warnings, nothing to do. Log line 224: the nightly export finished, 8 warnings, nothing to do. Log line 225: the nightly export finished, 2 warnings, nothing to do. Log line 226: the nightly export finished, 9 warnings, nothing to do. Log line 227: the nightly export finished, 3 warnings, nothing to do. Log line 228: the nightly export finished, 10 warnings, nothing to do. Log line 229: the nightly export finished, 4 warnings, nothing to do. Log line 230: the nightly export finished, 11 warnings, nothing to do. Log line 231: the nightly export finished, 5 warnings, nothing to do. Log line 232: the nightly export finished, 12 warnings, nothing to do. Log line 233: the nightly export finished, 6 warnings, nothing to do. Log line 234: the nightly export finished, 0 warnings, nothing to do. Log line 235: the nightly export finished, 7 warnings, nothing to do. Log line 236: the nightly export finished, 1 warnings, nothing to do. Log line 237: the nightly export finished, 8 warnings, nothing to do. Log line 238: the nightly export finished, 2 warnings, nothing to do. Log line 239: the nightly export finished, 9 warnings, nothing to do. Log line 240: the nightly export finished, 3 warnings, nothing to do. Log line 241: the nightly export finished, 10 warnings, nothing to do. Log line 242: the nightly export finished, 4 warnings, nothing to do. Log line 243: the nightly export finished, 11 warnings, nothing to do. Log line 244: the nightly export finished, 5 warnings, nothing to do. Log line 245: the nightly export finished, 12 warnings, nothing to do. Log line 246: the nightly export finished, 6 warnings, nothing to do. Log line 247: the nightly export finished, 0 warnings, nothing to do. Log line 248: the nightly export finished, 7 warnings, nothing to do. Log line 249: the nightly export finished, 1 warnings, nothing to do. Log line 250: the nightly export finished, 8 warnings, nothing to do. Log line 251: the nightly export finished, 2 warnings, nothing to do. Log line 252: the nightly export finished, 9 warnings, nothing to do. Log line 253: the nightly export finished, 3 warnings, nothing to do. Log line 254: the nightly export finished, 10 warnings, nothing to do. Log line 255: the nightly export finished, 4 warnings, nothing to do. Log line 256: the nightly export finished, 11 warnings, nothing to do. Log line 257: the nightly export finished, 5 warnings, nothing to do. Log line 258: the nightly export finished, 12 warnings, nothing to do. Log line 259: the nightly export finished, 6 warnings, nothing to do. Log line 260: the nightly export finished, 0 warnings, nothing to do. Log line 261: the nightly export finished, 7 warnings, nothing to do. Log line 262: the nightly export finished, 1 warnings, nothing to do. Log line 263: the nightly export finished, 8 warnings, nothing to do. Log line 264: the nightly export finished, 2 warnings, nothing to do. Log line 265: the nightly export finished, 9 warnings, nothing to do. Log line 266: the nightly export finished, 3 warnings, nothing to do. Log line 267: the nightly export finished, 10 warnings, nothing to do. Log line 268: the nightly export finished, 4 warnings, nothing to do. Log line 269: the nightly export finished, 11 warnings, nothing to do. Log line 270: the nightly export finished, 5 warnings, nothing to do. Log line 271: the nightly export finished, 12 warnings, nothing to do. Log line 272: the nightly export finished, 6 warnings, nothing to do. Log line 273: the nightly export finished, 0 warnings, nothing to do. Log line 274: the nightly export finished, 7 warnings, nothing to do. Log line 275: the nightly export finished, 1 warnings, nothing to do. Log line 276: the nightly export finished, 8 warnings, nothing to do. Log line 277: the nightly export finished, 2 warnings, nothing to do. Log line 278: the nightly export finished, 9 warnings, nothing to do. Log line 279: the nightly export finished, 3 warnings, nothing to do. Log line 280: the nightly export finished, 10 warnings, nothing to do. Log line 281: the nightly export finished, 4 warnings, nothing to do. Log line 282: the nightly export finished, 11 warnings, nothing to do. Log line 283: the nightly export finished, 5 warnings, nothing to do. Log line 284: the nightly export finished, 12 warnings, nothing to do. Log line 285: the nightly export finished, 6 warnings, nothing to do. Log line 286: the nightly export finished, 0 warnings, nothing to do. Log line 287: the nightly export finished, 7 warnings, nothing to do. Log line 288: the nightly export finished, 1 warnings, nothing to do. Log line 289: the nightly export finished, 8 warnings, nothing to do. Log line 290: the nightly export finished, 2 warnings, nothing to do. Log line 291: the nightly export finished, 9 warnings, nothing to do. Log line 292: the nightly export finished, 3 warnings, nothing to do. Log line 293: the nightly export finished, 10 warnings, nothing to do. Log line 294: the nightly export finished, 4 warnings, nothing to do. Log line 295: the nightly export finished, 11 warnings, nothing to do. Log line 296: the nightly export finished, 5 warnings, nothing to do. Log line 297: the nightly export finished, 12 warnings, nothing to do. Log line 298: the nightly export finished, 6 warnings, nothing to do. Log line 299: the nightly export finished, 0 warnings, nothing to do. Log line 300: the nightly export finished, 7 warnings, nothing to do. Log line 301: the nightly export finished, 1 warnings, nothing to do. Log line 302: the nightly export finished, 8 warnings, nothing to do. Log line 303: the nightly export finished, 2 warnings, nothing to do. Log line 304: the nightly export finished, 9 warnings, nothing to do. Log line 305: the nightly export finished, 3 warnings, nothing to do. Log line 306: the nightly export finished, 10 warnings, nothing to do. Log line 307: the nightly export finished, 4 warnings, nothing to do. Log line 308: the nightly export finished, 11 warnings, nothing to do. Log line 309: the nightly export finished, 5 warnings, nothing to do. Log line 310: the nightly export finished, 12 warnings, nothing to do. Log line 311: the nightly export finished, 6 warnings, nothing to do. Log line 312: the nightly export finished, 0 warnings, nothing to do. Log line 313: the nightly export finished, 7 warnings, nothing to do. Log line 314: the nightly export finished, 1 warnings, nothing to do. Log line 315: the nightly export finished, 8 warnings, nothing to do. Log line 316: the nightly export finished, 2 warnings, nothing to do. Log line 317: the nightly export finished, 9 warnings, nothing to do. Log line 318: the nightly export finished, 3 warnings, nothing to do. Log line 319: the nightly export finished, 10 warnings, nothing to do. Log line 320: the nightly export finished, 4 warnings, nothing to do. Log line 321: the nightly export finished, 11 warnings, nothing to do. Log line 322: the nightly export finished, 5 warnings, nothing to do. Log line 323: the nightly export finished, 12 warnings, nothing to do. Log line 324: the nightly export finished, 6 warnings, nothing to do. Log line 325: the nightly export finished, 0 warnings, nothing to do. Log line 326: the nightly export finished, 7 warnings, nothing to do. Log line 327: the nightly export finished, 1 warnings, nothing to do. Log line 328: the nightly export finished, 8 warnings, nothing to do. Log line 329: the nightly export finished, 2 warnings, nothing to do. Log line 330: the nightly export finished, 9 warnings, nothing to do. Log line 331: the nightly export finished, 3 warnings, nothing to do. Log line 332: the nightly export finished, 10 warnings, nothing to do. Log line 333: the nightly export finished, 4 warnings, nothing to do. Log line 334: the nightly export finished, 11 warnings, nothing to do. Log line 335: the nightly export finished, 5 warnings, nothing to do. Log line 336: the nightly export finished, 12 warnings, nothing to do. Log line 337: the nightly export finished, 6 warnings, nothing to do. Log line 338: the nightly export finished, 0 warnings, nothing to do. Log line 339: the nightly export finished, 7 warnings, nothing to do. Log line 340: the nightly export finished, 1 warnings, nothing to do. Log line 341: the nightly export finished, 8 warnings, nothing to do. Log line 342: the nightly export finished, 2 warnings, nothing to do. Log line 343: the nightly export finished, 9 warnings, nothing to do. Log line 344: the nightly export finished, 3 warnings, nothing to do. Log line 345: the nightly export finished, 10 warnings, nothing to do. Log line 346: the nightly export finished, 4 warnings, nothing to do. Log line 347: the nightly export finished, 11 warnings, nothing to do. Log line 348: the nightly export finished, 5 warnings, nothing to do. Log line 349: the nightly export finished, 12 warnings, nothing to do. Log line 350: the nightly export finished, 6 warnings, nothing to do. Log line 351: the nightly export finished, 0 warnings, nothing to do. Log line 352: the nightly export finished, 7 warnings, nothing to do. Log line 353: the nightly export finished, 1 warnings, nothing to do. Log line 354: the nightly export finished, 8 warnings, nothing to do. Log line 355: the nightly export finished, 2 warnings, nothing to do. Log line 356: the nightly export finished, 9 warnings, nothing to do. Log line 357: the nightly export finished, 3 warnings, nothing to do. Log line 358: the nightly export finished, 10 warnings, nothing to do. Log line 359: the nightly export finished, 4 warnings, nothing to do. Log line 360: the nightly export finished, 11 warnings, nothing to do. Log line 361: the nightly export finished, 5 warnings, nothing to do. Log line 362: the nightly export finished, 12 warnings, nothing to do. Log line 363: the nightly export finished, 6 warnings, nothing to do. Log line 364: the nightly export finished, 0 warnings, nothing to do. Log line 365: the nightly export finished, 7 warnings, nothing to do. Log line 366: the nightly export finished, 1 warnings, nothing to do. Log line 367: the nightly export finished, 8 warnings, nothing to do. Log line 368: the nightly export finished, 2 warnings, nothing to do. Log line 369: the nightly export finished, 9 warnings, nothing to do. Log line 370: the nightly export finished, 3 warnings, nothing to do. Log line 371: the nightly export finished, 10 warnings, nothing to do. Log line 372: the nightly export finished, 4 warnings, nothing to do. Log line 373: the nightly export finished, 11 warnings, nothing to do. Log line 374: the nightly export finished, 5 warnings, nothing to do. Log line 375: the nightly export finished, 12 warnings, nothing to do. Log line 376: the nightly export finished, 6 warnings, nothing to do. Log line 377: the nightly export finished, 0 warnings, nothing to do. Log line 378: the nightly export finished, 7 warnings, nothing to do. Log line 379: the nightly export finished, 1 warnings, nothing to do. Log line 380: the nightly export finished, 8 warnings, nothing to do. Log line 381: the nightly export finished, 2 warnings, nothing to do. Log line 382: the nightly export finished, 9 warnings, nothing to do. Log line 383: the nightly export finished, 3 warnings, nothing to do. Log line 384: the nightly export finished, 10 warnings, nothing to do. Log line 385: the nightly export finished, 4 warnings, nothing to do. Log line 386: the nightly export finished, 11 warnings, nothing to do. Log line 387: the nightly export finished, 5 warnings, nothing to do. Log line 388: the nightly export finished, 12 warnings, nothing to do. Log line 389: the nightly export finished, 6 warnings, nothing to do. Log line 390: the nightly export finished, 0 warnings, nothing to do. Log line 391: the nightly export finished, 7 warnings, nothing to do. Log line 392: the nightly export finished, 1 warnings, nothing to do. Log line 393: the nightly export finished, 8 warnings, nothing to do. Log line 394: the nightly export finished, 2 warnings, nothing to do. Log line 395: the nightly export finished, 9 warnings, nothing to do. Log line 396: the nightly export finished, 3 warnings, nothing to do. Log line 397: the nightly export finished, 10 warnings, nothing to do. Log line 398: the nightly export finished, 4 warnings, nothing to do. Log line 399: the nightly export finished, 11 warnings, nothing to do. Is the state short?"
+    }
+   }
+  },
+  {
+   "name": "decomposed_unicode",
+   "state": "Le café était froid.",
+   "questions": {
+    "q": {
+     "type": "choice",
+     "instructions": "Which café is it? café café",
+     "criteria": {
+      "billing": null,
+      "sales": null,
+      "résumé": null
+     }
+    }
+   }
+  }
+ ],
+ "many": [
+  {
+   "name": "payouts",
+   "state": "Help! My payouts have been failing for 3 days!",
+   "questions": {
+    "team": {
+     "type": "choice",
+     "instructions": "Which team should handle this?",
+     "criteria": {
+      "billing": null,
+      "sales": null,
+      "retail": null
+     }
+    },
+    "urgent": {
+     "type": "noul",
+     "instructions": "Does this convey urgency?"
+    },
+    "frustration": {
+     "type": "score",
+     "instructions": "How frustrated is the writer?",
+     "criteria": [
+      "calm",
+      "frustrated",
+      "furious"
+     ]
+    }
+   }
+  },
+  {
+   "name": "long_state_mixed_questions",
+   "state": "Log line 0: the nightly export finished, 0 warnings, nothing to do. Log line 1: the nightly export finished, 7 warnings, nothing to do. Log line 2: the nightly export finished, 1 warnings, nothing to do. Log line 3: the nightly export finished, 8 warnings, nothing to do. Log line 4: the nightly export finished, 2 warnings, nothing to do. Log line 5: the nightly export finished, 9 warnings, nothing to do. Log line 6: the nightly export finished, 3 warnings, nothing to do. Log line 7: the nightly export finished, 10 warnings, nothing to do. Log line 8: the nightly export finished, 4 warnings, nothing to do. Log line 9: the nightly export finished, 11 warnings, nothing to do. Log line 10: the nightly export finished, 5 warnings, nothing to do. Log line 11: the nightly export finished, 12 warnings, nothing to do. Log line 12: the nightly export finished, 6 warnings, nothing to do. Log line 13: the nightly export finished, 0 warnings, nothing to do. Log line 14: the nightly export finished, 7 warnings, nothing to do. Log line 15: the nightly export finished, 1 warnings, nothing to do. Log line 16: the nightly export finished, 8 warnings, nothing to do. Log line 17: the nightly export finished, 2 warnings, nothing to do. Log line 18: the nightly export finished, 9 warnings, nothing to do. Log line 19: the nightly export finished, 3 warnings, nothing to do. Log line 20: the nightly export finished, 10 warnings, nothing to do. Log line 21: the nightly export finished, 4 warnings, nothing to do. Log line 22: the nightly export finished, 11 warnings, nothing to do. Log line 23: the nightly export finished, 5 warnings, nothing to do. Log line 24: the nightly export finished, 12 warnings, nothing to do. Log line 25: the nightly export finished, 6 warnings, nothing to do. Log line 26: the nightly export finished, 0 warnings, nothing to do. Log line 27: the nightly export finished, 7 warnings, nothing to do. Log line 28: the nightly export finished, 1 warnings, nothing to do. Log line 29: the nightly export finished, 8 warnings, nothing to do. Log line 30: the nightly export finished, 2 warnings, nothing to do. Log line 31: the nightly export finished, 9 warnings, nothing to do. Log line 32: the nightly export finished, 3 warnings, nothing to do. Log line 33: the nightly export finished, 10 warnings, nothing to do. Log line 34: the nightly export finished, 4 warnings, nothing to do. Log line 35: the nightly export finished, 11 warnings, nothing to do. Log line 36: the nightly export finished, 5 warnings, nothing to do. Log line 37: the nightly export finished, 12 warnings, nothing to do. Log line 38: the nightly export finished, 6 warnings, nothing to do. Log line 39: the nightly export finished, 0 warnings, nothing to do. Log line 40: the nightly export finished, 7 warnings, nothing to do. Log line 41: the nightly export finished, 1 warnings, nothing to do. Log line 42: the nightly export finished, 8 warnings, nothing to do. Log line 43: the nightly export finished, 2 warnings, nothing to do. Log line 44: the nightly export finished, 9 warnings, nothing to do. Log line 45: the nightly export finished, 3 warnings, nothing to do. Log line 46: the nightly export finished, 10 warnings, nothing to do. Log line 47: the nightly export finished, 4 warnings, nothing to do. Log line 48: the nightly export finished, 11 warnings, nothing to do. Log line 49: the nightly export finished, 5 warnings, nothing to do. Log line 50: the nightly export finished, 12 warnings, nothing to do. Log line 51: the nightly export finished, 6 warnings, nothing to do. Log line 52: the nightly export finished, 0 warnings, nothing to do. Log line 53: the nightly export finished, 7 warnings, nothing to do. Log line 54: the nightly export finished, 1 warnings, nothing to do. Log line 55: the nightly export finished, 8 warnings, nothing to do. Log line 56: the nightly export finished, 2 warnings, nothing to do. Log line 57: the nightly export finished, 9 warnings, nothing to do. Log line 58: the nightly export finished, 3 warnings, nothing to do. Log line 59: the nightly export finished, 10 warnings, nothing to do. Log line 60: the nightly export finished, 4 warnings, nothing to do. Log line 61: the nightly export finished, 11 warnings, nothing to do. Log line 62: the nightly export finished, 5 warnings, nothing to do. Log line 63: the nightly export finished, 12 warnings, nothing to do. Log line 64: the nightly export finished, 6 warnings, nothing to do. Log line 65: the nightly export finished, 0 warnings, nothing to do. Log line 66: the nightly export finished, 7 warnings, nothing to do. Log line 67: the nightly export finished, 1 warnings, nothing to do. Log line 68: the nightly export finished, 8 warnings, nothing to do. Log line 69: the nightly export finished, 2 warnings, nothing to do. Log line 70: the nightly export finished, 9 warnings, nothing to do. Log line 71: the nightly export finished, 3 warnings, nothing to do. Log line 72: the nightly export finished, 10 warnings, nothing to do. Log line 73: the nightly export finished, 4 warnings, nothing to do. Log line 74: the nightly export finished, 11 warnings, nothing to do. Log line 75: the nightly export finished, 5 warnings, nothing to do. Log line 76: the nightly export finished, 12 warnings, nothing to do. Log line 77: the nightly export finished, 6 warnings, nothing to do. Log line 78: the nightly export finished, 0 warnings, nothing to do. Log line 79: the nightly export finished, 7 warnings, nothing to do. Log line 80: the nightly export finished, 1 warnings, nothing to do. Log line 81: the nightly export finished, 8 warnings, nothing to do. Log line 82: the nightly export finished, 2 warnings, nothing to do. Log line 83: the nightly export finished, 9 warnings, nothing to do. Log line 84: the nightly export finished, 3 warnings, nothing to do. Log line 85: the nightly export finished, 10 warnings, nothing to do. Log line 86: the nightly export finished, 4 warnings, nothing to do. Log line 87: the nightly export finished, 11 warnings, nothing to do. Log line 88: the nightly export finished, 5 warnings, nothing to do. Log line 89: the nightly export finished, 12 warnings, nothing to do. Log line 90: the nightly export finished, 6 warnings, nothing to do. Log line 91: the nightly export finished, 0 warnings, nothing to do. Log line 92: the nightly export finished, 7 warnings, nothing to do. Log line 93: the nightly export finished, 1 warnings, nothing to do. Log line 94: the nightly export finished, 8 warnings, nothing to do. Log line 95: the nightly export finished, 2 warnings, nothing to do. Log line 96: the nightly export finished, 9 warnings, nothing to do. Log line 97: the nightly export finished, 3 warnings, nothing to do. Log line 98: the nightly export finished, 10 warnings, nothing to do. Log line 99: the nightly export finished, 4 warnings, nothing to do. Log line 100: the nightly export finished, 11 warnings, nothing to do. Log line 101: the nightly export finished, 5 warnings, nothing to do. Log line 102: the nightly export finished, 12 warnings, nothing to do. Log line 103: the nightly export finished, 6 warnings, nothing to do. Log line 104: the nightly export finished, 0 warnings, nothing to do. Log line 105: the nightly export finished, 7 warnings, nothing to do. Log line 106: the nightly export finished, 1 warnings, nothing to do. Log line 107: the nightly export finished, 8 warnings, nothing to do. Log line 108: the nightly export finished, 2 warnings, nothing to do. Log line 109: the nightly export finished, 9 warnings, nothing to do. Log line 110: the nightly export finished, 3 warnings, nothing to do. Log line 111: the nightly export finished, 10 warnings, nothing to do. Log line 112: the nightly export finished, 4 warnings, nothing to do. Log line 113: the nightly export finished, 11 warnings, nothing to do. Log line 114: the nightly export finished, 5 warnings, nothing to do. Log line 115: the nightly export finished, 12 warnings, nothing to do. Log line 116: the nightly export finished, 6 warnings, nothing to do. Log line 117: the nightly export finished, 0 warnings, nothing to do. Log line 118: the nightly export finished, 7 warnings, nothing to do. Log line 119: the nightly export finished, 1 warnings, nothing to do. Log line 120: the nightly export finished, 8 warnings, nothing to do. Log line 121: the nightly export finished, 2 warnings, nothing to do. Log line 122: the nightly export finished, 9 warnings, nothing to do. Log line 123: the nightly export finished, 3 warnings, nothing to do. Log line 124: the nightly export finished, 10 warnings, nothing to do. Log line 125: the nightly export finished, 4 warnings, nothing to do. Log line 126: the nightly export finished, 11 warnings, nothing to do. Log line 127: the nightly export finished, 5 warnings, nothing to do. Log line 128: the nightly export finished, 12 warnings, nothing to do. Log line 129: the nightly export finished, 6 warnings, nothing to do. Log line 130: the nightly export finished, 0 warnings, nothing to do. Log line 131: the nightly export finished, 7 warnings, nothing to do. Log line 132: the nightly export finished, 1 warnings, nothing to do. Log line 133: the nightly export finished, 8 warnings, nothing to do. Log line 134: the nightly export finished, 2 warnings, nothing to do. Log line 135: the nightly export finished, 9 warnings, nothing to do. Log line 136: the nightly export finished, 3 warnings, nothing to do. Log line 137: the nightly export finished, 10 warnings, nothing to do. Log line 138: the nightly export finished, 4 warnings, nothing to do. Log line 139: the nightly export finished, 11 warnings, nothing to do. Log line 140: the nightly export finished, 5 warnings, nothing to do. Log line 141: the nightly export finished, 12 warnings, nothing to do. Log line 142: the nightly export finished, 6 warnings, nothing to do. Log line 143: the nightly export finished, 0 warnings, nothing to do. Log line 144: the nightly export finished, 7 warnings, nothing to do. Log line 145: the nightly export finished, 1 warnings, nothing to do. Log line 146: the nightly export finished, 8 warnings, nothing to do. Log line 147: the nightly export finished, 2 warnings, nothing to do. Log line 148: the nightly export finished, 9 warnings, nothing to do. Log line 149: the nightly export finished, 3 warnings, nothing to do. Log line 150: the nightly export finished, 10 warnings, nothing to do. Log line 151: the nightly export finished, 4 warnings, nothing to do. Log line 152: the nightly export finished, 11 warnings, nothing to do. Log line 153: the nightly export finished, 5 warnings, nothing to do. Log line 154: the nightly export finished, 12 warnings, nothing to do. Log line 155: the nightly export finished, 6 warnings, nothing to do. Log line 156: the nightly export finished, 0 warnings, nothing to do. Log line 157: the nightly export finished, 7 warnings, nothing to do. Log line 158: the nightly export finished, 1 warnings, nothing to do. Log line 159: the nightly export finished, 8 warnings, nothing to do. Log line 160: the nightly export finished, 2 warnings, nothing to do. Log line 161: the nightly export finished, 9 warnings, nothing to do. Log line 162: the nightly export finished, 3 warnings, nothing to do. Log line 163: the nightly export finished, 10 warnings, nothing to do. Log line 164: the nightly export finished, 4 warnings, nothing to do. Log line 165: the nightly export finished, 11 warnings, nothing to do. Log line 166: the nightly export finished, 5 warnings, nothing to do. Log line 167: the nightly export finished, 12 warnings, nothing to do. Log line 168: the nightly export finished, 6 warnings, nothing to do. Log line 169: the nightly export finished, 0 warnings, nothing to do. Log line 170: the nightly export finished, 7 warnings, nothing to do. Log line 171: the nightly export finished, 1 warnings, nothing to do. Log line 172: the nightly export finished, 8 warnings, nothing to do. Log line 173: the nightly export finished, 2 warnings, nothing to do. Log line 174: the nightly export finished, 9 warnings, nothing to do. Log line 175: the nightly export finished, 3 warnings, nothing to do. Log line 176: the nightly export finished, 10 warnings, nothing to do. Log line 177: the nightly export finished, 4 warnings, nothing to do. Log line 178: the nightly export finished, 11 warnings, nothing to do. Log line 179: the nightly export finished, 5 warnings, nothing to do. Log line 180: the nightly export finished, 12 warnings, nothing to do. Log line 181: the nightly export finished, 6 warnings, nothing to do. Log line 182: the nightly export finished, 0 warnings, nothing to do. Log line 183: the nightly export finished, 7 warnings, nothing to do. Log line 184: the nightly export finished, 1 warnings, nothing to do. Log line 185: the nightly export finished, 8 warnings, nothing to do. Log line 186: the nightly export finished, 2 warnings, nothing to do. Log line 187: the nightly export finished, 9 warnings, nothing to do. Log line 188: the nightly export finished, 3 warnings, nothing to do. Log line 189: the nightly export finished, 10 warnings, nothing to do. Log line 190: the nightly export finished, 4 warnings, nothing to do. Log line 191: the nightly export finished, 11 warnings, nothing to do. Log line 192: the nightly export finished, 5 warnings, nothing to do. Log line 193: the nightly export finished, 12 warnings, nothing to do. Log line 194: the nightly export finished, 6 warnings, nothing to do. Log line 195: the nightly export finished, 0 warnings, nothing to do. Log line 196: the nightly export finished, 7 warnings, nothing to do. Log line 197: the nightly export finished, 1 warnings, nothing to do. Log line 198: the nightly export finished, 8 warnings, nothing to do. Log line 199: the nightly export finished, 2 warnings, nothing to do. Log line 200: the nightly export finished, 9 warnings, nothing to do. Log line 201: the nightly export finished, 3 warnings, nothing to do. Log line 202: the nightly export finished, 10 warnings, nothing to do. Log line 203: the nightly export finished, 4 warnings, nothing to do. Log line 204: the nightly export finished, 11 warnings, nothing to do. Log line 205: the nightly export finished, 5 warnings, nothing to do. Log line 206: the nightly export finished, 12 warnings, nothing to do. Log line 207: the nightly export finished, 6 warnings, nothing to do. Log line 208: the nightly export finished, 0 warnings, nothing to do. Log line 209: the nightly export finished, 7 warnings, nothing to do. Log line 210: the nightly export finished, 1 warnings, nothing to do. Log line 211: the nightly export finished, 8 warnings, nothing to do. Log line 212: the nightly export finished, 2 warnings, nothing to do. Log line 213: the nightly export finished, 9 warnings, nothing to do. Log line 214: the nightly export finished, 3 warnings, nothing to do. Log line 215: the nightly export finished, 10 warnings, nothing to do. Log line 216: the nightly export finished, 4 warnings, nothing to do. Log line 217: the nightly export finished, 11 warnings, nothing to do. Log line 218: the nightly export finished, 5 warnings, nothing to do. Log line 219: the nightly export finished, 12 warnings, nothing to do. Log line 220: the nightly export finished, 6 warnings, nothing to do. Log line 221: the nightly export finished, 0 warnings, nothing to do. Log line 222: the nightly export finished, 7 warnings, nothing to do. Log line 223: the nightly export finished, 1 warnings, nothing to do. Log line 224: the nightly export finished, 8 warnings, nothing to do. Log line 225: the nightly export finished, 2 warnings, nothing to do. Log line 226: the nightly export finished, 9 warnings, nothing to do. Log line 227: the nightly export finished, 3 warnings, nothing to do. Log line 228: the nightly export finished, 10 warnings, nothing to do. Log line 229: the nightly export finished, 4 warnings, nothing to do. Log line 230: the nightly export finished, 11 warnings, nothing to do. Log line 231: the nightly export finished, 5 warnings, nothing to do. Log line 232: the nightly export finished, 12 warnings, nothing to do. Log line 233: the nightly export finished, 6 warnings, nothing to do. Log line 234: the nightly export finished, 0 warnings, nothing to do. Log line 235: the nightly export finished, 7 warnings, nothing to do. Log line 236: the nightly export finished, 1 warnings, nothing to do. Log line 237: the nightly export finished, 8 warnings, nothing to do. Log line 238: the nightly export finished, 2 warnings, nothing to do. Log line 239: the nightly export finished, 9 warnings, nothing to do. Log line 240: the nightly export finished, 3 warnings, nothing to do. Log line 241: the nightly export finished, 10 warnings, nothing to do. Log line 242: the nightly export finished, 4 warnings, nothing to do. Log line 243: the nightly export finished, 11 warnings, nothing to do. Log line 244: the nightly export finished, 5 warnings, nothing to do. Log line 245: the nightly export finished, 12 warnings, nothing to do. Log line 246: the nightly export finished, 6 warnings, nothing to do. Log line 247: the nightly export finished, 0 warnings, nothing to do. Log line 248: the nightly export finished, 7 warnings, nothing to do. Log line 249: the nightly export finished, 1 warnings, nothing to do. Log line 250: the nightly export finished, 8 warnings, nothing to do. Log line 251: the nightly export finished, 2 warnings, nothing to do. Log line 252: the nightly export finished, 9 warnings, nothing to do. Log line 253: the nightly export finished, 3 warnings, nothing to do. Log line 254: the nightly export finished, 10 warnings, nothing to do. Log line 255: the nightly export finished, 4 warnings, nothing to do. Log line 256: the nightly export finished, 11 warnings, nothing to do. Log line 257: the nightly export finished, 5 warnings, nothing to do. Log line 258: the nightly export finished, 12 warnings, nothing to do. Log line 259: the nightly export finished, 6 warnings, nothing to do. Log line 260: the nightly export finished, 0 warnings, nothing to do. Log line 261: the nightly export finished, 7 warnings, nothing to do. Log line 262: the nightly export finished, 1 warnings, nothing to do. Log line 263: the nightly export finished, 8 warnings, nothing to do. Log line 264: the nightly export finished, 2 warnings, nothing to do. Log line 265: the nightly export finished, 9 warnings, nothing to do. Log line 266: the nightly export finished, 3 warnings, nothing to do. Log line 267: the nightly export finished, 10 warnings, nothing to do. Log line 268: the nightly export finished, 4 warnings, nothing to do. Log line 269: the nightly export finished, 11 warnings, nothing to do. Log line 270: the nightly export finished, 5 warnings, nothing to do. Log line 271: the nightly export finished, 12 warnings, nothing to do. Log line 272: the nightly export finished, 6 warnings, nothing to do. Log line 273: the nightly export finished, 0 warnings, nothing to do. Log line 274: the nightly export finished, 7 warnings, nothing to do. Log line 275: the nightly export finished, 1 warnings, nothing to do. Log line 276: the nightly export finished, 8 warnings, nothing to do. Log line 277: the nightly export finished, 2 warnings, nothing to do. Log line 278: the nightly export finished, 9 warnings, nothing to do. Log line 279: the nightly export finished, 3 warnings, nothing to do. Log line 280: the nightly export finished, 10 warnings, nothing to do. Log line 281: the nightly export finished, 4 warnings, nothing to do. Log line 282: the nightly export finished, 11 warnings, nothing to do. Log line 283: the nightly export finished, 5 warnings, nothing to do. Log line 284: the nightly export finished, 12 warnings, nothing to do. Log line 285: the nightly export finished, 6 warnings, nothing to do. Log line 286: the nightly export finished, 0 warnings, nothing to do. Log line 287: the nightly export finished, 7 warnings, nothing to do. Log line 288: the nightly export finished, 1 warnings, nothing to do. Log line 289: the nightly export finished, 8 warnings, nothing to do. Log line 290: the nightly export finished, 2 warnings, nothing to do. Log line 291: the nightly export finished, 9 warnings, nothing to do. Log line 292: the nightly export finished, 3 warnings, nothing to do. Log line 293: the nightly export finished, 10 warnings, nothing to do. Log line 294: the nightly export finished, 4 warnings, nothing to do. Log line 295: the nightly export finished, 11 warnings, nothing to do. Log line 296: the nightly export finished, 5 warnings, nothing to do. Log line 297: the nightly export finished, 12 warnings, nothing to do. Log line 298: the nightly export finished, 6 warnings, nothing to do. Log line 299: the nightly export finished, 0 warnings, nothing to do. Log line 300: the nightly export finished, 7 warnings, nothing to do. Log line 301: the nightly export finished, 1 warnings, nothing to do. Log line 302: the nightly export finished, 8 warnings, nothing to do. Log line 303: the nightly export finished, 2 warnings, nothing to do. Log line 304: the nightly export finished, 9 warnings, nothing to do. Log line 305: the nightly export finished, 3 warnings, nothing to do. Log line 306: the nightly export finished, 10 warnings, nothing to do. Log line 307: the nightly export finished, 4 warnings, nothing to do. Log line 308: the nightly export finished, 11 warnings, nothing to do. Log line 309: the nightly export finished, 5 warnings, nothing to do. Log line 310: the nightly export finished, 12 warnings, nothing to do. Log line 311: the nightly export finished, 6 warnings, nothing to do. Log line 312: the nightly export finished, 0 warnings, nothing to do. Log line 313: the nightly export finished, 7 warnings, nothing to do. Log line 314: the nightly export finished, 1 warnings, nothing to do. Log line 315: the nightly export finished, 8 warnings, nothing to do. Log line 316: the nightly export finished, 2 warnings, nothing to do. Log line 317: the nightly export finished, 9 warnings, nothing to do. Log line 318: the nightly export finished, 3 warnings, nothing to do. Log line 319: the nightly export finished, 10 warnings, nothing to do. Log line 320: the nightly export finished, 4 warnings, nothing to do. Log line 321: the nightly export finished, 11 warnings, nothing to do. Log line 322: the nightly export finished, 5 warnings, nothing to do. Log line 323: the nightly export finished, 12 warnings, nothing to do. Log line 324: the nightly export finished, 6 warnings, nothing to do. Log line 325: the nightly export finished, 0 warnings, nothing to do. Log line 326: the nightly export finished, 7 warnings, nothing to do. Log line 327: the nightly export finished, 1 warnings, nothing to do. Log line 328: the nightly export finished, 8 warnings, nothing to do. Log line 329: the nightly export finished, 2 warnings, nothing to do. Log line 330: the nightly export finished, 9 warnings, nothing to do. Log line 331: the nightly export finished, 3 warnings, nothing to do. Log line 332: the nightly export finished, 10 warnings, nothing to do. Log line 333: the nightly export finished, 4 warnings, nothing to do. Log line 334: the nightly export finished, 11 warnings, nothing to do. Log line 335: the nightly export finished, 5 warnings, nothing to do. Log line 336: the nightly export finished, 12 warnings, nothing to do. Log line 337: the nightly export finished, 6 warnings, nothing to do. Log line 338: the nightly export finished, 0 warnings, nothing to do. Log line 339: the nightly export finished, 7 warnings, nothing to do. Log line 340: the nightly export finished, 1 warnings, nothing to do. Log line 341: the nightly export finished, 8 warnings, nothing to do. Log line 342: the nightly export finished, 2 warnings, nothing to do. Log line 343: the nightly export finished, 9 warnings, nothing to do. Log line 344: the nightly export finished, 3 warnings, nothing to do. Log line 345: the nightly export finished, 10 warnings, nothing to do. Log line 346: the nightly export finished, 4 warnings, nothing to do. Log line 347: the nightly export finished, 11 warnings, nothing to do. Log line 348: the nightly export finished, 5 warnings, nothing to do. Log line 349: the nightly export finished, 12 warnings, nothing to do. Log line 350: the nightly export finished, 6 warnings, nothing to do. Log line 351: the nightly export finished, 0 warnings, nothing to do. Log line 352: the nightly export finished, 7 warnings, nothing to do. Log line 353: the nightly export finished, 1 warnings, nothing to do. Log line 354: the nightly export finished, 8 warnings, nothing to do. Log line 355: the nightly export finished, 2 warnings, nothing to do. Log line 356: the nightly export finished, 9 warnings, nothing to do. Log line 357: the nightly export finished, 3 warnings, nothing to do. Log line 358: the nightly export finished, 10 warnings, nothing to do. Log line 359: the nightly export finished, 4 warnings, nothing to do. Log line 360: the nightly export finished, 11 warnings, nothing to do. Log line 361: the nightly export finished, 5 warnings, nothing to do. Log line 362: the nightly export finished, 12 warnings, nothing to do. Log line 363: the nightly export finished, 6 warnings, nothing to do. Log line 364: the nightly export finished, 0 warnings, nothing to do. Log line 365: the nightly export finished, 7 warnings, nothing to do. Log line 366: the nightly export finished, 1 warnings, nothing to do. Log line 367: the nightly export finished, 8 warnings, nothing to do. Log line 368: the nightly export finished, 2 warnings, nothing to do. Log line 369: the nightly export finished, 9 warnings, nothing to do. Log line 370: the nightly export finished, 3 warnings, nothing to do. Log line 371: the nightly export finished, 10 warnings, nothing to do. Log line 372: the nightly export finished, 4 warnings, nothing to do. Log line 373: the nightly export finished, 11 warnings, nothing to do. Log line 374: the nightly export finished, 5 warnings, nothing to do. Log line 375: the nightly export finished, 12 warnings, nothing to do. Log line 376: the nightly export finished, 6 warnings, nothing to do. Log line 377: the nightly export finished, 0 warnings, nothing to do. Log line 378: the nightly export finished, 7 warnings, nothing to do. Log line 379: the nightly export finished, 1 warnings, nothing to do. Log line 380: the nightly export finished, 8 warnings, nothing to do. Log line 381: the nightly export finished, 2 warnings, nothing to do. Log line 382: the nightly export finished, 9 warnings, nothing to do. Log line 383: the nightly export finished, 3 warnings, nothing to do. Log line 384: the nightly export finished, 10 warnings, nothing to do. Log line 385: the nightly export finished, 4 warnings, nothing to do. Log line 386: the nightly export finished, 11 warnings, nothing to do. Log line 387: the nightly export finished, 5 warnings, nothing to do. Log line 388: the nightly export finished, 12 warnings, nothing to do. Log line 389: the nightly export finished, 6 warnings, nothing to do. Log line 390: the nightly export finished, 0 warnings, nothing to do. Log line 391: the nightly export finished, 7 warnings, nothing to do. Log line 392: the nightly export finished, 1 warnings, nothing to do. Log line 393: the nightly export finished, 8 warnings, nothing to do. Log line 394: the nightly export finished, 2 warnings, nothing to do. Log line 395: the nightly export finished, 9 warnings, nothing to do. Log line 396: the nightly export finished, 3 warnings, nothing to do. Log line 397: the nightly export finished, 10 warnings, nothing to do. Log line 398: the nightly export finished, 4 warnings, nothing to do. Log line 399: the nightly export finished, 11 warnings, nothing to do. Final line: the customer asks for a refund. Final line: the customer asks for a refund.",
+   "questions": {
+    "short": {
+     "type": "noul",
+     "instructions": "Is this a log?"
+    },
+    "long": {
+     "type": "choice",
+     "instructions": "Read the whole state carefully, including every log line and its warning count, then decide what the final line asks the support team to do for the customer.",
+     "criteria": {
+      "refund": "give the money back",
+      "nothing": "no action needed",
+      "escalate": "pass it to a manager"
+     }
+    }
+   }
+  }
+ ]
+}

@@ -1,0 +1,9 @@
+# The conversion toolchain, on top of `pip install -e .` from the repository root (which brings torch, transformers
+# and peft at the versions the package itself supports). Pinned because a new model builder can export a different
+# graph. Any change to this file or to convert.py changes the converter id (publish.py), and the workflow converts
+# the release again.
+onnxruntime-genai==0.17.1
+onnxruntime==1.30.0
+onnx==1.23.1
+onnx-ir==1.0.0
+onnxscript==0.7.2

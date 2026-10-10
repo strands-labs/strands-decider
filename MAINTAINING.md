@@ -30,3 +30,27 @@ Steps:
 
 PyPI rejects re-uploading an existing version. Bump the number (or add a
 `.devN` suffix) on every run.
+
+## The browser demo
+
+[`.github/workflows/web.yml`](.github/workflows/web.yml) converts each new
+`StrandsAgents/strands-decider-2B-*` release for the browser and redeploys the
+demo on GitHub Pages. It runs on every push to `main` and daily, so publishing a
+release needs no other step; `gh workflow run web.yml` picks one up at once.
+Details in [web/README.md](web/README.md).
+
+One-time setup:
+
+1. **Settings → Pages → Source: GitHub Actions.**
+2. A repository secret `HF_TOKEN`: a Hugging Face token with write access to
+   `StrandsAgents/strands-decider-2B-webgpu`. Either create that repo first
+   (empty, public) and give a fine-grained token write access to it alone, or
+   use a token that may create repos in the org, and the first upload creates
+   it. If the token expires, the publish job fails and the site keeps serving
+   the release it has.
+3. Optional repository variables: `WEIGHTS_REPO` (another weights repo) and
+   `DECIDER_RELEASE` (serve this release instead of the newest).
+
+GitHub disables scheduled workflows in a public repository after 60 days without
+activity; pushes to `main` still run it, and so does **Actions → web → Run
+workflow**.

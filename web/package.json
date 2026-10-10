@@ -1,0 +1,19 @@
+{
+  "name": "strands-decider-web",
+  "private": true,
+  "description": "Strands Decider in the browser: ONNX Runtime Web, WebGPU or WASM",
+  "license": "Apache-2.0",
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "serve": "node server.mjs",
+    "test": "node --test test/*.test.mjs && playwright test"
+  },
+  "dependencies": {
+    "@huggingface/tokenizers": "0.2.0",
+    "onnxruntime-web": "1.30.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.63.0"
+  }
+}
