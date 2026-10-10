@@ -168,6 +168,9 @@ curl -s localhost:8000/v1/systemone \
   ```
 </details>
 
+To serve it on AWS (SageMaker AI, Amazon Bedrock AgentCore Runtime or AWS Lambda MicroVMs), see
+[docs/deployment.md](docs/deployment.md) for measured hosts and their setup problems.
+
 ### Images
 
 Qwen3.5-2B-Base is natively multimodal. With `--vision` the server keeps its vision tower,
