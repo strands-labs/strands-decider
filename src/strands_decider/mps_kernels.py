@@ -51,6 +51,65 @@ import torch
 import torch.nn.functional as F
 
 _installed = False
+_unit_lower_inverse_metal_library = None
+
+_UNIT_LOWER_INVERSE_METAL = r"""
+#include <metal_stdlib>
+using namespace metal;
+
+kernel void unit_lower_inverse_64(
+    device const float* a [[buffer(0)]],
+    device float* out [[buffer(1)]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint gid [[threadgroup_position_in_grid]])
+{
+    threadgroup float x[64 * 64];
+    threadgroup float next_x[64 * 64];
+    const uint base = gid * 64 * 64;
+
+    for (uint i = tid; i < 4096; i += 256) {
+        uint r = i >> 6, c = i & 63;
+        x[i] = (r == c) ? 1.0f : 0.0f;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    for (uint b = 1; b < 64; b <<= 1) {
+        uint block = b << 1;
+        uint blocks = 64 / block;
+        uint work = blocks * b * b;
+
+        for (uint w = tid; w < work; w += 256) {
+            uint per_block = b * b;
+            uint bi = w / per_block;
+            uint rem = w - bi * per_block;
+            uint rr = rem / b, cc = rem - rr * b;
+            uint start = bi * block;
+            uint row = start + b + rr, col = start + cc;
+
+            float sum = 0.0f;
+            for (uint j = 0; j < b; ++j) {
+                float left = 0.0f;
+                for (uint k = 0; k < b; ++k)
+                    left += x[(start+b+rr)*64 + (start+b+k)]
+                          * a[base + (start+b+k)*64 + (start+j)];
+                sum += left * x[(start+j)*64 + (start+cc)];
+            }
+            next_x[row*64 + col] = -sum;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        for (uint w = tid; w < work; w += 256) {
+            uint per_block=b*b, bi=w/per_block, rem=w-bi*per_block;
+            uint rr=rem/b, cc=rem-rr*b, start=bi*block;
+            x[(start+b+rr)*64 + (start+cc)] =
+                next_x[(start+b+rr)*64 + (start+cc)];
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    for (uint i=tid; i<4096; i+=256) out[base+i]=x[i];
+}
+"""
 
 
 def _unit_lower_inverse(a: torch.Tensor) -> torch.Tensor:
@@ -67,6 +126,22 @@ def _unit_lower_inverse(a: torch.Tensor) -> torch.Tensor:
     the powers of N reach ~1e8 on real Qwen3.5 inputs before cancelling, which fp32
     cannot survive.
     """
+    if a.device.type == "mps" and a.dtype == torch.float32 and a.shape[-2:] == (64, 64):
+        a = a.contiguous()
+        out = torch.empty_like(a)
+        matrices = a.numel() // 4096
+        if matrices == 0:
+            return out
+        global _unit_lower_inverse_metal_library
+        if _unit_lower_inverse_metal_library is None:
+            _unit_lower_inverse_metal_library = torch.mps.compile_shader(_UNIT_LOWER_INVERSE_METAL)
+        _unit_lower_inverse_metal_library.unit_lower_inverse_64(
+            a, out,
+            threads=[matrices * 256, 1, 1],
+            group_size=[256, 1, 1],
+        )
+        return out
+
     n = a.shape[-1]
     idx = torch.arange(n, device=a.device)
     x = torch.eye(n, dtype=a.dtype, device=a.device).expand_as(a).clone()
