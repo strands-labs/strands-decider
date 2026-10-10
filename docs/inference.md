@@ -17,6 +17,8 @@ checkpoint with `strands-decider calibrate` before you serve it.
 - [Asking many questions is nearly free](#asking-many-questions-is-nearly-free): the shared-prefix cache.
 - [Serving on a Mac](#serving-on-a-mac): MPS, and the one kernel that had to be replaced.
 - [Serving on a Mac with MLX](#serving-on-a-mac-with-mlx): `--device mlx`, measured against MPS.
+- [`deployment.md`](deployment.md): serving on AWS (SageMaker AI, AgentCore Runtime, Lambda
+  MicroVMs), measured, with each host's setup problems.
 - [`../examples/strands/`](../examples/strands/README.md): an agent built with the Strands
   Agents SDK that uses the server, with its client in `_client.py`.
 - [`../evaluation/results.md`](../evaluation/results.md): measured latency and accuracy on an
