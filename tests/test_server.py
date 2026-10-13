@@ -102,7 +102,9 @@ def test_health_identifies_checkpoint(monkeypatch):
     monkeypatch.setattr(server, "_engine", None)
     monkeypatch.setattr(server.StrandsDeciderModel, "load", lambda *a, **k: _StubModel())
     monkeypatch.setattr(server, "SystemOneEngine", lambda model, cfg: _StubEngine())
-    r = TestClient(server.create_app("checkpoints/strands-decider-test", device="cpu")).get("/health")
+    r = TestClient(server.create_app("checkpoints/strands-decider-test", device="cpu")).get(
+        "/health"
+    )
     assert r.status_code == 200
     assert r.json()["checkpoint"] == "checkpoints/strands-decider-test"
     assert r.json()["max_length"] == 512
@@ -206,7 +208,9 @@ def test_real_create_app_routes_work(monkeypatch):
     """
     from strands_decider import infer
 
-    monkeypatch.setattr(server.StrandsDeciderModel, "load", classmethod(lambda cls, *a, **k: _StubModel()))
+    monkeypatch.setattr(
+        server.StrandsDeciderModel, "load", classmethod(lambda cls, *a, **k: _StubModel())
+    )
     monkeypatch.setattr(server, "SystemOneEngine", lambda model, cfg: _StubEngine())
     monkeypatch.setattr(infer, "SystemOneEngine", lambda model, cfg=None: _StubEngine())
 
@@ -289,7 +293,9 @@ def test_too_many_options_returns_422(monkeypatch):
         def evaluate(self, request):
             raise ValueError("question has 30 options but this model has 24 slots")
 
-    monkeypatch.setattr(server.StrandsDeciderModel, "load", classmethod(lambda cls, *a, **k: _StubModel()))
+    monkeypatch.setattr(
+        server.StrandsDeciderModel, "load", classmethod(lambda cls, *a, **k: _StubModel())
+    )
     monkeypatch.setattr(server, "SystemOneEngine", lambda model, cfg: _NarrowEngine())
 
     app = server.create_app("checkpoints/does-not-exist", device="cpu")
@@ -299,3 +305,52 @@ def test_too_many_options_returns_422(monkeypatch):
     )
     assert r.status_code == 422
     assert "24 slots" in r.json()["detail"]
+
+
+def test_api_key_authentication(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from strands_decider import infer, server
+
+    monkeypatch.setenv("STRANDS_DECIDER_API_KEY", "test-secret-key")
+
+    monkeypatch.setattr(
+        server.StrandsDeciderModel,
+        "load",
+        classmethod(lambda cls, *a, **k: _StubModel()),
+    )
+    monkeypatch.setattr(
+        server,
+        "SystemOneEngine",
+        lambda model, cfg: _StubEngine(),
+    )
+    monkeypatch.setattr(
+        infer,
+        "SystemOneEngine",
+        lambda model, cfg=None: _StubEngine(),
+    )
+
+    app = server.create_app("checkpoints/does-not-exist", device="cpu")
+    client = TestClient(app)
+
+    assert client.get("/health").status_code == 200
+
+    response = client.post(
+        "/v1/systemone",
+        json={"state": "test", "questions": {"q1": {"type": "noul", "instructions": "test"}}},
+    )
+    assert response.status_code == 401
+
+    response = client.post(
+        "/v1/systemone",
+        json={"state": "test", "questions": {"q1": {"type": "noul", "instructions": "test"}}},
+        headers={"Authorization": "Bearer wrong-key"},
+    )
+    assert response.status_code == 401
+
+    response = client.post(
+        "/v1/systemone",
+        json={"state": "test", "questions": {"q1": {"type": "noul", "instructions": "test"}}},
+        headers={"Authorization": "Bearer test-secret-key"},
+    )
+    assert response.status_code != 401

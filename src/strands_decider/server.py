@@ -7,11 +7,12 @@ Compatibility with the Jev API itself is not verified.
 
 from __future__ import annotations
 
+import hmac
 import os
 import threading
 import time
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import JSONResponse
 
 from .infer import EngineConfig, SystemOneEngine, load_mlx
@@ -51,14 +52,19 @@ def create_app(
         version="0.1.0",
         description="Typed, calibrated answers. Choice, Score and Noul over one state.",
     )
+    api_key = os.environ.get("STRANDS_DECIDER_API_KEY")
 
     # Identify the response's `model` by the checkpoint served, so multiple servers
     # on the same host cannot be confused. HF repo ids ("org/name") collapse to `name`.
     resolved_name = model_name or os.path.basename(checkpoint.rstrip("/")) or checkpoint
 
     config = EngineConfig(
-        device=device, use_prefix_cache=use_prefix_cache, model_name=resolved_name,
-        strict_window=strict_window, max_batch=max_batch, max_batch_tokens=max_batch_tokens,
+        device=device,
+        use_prefix_cache=use_prefix_cache,
+        model_name=resolved_name,
+        strict_window=strict_window,
+        max_batch=max_batch,
+        max_batch_tokens=max_batch_tokens,
     )
     if vision:
         if device == "mlx":
@@ -89,7 +95,19 @@ def create_app(
         }
 
     @app.post("/v1/systemone", response_model=SystemOneResponse)
-    def systemone(request: SystemOneRequest) -> JSONResponse:
+    def systemone(
+        request: SystemOneRequest,
+        authorization: str | None = Header(default=None),
+    ) -> JSONResponse:
+        if api_key is not None:
+            expected = f"Bearer {api_key}"
+            if authorization is None or not hmac.compare_digest(authorization, expected):
+                raise HTTPException(
+                    status_code=401,
+                    detail="Invalid or missing API key",
+                    headers={"WWW-Authenticate": "Bearer"},
+                )
+
         eng = get_engine()
         started = time.perf_counter()
         try:

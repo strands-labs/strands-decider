@@ -204,9 +204,24 @@ schema validity 1.000 ([External benchmark](../evaluation/jevbench.md#external-b
 Compatibility with the Jev API itself is not verified. `GET /health` returns the model
 name, the checkpoint path, the base model, the device and the calibration temperature.
 
-The server binds to `127.0.0.1` by default and has no authentication. Its behaviour under
+The server binds to `127.0.0.1` by default. Authentication for `POST /v1/systemone`
+is optional: set `STRANDS_DECIDER_API_KEY` to require an
+`Authorization: Bearer <key>` header. Requests with a missing or invalid key receive
+HTTP 401. If the environment variable is unset, authentication remains disabled for
+backwards compatibility. The `/health` endpoint remains public. Its behaviour under
 concurrent requests is not verified. Use it for local experiments only
 ([Security](../README.md#security)).
+
+To enable authentication:
+
+```bash
+export STRANDS_DECIDER_API_KEY="replace-with-a-long-random-secret"
+strands-decider serve checkpoints/hobson-2b-recipe --port 8000
+curl http://127.0.0.1:8000/v1/systemone \
+  -H "Authorization: Bearer $STRANDS_DECIDER_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '<your request JSON>'
+```
 
 ```bash
 curl -s localhost:8000/v1/systemone -H 'content-type: application/json' -d '{
