@@ -120,9 +120,14 @@ def ask_cmd(
     for i, spec in enumerate(choice or []):
         q, _, opts = spec.partition("=")
         if not opts:
-            raise typer.BadParameter(f"--choice needs 'question=opt1,opt2': {spec!r}")
+            raise typer.BadParameter(f"--choice needs 'question=opt1[=descr1],opt2[=descr2]': {spec!r}")
         questions[f"choice_{i}"] = ChoiceQuestion(
-            instructions=q, criteria={o.strip(): "" for o in opts.split(",") if o.strip()}
+            instructions=q, criteria={
+                kv[0].strip(): kv[2].strip()
+                for opt in opts.split(",")
+                    if (o := opt.strip())
+                        for kv in [o.partition("=")]
+            }
         )
     for i, spec in enumerate(score or []):
         q, _, levels = spec.partition("=")
