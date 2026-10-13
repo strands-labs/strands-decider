@@ -43,6 +43,7 @@ def create_app(
     max_batch: int = 32,
     vision: bool = False,
     max_batch_tokens: int | None = None,
+    audio: bool = False,
 ) -> FastAPI:
     global _engine
 
@@ -60,12 +61,14 @@ def create_app(
         device=device, use_prefix_cache=use_prefix_cache, model_name=resolved_name,
         strict_window=strict_window, max_batch=max_batch, max_batch_tokens=max_batch_tokens,
     )
+    vision = vision or audio  # audio rides on the multimodal torso the image path loads
     if vision:
         if device == "mlx":
-            raise ValueError("--vision runs on torch devices (cuda, mps, cpu), not mlx")
+            raise ValueError("--vision and --audio run on torch devices (cuda, mps, cpu), not mlx")
         from .vision import load_vision_engine
 
-        _engine = load_vision_engine(checkpoint, config, attn_implementation=attn_implementation)
+        _engine = load_vision_engine(checkpoint, config, attn_implementation=attn_implementation,
+                                     audio=audio)
     elif device == "mlx":
         _engine = load_mlx(checkpoint, config)
     else:
@@ -86,6 +89,7 @@ def create_app(
             "device": eng.cfg.device,
             "prefix_cache": eng.cfg.use_prefix_cache,
             "vision": vision,
+            "audio": audio,
         }
 
     @app.post("/v1/systemone", response_model=SystemOneResponse)
@@ -118,6 +122,7 @@ def serve(
     max_batch: int = 32,
     vision: bool = False,
     max_batch_tokens: int | None = None,
+    audio: bool = False,
 ) -> None:
     import uvicorn
 
@@ -130,6 +135,7 @@ def serve(
         max_batch=max_batch,
         vision=vision,
         max_batch_tokens=max_batch_tokens,
+        audio=audio,
     )
     # Single worker: the model owns the GPU, and forking more would just duplicate it.
     uvicorn.run(app, host=host, port=port, workers=1)

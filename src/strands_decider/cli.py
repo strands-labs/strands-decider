@@ -66,7 +66,13 @@ def serve_cmd(
     ),
     vision: bool = typer.Option(
         False, "--vision",
-        help="Keep Qwen3.5's vision tower so requests may carry `images` (docs/vision.md).",
+        help="Keep the base's vision tower (Qwen3.5 or Gemma 4) so requests may carry `images` "
+        "(docs/vision.md).",
+    ),
+    audio: bool = typer.Option(
+        False, "--audio",
+        help="Gemma 4 E2B / E4B: also keep the audio encoder so requests may carry `audio` "
+        "(docs/audio.md). Implies --vision.",
     ),
     max_batch: int = typer.Option(
         32, "--max-batch", help="Questions encoded per forward pass; lower it for very long states.",
@@ -86,7 +92,7 @@ def serve_cmd(
         checkpoint, host=host, port=port, device=selected_device,
         use_prefix_cache=not no_prefix_cache, model_name=model_name,
         strict_window=strict_window, max_batch=max_batch, vision=vision,
-        max_batch_tokens=max_batch_tokens,
+        max_batch_tokens=max_batch_tokens, audio=audio,
     )
 
 
@@ -96,6 +102,11 @@ def ask_cmd(
     state: str = typer.Option(..., "--state", "-s", help="The content to evaluate."),
     image: list[str] | None = typer.Option(
         None, "--image", help="Image file, part of the state; repeat. Loads the vision tower."
+    ),
+    audio: list[str] | None = typer.Option(
+        None, "--audio",
+        help="Audio file (WAV, FLAC, OGG, MP3; at most 30 s), part of the state; repeat. "
+        "Gemma 4 E2B / E4B only; loads the audio encoder.",
     ),
     noul: list[str] | None = typer.Option(None, "--noul", help="Yes/no question; repeat."),
     choice: list[str] | None = typer.Option(
@@ -136,18 +147,20 @@ def ask_cmd(
 
     selected_device = device or _auto_device()
     _configure_inference_logging(selected_device)
-    if image:
+    if image or audio:
         import base64
 
         from .vision import load_vision_engine
 
-        encoded = []
-        for path in image:
-            with open(path, "rb") as fh:
-                encoded.append(base64.b64encode(fh.read()).decode("ascii"))
-        response = load_vision_engine(checkpoint, EngineConfig(device=selected_device)).ask_images(
-            state, questions, encoded
-        )
+        def _encode(paths: list[str] | None) -> list[str]:
+            out = []
+            for path in paths or []:
+                with open(path, "rb") as fh:
+                    out.append(base64.b64encode(fh.read()).decode("ascii"))
+            return out
+
+        engine = load_vision_engine(checkpoint, EngineConfig(device=selected_device), audio=bool(audio))
+        response = engine.ask_images(state, questions, _encode(image), _encode(audio))
     else:
         response = load_engine(checkpoint, device=selected_device).ask(state, questions)
 

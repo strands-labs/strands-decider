@@ -12,6 +12,7 @@
 #   EXPECT_MAX_LENGTH  window /health must report     (default: the checkpoint's own)
 #   MODEL_LABEL      --model / --run-label passed to JevBench       (default basename of ckpt)
 #   HEALTH_TIMEOUT_S seconds to wait for /health                    (default 1200)
+#   SERVE_EXTRA      extra `serve` flags, e.g. --audio               (default none)
 #   baseline_run     a run in research/data/jevbench_results.csv (e.g. v17); if given,
 #                    evaluation/jevbench/paired.py writes <out_dir>/paired.{txt,json}
 #
@@ -96,7 +97,7 @@ if curl -s -m 3 -o /dev/null "$URL/health"; then
   die "something already answers on $URL; refusing to measure a stale server"
 fi
 log "serving $CKPT on GPU $GPU port $PORT"
-CUDA_VISIBLE_DEVICES=$GPU nohup "$HOBSON" serve "$CKPT" --host 127.0.0.1 --port "$PORT" \
+CUDA_VISIBLE_DEVICES=$GPU nohup "$HOBSON" serve "$CKPT" ${SERVE_EXTRA:-} --host 127.0.0.1 --port "$PORT" \
   > "$OUT/server.log" 2>&1 &
 SERVER_PID=$!
 cleanup() {

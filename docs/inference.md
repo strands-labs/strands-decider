@@ -245,7 +245,9 @@ float rounding. Long-context torsos (Gemma 4 at a 32,768-token window) need it; 
 
 The four Gemma 4 models serve with the same commands as the Qwen3.5 model. They need the code on
 `main` (`pip install "strands-decider @ git+https://github.com/strands-labs/strands-decider"`); the
-package on PyPI does not have Gemma 4 support yet. They read text only, so `--vision` does not apply.
+package on PyPI does not have Gemma 4 support yet. E2B and E4B also take images (`--vision`) and audio
+(`--audio`); see [audio.md](audio.md). The 12B (`gemma4_unified`) is refused with `--vision`, and the
+26B-A4B has no audio encoder and is untested with images.
 
 **E2B uses eager attention on CUDA.** The loader selects it for the E2B model on every device.
 On CUDA, PyTorch's default attention kernel gives wrong results for E2B (one key/value head) when a

@@ -188,6 +188,21 @@ with the image missing it is more overconfident than v21 on POPE
 ([docs/vision.md](docs/vision.md#v1)). See
 [docs/vision.md](docs/vision.md) for the request shape, how it works and the measurements.
 
+### Audio
+
+Gemma 4 E2B and E4B ship an audio encoder. With `--audio` the server keeps it (and the vision
+encoder), and a request may carry `audio` clips (base64 WAV, FLAC, OGG or MP3, up to 30 s each)
+beside `images` and the text state, all answered in one forward pass. Needs
+`pip install "strands-decider[audio]"`.
+
+```bash
+strands-decider serve StrandsAgents/strands-decider-E4B-gemma4-v1-2610 --audio --port 8000
+strands-decider ask StrandsAgents/strands-decider-E4B-gemma4-v1-2610 --state "" --audio call.wav \
+  --noul "Is the caller asking for a refund?"
+```
+
+See [docs/audio.md](docs/audio.md) for the request shape, how it works and the measurements.
+
 ## Model names
 
 Model names now use the pattern `strands-decider-<size>-<base>-v<N>-<YYMM>`:
@@ -266,7 +281,8 @@ released v19. The rows come from 25 public Hugging Face datasets, five of them c
 ContractNLI, MuSiQue, generated rows and generated code tasks. [data/sources.md](data/sources.md)
 lists every source with its licence.
 
-The Gemma 4 models read text only: `--vision` is for the Qwen3.5 model.
+The Gemma 4 E2B and E4B models also take images (`--vision`) and audio (`--audio`), with no
+retraining; see [docs/audio.md](docs/audio.md).
 
 ## About the model
 

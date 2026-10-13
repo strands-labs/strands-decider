@@ -354,6 +354,9 @@ class SystemOneEngine:
     def evaluate(self, request: SystemOneRequest) -> SystemOneResponse:
         if request.images:
             raise ValueError("this engine has no vision tower; serve with --vision for images")
+        if request.audio:
+            raise ValueError("this engine has no audio encoder; serve a Gemma 4 E2B / E4B checkpoint "
+                             "with --audio for audio")
         names = list(request.questions.keys())
         questions: list[Question] = [request.questions[n] for n in names]
 

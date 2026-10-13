@@ -101,6 +101,9 @@ class SystemOneRequest(BaseModel):
     # Base64 images (or data: URIs), part of the state. Needs a vision engine
     # (`serve --vision`); a text-only engine refuses them rather than ignore them.
     images: list[str] = Field(default_factory=list)
+    # Base64 audio clips (WAV, FLAC, OGG or MP3; data: URIs too), part of the state. Needs a
+    # Gemma 4 E2B / E4B checkpoint served with `--audio`; any other engine refuses them.
+    audio: list[str] = Field(default_factory=list)
 
 
 class NoulAnswer(BaseModel):

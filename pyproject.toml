@@ -34,6 +34,8 @@ dependencies = [
 train = ["datasets>=2.20"]
 # Image input (`serve --vision`, `ask --image`, docs/vision.md); also needs transformers >= 5.18.
 vision = ["pillow>=10"]
+# Audio input on Gemma 4 E2B / E4B (`serve --audio`, `ask --audio`, docs/audio.md): decoding and resampling.
+audio = ["pillow>=10", "soundfile>=0.12", "scipy>=1.10"]
 # `--device mlx`: the torso on Apple silicon's GPU through mlx-lm (src/strands_decider/mlx_engine.py).
 # mlx-lm is capped at the minor version tested: the backend uses its Qwen3.5 module layout and
 # prompt-cache classes, which are internals.
@@ -131,6 +133,9 @@ module = [
     "mlx_lm.*",
     "PIL.*",
     "tokenizers",
+    "numpy",
+    "scipy.*",
+    "soundfile",
 ]
 ignore_missing_imports = true
 
