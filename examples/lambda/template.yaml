@@ -1,0 +1,67 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  strands-decider (2B, llama.cpp Q8_0) on AWS Lambda: arm64, the GGUF streamed
+  from S3 into memory, the Lambda Web Adapter, an IAM-auth Function URL and
+  SnapStart.
+
+Parameters:
+  ModelBucket:
+    Type: String
+    Description: Bucket holding the GGUF and the function zip
+  ModelKey:
+    Type: String
+    Description: S3 key of the Q8_0 GGUF
+  CodeKey:
+    Type: String
+    Description: S3 key of the function zip
+  SnapStart:
+    Type: String
+    Default: PublishedVersions
+    AllowedValues: [PublishedVersions, None]
+    Description: >
+      PublishedVersions restores new environments from a snapshot in about 4 s, and bills
+      the snapshot cache while the version exists. None costs nothing idle, and a new
+      environment loads the model in about 30 s.
+
+Resources:
+  DeciderFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Ref AWS::StackName
+      CodeUri:
+        Bucket: !Ref ModelBucket
+        Key: !Ref CodeKey
+      Handler: run.sh
+      Runtime: python3.12
+      Architectures: [arm64]
+      # 10 GB is the only size that gets all 6 vCPUs, and a 3,900-token state peaks at about 9 GB.
+      MemorySize: 10240
+      Timeout: 900
+      AutoPublishAlias: live
+      AutoPublishAliasAllProperties: true
+      SnapStart:
+        ApplyOn: !Ref SnapStart
+      Policies:
+        - S3ReadPolicy:
+            BucketName: !Ref ModelBucket
+      Environment:
+        Variables:
+          MODEL_BUCKET: !Ref ModelBucket
+          MODEL_KEY: !Ref ModelKey
+          # Requests over this many tokens (state + all questions) get a 422; 0: no limit.
+          MAX_REQUEST_TOKENS: '24576'
+          AWS_LAMBDA_EXEC_WRAPPER: /opt/bootstrap
+          AWS_LWA_READINESS_CHECK_PATH: /health
+          AWS_LWA_INVOKE_MODE: BUFFERED
+      FunctionUrlConfig:
+        AuthType: AWS_IAM
+        InvokeMode: BUFFERED
+      Layers:
+        - !Sub arn:aws:lambda:${AWS::Region}:753240598075:layer:LambdaAdapterLayerArm64:30
+
+Outputs:
+  FunctionUrl:
+    Value: !GetAtt DeciderFunctionUrl.FunctionUrl
+  FunctionArn:
+    Value: !Ref DeciderFunction.Alias
