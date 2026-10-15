@@ -34,11 +34,10 @@ from dataclasses import dataclass
 from typing import Any
 
 import torch
-import torch.nn.functional as F
+import torch.distributed as dist
 import typer
 from rich.console import Console
 from rich.table import Table
-from torch.utils.data import DataLoader
 
 from strands_decider.modeling import (
     MASK_VALUE,
@@ -50,7 +49,8 @@ from strands_decider.schema import derive_confidence, derive_score_confidence
 
 from .data.collate import CollatorConfig, SystemOneCollator
 from .data.format import Example, read_jsonl
-from .train import ExampleDataset
+from .data.sampling import example_length
+from .distributed import env, process_group
 
 
 def partition_examples(examples: list[Example], part: str, *, seed: int = 0) -> list[Example]:
@@ -118,6 +118,23 @@ class Prediction:
         return derive_confidence(self.probs)
 
 
+def eval_batches(
+    examples: list[Example], batch_size: int, *, sort_by_length: bool = False
+) -> list[list[int]]:
+    """The row indices of each forward `collect_logits` makes.
+
+    In file order by default. `sort_by_length` puts rows of similar length in the same
+    batch, longest first, so batches carry little padding and a sequence that does not fit
+    fails at the first batch; ties keep file order. Right padding never reaches a row's
+    real tokens, so the order changes the logits only by bf16 batch-shape rounding.
+    """
+    order = list(range(len(examples)))
+    if sort_by_length:
+        lengths = [example_length(ex) for ex in examples]
+        order.sort(key=lambda i: -lengths[i])
+    return [order[i:i + batch_size] for i in range(0, len(order), batch_size)]
+
+
 @torch.no_grad()  # type: ignore[untyped-decorator]
 def collect_logits(
     model: StrandsDeciderModel,
@@ -126,12 +143,22 @@ def collect_logits(
     device: str = "cuda",
     batch_size: int = 16,
     max_length: int = 3072,
+    sort_by_length: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[Example]]:
     """Run the model once and keep the logits, so temperature sweeps need no re-forward.
 
-    The logits are untempered. In each row, the columns at or past the row's option
-    count hold MASK_VALUE, so a raw argmax over the row lands on one of its options.
+    The logits are untempered and in the order of `examples`, whatever the batching
+    (`eval_batches`). In each row, the columns at or past the row's option count hold
+    MASK_VALUE, so a raw argmax over the row lands on one of its options.
+
+    Inside a torchrun process group (`distributed.process_group`), rank r forwards
+    batches r, r + N, ... of the single-process batching on its own GPU, and every rank
+    returns all the rows: each row is computed in the batch it is in on one GPU.
     """
+    world = dist.get_world_size() if dist.is_available() and dist.is_initialized() else 1
+    rank = dist.get_rank() if world > 1 else 0
+    if world > 1 and device == "cuda":
+        device = f"cuda:{torch.cuda.current_device()}"  # this rank's GPU
     model.eval().to(device)
     coll = SystemOneCollator(
         model.tokenizer,
@@ -142,12 +169,11 @@ def collect_logits(
         ),
         train=False,  # no option shuffling: evaluation must be deterministic
     )
-    loader = DataLoader(
-        ExampleDataset(examples), batch_size=batch_size, shuffle=False, collate_fn=coll
-    )
+    batches = eval_batches(examples, batch_size, sort_by_length=sort_by_length)
 
-    all_logits, all_labels, all_slots = [], [], []
-    for batch in loader:
+    done: list[tuple[list[int], torch.Tensor, torch.Tensor, torch.Tensor]] = []
+    for idx in batches[rank::world]:
+        batch = coll([examples[i] for i in idx])
         batch = {k: v.to(device) for k, v in batch.items()}
         out = model(
             input_ids=batch["input_ids"],
@@ -163,25 +189,26 @@ def collect_logits(
         # every reader; masked_log_softmax would write the same value into them.
         cols = torch.arange(logits.size(1), device=logits.device)
         logits = logits.masked_fill(cols >= batch["n_slots"].unsqueeze(1), MASK_VALUE)
-        all_logits.append(logits.cpu())
-        all_labels.append(batch["labels"].cpu())
-        all_slots.append(batch["n_slots"].cpu())
+        done.append((idx, logits.cpu(), batch["labels"].cpu(), batch["n_slots"].cpu()))
+
+    if world > 1:
+        parts: list[Any] = [None] * world
+        dist.all_gather_object(parts, done)
+        done = [b for part in parts for b in part]
 
     # A pointer head emits one logit per option, so each batch is only as wide as its
-    # own widest question. Pad to the widest across batches before concatenating;
-    # MASK_VALUE keeps the extra columns inert under masked_log_softmax.
-    width = max(t.size(1) for t in all_logits)
-    all_logits = [
-        t if t.size(1) == width
-        else F.pad(t, (0, width - t.size(1)), value=MASK_VALUE)
-        for t in all_logits
-    ]
-    return (
-        torch.cat(all_logits),
-        torch.cat(all_labels),
-        torch.cat(all_slots),
-        examples,
-    )
+    # own widest question. The result is as wide as the widest batch; MASK_VALUE keeps
+    # the extra columns inert under masked_log_softmax.
+    width = max(t.size(1) for _, t, _, _ in done)
+    all_logits = torch.full((len(examples), width), MASK_VALUE, dtype=done[0][1].dtype)
+    all_labels = torch.empty(len(examples), dtype=torch.long)
+    all_slots = torch.empty(len(examples), dtype=torch.long)
+    for idx, logits, labels, slots in done:
+        rows = torch.tensor(idx)
+        all_logits[rows, : logits.size(1)] = logits
+        all_labels[rows] = labels
+        all_slots[rows] = slots
+    return all_logits, all_labels, all_slots, examples
 
 
 def predictions_from_logits(
@@ -405,11 +432,12 @@ def evaluate_checkpoint(
     device: str = "cuda",
     batch_size: int = 16,
     apply_temperature: bool = True,
+    sort_by_length: bool = False,
 ) -> dict[str, Any]:
     model = StrandsDeciderModel.load(checkpoint)
     logits, labels, slots, exs = collect_logits(
         model, examples, device=device, batch_size=batch_size,
-        max_length=model.config.max_length,
+        max_length=model.config.max_length, sort_by_length=sort_by_length,
     )
     if apply_temperature:
         by_kind = getattr(model.config, "temperature_by_kind", None) or {}
@@ -431,6 +459,7 @@ def calibrate_checkpoint(
     *,
     device: str = "cuda",
     batch_size: int = 16,
+    sort_by_length: bool = False,
 ) -> dict[str, Any]:
     """Fit temperature on a held-out split and write it into the checkpoint config."""
     import os
@@ -445,7 +474,7 @@ def calibrate_checkpoint(
     model = StrandsDeciderModel.load(checkpoint)
     logits, labels, slots, exs = collect_logits(
         model, examples, device=device, batch_size=batch_size,
-        max_length=model.config.max_length,
+        max_length=model.config.max_length, sort_by_length=sort_by_length,
     )
 
     eps = model.config.ordinal_smoothing
@@ -460,9 +489,12 @@ def calibrate_checkpoint(
 
     model.config.temperature = float(t)
     model.config.temperature_by_kind = by_kind
-    # The same file `load` reads: strands_decider_config.json, or the legacy name.
-    with open(config_path(checkpoint), "w", encoding="utf-8") as fh:
-        fh.write(model.config.to_json())
+    # Under torchrun every rank holds the same fit (collect_logits returns every row to
+    # each), so rank 0 alone writes it. The same file `load` reads:
+    # strands_decider_config.json, or the legacy name.
+    if env()[0] == 0:
+        with open(config_path(checkpoint), "w", encoding="utf-8") as fh:
+            fh.write(model.config.to_json())
 
     return {
         "temperature": float(t),
@@ -502,18 +534,31 @@ def eval_cmd(
         None, "--device",
         help="cuda, mps or cpu (torch). Auto-detected when omitted: cuda > mps > cpu.",
     ),
+    sort_by_length: bool = typer.Option(
+        False,
+        help="Batch rows of similar length together: less padding, faster. Off (the "
+        "default), rows run in file order, as in earlier versions, and give the same "
+        "results; on, results differ only by bf16 batch-shape rounding.",
+    ),
 ) -> None:
     """Accuracy, ECE, NLL and score MAE, broken down by task and confidence band.
 
     Defaults to the `test` half, which `python -m training.evaluate calibrate` does not fit on.
+
+    On N GPUs, `torchrun --standalone --nproc_per_node=N -m training.evaluate eval ...`
+    splits the forward passes across the GPUs; each row is computed in the same batch
+    as on one GPU, so the report is the one a single GPU gives.
     """
     from strands_decider.cli import resolve_device
 
     examples = sample_examples(partition_examples(list(read_jsonl(data)), split), limit)
-    report = evaluate_checkpoint(
-        checkpoint, examples, batch_size=batch_size, apply_temperature=not raw,
-        device=resolve_device(device),
-    )
+    with process_group():  # one rank of torchrun's group, or a plain call
+        report = evaluate_checkpoint(
+            checkpoint, examples, batch_size=batch_size, apply_temperature=not raw,
+            device=resolve_device(device), sort_by_length=sort_by_length,
+        )
+    if env()[0]:  # every rank holds the report; rank 0 prints and writes it
+        return
     overall = report["overall"]
     console.print(
         f"[bold]overall[/] n={overall['n']:,} acc={overall['accuracy']:.3f} "
@@ -557,6 +602,12 @@ def calibrate_cmd(
         None, "--device",
         help="cuda, mps or cpu (torch). Auto-detected when omitted: cuda > mps > cpu.",
     ),
+    sort_by_length: bool = typer.Option(
+        False,
+        help="Batch rows of similar length together: less padding, faster. Off (the "
+        "default), rows run in file order, as in earlier versions, and give the same "
+        "results; on, results differ only by bf16 batch-shape rounding.",
+    ),
 ) -> None:
     """Fit a temperature on held-out data and write it into the checkpoint.
 
@@ -565,13 +616,21 @@ def calibrate_cmd(
 
     Defaults to the `calib` half so that `python -m training.evaluate eval --split test`
     scores rows the temperature was never fitted on.
+
+    On N GPUs, `torchrun --standalone --nproc_per_node=N -m training.evaluate calibrate ...`
+    splits the forward passes across the GPUs; each row is computed in the same batch
+    as on one GPU, so the fit is the one a single GPU gives.
     """
     from strands_decider.cli import resolve_device
 
     examples = sample_examples(partition_examples(list(read_jsonl(data)), split), limit)
-    result = calibrate_checkpoint(
-        checkpoint, examples, batch_size=batch_size, device=resolve_device(device),
-    )
+    with process_group():  # one rank of torchrun's group, or a plain call
+        result = calibrate_checkpoint(
+            checkpoint, examples, batch_size=batch_size, device=resolve_device(device),
+            sort_by_length=sort_by_length,
+        )
+    if env()[0]:  # every rank holds the fit; rank 0 reports it
+        return
     console.print(f"[green]global temperature = {result['temperature']:.4f}[/]")
     by_kind = result.get("temperature_by_kind") or {}
     if by_kind:

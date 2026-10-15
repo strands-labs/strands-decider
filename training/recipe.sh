@@ -42,8 +42,8 @@
 #   TRAIN_CONFIG=configs/experiments/v20.yaml CKPT=checkpoints/hobson-2b-v20-retrain \
 #     training/recipe.sh train calibrate eval
 # `distill` uses the committed teacher and replay labels, so no parent is trained.
-# NGPU=8 uses eight GPUs: teacher and replay one shard per GPU, then a merge; parent and
-# train under torchrun (training/README.md#training-on-several-gpus). PARENT_CONFIG and TRAIN_CONFIG
+# NGPU=8 uses eight GPUs: teacher and replay one shard per GPU, then a merge; parent,
+# train, calibrate and eval under torchrun (training/README.md#training-on-several-gpus). PARENT_CONFIG and TRAIN_CONFIG
 # replace the two training configs.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."  # every path below is relative to the repo root
@@ -73,6 +73,14 @@ fit() {  # fit CONFIG [python -m training.train options]
   if [ "$NGPU" -gt 1 ]; then
     "$PY" -m torch.distributed.run --standalone --nproc_per_node="$NGPU" -m training.train --config "$cfg" "$@"
   else "$PY" -u -m training.train --config "$cfg" "$@"; fi
+}
+
+# evaluate_cmd COMMAND ARGS...: `training.evaluate COMMAND` in one process, or with NGPU > 1
+# under torchrun, one rank per GPU; either way the fit and the report are the same.
+evaluate_cmd() {
+  if [ "$NGPU" -gt 1 ]; then
+    "$PY" -u -m torch.distributed.run --standalone --nproc_per_node="$NGPU" -m training.evaluate "$@"
+  else "$PY" -u -m training.evaluate "$@"; fi
 }
 
 # verify FILE...: stop unless data/SHA256SUMS has an entry for each FILE and FILE has that
@@ -191,12 +199,12 @@ train() {
   fit "$TRAIN_CONFIG" --output-dir "$CKPT"
 }
 
-calibrate() { verify data/holdout_v5_norule.jsonl; "$PY" -u -m training.evaluate calibrate "$CKPT" --data data/holdout_v5_norule.jsonl; }
+calibrate() { verify data/holdout_v5_norule.jsonl; evaluate_cmd calibrate "$CKPT" --data data/holdout_v5_norule.jsonl; }
 
 evaluate() {
   verify data/holdout_v5_norule.jsonl data/multistep_v14_eval.jsonl
   mkdir -p reports
-  "$PY" -u -m training.evaluate eval "$CKPT" --data data/holdout_v5_norule.jsonl --limit 6000 --out reports/recipe_heldout.json
+  evaluate_cmd eval "$CKPT" --data data/holdout_v5_norule.jsonl --limit 6000 --out reports/recipe_heldout.json
   "$PY" -m evaluation.multistep_eval "$CKPT"
   "$PY" -m evaluation.multistep_eval "$CKPT" --data data/generated_v16_eval.jsonl
   "$PY" -m evaluation.multistep_eval "$CKPT" --data data/generated_v18_eval.jsonl
