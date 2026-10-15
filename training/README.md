@@ -165,6 +165,23 @@ python -m training.data.teacher --merge --num-shards 8 --src data/multistep_v14.
 `training.data.replay` takes the same flags. Each shard labels whole batches of the
 single-process batching, so the merge writes the single-process files byte for byte.
 
+Calibration and evaluation run under `torchrun` too:
+
+```bash
+torchrun --standalone --nproc_per_node=8 -m training.evaluate calibrate "$CKPT" --data data/holdout_v5_norule.jsonl
+torchrun --standalone --nproc_per_node=8 -m training.evaluate eval "$CKPT" --data data/holdout_v5_norule.jsonl --limit 6000
+```
+
+Rank r runs batches r, r + N, ... of the single-process batching and every rank gathers
+all the logits, so each row is computed in the same batch as on one GPU and the fitted
+temperatures and the report are the single-GPU ones (bit for bit in every run measured);
+rank 0 alone writes the config and the report. `--sort-by-length` puts rows of similar
+length in the same batch. It changes the logits only by bf16 batch-shape rounding, as a
+different `--batch-size` does, and is off by default so that a report reproduces an earlier
+one exactly. On 8x A100 40 GB, the forward passes over 1,919 rows of mixed length (short tickets
+and ~2,000-token documents) took 169 s on one GPU, 93 s sorted, and 40 s on 8 GPUs (37 s
+sorted).
+
 With 80 GB GPUs, `gradient_checkpointing: false` and `precompute_frozen_kl: true` train
 2.2x faster at 8 GPUs. The first is exact. The second computes the frozen-KL reference in
 one pass before step 1 instead of a second forward every step, which changes only bf16

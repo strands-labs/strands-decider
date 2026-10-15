@@ -54,37 +54,49 @@ def env() -> tuple[int, int, int]:
 def entry_point(fn: Callable[..., Any]) -> Callable[..., Any]:
     """Run `fn(cfg)` as one rank when torchrun launched this process, else as a plain call.
 
-    As a rank: join the process group (NCCL on GPU, gloo on CPU), silence stdout on ranks
-    other than 0 (rank 0 prints the log), wait after `fn` until every rank is done (so none
-    returns before rank 0 has saved), and leave the group however `fn` exits.
+    As a rank, `fn` runs inside `process_group`, once the world size has been checked
+    against the rows of an optimizer step (before the model loads).
     """
 
     @functools.wraps(fn)
     def run(cfg: Any, *args: Any, **kwargs: Any) -> Any:
-        rank, local_rank, world = env()
-        if world == 1:
-            return fn(cfg, *args, **kwargs)
+        world = env()[2]
         rows = cfg.micro_batch_size * cfg.grad_accum
         if world > rows:  # fail before the model loads
             raise ValueError(f"world size {world} exceeds the {rows} rows of an optimizer step")
-        if torch.cuda.is_available():
-            torch.cuda.set_device(local_rank)
-        # The timeout is a backstop: under torchrun a rank that raises exits, and the
-        # launcher then stops the others rather than leaving them in a collective.
-        dist.init_process_group("nccl" if torch.cuda.is_available() else "gloo",
-                                timeout=timedelta(minutes=30))
-        try:
-            with contextlib.ExitStack() as stack:
-                if rank:
-                    null = stack.enter_context(open(os.devnull, "w", encoding="utf-8"))
-                    stack.enter_context(contextlib.redirect_stdout(null))
-                out = fn(cfg, *args, **kwargs)
-            dist.barrier(device_ids=[local_rank] if torch.cuda.is_available() else None)
-            return out
-        finally:
-            dist.destroy_process_group()
+        with process_group():
+            return fn(cfg, *args, **kwargs)
 
     return run
+
+
+@contextlib.contextmanager
+def process_group() -> Iterator[None]:
+    """Run the block as one rank of torchrun's process group; a plain block at world size 1.
+
+    As a rank: join the group (NCCL on GPU, gloo on CPU), silence stdout on ranks other
+    than 0 (rank 0 prints the log), wait at the end of the block until every rank is done
+    (so none leaves before rank 0 has saved), and leave the group however the block exits.
+    """
+    rank, local_rank, world = env()
+    if world == 1:
+        yield
+        return
+    if torch.cuda.is_available():
+        torch.cuda.set_device(local_rank)
+    # The timeout is a backstop: under torchrun a rank that raises exits, and the
+    # launcher then stops the others rather than leaving them in a collective.
+    dist.init_process_group("nccl" if torch.cuda.is_available() else "gloo",
+                            timeout=timedelta(minutes=30))
+    try:
+        with contextlib.ExitStack() as stack:
+            if rank:
+                null = stack.enter_context(open(os.devnull, "w", encoding="utf-8"))
+                stack.enter_context(contextlib.redirect_stdout(null))
+            yield
+        dist.barrier(device_ids=[local_rank] if torch.cuda.is_available() else None)
+    finally:
+        dist.destroy_process_group()
 
 
 def _device() -> torch.device:
