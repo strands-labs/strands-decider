@@ -92,6 +92,12 @@ wheels have oneDNN, and the reference is fast there for short states. On a Xeon 
 (8 threads), the conv takes 35 ms of a 1.6 s v21 ask either way, and on a 3,000-token state
 it takes 0.49 s instead of 1.18 s.
 
+The engine upcasts the bf16 torso to fp32 on CPU, which is faster where bf16 kernels
+are emulated (x86, Apple silicon). On CPUs with native bf16 matmul, such as Graviton 3/4,
+pass `--cpu-torso-dtype checkpoint` (or `EngineConfig(cpu_torso_dtype="checkpoint")`) to
+keep it in bf16: on a Graviton 4 at 64 threads that took a question from 3.11 s to 1.15 s,
+with top-1 agreeing with a GPU run on 339 of 342 questions of a routing set (fp32: 338).
+
 ## Model artifact
 
 The reference weights are published as

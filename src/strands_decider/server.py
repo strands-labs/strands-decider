@@ -46,6 +46,7 @@ def create_app(
     strict_window: bool = False,
     max_batch: int = 32,
     vision: bool = False,
+    cpu_torso_dtype: str = "float32",
     max_batch_tokens: int | None = None,
 ) -> FastAPI:
     global _engine
@@ -62,7 +63,8 @@ def create_app(
 
     config = EngineConfig(
         device=device, use_prefix_cache=use_prefix_cache, model_name=resolved_name,
-        strict_window=strict_window, max_batch=max_batch, max_batch_tokens=max_batch_tokens,
+        strict_window=strict_window, max_batch=max_batch, cpu_torso_dtype=cpu_torso_dtype,
+        max_batch_tokens=max_batch_tokens,
     )
     if vision:
         if device == "mlx":
@@ -124,6 +126,7 @@ def serve(
     strict_window: bool = False,
     max_batch: int = 32,
     vision: bool = False,
+    cpu_torso_dtype: str = "float32",
     max_batch_tokens: int | None = None,
 ) -> None:
     import uvicorn
@@ -136,6 +139,7 @@ def serve(
         strict_window=strict_window,
         max_batch=max_batch,
         vision=vision,
+        cpu_torso_dtype=cpu_torso_dtype,
         max_batch_tokens=max_batch_tokens,
     )
     # Single worker: the model owns the GPU, and forking more would just duplicate it.
