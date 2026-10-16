@@ -98,18 +98,63 @@ def _load_tokenizer(path: str):
     return PreTrainedTokenizerFast(tokenizer_file=path, pad_token="<pad>", eos_token="<eos>")
 
 
+def _qwen3_config(vocab_size: int):
+    from transformers import Qwen3Config
+
+    return Qwen3Config(vocab_size=vocab_size, hidden_size=32, intermediate_size=64,
+                       num_hidden_layers=2, num_attention_heads=4, num_key_value_heads=2,
+                       head_dim=8, max_position_embeddings=4096, tie_word_embeddings=True)
+
+
+def _tiny_torso(out: str, tokenizer_path: str) -> str:
+    """Save a tiny random Qwen3 torso, the base model of `_tiny_checkpoint`, to `out`."""
+    from transformers import Qwen3Model
+
+    with torch.random.fork_rng():
+        torch.manual_seed(0)
+        Qwen3Model(_qwen3_config(len(_load_tokenizer(tokenizer_path)))).save_pretrained(out)
+    return out
+
+
+def _load_saved_torso(torso_dir: str):
+    """Stands in for StrandsDeciderModel._load_torso: the torso `_tiny_torso` saved."""
+    from transformers import Qwen3Model
+
+    return lambda config, *a: Qwen3Model.from_pretrained(torso_dir)
+
+
+def _tiny_checkpoint(out: str, tokenizer_path: str, torso_dir: str, seed: int = 0, **over) -> str:
+    """A checkpoint as training saves one, over the torso in `torso_dir`: a LoRA adapter and
+    a pointer head with random weights (lora_B and the head's LayerNorm too, so that each
+    changes the outputs) and fitted temperatures."""
+    from strands_decider.modeling import StrandsDeciderConfig, StrandsDeciderModel
+
+    cfg = StrandsDeciderConfig(**{**dict(
+        base_model="tiny", head_type="pointer", pointer_dim=16, lora_r=2, lora_alpha=4,
+        lora_dropout=0.0, torch_dtype="float32", max_length=2048, temperature=1.7,
+        temperature_by_kind={"choice": 0.8}), **over})
+    with torch.random.fork_rng():
+        torch.manual_seed(seed)
+        torso = _load_saved_torso(torso_dir)(cfg)
+        model = StrandsDeciderModel(cfg, torso, _load_tokenizer(tokenizer_path))
+        model.attach_lora()
+        with torch.no_grad():
+            for n, p in model.named_parameters():
+                if "lora_" in n or n.startswith("head.norm"):
+                    p.normal_(std=0.5)
+    model.save_pretrained(out)
+    return out
+
+
 def _tiny_model_factory(tokenizer_path: str):
     """Stands in for StrandsDeciderModel.from_pretrained_base: same construction, tiny torso."""
-    from transformers import Qwen3Config, Qwen3Model
+    from transformers import Qwen3Model
 
     from strands_decider.modeling import StrandsDeciderModel
 
     def build(config, *, device_map=None, attn_implementation=None):
         tok = _load_tokenizer(tokenizer_path)
-        qc = Qwen3Config(vocab_size=len(tok), hidden_size=32, intermediate_size=64,
-                         num_hidden_layers=2, num_attention_heads=4, num_key_value_heads=2,
-                         head_dim=8, max_position_embeddings=4096, tie_word_embeddings=True)
-        torso = Qwen3Model(qc)  # float32, randomly initialised after train()'s seed
+        torso = Qwen3Model(_qwen3_config(len(tok)))  # float32, random after train()'s seed
         config.lora_dropout = 0.0  # dropout masks cannot match across world sizes
         model = StrandsDeciderModel(config, torso, tok)
         if config.use_lora:
@@ -151,6 +196,9 @@ def worker(cfg_path: str) -> None:
     with open(cfg_path, encoding="utf-8") as fh:
         spec = json.load(fh)
     StrandsDeciderModel.from_pretrained_base = staticmethod(_tiny_model_factory(spec.pop("tokenizer")))
+    torso_dir = spec.pop("torso", None)
+    if torso_dir:  # init_from: the base model of the checkpoint
+        StrandsDeciderModel._load_torso = staticmethod(_load_saved_torso(torso_dir))
     ref_tokenizer = spec.pop("ref_tokenizer", None)
     if ref_tokenizer:  # kl_frozen_reference: a tiny checkpoint, the same on every rank
 
@@ -237,7 +285,9 @@ def _run(corpus, tmp_path, world: int, *, expect_ok: bool = True, **over) -> dic
     tmp_path.mkdir(parents=True, exist_ok=True)
     cfg_path = tmp_path / f"cfg{world}.json"
     cfg_path.write_text(json.dumps(spec))
-    env = {**os.environ, "PYTHONPATH": os.path.join(ROOT, "src"), "OMP_NUM_THREADS": "1",
+    # src/ for strands_decider, the root for the training package (not in the wheel)
+    env = {**os.environ, "PYTHONPATH": os.pathsep.join([os.path.join(ROOT, "src"), ROOT]),
+           "OMP_NUM_THREADS": "1",
            "TOKENIZERS_PARALLELISM": "false"}
     for k in ("RANK", "LOCAL_RANK", "WORLD_SIZE", "MASTER_ADDR", "MASTER_PORT"):
         env.pop(k, None)
@@ -345,6 +395,21 @@ def test_ddp_frozen_reference_checkpoint_matches_single_process(corpus, tmp_path
                 ref_tokenizer=str(corpus / tokenizer))
     ref = _run(corpus, tmp_path / "a", 1, **over)
     assert "frozen-KL reference: tiny-ref" in ref["stdout"]
+    _assert_same_run(ref, _run(corpus, tmp_path / "b", 3, **over), 3)
+
+
+@pytest.mark.distributed
+def test_ddp_init_from_matches_single_process(corpus, tmp_path):
+    """init_from a trained checkpoint, anchored to that checkpoint's own answers."""
+    tok = str(corpus / "tokenizer.json")
+    torso = _tiny_torso(str(tmp_path / "torso"), tok)
+    ckpt = _tiny_checkpoint(str(tmp_path / "ckpt"), tok, torso)
+    # One epoch, 4 steps: the checkpoint's random adapter amplifies fp32 rounding, and by
+    # step 8 the gradients differ by 3e-4 (relative) with or without the reference.
+    over = dict(init_from=ckpt, torso=torso, precompute_frozen_kl=True, kl_frozen_reference=ckpt,
+                epochs=1)
+    ref = _run(corpus, tmp_path / "a", 1, **over)
+    assert f"continuing from {ckpt}" in ref["stdout"]
     _assert_same_run(ref, _run(corpus, tmp_path / "b", 3, **over), 3)
 
 

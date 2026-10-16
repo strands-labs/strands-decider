@@ -334,14 +334,18 @@ class VisionDeciderModel(StrandsDeciderModel):
         *,
         device_map: str | None = None,
         attn_implementation: str | None = None,
+        trainable: bool = False,
+        host_embeddings: bool | None = None,
     ) -> VisionDeciderModel:
-        """Load a Strands Decider checkpoint (e.g. v19) onto the multimodal torso.
+        """Load a Strands Decider checkpoint (e.g. v19) onto the multimodal torso, to serve it.
 
         Text checkpoints trained their adapter on the bare decoder (`layers.N...`); in
         the multimodal torso the same decoder sits under `language_model.layers.N...`,
         so the adapter's keys are remapped onto it. Text behaviour is unchanged: the
         weights the text path runs through are identical.
         """
+        if trainable or host_embeddings is not None:
+            raise ValueError("the multimodal model loads to serve only")
         from peft import set_peft_model_state_dict
         from safetensors.torch import load_file
         from transformers import AutoTokenizer

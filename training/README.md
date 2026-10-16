@@ -199,6 +199,59 @@ H100 with the real torso, bf16, dropout off, 40 steps at 8 GPUs track 1 GPU step
 micro-batch across ranks changes bf16 rounding by 1e-2 to 4e-2 of the gradient; dropout,
 as shipped, changes it by 0.44.
 
+### Fine-tuning a released model with `init_from`
+
+`init_from: <checkpoint>` starts training from a trained checkpoint instead of the base
+model, and trains it on your rows. The checkpoint is a Hub id or a local directory. Its
+LoRA adapter and its head, pointer or slot, start from their trained values, and both
+train. The torso is not frozen, and `gradient_checkpointing` applies as usual. It works
+under `torchrun` as a run from the base model does.
+
+```yaml
+init_from: "StrandsAgents/strands-decider-E4B-gemma4-v1-2610"
+train_files: ["data/my_rows.jsonl"]
+val_fraction: 0.05
+group_by_length: true
+# Keep the answers close to the released model's own:
+kl_frozen_weight: 0.3
+kl_frozen_reference: "StrandsAgents/strands-decider-E4B-gemma4-v1-2610"
+precompute_frozen_kl: true
+output_dir: "checkpoints/my-e4b"
+```
+
+```bash
+python -m training.train --config my-finetune.yaml
+python -m training.evaluate calibrate checkpoints/my-e4b --data <held-out rows>
+```
+
+- **The checkpoint fixes the architecture.** `base_model`, `num_slots`, `head_type`,
+  `pointer_dim`, `head_hidden`, `use_lora`, `lora_r`, `lora_alpha`, `lora_targets` and
+  `force_bos` come from the checkpoint's `strands_decider_config.json`. Leave them out of
+  the config. A config that sets one of them to another value stops before the model loads,
+  with one error that names every such key. A key in the YAML file counts as set even at its
+  default value, so a copy of `configs/train.yaml` (`lora_r: 16`) stops on a released soup.
+  `max_length` is the checkpoint's unless the config sets it. Everything else (data,
+  learning rates, epochs, `head_dropout`, `ordinal_smoothing`, the KL terms) is the
+  config's, and is saved with the result. `head_lr` defaults to 1e-3, a value chosen for a
+  randomly initialised head; here the head is already trained.
+- **Released models are soups** ([Seeds and soups](steps.md#seeds-and-soups)): a rank-N·r
+  adapter and a pointer head with `pointer_dim` N·d. They load and train as any checkpoint.
+- **Temperatures** are reset to 1 at the start, as for a soup: calibrate the result before
+  you evaluate or serve it.
+- **The frozen-KL anchor.** With `kl_frozen_reference` set to the `init_from` checkpoint,
+  the KL term starts near 0 (exactly 0 with dropout off) and keeps the fine-tune close to
+  the released model's answers.
+  Without `kl_frozen_reference`, the anchor is the base torso's own option-number readout,
+  with the adapter disabled, as in a run from the base model.
+- **The result is a normal checkpoint**: `strands-decider serve` and `ask`,
+  `python -m training.evaluate` and `training.soup` read it. To soup fine-tunes, train
+  several seeds with one config (the same `init_from` and settings, other `seed` values):
+  `soup` refuses checkpoints whose configs differ in more than their temperatures. The soup
+  of N fine-tunes of a rank-R checkpoint has rank N·R: three seeds on a rank-48
+  soup give a rank-144 adapter.
+- `freeze_torso: true` trains the head alone, on the checkpoint's frozen adapter.
+  `head_init` must stay `random`: the trained head is kept.
+
 ## Usage
 
 `training/recipe.sh` builds, trains and evaluates the default, v19, end to end under WSL2; pass

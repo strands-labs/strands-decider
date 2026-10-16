@@ -20,7 +20,7 @@ import math
 import os
 import random
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import MISSING, asdict, dataclass, field
 from typing import Any
 
 import torch
@@ -28,7 +28,12 @@ import typer
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import DataLoader, Dataset
 
-from strands_decider.modeling import StrandsDeciderConfig, StrandsDeciderModel
+from strands_decider.modeling import (
+    StrandsDeciderConfig,
+    StrandsDeciderModel,
+    checkpoint_dir,
+    config_path,
+)
 
 from . import distributed
 from .data.collate import CollatorConfig, SystemOneCollator
@@ -99,10 +104,13 @@ class TrainConfig:
     # KL(target || student) (mass-covering, every run so far); "reverse" = KL(student ||
     # target) (mode-seeking).
     kl_direction: str = "forward"
-    # Continue from an existing checkpoint, keeping its trained LoRA adapter and
-    # attaching a freshly-initialised head. `freeze_torso` alone cannot do this: it
-    # drops the adapter and freezes the *base* torso, which would train the new head
-    # against unadapted features and silently measure the wrong thing.
+    # Continue training a trained checkpoint (a local directory or a Hub id, e.g. a released
+    # model) on this config's data: its adapter and its head, pointer or slot, souped or not,
+    # train on from their trained values (`_init_from`). The checkpoint fixes the architecture
+    # (INIT_FROM_ARCH): leave those fields out, as a config that sets one to another value
+    # than the checkpoint's is refused. max_length is the checkpoint's unless set. Fitted
+    # temperatures are reset to 1: calibrate the result. freeze_torso: true trains the head
+    # alone on the checkpoint's frozen adapter.
     init_from: str | None = None
 
     # optimisation
@@ -112,6 +120,7 @@ class TrainConfig:
     lr: float = 1e-4
     # The head is randomly initialised while LoRA starts as a no-op, so the head
     # needs a much larger step or the torso adapts to a head that is still noise.
+    # With init_from both start trained, and no value is measured for that yet.
     head_lr: float = 1e-3
     weight_decay: float = 0.01
     warmup_ratio: float = 0.03
@@ -156,7 +165,70 @@ class TrainConfig:
         unknown = set(raw) - known
         if unknown:
             raise ValueError(f"unknown config keys: {sorted(unknown)}")
-        return cls(**raw)
+        cfg = cls(**raw)
+        cfg.yaml_keys = frozenset(raw)  # type: ignore[attr-defined]  # what _given reads
+        return cfg
+
+
+# The fields of a TrainConfig that a checkpoint fixes: with init_from they are the checkpoint's.
+INIT_FROM_ARCH = ("base_model", "num_slots", "head_type", "pointer_dim", "head_hidden",
+                  "use_lora", "lora_r", "lora_alpha", "lora_targets", "force_bos")
+
+
+def _given(cfg: TrainConfig, name: str) -> bool:
+    """True if `cfg` sets field `name`: its YAML file has the key, or its value is not the
+    default."""
+    f = TrainConfig.__dataclass_fields__[name]
+    default = f.default_factory() if f.default_factory is not MISSING else f.default
+    return name in getattr(cfg, "yaml_keys", ()) or getattr(cfg, name) != default
+
+
+def _init_from(cfg: TrainConfig) -> StrandsDeciderModel:
+    """The checkpoint `cfg.init_from`, loaded to train on (TrainConfig.init_from).
+
+    The adapter and the head keep their trained values and train; the architecture fields of
+    `cfg` are set to the checkpoint's, so the collator and train_config.json describe the
+    model that trains. A soup loads as any checkpoint: a rank-N*r adapter and a head with
+    pointer_dim N*d whose LayerNorm has gain 1 and bias 0 (soup.py). Both train as any other.
+    """
+    path = checkpoint_dir(cfg.init_from or "")
+    ck = StrandsDeciderConfig.from_json(config_path(path))
+    conflicts = []
+    for name in INIT_FROM_ARCH:
+        mine, theirs = getattr(cfg, name), getattr(ck, name)
+        if name == "lora_targets":  # an order-free list; None is the model's default list
+            mine, theirs = sorted(mine or StrandsDeciderConfig().lora_targets), sorted(theirs)
+        if _given(cfg, name) and mine != theirs:
+            conflicts.append((name, mine, theirs))
+        setattr(cfg, name, getattr(ck, name))
+    if conflicts:
+        sets = "; ".join(f"the config sets {n}={m!r}, the checkpoint has {t!r}"
+                         for n, m, t in conflicts)
+        raise ValueError(f"init_from {cfg.init_from}: {sets}. The checkpoint fixes the "
+                         f"architecture: remove {', '.join(n for n, _, _ in conflicts)} "
+                         "from the config.")
+    if not ck.use_lora and not cfg.freeze_torso:
+        raise ValueError(f"init_from {cfg.init_from}: the checkpoint has no LoRA adapter to train "
+                         "on; set freeze_torso: true to train its head alone")
+    if cfg.head_init != "random":
+        raise ValueError("init_from keeps the checkpoint's trained head; head_init must be random")
+    if not _given(cfg, "max_length"):
+        cfg.max_length = ck.max_length
+    print(f"[strands-decider] continuing from {cfg.init_from}")
+    model = StrandsDeciderModel.load(path, attn_implementation=cfg.attn_implementation,
+                                     trainable=True, host_embeddings=cfg.host_embeddings)
+    c = model.config
+    # The fitted temperatures describe the checkpoint, not what trains from it: forward()
+    # would apply them during training. Reset; calibrate after training.
+    c.temperature, c.temperature_by_kind = 1.0, {}
+    # This run's settings, saved with the result as a run from the base model saves them.
+    c.max_length, c.ordinal_smoothing = cfg.max_length, cfg.ordinal_smoothing
+    c.kl_frozen_weight, c.head_dropout = cfg.kl_frozen_weight, cfg.head_dropout
+    model.head.dropout = (torch.nn.Dropout(cfg.head_dropout) if cfg.head_dropout > 0
+                          else torch.nn.Identity())
+    if cfg.freeze_torso:
+        model.freeze_torso()
+    return model
 
 
 def _random_batches(n: int, cfg: TrainConfig) -> list[list[int]]:
@@ -383,52 +455,31 @@ def train(cfg: TrainConfig) -> str:
     random.seed(cfg.seed)
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    print(f"[strands-decider] loading base model {cfg.base_model}")
-    model_cfg = StrandsDeciderConfig(
-        base_model=cfg.base_model,
-        num_slots=cfg.num_slots,
-        head_hidden=cfg.head_hidden,
-        head_dropout=cfg.head_dropout,
-        max_length=cfg.max_length,
-        use_lora=cfg.use_lora and not cfg.freeze_torso,
-        lora_r=cfg.lora_r,
-        lora_alpha=cfg.lora_alpha,
-        force_bos=cfg.force_bos,
-        host_embeddings=cfg.host_embeddings,
-        # Serving needs this to correct the variance floor smoothing imposes on
-        # score confidence; without it a score could never reach high confidence.
-        ordinal_smoothing=cfg.ordinal_smoothing,
-        head_init=cfg.head_init,
-        kl_frozen_weight=cfg.kl_frozen_weight,
-        head_type=cfg.head_type,
-        pointer_dim=cfg.pointer_dim,
-    )
-    if cfg.lora_targets:
-        model_cfg.lora_targets = list(cfg.lora_targets)
     if cfg.init_from:
-        from strands_decider.modeling import SlotHead
-
-        print(f"[strands-decider] loading torso + adapter from {cfg.init_from}")
-        model = StrandsDeciderModel.load(cfg.init_from, attn_implementation=cfg.attn_implementation)
-        # Swap in a fresh head of the requested shape; the loaded one is discarded so
-        # that head capacity is the only thing differing between arms.
-        model.config.head_hidden = cfg.head_hidden
-        model.config.head_dropout = cfg.head_dropout
-        model.config.ordinal_smoothing = cfg.ordinal_smoothing
-        # Any calibration stored on the source checkpoint describes its old head and
-        # is meaningless for a fresh one. Left in place it would be applied during
-        # training by forward(), which the new head would simply absorb into its own
-        # scale -- harmless but misleading. Reset, and recalibrate after training.
-        model.config.temperature = 1.0
-        model.config.temperature_by_kind = {}
-        model.head = SlotHead(
-            StrandsDeciderModel.hidden_size(model.torso),
-            model.config.num_slots,
-            hidden=cfg.head_hidden,
-            dropout=cfg.head_dropout,
-        ).to(torch.float32)
-        model.freeze_torso()
+        model = _init_from(cfg)
     else:
+        print(f"[strands-decider] loading base model {cfg.base_model}")
+        model_cfg = StrandsDeciderConfig(
+            base_model=cfg.base_model,
+            num_slots=cfg.num_slots,
+            head_hidden=cfg.head_hidden,
+            head_dropout=cfg.head_dropout,
+            max_length=cfg.max_length,
+            use_lora=cfg.use_lora and not cfg.freeze_torso,
+            lora_r=cfg.lora_r,
+            lora_alpha=cfg.lora_alpha,
+            force_bos=cfg.force_bos,
+            host_embeddings=cfg.host_embeddings,
+            # Serving needs this to correct the variance floor smoothing imposes on
+            # score confidence; without it a score could never reach high confidence.
+            ordinal_smoothing=cfg.ordinal_smoothing,
+            head_init=cfg.head_init,
+            kl_frozen_weight=cfg.kl_frozen_weight,
+            head_type=cfg.head_type,
+            pointer_dim=cfg.pointer_dim,
+        )
+        if cfg.lora_targets:
+            model_cfg.lora_targets = list(cfg.lora_targets)
         model = StrandsDeciderModel.from_pretrained_base(
             model_cfg, attn_implementation=cfg.attn_implementation
         )
@@ -441,7 +492,7 @@ def train(cfg: TrainConfig) -> str:
         raise ValueError(f"unknown head_init {cfg.head_init!r}")
     # Checkpointing needs a grad-requiring input; a frozen torso has none, and it
     # buys nothing anyway since no backward pass traverses it.
-    if cfg.gradient_checkpointing and not (cfg.freeze_torso or cfg.init_from):
+    if cfg.gradient_checkpointing and not cfg.freeze_torso:
         base = getattr(model.torso, "base_model", model.torso)
         inner = getattr(base, "model", base)
         if hasattr(inner, "gradient_checkpointing_enable"):
