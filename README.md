@@ -370,6 +370,16 @@ The repository includes a worked example of strands decider inside a Strands age
 weather-tool call on two yes/no decisions, so the agent asks which city instead of guessing. See
 the example's [README](examples/strands/README.md) for setup and the walk-through.
 
+## Customizing for your decisions
+
+[`skills/customize-decider/`](skills/customize-decider/SKILL.md) is a skill for a coding agent
+(Claude Code, or any agent that reads a `SKILL.md`). It guides you from a decision in your
+application to a model measured on your own data: the task and its questions, an evaluation set,
+scores of every released model, the decision whether to train, the training data, the run and
+its monitoring, calibration, and the comparison with the released model. To use it with Claude
+Code, copy the folder to `.claude/skills/` in your project or to `~/.claude/skills/`, then ask
+the agent to evaluate Strands Decider on your task.
+
 ## Training
 
 Two entry points, both on a Linux or WSL2 host with NVIDIA GPUs and the training
