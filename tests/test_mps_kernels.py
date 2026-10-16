@@ -6,6 +6,9 @@ on MPS as well when one is present. No model weights are needed.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+from unittest.mock import Mock
+
 import pytest
 import torch
 
@@ -41,6 +44,32 @@ def test_unit_lower_inverse(device):
     inv = _unit_lower_inverse(a.to(device)).cpu()
     unit = a.tril(-1) + torch.eye(64)
     assert torch.allclose(unit @ inv, torch.eye(64).expand(3, 64, 64), atol=1e-5)
+
+
+def test_unit_lower_inverse_uses_metal_fast_path(monkeypatch):
+    if not torch.backends.mps.is_available():
+        pytest.skip("MPS is not available")
+
+    from strands_decider import mps_kernels
+
+    library = torch.mps.compile_shader(mps_kernels._UNIT_LOWER_INVERSE_METAL)
+    # Record the dispatch while still executing the real Metal kernel.
+    kernel = Mock(wraps=library.unit_lower_inverse_64)
+    monkeypatch.setattr(
+        mps_kernels, "_unit_lower_inverse_metal_library",
+        SimpleNamespace(unit_lower_inverse_64=kernel),
+    )
+    a = torch.randn(3, 64, 64, dtype=torch.float32) * 0.2 + torch.eye(64) * 7.0
+    want = _unit_lower_inverse(a)  # CPU uses the existing PyTorch implementation.
+    mps_a = a.to("mps").contiguous()
+    got = _unit_lower_inverse(mps_a)
+
+    kernel.assert_called_once()
+    args, kwargs = kernel.call_args
+    assert args[0] is mps_a and args[1] is got
+    assert kwargs == {"threads": [3 * 256, 1, 1], "group_size": [256, 1, 1]}
+    assert got.shape == mps_a.shape and got.dtype == mps_a.dtype and got.device == mps_a.device
+    torch.testing.assert_close(got.cpu(), want, rtol=1e-5, atol=1e-5)
 
 
 @pytest.mark.parametrize("device", DEVICES)
