@@ -24,7 +24,7 @@ import copy
 import threading
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 import torch
 
@@ -71,6 +71,112 @@ class EngineConfig:
     # cut and scored independently, so answers only move by float rounding; long-context
     # Gemma torsos need it at a 32,768 window. None: off.
     max_batch_tokens: int | None = None
+    # Cross-request batching (server micro-batcher, `evaluate_prepared`): one forward holds
+    # at most this many padded tokens (rows x longest row) and this many rows. A row longer
+    # than the budget runs alone, as it would unbatched. With eager attention (Gemma 4 E2B)
+    # a forward is also held to rows x longest^2 <= window^2: its score matrices are then
+    # no larger than those of one window-filling request. The server sets them from
+    # --max-batch and --max-batch-tokens.
+    batch_tokens: int = 16384
+    batch_rows: int = 32
+    # Padding waste: a row joins a forward only while its padded tokens stay within
+    # (1 + batch_pad_slack) x its real tokens, unless the forward is at most
+    # batch_pad_free tokens (short forwards are launch-bound: padding there is free).
+    # Long prompts are compute-bound, and padding them only costs. None: no cap.
+    batch_pad_slack: float | None = 0.25
+    batch_pad_free: int = 4096
+    # Measured by `tune_batching` (at serve startup): {row width: best rows per forward}.
+    # A forward of width w then holds at most the smaller of its neighbouring widths'
+    # best token counts (rows x width). Batching pays for short, launch-bound rows; for
+    # long rows a torso can be memory-bound, and a larger forward only spills its
+    # activations out of cache. None: only the budgets above.
+    batch_rows_by_width: dict[int, int] | None = None
+
+
+@dataclass
+class PreparedRow:
+    """One forward row of a prepared request: its tokens (state + question), its option
+    positions in those tokens (pointer head), slot count and question kind."""
+
+    ids: list[int]
+    opt: list[int]
+    n_slots: int
+    kind: str
+
+
+@dataclass
+class PreparedRequest:
+    """A request tokenised on the host, ready for `evaluate_prepared`.
+
+    `rows` is None when the request takes the shared-prefix path (several questions on one
+    state with the prefix cache on): it then runs alone, through `evaluate`.
+    """
+
+    request: SystemOneRequest
+    names: list[str]
+    rendered: list[RenderedQuestion]
+    rows: list[PreparedRow] | None
+
+    @property
+    def tokens(self) -> int:
+        return sum(len(r.ids) for r in self.rows) if self.rows is not None else 0
+
+
+def is_cuda_fatal(exc: BaseException) -> bool:
+    """A CUDA error that leaves the process's context unusable (device-side assert,
+    illegal address): every later call on the device fails the same way."""
+    msg = str(exc)
+    return (
+        "device-side assert" in msg or "illegal memory access" in msg
+        or "CUDA error" in msg or "cudaError" in msg
+    )
+
+
+def tuned_token_cap(rows_by_width: dict[int, int] | None, width: int) -> int | None:
+    """Padded tokens one forward of rows `width` wide may hold under `tune_batching`'s
+    measurements: the smaller best token count (rows x width) of the measured widths
+    either side of `width` (the nearest one outside the measured range)."""
+    if not rows_by_width:
+        return None
+    ws = sorted(rows_by_width)
+    lo = [w for w in ws if w <= width]
+    hi = [w for w in ws if w >= width]
+    near = ([lo[-1]] if lo else []) + ([hi[0]] if hi else [])
+    return min(rows_by_width[w] * w for w in near)
+
+
+def plan_rows(
+    lengths: Sequence[int], max_tokens: int, max_rows: int, quadratic_cap: int | None = None,
+    pad_slack: float | None = None, pad_free: int = 0,
+    rows_by_width: dict[int, int] | None = None,
+) -> list[list[int]]:
+    """Group row indices into forwards, shortest first so rows of like length pad together.
+
+    A group holds at most `max_rows` rows and `max_tokens` padded tokens (rows x its longest
+    row); with `quadratic_cap`, also rows x longest^2 <= quadratic_cap (eager attention's
+    score matrices); with `pad_slack`, a group over `pad_free` padded tokens also keeps its
+    padded tokens within (1 + pad_slack) x its real tokens; with `rows_by_width`, at most
+    `tuned_token_cap` padded tokens. A row over the caps on its own still gets a group of one.
+    """
+    order = sorted(range(len(lengths)), key=lambda i: (lengths[i], i))
+    groups: list[list[int]] = []
+    cur: list[int] = []
+    real = 0
+    for i in order:
+        w, r = lengths[i], len(cur) + 1
+        padded = r * w
+        if cur and (r > max_rows or padded > max_tokens
+                    or (quadratic_cap is not None and r * w * w > quadratic_cap)
+                    or (pad_slack is not None and padded > pad_free
+                        and padded > (1.0 + pad_slack) * (real + w))
+                    or (rows_by_width and padded > max(w, tuned_token_cap(rows_by_width, w) or 0))):
+            groups.append(cur)
+            cur, real = [], 0
+        cur.append(i)
+        real += w
+    if cur:
+        groups.append(cur)
+    return groups
 
 
 class UnforkableCache(TypeError):
@@ -167,6 +273,10 @@ class SystemOneEngine:
         # "Already borrowed", or silently uses another thread's max_length).
         # Tokenisation is cheap relative to the model forward, so holding this is fine.
         self._tok_lock = threading.Lock()
+        # Eager attention materialises [rows, heads, L, L] scores, so a cross-request
+        # forward is also capped quadratically (EngineConfig.batch_tokens).
+        torso_cfg = getattr(getattr(self.model, "torso", None), "config", None)
+        self._quadratic_attn = getattr(torso_cfg, "_attn_implementation", None) == "eager"
 
     def _upcast_torso_for_cpu(self) -> None:
         """Run a half-precision torso in fp32 on CPU.
@@ -257,16 +367,23 @@ class SystemOneEngine:
         where `hidden` is the suffix) and the state's token count when it forwards the
         whole prompt. `offsets` are `_fit`'s, so front truncation is accounted for.
         """
-        rows = [
-            _option_token_index(offs, rq.option_spans, 0)
-            for rq, offs in zip(rendered, offsets, strict=True)
-        ]
+        rows = self._host_option_positions(rendered, offsets)
         width = max(len(r) for r in rows)
         return torch.tensor(
             [[base + i for i in r] + [-1] * (width - len(r)) for r in rows],
             dtype=torch.long,
             device=self.device,
         )
+
+    @staticmethod
+    def _host_option_positions(
+        rendered: Sequence[RenderedQuestion], offsets: Sequence[Sequence[Any]],
+    ) -> list[list[int]]:
+        """`_option_idx`'s positions as host lists, question-relative (no `base`)."""
+        return [
+            _option_token_index(offs, rq.option_spans, 0)
+            for rq, offs in zip(rendered, offsets, strict=True)
+        ]
 
     def _pad(self, seqs: list[list[int]]) -> tuple[torch.Tensor, torch.Tensor]:
         """Right-pad to a rectangle; pool_last_token finds the last real token by mask."""
@@ -371,7 +488,7 @@ class SystemOneEngine:
 
     # ---- public ----------------------------------------------------------
 
-    def evaluate(self, request: SystemOneRequest) -> SystemOneResponse:
+    def _render(self, request: SystemOneRequest) -> tuple[list[str], list[RenderedQuestion]]:
         if request.images:
             raise ValueError("this engine has no vision tower; serve with --vision for images")
         names = list(request.questions.keys())
@@ -392,7 +509,10 @@ class SystemOneEngine:
                     f"retrain with a larger num_slots"
                 )
             rendered.append(rq)
+        return names, rendered
 
+    def evaluate(self, request: SystemOneRequest) -> SystemOneResponse:
+        names, rendered = self._render(request)
         state_text = render_state(request.state)
         n_slots = [rq.n_slots for rq in rendered]
 
@@ -462,6 +582,205 @@ class SystemOneEngine:
 
     def ask(self, state: Content, questions: dict[str, Question]) -> SystemOneResponse:
         return self.evaluate(SystemOneRequest(state=state, questions=questions))
+
+    # ---- cross-request batching -------------------------------------------
+    #
+    # `prepare` does a request's host work (render, fit, option positions) and raises
+    # ValueError for a request the engine refuses, exactly where `evaluate` would.
+    # `evaluate_prepared` then scores many prepared requests together: their rows (one per
+    # question: state + question, as `_slot_probs_batched` builds them) are length-sorted
+    # into right-padded forwards under `batch_tokens` / `batch_rows`. Each row's tokens,
+    # option positions, temperature and slot mask are its own, and right padding leaves
+    # every real position's hidden state as it is alone: attention is causal and padded
+    # keys are masked, Gated DeltaNet's convolution and recurrence are causal (and padded
+    # inputs are zeroed), and Gemma 4's per-layer inputs and positions are per token. The
+    # pooled `<answer>` position and the option positions are all real tokens, so batching
+    # changes answers only by float rounding.
+
+    def can_batch_rows(self) -> bool:
+        """Whether this engine scores rows with the base class's own forward (not MLX or
+        vision, which override the low-level paths and so always run requests alone)."""
+        cls = type(self)
+        return (cls._slot_probs_batched is SystemOneEngine._slot_probs_batched
+                and cls.evaluate is SystemOneEngine.evaluate)
+
+    def prepare(self, request: SystemOneRequest) -> PreparedRequest:
+        """Host-side preparation of one request for `evaluate_prepared` (no device work)."""
+        if not self.can_batch_rows():
+            return PreparedRequest(request, list(request.questions), [], None)
+        names, rendered = self._render(request)
+        state_text = render_state(request.state)
+        chunks = self._chunks(state_text, rendered)
+        if (self.cfg.use_prefix_cache and not self._prefix_cache_unforkable
+                and any(c.stop - c.start > 1 for c, *_ in chunks)):
+            return PreparedRequest(request, names, rendered, None)  # shared-prefix path
+        pointer = self.model.config.head_type == "pointer"
+        rows: list[PreparedRow] = []
+        for chunk, s, q, offsets in chunks:
+            chunk_rendered = rendered[chunk]
+            pos = (self._host_option_positions(chunk_rendered, offsets) if pointer
+                   else [[] for _ in q])
+            for rq, qi, p in zip(chunk_rendered, q, pos, strict=True):
+                rows.append(PreparedRow(ids=s + qi, opt=[len(s) + i for i in p],
+                                        n_slots=rq.n_slots, kind=rq.kind))
+        return PreparedRequest(request, names, rendered, rows)
+
+    @torch.inference_mode()  # type: ignore[untyped-decorator]
+    def _forward_rows(self, rows: Sequence[PreparedRow]) -> torch.Tensor:
+        """One right-padded forward over rows of any requests -> [rows, K] probabilities
+        (on the host). The same forward as `_slot_probs_batched`."""
+        ids, mask = self._pad([r.ids for r in rows])
+        opt_idx = None
+        if self.model.config.head_type == "pointer":
+            width = max(len(r.opt) for r in rows)
+            opt_idx = torch.tensor([r.opt + [-1] * (width - len(r.opt)) for r in rows],
+                                   dtype=torch.long, device=self.device)
+        out = self.model(
+            input_ids=ids,
+            attention_mask=mask,
+            n_slots=torch.tensor([r.n_slots for r in rows], device=self.device),
+            temperature=self._temperatures([r.kind for r in rows]),
+            opt_idx=opt_idx,
+        )
+        probs: torch.Tensor = out["log_probs"].exp().float().cpu()
+        return probs
+
+    def _quadratic_cap(self) -> int | None:
+        if not self._quadratic_attn:
+            return None
+        return int(self.model.config.max_length) ** 2
+
+    def tune_batching(self, widths: Sequence[int] = (256, 1024, 4096), reps: int = 2,
+                      gain: float = 1.05) -> dict[int, int]:
+        """Measure, for synthetic rows of each width, the rows per forward with the best rows/s
+        (k = 1, 2, 4, ... within the budgets; a larger k must gain `gain`x, and the search stops
+        once rows/s falls or a forward runs out of memory), and keep them in
+        cfg.batch_rows_by_width for `plan_rows`. The server runs it once at startup, before
+        requests arrive, as vLLM runs a profiling forward to size its batches to the GPU."""
+        import time
+
+        sync = torch.cuda.synchronize if str(self.device).startswith("cuda") else (lambda: None)
+        enc = self.tok(" the", add_special_tokens=False)["input_ids"]
+        tid = int(enc[-1]) if enc else 0
+        quad = self._quadratic_cap()
+        window = int(self.model.config.max_length)
+        out: dict[int, int] = {}
+        for w in widths:
+            if w > window or w < 4:
+                continue
+            row = PreparedRow(ids=[tid] * w, opt=[w - 3, w - 2], n_slots=2, kind="choice")
+            best_k, best_rate, k = 1, 0.0, 1
+            while k <= self.cfg.batch_rows and (k == 1 or (
+                    k * w <= self.cfg.batch_tokens and (quad is None or k * w * w <= quad))):
+                rows = [row] * k
+                try:
+                    self._forward_rows(rows)  # warm-up for this shape
+                    sync()
+                    t = time.perf_counter()
+                    for _ in range(reps):
+                        self._forward_rows(rows)
+                    sync()
+                except torch.OutOfMemoryError:  # the largest forward that fits is the cap
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                    break
+                rate = k * reps / (time.perf_counter() - t)
+                if rate > best_rate * gain:
+                    best_k, best_rate = k, rate
+                elif rate < best_rate:
+                    break
+                k *= 2
+            out[w] = best_k
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        self.cfg.batch_rows_by_width = out
+        return out
+
+    def _score_rows(self, rows: Sequence[PreparedRow], group: list[int],
+                    out: list[Any]) -> None:
+        """Score `group` (indices into rows) into `out`: a probability row or an exception
+        per row. On CUDA OOM the group is split in halves (a single row that still fails
+        gets the OOM); a CUDA error that loses the context fails the whole group; any other
+        error in a multi-row forward is retried row by row, so it stays with its own row."""
+        try:
+            probs = self._forward_rows([rows[i] for i in group])
+        except torch.OutOfMemoryError as exc:
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            if len(group) == 1:
+                out[group[0]] = exc
+                return
+            h = len(group) // 2
+            self._score_rows(rows, group[:h], out)
+            self._score_rows(rows, group[h:], out)
+            return
+        except Exception as exc:  # mapped per row below
+            if len(group) == 1 or is_cuda_fatal(exc):
+                for i in group:
+                    out[i] = exc
+                return
+            for i in group:
+                self._score_rows(rows, [i], out)
+            return
+        for j, i in enumerate(group):
+            out[i] = probs[j]
+
+    def evaluate_prepared(
+        self, prepared: Sequence[PreparedRequest]
+    ) -> list[SystemOneResponse | BaseException]:
+        """Score prepared requests together; one response or exception per request, in order.
+
+        Requests without rows (shared-prefix path, non-batchable engines) run alone through
+        `evaluate`. The rest are scored in forwards planned by `plan_rows`, one at a time,
+        so peak activation memory is that of the largest planned forward.
+        """
+        results: list[SystemOneResponse | BaseException | None] = [None] * len(prepared)
+        flat: list[PreparedRow] = []
+        for k, p in enumerate(prepared):
+            if p.rows is None:
+                try:
+                    results[k] = self.evaluate(p.request)
+                except Exception as exc:  # returned to the caller
+                    results[k] = exc
+                continue
+            flat.extend(p.rows)
+        if flat:
+            scored: list[Any] = [None] * len(flat)
+            groups = plan_rows([len(r.ids) for r in flat], self.cfg.batch_tokens,
+                               self.cfg.batch_rows, self._quadratic_cap(),
+                               self.cfg.batch_pad_slack, self.cfg.batch_pad_free,
+                               self.cfg.batch_rows_by_width)
+            fatal: BaseException | None = None
+            for group in groups:
+                if fatal is not None:  # the context is gone; do not launch more work
+                    for i in group:
+                        scored[i] = fatal
+                    continue
+                self._score_rows(flat, group, scored)
+                fatal = next((scored[i] for i in group if isinstance(scored[i], BaseException)
+                              and is_cuda_fatal(scored[i])), None)
+            start = 0
+            for k, p in enumerate(prepared):
+                if p.rows is None:
+                    continue
+                mine = scored[start:start + len(p.rows)]
+                start += len(p.rows)
+                err = next((x for x in mine if isinstance(x, BaseException)), None)
+                if err is not None:
+                    results[k] = err
+                    continue
+                answers: dict[str, Answer] = {}
+                for name, rq, row in zip(p.names, p.rendered, mine, strict=True):
+                    answers[name] = _to_answer(
+                        rq, row[: rq.n_slots].tolist(),
+                        ordinal_smoothing=self.model.config.ordinal_smoothing,
+                    )
+                results[k] = SystemOneResponse(
+                    model=self.cfg.model_name,
+                    answers=answers,
+                    usage=Usage(input_tokens=p.tokens, output_tokens=len(p.names)),
+                )
+        return cast("list[SystemOneResponse | BaseException]", results)
 
 
 def _option_token_index(
