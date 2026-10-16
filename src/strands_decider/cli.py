@@ -82,6 +82,10 @@ def serve_cmd(
         None, "--max-batch-tokens",
         help="Also cap one forward's padded tokens (questions x longest state + question); for long-context torsos.",
     ),
+    warmup: bool | None = typer.Option(
+        None, "--warmup/--no-warmup",
+        help="Warm text inference before accepting requests. Default: on for CUDA, off otherwise.",
+    ),
 ) -> None:
     """Serve POST /v1/systemone. JevBench's typesafe adapter runs against it unchanged."""
     from .server import serve
@@ -93,6 +97,7 @@ def serve_cmd(
         use_prefix_cache=not no_prefix_cache, model_name=model_name,
         strict_window=strict_window, max_batch=max_batch, vision=vision,
         max_batch_tokens=max_batch_tokens,
+        warmup=warmup,
     )
 
 

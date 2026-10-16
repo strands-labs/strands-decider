@@ -209,6 +209,19 @@ schema validity 1.000 ([External benchmark](../evaluation/jevbench.md#external-b
 Compatibility with the Jev API itself is not verified. `GET /health` returns the model
 name, the checkpoint path, the base model, the device and the calibration temperature.
 
+On CUDA, including `--device cuda:0`, the server warms text inference before it accepts
+connections. It evaluates one small fixed question of each type (`noul`, `choice`, and
+`score`), then all three against a shared state. The configured prefix-cache and batch
+limits apply: disabling the cache or limiting each batch to one question keeps the warmup
+on the plain path. If warmup fails, startup fails instead of serving a healthy response.
+Startup and health-check timeouts must allow time for model loading and warmup.
+
+Use `--no-warmup` to skip it, or `--warmup` to enable it on CPU, MPS, or MLX, where it is
+off by default. Python callers can pass `warmup=True` or `False` to `create_app` or `serve`;
+`None` uses the device default. Warmup moves one-time initialization into startup; it does
+not remove the total cold-start cost or guarantee that every input length, batch size, or
+image path is warmed. With `--vision`, these requests still contain text only.
+
 The server binds to `127.0.0.1` by default and has no authentication. Its behaviour under
 concurrent requests is not verified. Use it for local experiments only
 ([Security](../README.md#security)).
