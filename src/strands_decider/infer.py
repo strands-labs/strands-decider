@@ -21,6 +21,8 @@ fallback is a safety valve rather than a different model.
 from __future__ import annotations
 
 import copy
+import importlib.util
+import sys
 import threading
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -71,6 +73,31 @@ class EngineConfig:
     # cut and scored independently, so answers only move by float rounding; long-context
     # Gemma torsos need it at a 32,768 window. None: off.
     max_batch_tokens: int | None = None
+
+
+def linear_attention_kernels(torso: Any) -> dict[str, bool] | None:
+    """Which fused kernels a torso's Gated DeltaNet layers will run, or None if it has none.
+
+    Qwen3.5 interleaves Gated DeltaNet (linear-attention) layers with full attention.
+    transformers binds each DeltaNet op when its model module is imported: the chunked
+    delta rule from flash-linear-attention (`fla`, Triton kernels) and the short
+    convolution from `causal_conv1d` (CUDA), or its own reference PyTorch code for either
+    package that is missing. The reference code gives the same answers to float rounding
+    and is slower: without fla, a 2B Qwen3.5 decider serves 1.5-3.6x fewer decisions a
+    second on an L40S ("Fast kernels on CUDA" in docs/inference.md). The `cuda` extra
+    installs fla; causal-conv1d compiles against the local CUDA toolkit and is installed by hand.
+    """
+    cfg = getattr(torso, "config", None)  # a PEFT wrapper forwards this to the base
+    if cfg is not None and hasattr(cfg, "get_text_config"):
+        cfg = cfg.get_text_config()  # multimodal (vision) torsos keep the layers on text_config
+    if "linear_attention" not in (getattr(cfg, "layer_types", None) or []):
+        return None
+    find = importlib.util.find_spec
+    return {
+        # fla imports without Triton (macOS) but cannot run; mps_kernels.install checks both.
+        "flash_linear_attention": find("fla") is not None and find("triton") is not None,
+        "causal_conv1d": find("causal_conv1d") is not None,
+    }
 
 
 class UnforkableCache(TypeError):
@@ -157,6 +184,14 @@ class SystemOneEngine:
         self.model = model.to(self.cfg.device).eval()
         if str(self.cfg.device) == "cpu":
             self._upcast_torso_for_cpu()
+        self.kernels = linear_attention_kernels(model.torso)
+        on_cuda = str(self.cfg.device).startswith("cuda")
+        if on_cuda and self.kernels and not self.kernels["flash_linear_attention"]:
+            # stderr: `ask` writes its answer to stdout.
+            print("[strands-decider] flash-linear-attention is not installed, so this model's "
+                  "Gated DeltaNet layers run transformers' reference PyTorch code: answers equal "
+                  "to float rounding, 1.5-3.6x slower on an L40S. Install it with: "
+                  'pip install "strands-decider[cuda]"', file=sys.stderr)
         self.tok = model.tokenizer
         self.device = self.cfg.device
         # Sticky, monotonic False->True: cache the first UnforkableCache so later

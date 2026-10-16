@@ -20,6 +20,7 @@ CPU), so they report the numbers serving returns. `--device mlx` is refused.
 - [Ask](#ask): one command, with recorded v19 output and how to read its confidence.
 - [Serve](#serve): `POST /v1/systemone` and `/health`, on `127.0.0.1` with no authentication.
 - [Asking many questions is nearly free](#asking-many-questions-is-nearly-free): the shared-prefix cache.
+- [Fast kernels on CUDA](#fast-kernels-on-cuda): what the `cuda` extra buys a Qwen3.5 checkpoint.
 - [Serving on a Mac](#serving-on-a-mac): MPS, and the one kernel that had to be replaced.
 - [Serving on a Mac with MLX](#serving-on-a-mac-with-mlx): `--device mlx`, measured against MPS.
 - [`../examples/strands/`](../examples/strands/README.md): an agent built with the Strands
@@ -48,7 +49,7 @@ from a clone, for example `pip install -e ".[mlx]"`.
 
 | `--device` | Install | Adds |
 |---|---|---|
-| `cuda` | `pip install "strands-decider[cuda]"` | flash-linear-attention (Linux). causal-conv1d compiles against the local CUDA toolkit and is installed separately: `pip install causal-conv1d --no-build-isolation`. |
+| `cuda` | `pip install "strands-decider[cuda]"` | flash-linear-attention (Linux). Without it, Qwen3.5 checkpoints serve 1.5 to 3.6x fewer decisions a second ([Fast kernels on CUDA](#fast-kernels-on-cuda)). causal-conv1d compiles against the local CUDA toolkit and is installed separately: `pip install causal-conv1d --no-build-isolation`. |
 | `mps` | `pip install "strands-decider[mps]"` | Nothing: the base install. |
 | `cpu` | `pip install "strands-decider[cpu]"` | Nothing: the base install. |
 | `mlx` | `pip install "strands-decider[mlx]"` | mlx and mlx-lm (Apple silicon only). |
@@ -207,7 +208,9 @@ strands-decider serve checkpoints/hobson-2b-recipe --port 8000
 targets this endpoint and runs against it unmodified: 231 of 231 tasks attempted and
 schema validity 1.000 ([External benchmark](../evaluation/jevbench.md#external-benchmark-jevbench-v1-public-set)).
 Compatibility with the Jev API itself is not verified. `GET /health` returns the model
-name, the checkpoint path, the base model, the device and the calibration temperature.
+name, the checkpoint path, the base model, the device and the calibration temperature. For a
+torso with Gated DeltaNet layers (Qwen3.5) its `kernels` field says whether
+flash-linear-attention and causal-conv1d are installed; for other torsos it is `null`.
 
 The server binds to `127.0.0.1` by default and has no authentication. Its behaviour under
 concurrent requests is not verified. Use it for local experiments only
@@ -313,6 +316,52 @@ accumulation order alone, far below any threshold worth routing on. On v14 on th
 questions over a ~2,000-token state take 369 ms through the shared prefix against
 1,964 ms batched, and sixteen take 445 ms against 4,086 ms. A request with one question
 skips the prefix path: it would pay a second forward for nothing.
+
+## Fast kernels on CUDA
+
+A Qwen3.5 torso has 18 Gated DeltaNet layers among its 24. transformers runs two of their ops
+through optional packages, the chunked delta rule through flash-linear-attention's Triton
+kernels and the short convolution through causal-conv1d, and it runs its reference PyTorch
+code for any package that is missing. The reference code gives the same answers to float
+rounding and is slower. `pip install strands-decider` installs neither package; the `cuda`
+extra installs flash-linear-attention. Gemma 4 torsos have no DeltaNet layers and are
+unaffected.
+
+Served with `--device cuda` without flash-linear-attention, a Qwen3.5 checkpoint prints a
+warning to stderr when it loads, and `/health` reports
+`"kernels": {"flash_linear_attention": false, "causal_conv1d": false}`. transformers 5.19 and
+later also log one warning for each fallback.
+
+Install the extra only where the server runs on CUDA. transformers binds fla's kernels for
+every device, and they run only on GPU tensors, so with the extra installed a Qwen3.5
+checkpoint fails on `--device cpu`
+(`ValueError: Pointer argument cannot be accessed from Triton (cpu tensor?)`).
+
+Throughput on one L40S (g6e.4xlarge), in decisions per second with 32 requests in flight.
+Each venv holds the same packages, except that the extra adds flash-linear-attention,
+fla-core and einops. The server is `strands-decider serve --device cuda --strict-window` at
+94f1cc1, with torch 2.14.1 (CUDA 13.0) and transformers 5.19.0:
+
+| Checkpoint | Prompt | Without the extra | With `[cuda]` | Speed-up |
+|---|---|---|---|---|
+| strands-decider-2B-qwen3.5-v1-2610 | 256 tokens | 6.4 | 9.6 | 1.5x |
+| | 1,024 tokens | 3.03 | 9.6 | 3.2x |
+| | 4,096 tokens | 1.07 | 3.5 | 3.3x |
+| v19 | 256 tokens | 6.4 | 9.6 | 1.5x |
+| | 1,024 tokens | 3.0 | 9.57 | 3.2x |
+| | 4,096 tokens | 1.07 | 3.87 | 3.6x |
+
+With one request at a time on 1,024-token prompts, the median latency falls from 147 to
+70 ms. At 256 tokens the kernels are no longer the limit: the GPU is 24 to 26% busy, and the
+server's overlapping forwards hold throughput down. A profile of one 1,024-token forward
+shows fla's kernels in all 18 DeltaNet layers, and the forward's CUDA time falls from 71 to
+46 ms. The convolution still runs on torch, since causal-conv1d is not installed in either
+venv.
+
+The two paths agree on 99.42% (2B) and 99.68% (v19) of decisions, and the decisions that
+differ are near ties, with a margin of 0.017 or less. Neither path is closer to an fp32 run of
+the reference code: on 200 rows the mean total variation is 0.0029 with fla and 0.0026
+without for 2B, and 0.0034 and 0.0032 for v19, differences inside the sample's noise.
 
 ## Serving on a Mac
 
