@@ -76,7 +76,10 @@ def create_app(
         model = StrandsDeciderModel.load(checkpoint, attn_implementation=attn_implementation)
         _engine = SystemOneEngine(model, config)
 
+    # SageMaker and AgentCore Runtime call /ping and /invocations; each is the same
+    # handler as the path above it.
     @app.get("/health")
+    @app.get("/ping")
     def health() -> dict:
         eng = get_engine()
         return {
@@ -96,6 +99,7 @@ def create_app(
     guard = _engine_lock if _needs_serialisation(device) else contextlib.nullcontext()
 
     @app.post("/v1/systemone", response_model=SystemOneResponse)
+    @app.post("/invocations", response_model=SystemOneResponse)
     def systemone(request: SystemOneRequest) -> JSONResponse:
         eng = get_engine()
         started = time.perf_counter()

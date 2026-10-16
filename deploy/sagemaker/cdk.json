@@ -1,0 +1,10 @@
+{
+  "app": "npx tsx bin/cdk-app.ts",
+  "context": {
+    "model": "StrandsAgents/strands-decider-2B-qwen3.5-v1-2610",
+    "model_revision": "main",
+    "instance_type": "ml.g6.xlarge",
+    "instance_count": 1,
+    "serve_args": ""
+  }
+}

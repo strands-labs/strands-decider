@@ -39,7 +39,11 @@ agentic workflows built with the [Strands Agents SDK](https://github.com/strands
   about 95% of the time ([evaluation/results.md](evaluation/results.md#summary)); below that,
   confirm or ask a person. Frontier LLM inference APIs do not expose anything equivalent.
 
-## Getting Started
+## How to start using strands-decider
+
+Start on your own machine: install the `strands-decider` CLI, ask the model questions, then run it
+as a server and send it HTTP requests. When other people or services need to call it, deploy that
+server ([Deploying it](#deploying-it)).
 
 The easiest place to get started is through the `strands-decider` cli:
 
@@ -187,6 +191,12 @@ POPE, and is more confident than v19 when the image is missing. v1 has v21's ima
 with the image missing it is more overconfident than v21 on POPE
 ([docs/vision.md](docs/vision.md#v1)). See
 [docs/vision.md](docs/vision.md) for the request shape, how it works and the measurements.
+
+### Deploying it
+
+The server you ran above is what you deploy. To host it beyond your machine, see
+[deploy/README.md](deploy/README.md): it lists where the server can run and links to a guide for
+each.
 
 ## Model names
 

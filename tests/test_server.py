@@ -108,6 +108,22 @@ def test_health_identifies_checkpoint(monkeypatch):
     assert r.json()["max_length"] == 512
 
 
+def test_sagemaker_paths_alias_the_api(monkeypatch):
+    """SageMaker and AgentCore Runtime call GET /ping and POST /invocations; the real app
+    answers them as /health and /v1/systemone."""
+    monkeypatch.setattr(server, "_engine", None)
+    monkeypatch.setattr(server.StrandsDeciderModel, "load", lambda *a, **k: _StubModel())
+    monkeypatch.setattr(server, "SystemOneEngine", lambda model, cfg: _StubEngine())
+    client = TestClient(server.create_app("checkpoints/strands-decider-test", device="cpu"))
+    assert client.get("/ping").json() == client.get("/health").json()
+    body = {"state": "x", "questions": {"q": {"type": "noul", "instructions": "Yes?"}}}
+    r = client.post("/invocations", json=body)
+    assert r.status_code == 200
+    assert r.json()["answers"] == client.post("/v1/systemone", json=body).json()["answers"]
+    bad = {"state": "x", "questions": {"q": {"type": "nope"}}}
+    assert client.post("/invocations", json=bad).status_code == 422
+
+
 def test_documented_payload_round_trips(client):
     r = client.post(
         "/v1/systemone",

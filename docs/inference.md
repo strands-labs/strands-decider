@@ -20,6 +20,8 @@ cuda > mps > cpu selection when omitted. They use torch; MLX is an `ask`/`serve`
 - [Asking many questions is nearly free](#asking-many-questions-is-nearly-free): the shared-prefix cache.
 - [Serving on a Mac](#serving-on-a-mac): MPS, and the one kernel that had to be replaced.
 - [Serving on a Mac with MLX](#serving-on-a-mac-with-mlx): `--device mlx`, measured against MPS.
+- [`../deploy/`](../deploy/README.md): hosting the server, for example on an Amazon SageMaker
+  real-time endpoint.
 - [`../examples/strands/`](../examples/strands/README.md): an agent built with the Strands
   Agents SDK that uses the server, with its client in `_client.py`.
 - [`../evaluation/results.md`](../evaluation/results.md): measured latency and accuracy on an
@@ -206,6 +208,9 @@ targets this endpoint and runs against it unmodified: 231 of 231 tasks attempted
 schema validity 1.000 ([External benchmark](../evaluation/jevbench.md#external-benchmark-jevbench-v1-public-set)).
 Compatibility with the Jev API itself is not verified. `GET /health` returns the model
 name, the checkpoint path, the base model, the device and the calibration temperature.
+`GET /ping` and `POST /invocations` are the same as `/health` and `/v1/systemone`: they are
+the paths that SageMaker and Bedrock AgentCore Runtime call
+([../deploy/sagemaker/](../deploy/sagemaker/README.md)).
 
 The server binds to `127.0.0.1` by default and has no authentication. Its behaviour under
 concurrent requests is not verified. Use it for local experiments only
