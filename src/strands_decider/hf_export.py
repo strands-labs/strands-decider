@@ -434,7 +434,7 @@ def card(name: str, run_id: str, role: str, prov: dict, arms: list[dict],
                            metric_value=v["accuracy"], metric_name=f"accuracy (n={v['n']})")
                 for k, v in headline(internal).items()]
     data = ModelCardData(base_model=base.model, base_model_relation="adapter",
-                         library_name="peft", pipeline_tag="text-classification", tags=base.tags,
+                         library_name="strands-decider", pipeline_tag="text-classification", tags=base.tags,
                          license="apache-2.0", datasets=DATASETS, model_name=name,
                          eval_results=results or None)
     rows = "\n".join(f"| JevBench public, window {a['window']} | {a['n_correct']}/{a['n']} "
