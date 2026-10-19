@@ -90,6 +90,8 @@ def create_app(
             "device": eng.cfg.device,
             "prefix_cache": eng.cfg.use_prefix_cache,
             "vision": vision,
+            # Gated DeltaNet torsos (Qwen3.5) only: whether fla and causal-conv1d are installed.
+            "kernels": getattr(eng, "kernels", None),
         }
 
     guard: contextlib.AbstractContextManager
