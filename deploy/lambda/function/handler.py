@@ -29,7 +29,7 @@ from strands_decider.schema import SystemOneRequest
 log = logging.getLogger("decider")
 log.setLevel(logging.INFO)
 
-MODEL_DIR = "/opt/model"  # the Dockerfile's
+MODEL_DIR = os.environ.get("DECIDER_MODEL_DIR", "/opt/model")  # the Dockerfile's, unless set
 ROUTES = {"/health": "GET", "/v1/systemone": "POST"}
 
 
@@ -69,12 +69,13 @@ def _load() -> HiddenStateEngine:
         os.path.join(MODEL_DIR, "assets"),
         backend,
         strict_window=os.environ.get("DECIDER_STRICT_WINDOW") == "true",
-        max_request_tokens=int(os.environ.get("DECIDER_MAX_REQUEST_TOKENS") or 0) or None,
     )
-    # The first forward's one-time costs, paid before the snapshot is taken.
+    # The first forward's one-time costs, paid before the snapshot is taken, and before the
+    # request limit, which could refuse even this.
     engine.evaluate(
         {"state": "Warm up.", "questions": {"q": {"type": "noul", "instructions": "?"}}}
     )
+    engine.cfg.max_request_tokens = int(os.environ.get("DECIDER_MAX_REQUEST_TOKENS") or 0) or None
     log.info("model ready in %.1f s", time.perf_counter() - started)
     return engine
 
@@ -97,8 +98,12 @@ else:  # snap-start
 def _cpu_part() -> str:
     """The host CPU, read per request because a snapshot can restore on any: 0xd0c is
     Graviton2, 0xd40 Graviton3, 0xd4f Graviton4."""
-    with open("/proc/cpuinfo") as f:
-        return next((line.split(":")[1].strip() for line in f if line.startswith("CPU part")), "?")
+    try:
+        with open("/proc/cpuinfo") as f:
+            lines = [line for line in f if line.startswith("CPU part")]
+    except OSError:  # not Linux
+        return "?"
+    return lines[0].split(":")[1].strip() if lines else "?"
 
 
 def _evaluate(request: SystemOneRequest) -> dict[str, Any]:

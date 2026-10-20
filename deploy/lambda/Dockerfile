@@ -7,12 +7,13 @@ ARG BASE=public.ecr.aws/lambda/python:3.12
 
 # llama.cpp, static, and the shim linked against it into one library.
 FROM ${BASE} AS llama
-RUN dnf -y install cmake gcc gcc-c++ tar gzip && dnf clean all
-# The llama.cpp commit this image was tested with.
+RUN dnf -y install cmake gcc gcc-c++ git && dnf clean all
+# The llama.cpp commit this image was tested with, fetched by its hash, which git checks the
+# source against.
 ARG LLAMA_CPP_REV=6184e92c57dcd34de8a3e381d7641a5e75250d5f
 WORKDIR /llama
-RUN curl -sSfL "https://github.com/ggml-org/llama.cpp/archive/${LLAMA_CPP_REV}.tar.gz" \
-    | tar xz --strip-components=1
+RUN git init -q . && git fetch -q --depth 1 https://github.com/ggml-org/llama.cpp "${LLAMA_CPP_REV}" \
+    && git checkout -q FETCH_HEAD && test "$(git rev-parse HEAD)" = "${LLAMA_CPP_REV}" && rm -rf .git
 # armv8.2-a+fp16+dotprod, without i8mm: Lambda runs arm64 functions on Graviton2, 3 and 4, a
 # SnapStart snapshot taken on one restores on any, and an i8mm instruction kills the process on
 # Graviton2. The build fails if the library has one.
