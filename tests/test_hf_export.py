@@ -10,8 +10,8 @@ import tempfile
 import pytest
 import torch
 
-from training import hf_export
 from strands_decider.modeling import load_head_state
+from training import hf_export
 
 
 def _ckpt(root, window=4096):
