@@ -21,7 +21,19 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from .schema import ChoiceQuestion, Content, NoulQuestion, Question, ScoreQuestion
+from .schema import (
+    Answer,
+    ChoiceAnswer,
+    ChoiceQuestion,
+    Content,
+    NoulAnswer,
+    NoulQuestion,
+    Question,
+    ScoreAnswer,
+    ScoreQuestion,
+    derive_confidence,
+    derive_score_confidence,
+)
 
 # Rendered on both sides of a noul so the two slots read like any other option list.
 NOUL_SLOT_LABELS = ("false", "true")
@@ -180,3 +192,62 @@ def read_score(probs: Sequence[float], rq: RenderedQuestion) -> tuple[float, dic
     expected = sum(int(level) * p for level, p in by_level.items())
     ordered = {str(i): by_level[str(i)] for i in range(len(by_level))}
     return float(expected), ordered
+
+
+def option_token_index(
+    offsets: Sequence[Sequence[int]],
+    spans: Sequence[Sequence[int]],
+    base: int,
+) -> list[int]:
+    """Last token index of each option's line, for a pointer readout.
+
+    The last token of the span is the one that has just read the whole option under
+    causal attention. Raises when an option has no surviving token: truncation has
+    removed it, and scoring it from a neighbour's representation would be silently
+    wrong.
+    """
+    out: list[int] = []
+    for s, e in spans:
+        a, b = base + s, base + e
+        last = -1
+        for j, (lo, hi) in enumerate(offsets):
+            if hi <= lo:
+                continue
+            if lo >= a and hi <= b:
+                last = j
+        if last < 0:
+            raise ValueError(
+                f"option span ({a},{b}) has no tokens left; the prompt was "
+                "truncated through its option list"
+            )
+        out.append(last)
+    return out
+
+
+def to_answer(
+    rq: RenderedQuestion, probs: list[float], *, ordinal_smoothing: float = 0.0
+) -> Answer:
+    if rq.kind == "noul":
+        return NoulAnswer(noul=round(read_noul(probs, rq), 4))
+
+    if rq.kind == "choice":
+        by_name = read_choice(probs, rq)
+        best = max(by_name, key=lambda k: by_name[k])
+        return ChoiceAnswer(
+            choice=best,
+            probabilities={k: round(v, 4) for k, v in by_name.items()},
+            confidence=round(derive_confidence(list(by_name.values())), 4),
+        )
+
+    score, ordered = read_score(probs, rq)
+    return ScoreAnswer(
+        score=round(score, 4),
+        # Report the rubric in canonical ascending order, not the order rendered.
+        legend=score_legend(rq),
+        probabilities={k: round(v, 4) for k, v in ordered.items()},
+        # Ordinal confidence, not max-probability: see derive_score_confidence.
+        confidence=round(
+            derive_score_confidence(list(ordered.values()), ordinal_smoothing=ordinal_smoothing),
+            4,
+        ),
+    )

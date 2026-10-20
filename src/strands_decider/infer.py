@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import copy
 import threading
-from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -30,27 +29,16 @@ import torch
 
 from . import __version__
 from .modeling import StrandsDeciderModel, apply_temperature, masked_log_softmax, pool_last_token
-from .prompting import (
-    RenderedQuestion,
-    read_choice,
-    read_noul,
-    read_score,
-    render_question,
-    render_state,
-    score_legend,
-)
+from .prompting import RenderedQuestion, render_question, render_state
+from .prompting import option_token_index as _option_token_index
+from .prompting import to_answer as _to_answer
 from .schema import (
     Answer,
-    ChoiceAnswer,
     Content,
-    NoulAnswer,
     Question,
-    ScoreAnswer,
     SystemOneRequest,
     SystemOneResponse,
     Usage,
-    derive_confidence,
-    derive_score_confidence,
 )
 
 
@@ -470,65 +458,6 @@ class SystemOneEngine:
 
     def ask(self, state: Content, questions: dict[str, Question]) -> SystemOneResponse:
         return self.evaluate(SystemOneRequest(state=state, questions=questions))
-
-
-def _option_token_index(
-    offsets: Sequence[Sequence[int]],
-    spans: Sequence[Sequence[int]],
-    base: int,
-) -> list[int]:
-    """Last token index of each option's line, for a pointer readout.
-
-    The last token of the span is the one that has just read the whole option under
-    causal attention. Raises when an option has no surviving token: truncation has
-    removed it, and scoring it from a neighbour's representation would be silently
-    wrong.
-    """
-    out: list[int] = []
-    for s, e in spans:
-        a, b = base + s, base + e
-        last = -1
-        for j, (lo, hi) in enumerate(offsets):
-            if hi <= lo:
-                continue
-            if lo >= a and hi <= b:
-                last = j
-        if last < 0:
-            raise ValueError(
-                f"option span ({a},{b}) has no tokens left; the prompt was "
-                "truncated through its option list"
-            )
-        out.append(last)
-    return out
-
-
-def _to_answer(
-    rq: RenderedQuestion, probs: list[float], *, ordinal_smoothing: float = 0.0
-) -> Answer:
-    if rq.kind == "noul":
-        return NoulAnswer(noul=round(read_noul(probs, rq), 4))
-
-    if rq.kind == "choice":
-        by_name = read_choice(probs, rq)
-        best = max(by_name, key=lambda k: by_name[k])
-        return ChoiceAnswer(
-            choice=best,
-            probabilities={k: round(v, 4) for k, v in by_name.items()},
-            confidence=round(derive_confidence(list(by_name.values())), 4),
-        )
-
-    score, ordered = read_score(probs, rq)
-    return ScoreAnswer(
-        score=round(score, 4),
-        # Report the rubric in canonical ascending order, not the order rendered.
-        legend=score_legend(rq),
-        probabilities={k: round(v, 4) for k, v in ordered.items()},
-        # Ordinal confidence, not max-probability: see derive_score_confidence.
-        confidence=round(
-            derive_score_confidence(list(ordered.values()), ordinal_smoothing=ordinal_smoothing),
-            4,
-        ),
-    )
 
 
 @torch.inference_mode()  # type: ignore[untyped-decorator]
