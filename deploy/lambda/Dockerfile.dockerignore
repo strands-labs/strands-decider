@@ -1,0 +1,11 @@
+# BuildKit reads this file for builds with -f deploy/lambda/Dockerfile. The image needs only
+# these files from the repository.
+*
+!pyproject.toml
+!README.md
+!LICENSE
+!src/
+!deploy/lambda/function/
+!deploy/lambda/scripts/
+**/__pycache__
+**/*.egg-info
