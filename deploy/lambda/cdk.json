@@ -1,0 +1,10 @@
+{
+  "app": "npx tsx bin/cdk-app.ts",
+  "context": {
+    "model": "StrandsAgents/strands-decider-2B-qwen3.5-v1-2610",
+    "model_revision": "main",
+    "snapstart": true,
+    "strict_window": false,
+    "max_request_tokens": 24576
+  }
+}
