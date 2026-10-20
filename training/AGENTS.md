@@ -267,12 +267,12 @@ talks to the Hub.
 checkpoint path, else `--run-id`.
 
 ```bash
-python -m strands_decider.hf_export export s3://$HOBSON_BUCKET/results/<run-id>/checkpoints/hobson-2b-recipe \
+python -m training.hf_export export s3://$HOBSON_BUCKET/results/<run-id>/checkpoints/hobson-2b-recipe \
   s3://$HOBSON_BUCKET/hf/<name>/<run-id> --run-dir s3://$HOBSON_BUCKET/results/<run-id>/run \
   --reports s3://$HOBSON_BUCKET/results/<run-id>/reports --jevbench s3://$HOBSON_BUCKET/results/<run-id>/jev \
   [--jevbench <dir of the 3072 arm> --window-config <its config json>] --repo-url <code repository URL>
-python -m strands_decider.hf_export verify s3://$HOBSON_BUCKET/hf/<name>/<run-id>
-python -m strands_decider.hf_export index  s3://$HOBSON_BUCKET/hf                     # INDEX.json and INDEX.md of every export
+python -m training.hf_export verify s3://$HOBSON_BUCKET/hf/<name>/<run-id>
+python -m training.hf_export index  s3://$HOBSON_BUCKET/hf                     # INDEX.json and INDEX.md of every export
 ```
 
 The exporter refuses an output that holds a different export or other files unless you
@@ -285,7 +285,7 @@ Never copy a token to a host or into an SSM command.
 ```bash
 hf upload <org>/<repo> <local export> . --commit-message "<what changed and why>"   # unchanged files are skipped; one commit
 hf download <org>/<repo> --local-dir <fresh dir>
-python -m strands_decider.hf_export verify <fresh dir>
+python -m training.hf_export verify <fresh dir>
 ```
 
 **Checks.** `verify` prints `ok`: every file matches `MANIFEST.sha256` and the required

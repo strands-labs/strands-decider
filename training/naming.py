@@ -1,6 +1,6 @@
 """Public model names, `strands-decider-{size}-{base}-v{N}-{YYMM}` (docs/naming.md).
 
-    python -m strands_decider.naming BASE_MODEL N YYMM     (prints the release name)
+    python -m training.naming BASE_MODEL N YYMM     (prints the release name)
 
 size is the base model's own size token as its Hub id writes it (2B, E2B, 26B-A4B); base is
 one token per base family; N counts the releases on that base family (v1 is the first); YYMM is

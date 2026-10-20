@@ -179,7 +179,7 @@ On the Decision Index (balanced skill) the soup scores 47.14, measured with the 
 On the Decision Index (balanced skill) the soup scores 48.69, measured with the training harness.
 
 **Release checks.** The files on the Hub, downloaded into a clean folder, are byte-identical to the
-exported files, and `python -m strands_decider.hf_export verify` passes. Through the code on `main`, on CPU
+exported files, and `python -m training.hf_export verify` passes. Through the code on `main`, on CPU
 (the test suite and ruff pass on that code):
 
 | check | E2B | E4B | 12B | 26B-A4B |

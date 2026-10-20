@@ -31,11 +31,11 @@ for example `StrandsAgents/strands-decider-2B-qwen3.5-v1-2610`. Released so far:
   `strands-decider-2B-hobson-v21`. hobson-v21 and v1 are different recipes; v1 is not a
   rename of v21.
 
-`strands_decider.naming.release_name(base_model, N, yymm)` builds a name from the base
-model's Hub id, and `strands_decider.naming.parse(name)` checks one:
+`training.naming.release_name(base_model, N, yymm)` builds a name from the base
+model's Hub id, and `training.naming.parse(name)` checks one:
 
 ```bash
-python -m strands_decider.naming Qwen/Qwen3.5-2B-Base 1 2610   # strands-decider-2B-qwen3.5-v1-2610
+python -m training.naming Qwen/Qwen3.5-2B-Base 1 2610   # strands-decider-2B-qwen3.5-v1-2610
 ```
 
 Git tags for model releases are `model/<name>`, for example

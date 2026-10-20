@@ -1,6 +1,6 @@
 import pytest
 
-from strands_decider.naming import parse, release_name
+from training.naming import parse, release_name
 
 
 @pytest.mark.parametrize("base, size", [

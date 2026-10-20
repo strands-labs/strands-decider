@@ -124,7 +124,7 @@ writes them, `python -m training.evaluate calibrate` adds the temperatures, and 
 | --- | --- |
 | `strands_decider_config.json` | The model configuration: the base model name, the readout type and size, the window (`max_length`) and the fitted temperatures. A checkpoint saved before the rename, such as the published v19, holds `hobson_config.json` instead; `load` reads either |
 | `lora/` | The LoRA adapter (`adapter_config.json`, `adapter_model.safetensors`) |
-| `slot_head.pt` or `head.safetensors` | The readout weights. `save_pretrained` writes `slot_head.pt`. An export from `strands_decider.hf_export` holds `head.safetensors` instead. |
+| `slot_head.pt` or `head.safetensors` | The readout weights. `save_pretrained` writes `slot_head.pt`. An export from `training.hf_export` holds `head.safetensors` instead. |
 | `tokenizer.json`, `tokenizer_config.json` | The tokenizer |
 | `chat_template.jinja` | The chat template, saved with the tokenizer. Inference does not read it. |
 
@@ -136,13 +136,13 @@ The base weights are not in the checkpoint. At first use, `load` downloads
 `provenance.json` records for the same base model, so a Hugging Face export loads the base it
 was trained on. With neither, the loader gets the current `main` of that repository.
 
-`python -m strands_decider.hf_export export CKPT OUT --run-id RUN` writes a checkpoint as a Hugging
+`python -m training.hf_export export CKPT OUT --run-id RUN` writes a checkpoint as a Hugging
 Face-format folder. Without `--run-id`, the exporter takes the run id from a
 `results/<run-id>/` part of the CKPT path, and it stops if the path has none. The folder
 holds the readout as `head.safetensors`, so it has no pickle files. It also holds the PEFT
 adapter, the tokenizer and configuration files, and a model card (`README.md`).
 `provenance.json`, `LICENSE.md` with the licence status and `MANIFEST.sha256` complete it.
-`python -m strands_decider.hf_export verify DIR` checks a folder. `StrandsDeciderModel.load` reads the
+`python -m training.hf_export verify DIR` checks a folder. `StrandsDeciderModel.load` reads the
 folder as it reads a checkpoint, and the base weights still download separately from
 Hugging Face. Where a command takes a checkpoint path (`strands-decider serve`, `strands-decider ask`,
 `strands-decider info`), a Hub model repo id such as `StrandsAgents/strands-decider-2B-qwen3.5-v1-2610` also works: the loader

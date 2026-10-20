@@ -1,11 +1,11 @@
 """A strands-decider checkpoint as a Hugging Face model-repo folder, for S3 and the Hub.
 
-    python -m strands_decider.hf_export export CKPT OUT [--run-dir D] [--jevbench D ...]
+    python -m training.hf_export export CKPT OUT [--run-dir D] [--jevbench D ...]
                                     [--name N] [--run-id R] [--role final|parent]
                                     [--replace] [--repo-url URL] [--hub-id ORG/NAME]
                                     [--redact TEXT ...]
-    python -m strands_decider.hf_export verify DIR
-    python -m strands_decider.hf_export index ROOT          (INDEX.json + INDEX.md of every export)
+    python -m training.hf_export verify DIR
+    python -m training.hf_export index ROOT          (INDEX.json + INDEX.md of every export)
 
 CKPT, OUT, --run-dir and --jevbench may be local paths or s3:// URIs. The folder holds no
 pickles: `slot_head.pt` becomes `head.safetensors` (same tensors, checked), which
@@ -37,7 +37,7 @@ from typing import Any
 
 import torch
 
-from .modeling import CONFIG_NAME, LEGACY_CONFIG_NAME, config_path
+from strands_decider.modeling import CONFIG_NAME, LEGACY_CONFIG_NAME, config_path
 
 FORMAT = "hobson-hf-export/1"
 # The checkpoint's config json is copied and required too, under whichever of CONFIG_NAME
@@ -551,7 +551,7 @@ and the reproduction contract.
 
 `provenance.json`: base model and revision (inferred: the hosts did not pin one), and the
 sha256 of the config, adapter, head and source pickle. `MANIFEST.sha256` lists every file;
-`python -m strands_decider.hf_export verify <folder>` checks them. The run records keep
+`python -m training.hf_export verify <folder>` checks them. The run records keep
 their timings and results; host paths, cloud identifiers and cost fields are removed.
 """
 
@@ -848,7 +848,7 @@ def index(root: str) -> str:
 
 
 def main(argv: list[str] | None = None) -> None:
-    ap = argparse.ArgumentParser(prog="python -m strands_decider.hf_export", description=__doc__.split("\n\n")[0])
+    ap = argparse.ArgumentParser(prog="python -m training.hf_export", description=__doc__.split("\n\n")[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
     ex = sub.add_parser("export")
     ex.add_argument("ckpt")

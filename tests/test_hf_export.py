@@ -10,7 +10,7 @@ import tempfile
 import pytest
 import torch
 
-from strands_decider import hf_export
+from training import hf_export
 from strands_decider.modeling import load_head_state
 
 

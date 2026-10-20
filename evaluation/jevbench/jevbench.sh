@@ -130,7 +130,7 @@ EOF
 log "/health ok (checkpoint and max_length match) after ${LOAD_S}s"
 
 # ---- 4. run all 231 tasks, then summarize ------------------------------------------
-# LC_ALL=C: byte order, as strands_decider.hf_export.fingerprint() recomputes it (a UTF-8 locale sorts
+# LC_ALL=C: byte order, as training.hf_export.fingerprint() recomputes it (a UTF-8 locale sorts
 # tokenizer_config.json before tokenizer.json).
 CKPT_REV=$(cd "$CKPT" && find -L . -type f ! -name '*.log' -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -c1-16)
 T_RUN0=$(date +%s)
