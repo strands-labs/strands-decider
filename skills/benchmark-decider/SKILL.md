@@ -4,10 +4,10 @@ description: >
   Measure how fast and how accurately Strands Decider models run on different engines, precisions,
   hosts and serving setups (a local checkpoint, any /v1/systemone server, AWS Lambda, SageMaker),
   and turn the measurements into figures and a written analysis. Use when a user asks "how fast is
-  the decider on X", wants time to first token by prompt length, throughput or tail latency under
+  the decider on X", wants time to first token by input length, throughput or tail latency under
   load, cost per million decisions, a comparison of engines, instance types or model sizes, or a
   check that an optimization kept the model's accuracy (JevBench, Decision Index). Also use to make
-  figures such as latency against prompt length, p95 against throughput, or throughput per GPU
+  figures such as latency against input length, p95 against throughput, or throughput per GPU
   across hosts and model sizes.
 ---
 
@@ -48,7 +48,7 @@ directory, and what you concluded. Log failures and corrections too, with their 
 ```bash
 python evaluation/decider_bench.py --model [NAME=]MODEL [--model ...] \
     [--metrics ttft,jevbench,decision-index] \
-    [--lengths 256,1024,4096] [--dataset requests.jsonl] \
+    [--input-length 256,1024,4096] [--dataset requests.jsonl] \
     [--concurrency 1,8,32] [--rps 2,8] [--num-requests 50] [--out runs/NAME]
 python evaluation/decider_bench.py plot runs/a runs/b ...
 ```
@@ -58,7 +58,7 @@ python evaluation/decider_bench.py plot runs/a runs/b ...
   or `sagemaker:ENDPOINT[@REGION]`. `NAME=` names it in tables and figures.
 - `ttft` is time to first token, which is a decider's whole latency because it decodes nothing.
   It is measured for every input and every load, with the decisions per second achieved.
-- Inputs: `--lengths` sends synthetic requests of exact prompt-token counts; `--dataset` sends the
+- Inputs: `--input-length` sends synthetic requests of exact input-token counts; `--dataset` sends the
   user's own requests (one `{"state", "questions"}` object per line). Either or both.
 - Load: `--concurrency N` keeps N requests in flight (a closed loop, which finds the throughput
   ceiling); `--rps R` sends R requests per second at Poisson times (an open loop, which shows latency
@@ -78,9 +78,9 @@ Write `work/plan.md` with the user before running anything. It names:
 1. **The comparison.** What varies (engine, precision, model size, host, packaging) and what is
    held fixed (the model, the inputs, the load, where the client runs). Two systems that differ in
    more than the factor under test do not answer the question.
-2. **Inputs.** `--lengths` when the question is how cost scales with prompt length; `--dataset` when
+2. **Inputs.** `--input-length` when the question is how cost scales with input length; `--dataset` when
    it is how the system behaves on real traffic. The user's own requests beat any synthetic mix.
-   Lengths above the model's window (4,096 tokens for the released models) are skipped.
+   Input lengths above the model's window (4,096 tokens for the released models) are skipped.
 3. **Load.** `--concurrency 1` gives the latency floor. A concurrency sweep (1, 4, 16, 32, 64) finds
    the throughput ceiling. An `--rps` sweep at about 25, 50, 75 and 90% of that ceiling shows latency
    under realistic traffic; get the ceiling from a first run.
@@ -92,7 +92,7 @@ Write `work/plan.md` with the user before running anything. It names:
 
 ## Phase 2. Smoke test
 
-Run every target once with `--lengths 256 --num-requests 5`. Check that each model started, that
+Run every target once with `--input-length 256 --num-requests 5`. Check that each model started, that
 its `host` in `latency.csv` is what you expect, that `tokens_mean` is close to the requested length,
 and that there are no errors. Fix anything odd now; a full run on a broken target wastes hours.
 
@@ -118,10 +118,10 @@ the first full run.
 
 `python evaluation/decider_bench.py plot runs/*` draws the standard set:
 
-- `ttft_vs_length.png`: time to first token against prompt length, one line per model and load.
+- `ttft_vs_input_length.png`: time to first token against input length, one line per model and load.
 - `ttft_vs_throughput.png`: p95 time to first token against decisions per second, one row per input,
   one column per host.
-- `throughput_vs_length.png`: the highest decisions per second measured against prompt length.
+- `throughput_vs_input_length.png`: the highest decisions per second measured against input length.
 - `accuracy.png`: JevBench and the Decision Index.
 
 For anything else, use [`scripts/figures.py`](scripts/figures.py) over `latency.csv` and

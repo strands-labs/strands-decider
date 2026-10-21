@@ -6,9 +6,9 @@ Run it where you want the client to be. It measures whatever --model points at a
   # a local checkpoint, served here with `strands-decider serve`
   python decider_bench.py --model ./checkpoints/my-2b --device cuda
 
-  # a deployed Lambda function, at three lengths and three loads, plus JevBench
+  # a deployed Lambda function, at three input lengths and three loads, plus JevBench
   python decider_bench.py --model lambda:my-decider:live --metrics ttft,jevbench \
-      --lengths 256,1024,4096 --concurrency 1,8,32
+      --input-length 256,1024,4096 --concurrency 1,8,32
 
   # two models side by side, on your own requests, under Poisson traffic
   python decider_bench.py --model base=StrandsAgents/strands-decider-2B-qwen3.5-v1-2610 --model mine=./ckpt \
@@ -31,8 +31,8 @@ What to measure (--metrics, default ttft):
   decision-index  the public Decision Index, scored by its own kit; needs --di-suite (see the kit's README)
 JevBench and the Decision Index always use their own inputs. The input and load flags apply to ttft only.
 
-Inputs for ttft (either or both; each is reported separately; default --lengths 256,1024,4096):
-  --lengths 256,1024     synthetic requests trimmed to exactly that many prompt tokens
+Inputs for ttft (either or both; each is reported separately; default --input-length 256,1024,4096):
+  --input-length 256,1024  synthetic requests trimmed to exactly that many input tokens
   --dataset FILE         your own requests, one JSON object per line: {"state": ..., "questions": {...}}
 
 Load for ttft (either or both; default --concurrency 1, one request at a time):
@@ -49,10 +49,10 @@ checkpoint, and the function's memory or the endpoint's instance type for Lambda
 
 Output (--out, default runs/<time>): latency.csv and accuracy.csv (one row per measurement, for your own
 analysis), summary.json, requests.jsonl (every timed request), and the figures:
-  ttft_vs_length.png       TTFT against prompt length, one line per model and load
-  ttft_vs_throughput.png   p95 TTFT against decisions per second, one panel per input
-  throughput_vs_length.png the highest decisions per second measured against prompt length (per GPU on GPU hosts)
-  accuracy.png             JevBench and the Decision Index
+  ttft_vs_input_length.png       TTFT against input length, one line per model and load
+  ttft_vs_throughput.png         p95 TTFT against decisions per second, one panel per input
+  throughput_vs_input_length.png the highest decisions per second measured against input length (per GPU on GPU hosts)
+  accuracy.png                   JevBench and the Decision Index
 `plot RUN_DIR ...` draws the same figures over several runs, with one column per host.
 """
 
@@ -475,7 +475,7 @@ class Prompts:
         return status, (p.get("usage") or {}).get("input_tokens") or None
 
     def calibrate(self, n):
-        """Find the document length that gives n prompt tokens. The probes also warm the server up at this shape."""
+        """Find the document length that gives n input tokens. The probes also warm the server up at this shape."""
         if self.max_length and n > self.max_length:
             self.chars[n], self.tokens[n] = None, None
             log(f"  {n} tokens: skipped, longer than the model's {self.max_length}-token window")
@@ -486,7 +486,7 @@ class Prompts:
                 raise SystemExit(f"the first request failed with HTTP {status}")
             if self.base is None:
                 log(
-                    "the server reports no usage.input_tokens; lengths are approximate (4 characters a token)"
+                    "the server reports no usage.input_tokens; input lengths are approximate (4 characters a token)"
                 )
         if self.base is None:
             self.chars[n], self.tokens[n] = 4 * n, None
@@ -690,7 +690,7 @@ def open_loop(url, next_body, rate, burstiness, n, seed, max_inflight):
 def ttft(m, prompts, args, sink):
     """TTFT, and the decisions per second achieved, for every input and every load."""
     inputs = []
-    for n in args.lengths:
+    for n in args.input_length:
         prompts.calibrate(n)
         if prompts.chars[n] is None:
             inputs.append((f"{n} tokens", n, None))
@@ -745,7 +745,7 @@ def ttft(m, prompts, args, sink):
                 sink({"model": m.label, "input": name, "load": ld["load"], "i": i, **r})
             st = {
                 "input": name,
-                **({"length": n} if n else {}),
+                **({"input_length": n} if n else {}),
                 **ld,
                 **stats(meas),
                 "decisions_per_s": round(dps, 3) if dps else None,
@@ -1100,7 +1100,7 @@ def write_csv(runs, out):
         "host",
         "gpus",
         "input",
-        "length",
+        "input_length",
         "tokens_mean",
         "load",
         "mode",
@@ -1246,18 +1246,18 @@ def plot(run_dirs, out):
                 (v, p)
                 for v in t.values()
                 for p in v.values()
-                if isinstance(p, dict) and p.get("length") and p.get("p50_ms")
+                if isinstance(p, dict) and p.get("input_length") and p.get("p50_ms")
             ),
-            key=lambda vp: vp[1]["length"],
+            key=lambda vp: vp[1]["input_length"],
         )
 
-    # 1. TTFT against prompt length: one line per model and load
+    # 1. TTFT against input length: one line per model and load
     if any(synthetic(t) for _, t, _ in lat):
         fig, axes = grid(
             1,
-            "Time to first token by prompt length",
+            "Time to first token by input length",
             "TTFT (s), p50 with p10 to p90",
-            "prompt tokens",
+            "input tokens",
         )
         xs, ys = [], []
         dashes = ["-", "--", ":", "-."]
@@ -1267,7 +1267,7 @@ def plot(run_dirs, out):
             for _, p in synthetic(t):
                 by_load.setdefault(p["load"], []).append(p)
             for k, (ld, pts) in enumerate(by_load.items()):
-                x = [p.get("tokens_mean") or p["length"] for p in pts]
+                x = [p.get("tokens_mean") or p["input_length"] for p in pts]
                 ax.plot(
                     x,
                     [p["p50_ms"] / 1e3 for p in pts],
@@ -1287,7 +1287,7 @@ def plot(run_dirs, out):
                 )
                 xs += x
                 ys += [p["p10_ms"] / 1e3 for p in pts] + [p["p90_ms"] / 1e3 for p in pts]
-        finish(fig, axes, "ttft_vs_length.png", xs, ys)
+        finish(fig, axes, "ttft_vs_input_length.png", xs, ys)
 
     # 2. p95 TTFT against decisions per second: one row per input, one line per model and kind of load
     inputs = list(
@@ -1332,14 +1332,14 @@ def plot(run_dirs, out):
             ax.axhline(1, color="grey", lw=0.8, ls=":")
         finish(fig, axes, "ttft_vs_throughput.png", xs, ys)
 
-    # 3. the highest decisions per second measured, against prompt length (per GPU where the GPU count is known)
+    # 3. the highest decisions per second measured, against input length (per GPU where the GPU count is known)
     if any(synthetic(t) for _, t, _ in lat) or any(r.get("error") for _, r, _ in runs):
         per_gpu = all((r.get("model") or {}).get("gpus") for _, r, _ in runs if r.get("ttft"))
         fig, axes = grid(
             1,
-            "Highest throughput measured, by prompt length",
+            "Highest throughput measured, by input length",
             "decisions/s per GPU" if per_gpu else "decisions/s",
-            "prompt tokens",
+            "input tokens",
         )
         xs, ys = [], []
         for lab, r, h in runs:
@@ -1364,21 +1364,26 @@ def plot(run_dirs, out):
                     (
                         p
                         for p in v.values()
-                        if isinstance(p, dict) and p.get("length") and p.get("decisions_per_s")
+                        if isinstance(p, dict)
+                        and p.get("input_length")
+                        and p.get("decisions_per_s")
                     ),
                     key=lambda p: p["decisions_per_s"],
                     default=None,
                 )
                 if best:
                     pts.append(
-                        (best.get("tokens_mean") or best["length"], best["decisions_per_s"] / g)
+                        (
+                            best.get("tokens_mean") or best["input_length"],
+                            best["decisions_per_s"] / g,
+                        )
                     )
             if pts:
                 pts.sort()
                 ax.plot(*zip(*pts, strict=True), marker="o", ms=4, color=color[lab], label=lab)
                 xs += [x for x, _ in pts]
                 ys += [y for _, y in pts]
-        finish(fig, axes, "throughput_vs_length.png", xs, ys)
+        finish(fig, axes, "throughput_vs_input_length.png", xs, ys)
 
     # 4. accuracy
     panels = [
@@ -1462,12 +1467,12 @@ def main():
         metavar="LIST",
         help="ttft, jevbench, decision-index, comma-separated (default ttft)",
     )
-    g = ap.add_argument_group("ttft inputs (either or both; default --lengths 256,1024,4096)")
+    g = ap.add_argument_group("ttft inputs (either or both; default --input-length 256,1024,4096)")
     g.add_argument(
-        "--lengths",
+        "--input-length",
         type=ints,
         metavar="N,N",
-        help="synthetic requests of exactly these prompt-token counts",
+        help="synthetic requests of exactly these input-token counts",
     )
     g.add_argument(
         "--dataset",
@@ -1559,8 +1564,8 @@ def main():
     bad = [x for x in metrics if x not in METRICS]
     if bad:
         ap.error(f"unknown metric {', '.join(bad)}; choose from {', '.join(METRICS)}")
-    if args.lengths is None:
-        args.lengths = [] if args.dataset else [256, 1024, 4096]
+    if args.input_length is None:
+        args.input_length = [] if args.dataset else [256, 1024, 4096]
     if args.concurrency is None:
         args.concurrency = [] if args.rps else [1]
     out = Path(args.out or f"runs/{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}")
@@ -1572,7 +1577,7 @@ def main():
         ap.error("two models have the same name; name them with NAME=")
 
     if "ttft" in metrics:
-        inputs = [f"{n} tokens" for n in args.lengths] + [Path(d).name for d in args.dataset]
+        inputs = [f"{n} tokens" for n in args.input_length] + [Path(d).name for d in args.dataset]
         loads = [f"{c} in flight" for c in args.concurrency] + [f"{r:g} req/s" for r in args.rps]
         log(
             f"plan: {len(models)} model(s) x {len(inputs)} input(s) [{', '.join(inputs)}] x {len(loads)} load(s) "
@@ -1588,7 +1593,7 @@ def main():
     summary = {
         "client": machine(),
         "metrics": metrics,
-        "lengths": args.lengths,
+        "input_length": args.input_length,
         "dataset": args.dataset,
         "concurrency": args.concurrency,
         "rps": args.rps,

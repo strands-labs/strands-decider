@@ -3,7 +3,7 @@
 ## First principles
 
 A decider answers with one prefill: it reads the prompt once and scores the options from the final
-hidden states, decoding nothing. Its work is therefore fixed by the prompt length n:
+hidden states, decoding nothing. Its work is therefore fixed by the input length n:
 
     FLOPs ≈ 2 × (matrix-multiply parameters) × n + (attention term, growing with n²)
 

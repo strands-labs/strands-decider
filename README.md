@@ -399,7 +399,7 @@ Strands Decider on your task.
 
 [`evaluation/decider_bench.py`](evaluation/decider_bench.py) measures a decider wherever it is
 served: a local checkpoint, any server that speaks `POST /v1/systemone`, an AWS Lambda function or
-a SageMaker endpoint. It times the first token at chosen prompt lengths or on your own requests,
+a SageMaker endpoint. It times the first token at chosen input lengths or on your own requests,
 with a fixed number of requests in flight or at a fixed request rate, and runs JevBench and the
 Decision Index through their own scorers. Each run writes CSVs and figures, and
 `decider_bench.py plot` combines runs made on different hosts.

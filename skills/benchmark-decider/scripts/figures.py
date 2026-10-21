@@ -5,10 +5,10 @@
 
     lat = F.load("runs/*")                                 # every row of every run's latency.csv, as dicts
     lat = F.split_name(lat, ["size", "engine"], sep="-")   # factors from model names such as 2b-vllm
-    best = F.max_throughput([r for r in lat if r["length"]])
+    best = F.max_throughput([r for r in lat if r["input_length"]])
     F.facet(best, x="tokens_mean", y="decisions_per_s", row="size", col="host", line="engine",
-            failed=F.failed_cells("runs/*", ["size", "engine"]), title="Highest throughput by prompt length",
-            xlabel="prompt tokens", ylabel="decisions/s", out="throughput_grid.png")
+            failed=F.failed_cells("runs/*", ["size", "engine"]), title="Highest throughput by input length",
+            xlabel="input tokens", ylabel="decisions/s", out="throughput_grid.png")
 
 facet() draws one panel per (row, col) value and one line per `line` value, with shared log axes on 1-2-5 ticks,
 one legend outside the panels, the same color for a line value in every panel, and a "did not start" note in any
