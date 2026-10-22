@@ -17,7 +17,14 @@ from fastapi.responses import JSONResponse
 
 from .infer import EngineConfig, SystemOneEngine, load_mlx
 from .modeling import StrandsDeciderModel
-from .schema import SystemOneRequest, SystemOneResponse
+from .schema import (
+    ChoiceQuestion,
+    NoulQuestion,
+    Question,
+    ScoreQuestion,
+    SystemOneRequest,
+    SystemOneResponse,
+)
 
 _engine: SystemOneEngine | None = None
 _engine_lock = threading.Lock()
@@ -36,6 +43,18 @@ def get_engine() -> SystemOneEngine:
     return _engine
 
 
+def _warmup_engine(engine: SystemOneEngine) -> None:
+    """Exercise text inference with single questions and a shared-state request."""
+    questions: dict[str, Question] = {
+        "noul": NoulQuestion(instructions="Is this a warmup?"),
+        "choice": ChoiceQuestion(instructions="Choose.", criteria={"yes": None, "no": None}),
+        "score": ScoreQuestion(instructions="Rate.", criteria=["low", "high"]),
+    }
+    for name, question in questions.items():
+        engine.evaluate(SystemOneRequest(state="Warmup.", questions={name: question}))
+    engine.evaluate(SystemOneRequest(state="Warmup.", questions=questions))
+
+
 def create_app(
     checkpoint: str,
     *,
@@ -47,6 +66,7 @@ def create_app(
     max_batch: int = 32,
     vision: bool = False,
     max_batch_tokens: int | None = None,
+    warmup: bool | None = None,
 ) -> FastAPI:
     global _engine
 
@@ -68,17 +88,24 @@ def create_app(
         max_batch=max_batch,
         max_batch_tokens=max_batch_tokens,
     )
+    engine: SystemOneEngine
     if vision:
         if device == "mlx":
             raise ValueError("--vision runs on torch devices (cuda, mps, cpu), not mlx")
         from .vision import load_vision_engine
 
-        _engine = load_vision_engine(checkpoint, config, attn_implementation=attn_implementation)
+        engine = load_vision_engine(checkpoint, config, attn_implementation=attn_implementation)
     elif device == "mlx":
-        _engine = load_mlx(checkpoint, config)
+        engine = load_mlx(checkpoint, config)
     else:
         model = StrandsDeciderModel.load(checkpoint, attn_implementation=attn_implementation)
-        _engine = SystemOneEngine(model, config)
+        engine = SystemOneEngine(model, config)
+
+    enabled = warmup if warmup is not None else device.split(":", 1)[0] == "cuda"
+    if enabled:
+        with _engine_lock:
+            _warmup_engine(engine)
+    _engine = engine
 
     # SageMaker and AgentCore Runtime call /ping and /invocations; each is the same
     # handler as the path above it.
@@ -133,6 +160,7 @@ def serve(
     max_batch: int = 32,
     vision: bool = False,
     max_batch_tokens: int | None = None,
+    warmup: bool | None = None,
 ) -> None:
     import uvicorn
 
@@ -145,6 +173,7 @@ def serve(
         max_batch=max_batch,
         vision=vision,
         max_batch_tokens=max_batch_tokens,
+        warmup=warmup,
     )
     # Single worker: the model owns the GPU, and forking more would just duplicate it.
     uvicorn.run(app, host=host, port=port, workers=1)
