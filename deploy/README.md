@@ -15,3 +15,9 @@ A real-time endpoint in your AWS account, on a GPU or CPU instance. One CDK stac
 to a private S3 bucket, builds the image in AWS CodeBuild and creates the endpoint; `cdk destroy`
 removes it. See
 [sagemaker/README.md](sagemaker/README.md).
+
+## Amazon EKS
+
+An EKS Auto Mode cluster in your AWS account, on Graviton CPU nodes, with an autoscaler that adds
+pods and nodes under load. One CDK stack creates the cluster, copies the model to S3 and builds the
+image in AWS CodeBuild; `cdk destroy` removes it. See [eks/README.md](eks/README.md).

@@ -23,7 +23,7 @@ CPU), so they report the numbers serving returns. `--device mlx` is refused.
 - [Serving on a Mac](#serving-on-a-mac): MPS, and the one kernel that had to be replaced.
 - [Serving on a Mac with MLX](#serving-on-a-mac-with-mlx): `--device mlx`, measured against MPS.
 - [`../deploy/`](../deploy/README.md): hosting the server, for example on an Amazon SageMaker
-  real-time endpoint.
+  real-time endpoint or an Amazon EKS cluster.
 - [`../examples/strands/`](../examples/strands/README.md): an agent built with the Strands
   Agents SDK that uses the server, with its client in `_client.py`.
 - [`../evaluation/results.md`](../evaluation/results.md): measured latency and accuracy on an
