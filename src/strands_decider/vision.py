@@ -318,21 +318,6 @@ class VisionDeciderModel(StrandsDeciderModel):
         finally:
             self._mm = (None, None)
 
-    def frozen_slot_log_probs(
-        self,
-        input_ids: torch.Tensor,
-        attention_mask: torch.Tensor,
-        n_slots: torch.Tensor,
-        pixel_values: torch.Tensor | None = None,
-        image_grid_thw: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """The untouched torso's option-number reading, with the image in the prompt."""
-        self._mm = (pixel_values, image_grid_thw)
-        try:
-            return super().frozen_slot_log_probs(input_ids, attention_mask, n_slots)
-        finally:
-            self._mm = (None, None)
-
     @classmethod
     def load(
         cls,
@@ -359,8 +344,6 @@ class VisionDeciderModel(StrandsDeciderModel):
         path = checkpoint_dir(path)
         config = StrandsDeciderConfig.from_json(config_path(path))
         config.base_revision = base_revision(path, config)
-        if config.head_type != "pointer":
-            raise ValueError("image input needs a pointer-head checkpoint")
         lora_file = os.path.join(path, "lora", "adapter_model.safetensors")
         if config.use_lora and not os.path.exists(lora_file):
             raise FileNotFoundError(

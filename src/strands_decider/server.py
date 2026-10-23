@@ -92,7 +92,6 @@ def create_app(
             "model": eng.cfg.model_name,
             "checkpoint": checkpoint,
             "base_model": eng.model.config.base_model,
-            "num_slots": eng.model.config.num_slots,
             "max_length": eng.model.config.max_length,
             "temperature": eng.model.config.temperature,
             "device": eng.cfg.device,
@@ -112,7 +111,7 @@ def create_app(
             with guard:
                 response = eng.evaluate(request)
         except ValueError as exc:
-            # Option count over num_slots, malformed permutation, etc. -- caller error.
+            # Malformed permutation, etc. -- caller error.
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         elapsed_ms = (time.perf_counter() - started) * 1000
         payload = response.model_dump()

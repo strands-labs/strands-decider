@@ -98,9 +98,7 @@ def _tiny_checkpoint(tmp_path):
             layer_types=["linear_attention"] * 3 + ["full_attention"],
         )
     ).save_pretrained(base)
-    cfg = StrandsDeciderConfig(
-        base_model=str(base), head_type="pointer", pointer_dim=8, torch_dtype="float32", lora_r=2
-    )
+    cfg = StrandsDeciderConfig(base_model=str(base), pointer_dim=8, torch_dtype="float32", lora_r=2)
     torso = Qwen3_5ForCausalLM.from_pretrained(base).model
     model = StrandsDeciderModel(cfg, torso, tok)
     model.attach_lora()

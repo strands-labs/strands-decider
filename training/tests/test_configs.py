@@ -78,3 +78,23 @@ def test_v19_saved_configs_load():
         "gradient_checkpointing",
         "precompute_frozen_kl",
     }
+
+
+def test_from_yaml_rejects_a_slot_head_config(tmp_path):
+    """A slot-era retrain config fails cleanly, not silently as a pointer run."""
+    import yaml
+
+    p = tmp_path / "slot.yaml"
+    p.write_text(yaml.safe_dump({"head_type": "slot"}))
+    with pytest.raises(ValueError, match="pointer-head"):
+        TrainConfig.from_yaml(str(p))
+
+
+def test_from_yaml_raises_on_an_unknown_key(tmp_path):
+    """A typo stops the run before training; only the retired slot-era keys are silently dropped."""
+    import yaml
+
+    p = tmp_path / "typo.yaml"
+    p.write_text(yaml.safe_dump({"kl_frozn_weight": 0.3}))
+    with pytest.raises(ValueError, match="unknown config key"):
+        TrainConfig.from_yaml(str(p))

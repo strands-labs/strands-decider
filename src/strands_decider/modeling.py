@@ -1,12 +1,11 @@
-"""The model: a pretrained LLM torso with its LM head removed, plus a readout head.
+"""The model: a pretrained LLM torso with its LM head removed, plus a pointer readout.
 
-    input -> [LLM torso] -> hidden states -> [head] -> one logit per option
+    input -> [LLM torso] -> hidden states -> [PointerHead] -> one logit per option
 
-Two heads exist. The pointer head, the v19 readout, scores option k from the hidden
-state of option k's own last token, so the option count is unbounded; see PointerHead.
-The slot head, the v1-v6 readout, maps the last-token state to K fixed slots. In both
-cases the logits past N, the number of options this question declared, are masked
-before the softmax, and one mechanism serves all three primitives; see schema.py.
+The pointer head, the v19 readout, scores option k from the hidden state of option k's
+own last token, so the option count is unbounded; see PointerHead. Logits past N, the
+number of options this question declared, are masked before the softmax, and one
+mechanism serves all three primitives; see schema.py.
 
 Why last-token pooling on a causal model rather than a BERT-style [CLS]: the torso
 is a decoder, so only the final position has attended to the whole prompt. Keeping
@@ -16,7 +15,6 @@ which matters a great deal when the adaptation is a rank-16 LoRA adapter.
 
 from __future__ import annotations
 
-import contextlib
 import json
 import os
 from collections.abc import Callable
@@ -28,12 +26,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from huggingface_hub import snapshot_download
 from transformers import AutoConfig, AutoModel, AutoTokenizer
-
-# Slots the head can address. This must match the largest option count the corpus
-# actually contains: slots beyond that never receive a gradient and would ship at
-# their random initialisation. `python -m training.data build --max-options 24` is the matching
-# default. Questions with more options are rejected, not silently truncated.
-DEFAULT_NUM_SLOTS = 24
 
 # Large negative rather than -inf: keeps softmax finite under autocast/bf16, where
 # -inf can produce NaNs if an entire row is masked by a malformed batch.
@@ -68,27 +60,17 @@ class StrandsDeciderConfig:
     # Hub revision of base_model the adapter was trained on. None loads the repo's default branch;
     # `load` falls back to the checkpoint's provenance.json.
     base_revision: str | None = None
-    num_slots: int = DEFAULT_NUM_SLOTS
-    # 0 = single linear projection. >0 inserts one GELU hidden layer of this width.
-    head_hidden: int = 0
     head_dropout: float = 0.0
     # 3072 covers every JevBench long_policy item whole. Measured: 1024 -> 3072 moved
     # long_policy 0.263 -> 0.368 and changed nothing else; 3072 -> 4096 changed nothing
     # at all, so this is where the context curve goes flat.
     max_length: int = 3072
     torch_dtype: str = "bfloat16"
-    # "random" (default) or "lm_head": seed slot k from the output-embedding row for
-    # the token "k+1", the digit the LM would emit after `<answer>` if it were asked
-    # for the option number. Only slots 0-8 have a single-token form in this
-    # tokeniser, so higher slots keep the default init.
-    head_init: str = "random"
-    # >0 adds KL(frozen || student) to the loss, pulling the trained head toward the
-    # untouched torso's own reading of the option-number tokens.
-    kl_frozen_weight: float = 0.0
-    # "slot" = Linear(hidden, num_slots), the v1-v6 readout. "pointer" scores each
-    # option from its own hidden state; see PointerHead. Defaults to "slot" so every
-    # existing checkpoint keeps loading unchanged.
-    head_type: str = "slot"
+    # Not read by this version (the pointer head is the only readout); kept on the config
+    # so every export writes `head_type: "pointer"` into its JSON. Older strands-decider
+    # versions default a missing head_type to "slot" and crash loading a pointer export,
+    # and out-of-tree readers may parse this field directly.
+    head_type: str = "pointer"
     pointer_dim: int = 256
     # Populated after `python -m training.evaluate calibrate` runs; 1.0 is a no-op. `temperature` is the
     # fallback; `temperature_by_kind` overrides it per primitive where fitted.
@@ -138,6 +120,17 @@ class StrandsDeciderConfig:
             raise ValueError(
                 f"{path}: full_weight_targets is set; this version loads LoRA checkpoints only"
             )
+        # Released checkpoints carry head_type="pointer" explicitly. A slot-era checkpoint
+        # would set it to "slot": fail cleanly rather than silently loading as pointer.
+        head_type = d.get("head_type")
+        if head_type is not None and head_type != "pointer":
+            raise ValueError(
+                f"{path}: head_type={head_type!r}; this version loads pointer-head checkpoints only"
+            )
+        # Drop any key the current dataclass does not know (e.g. legacy head_type="pointer",
+        # num_slots, head_hidden, head_init, kl_frozen_weight on a released config).
+        allowed = set(cls.__dataclass_fields__)
+        d = {k: v for k, v in d.items() if k in allowed}
         return cls(**d)
 
 
@@ -208,31 +201,6 @@ def ensure_bos(tok: Any) -> Any:
     return tok
 
 
-class SlotHead(nn.Module):
-    """Projects a pooled hidden state to K slot logits.
-
-    LayerNorm first: the torso's final hidden states are not normalised on most
-    decoder architectures, and their scale drifts with sequence length, which makes
-    an unnormalised linear head slow to converge.
-    """
-
-    def __init__(self, hidden_size: int, num_slots: int, hidden: int = 0, dropout: float = 0.0):
-        super().__init__()
-        self.norm = nn.LayerNorm(hidden_size)
-        self.dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
-        if hidden > 0:
-            self.proj: nn.Module = nn.Sequential(
-                nn.Linear(hidden_size, hidden),
-                nn.GELU(),
-                nn.Linear(hidden, num_slots),
-            )
-        else:
-            self.proj = nn.Linear(hidden_size, num_slots)
-
-    def forward(self, pooled: torch.Tensor) -> torch.Tensor:
-        return self.proj(self.dropout(self.norm(pooled)))
-
-
 class PointerHead(nn.Module):
     """Scores option k from option k's own hidden state, not from a fixed slot.
 
@@ -241,8 +209,8 @@ class PointerHead(nn.Module):
     causal attention. So an option's logit depends on what it *says*, and there is no
     per-slot parameter for a positional bias to live in.
 
-    Three consequences. The option count is unbounded rather than capped at
-    `num_slots`. Genericity is structural instead of something option shuffling has to
+    Three consequences. The option count is unbounded rather than capped at a fixed
+    slot count. Genericity is structural instead of something option shuffling has to
     beat into a positional head. And the parameter count does not grow with K.
 
     Measured on frozen v6 features, against the slot head refitted on the same rows:
@@ -271,24 +239,12 @@ class PointerHead(nn.Module):
 
 
 def build_head(config: StrandsDeciderConfig, hidden_size: int) -> nn.Module:
-    """The readout named by `config.head_type`, in fp32 either way.
+    """The pointer readout, in fp32.
 
     The head trains in fp32 even when the torso is bf16: it is tiny, and a
     low-precision classifier is a needless source of calibration error.
     """
-    if config.head_type == "pointer":
-        head: nn.Module = PointerHead(
-            hidden_size, dim=config.pointer_dim, dropout=config.head_dropout
-        )
-    elif config.head_type == "slot":
-        head = SlotHead(
-            hidden_size,
-            config.num_slots,
-            hidden=config.head_hidden,
-            dropout=config.head_dropout,
-        )
-    else:
-        raise ValueError(f"unknown head_type {config.head_type!r}")
+    head = PointerHead(hidden_size, dim=config.pointer_dim, dropout=config.head_dropout)
     return head.to(torch.float32)
 
 
@@ -351,7 +307,7 @@ def apply_temperature(logits: torch.Tensor, temperature: Any) -> torch.Tensor:
 
 
 class StrandsDeciderModel(nn.Module):
-    """LLM torso + slot head. The LM output head is never loaded."""
+    """LLM torso + pointer head. The LM output head is never loaded."""
 
     def __init__(self, config: StrandsDeciderConfig, torso: nn.Module, tokenizer: Any):
         super().__init__()
@@ -458,7 +414,7 @@ class StrandsDeciderModel(nn.Module):
             lora_dropout=self.config.lora_dropout,
             target_modules=self.config.lora_targets,
             bias="none",
-            # No PEFT task head -- our SlotHead is the task head and is saved separately.
+            # No PEFT task head -- our pointer head is the task head and is saved separately.
             task_type="FEATURE_EXTRACTION",
         )
         self.torso = get_peft_model(self.torso, lora_cfg)
@@ -487,94 +443,6 @@ class StrandsDeciderModel(nn.Module):
         )
         return out.last_hidden_state
 
-    # ---- pretrained-readout hooks ------------------------------------------
-    def slot_token_ids(self) -> dict[int, int]:
-        """slot index -> token id of the option number the prompt shows for it.
-
-        `_option_block` numbers options from 1, and the prompt ends at `<answer>`, so
-        the natural continuation for slot k is the token "k+1". Only 1-9 are single
-        tokens in the Qwen vocabulary; slots past that have no usable row and are
-        omitted, which covers 78.6% of the training corpus and almost every real
-        request (JevBench families are mostly 2-5 options).
-        """
-        out: dict[int, int] = {}
-        for k in range(self.config.num_slots):
-            ids = self.tokenizer.encode(str(k + 1), add_special_tokens=False)
-            if len(ids) == 1:
-                out[k] = ids[0]
-        return out
-
-    def _output_embedding(self) -> torch.Tensor:
-        """The LM output matrix. Qwen3 ties embeddings, so the input table *is* it.
-
-        `AutoModel` never loads `lm_head`, so without the tie there would be nothing
-        to read; assert rather than silently seeding from an unrelated matrix.
-        """
-        base = self.torso
-        base = getattr(base, "base_model", base)
-        base = getattr(base, "model", base)
-        emb = base.get_input_embeddings() if hasattr(base, "get_input_embeddings") else None
-        if emb is None:
-            raise RuntimeError("torso exposes no input embedding to use as an LM head")
-        cfg = getattr(self.torso, "config", None)
-        if cfg is not None and not getattr(cfg, "tie_word_embeddings", False):
-            raise RuntimeError(
-                "base model does not tie embeddings, so the input table is not the LM head"
-            )
-        return emb.weight
-
-    def init_head_from_lm_head(self) -> int:
-        """Seed the slot head with the LM's own option-number readout directions."""
-        if self.config.head_hidden:
-            raise ValueError("lm_head init applies to the linear head only")
-        table = self._output_embedding()
-        slots = self.slot_token_ids()
-        proj = self.head.proj
-        with torch.no_grad():
-            rows = table[list(slots.values())].to(torch.float32)
-            # Match the scale the randomly-initialised head was given, so the change
-            # under test is the *direction* carried by the LM head, not a larger step.
-            rows = rows * (proj.weight.std() / rows.std().clamp_min(1e-8))
-            for position, slot in enumerate(slots):
-                proj.weight[slot].copy_(rows[position].to(proj.weight.device))
-            if proj.bias is not None:
-                proj.bias[list(slots)] = 0.0
-        return len(slots)
-
-    def frozen_slot_log_probs(
-        self, input_ids: torch.Tensor, attention_mask: torch.Tensor, n_slots: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """The untouched torso's own option-number distribution, and who it covers.
-
-        Adapters are disabled rather than a second copy loaded, so this costs one
-        extra forward and no extra weights. Rows needing a slot without a
-        single-token number are excluded and reported in the mask.
-        """
-        slots = self.slot_token_ids()
-        usable = max(slots) + 1 if slots else 0
-        eligible = n_slots <= usable
-        if not bool(eligible.any()):
-            return torch.zeros(0, device=input_ids.device), eligible
-        table = self._output_embedding()
-        with torch.no_grad():
-            disable = getattr(self.torso, "disable_adapter", None)
-            ctx = disable() if callable(disable) else contextlib.nullcontext()
-            with ctx:
-                hidden = self.encode(input_ids, attention_mask)
-            pooled = pool_last_token(hidden, attention_mask).to(torch.float32)
-            rows = table[[slots[k] for k in sorted(slots)]].to(torch.float32)
-            logits = pooled @ rows.t()
-            # The LM's own final transform, where it has one: Gemma soft-caps its logits
-            # at 30. Without it the read distribution is not the model's (options 1-3:
-            # 0.37 / 0.50 / 0.14 raw against the model's 0.36 / 0.40 / 0.24).
-            cap = getattr(getattr(self.torso, "config", None), "final_logit_softcapping", None)
-            if cap:
-                logits = cap * torch.tanh(logits / cap)
-            pad = self.config.num_slots - logits.size(-1)
-            if pad > 0:
-                logits = F.pad(logits, (0, pad), value=MASK_VALUE)
-            return masked_log_softmax(logits, n_slots), eligible
-
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -587,18 +455,15 @@ class StrandsDeciderModel(nn.Module):
         temperature: Any | None = None,
         opt_idx: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
+        if opt_idx is None:
+            raise ValueError("pointer head needs opt_idx (option token positions)")
         hidden = self.encode(input_ids, attention_mask, past_key_values=past_key_values)
         pooled = pool_last_token(hidden, attention_mask).to(torch.float32)
-        if self.config.head_type == "pointer":
-            if opt_idx is None:
-                raise ValueError("pointer head needs opt_idx (option token positions)")
-            # Indices are relative to what was actually forwarded, so with a shared
-            # prefix cache the caller passes suffix-relative positions and this works
-            # unchanged -- `hidden` is the suffix in that case.
-            options = gather_options(hidden, opt_idx).to(torch.float32)
-            logits = self.head(pooled, options)
-        else:
-            logits = self.head(pooled)
+        # Indices are relative to what was actually forwarded, so with a shared
+        # prefix cache the caller passes suffix-relative positions and this works
+        # unchanged -- `hidden` is the suffix in that case.
+        options = gather_options(hidden, opt_idx).to(torch.float32)
+        logits = self.head(pooled, options)
 
         logits = apply_temperature(
             logits, self.config.temperature if temperature is None else temperature
@@ -628,10 +493,13 @@ class StrandsDeciderModel(nn.Module):
         return out
 
     def save_pretrained(self, path: str) -> None:
+        from safetensors.torch import save_file
+
         os.makedirs(path, exist_ok=True)
         with open(os.path.join(path, CONFIG_NAME), "w", encoding="utf-8") as fh:
             fh.write(self.config.to_json())
-        torch.save(self.head.state_dict(), os.path.join(path, "slot_head.pt"))
+        state = {k: v.detach().cpu().contiguous() for k, v in self.head.state_dict().items()}
+        save_file(state, os.path.join(path, "head.safetensors"), metadata={"format": "pt"})
         if self.config.use_lora:
             self.torso.save_pretrained(os.path.join(path, "lora"))
         self.tokenizer.save_pretrained(path)
@@ -737,18 +605,27 @@ def checkpoint_dir(path: str, revision: str | None = None) -> str:
 
 
 def load_head_state(path: str) -> dict[str, torch.Tensor]:
-    """The head weights: `head.safetensors` (a Hugging Face export) or the `slot_head.pt`
-    that `save_pretrained` writes. Both hold the same state dict. This function refuses a
-    directory with both files, because nothing tells which one is correct."""
+    """The head weights: `head.safetensors`, written by `save_pretrained` and by the
+    Hugging Face export. For local checkpoints trained before the slot-head removal
+    `slot_head.pt` is read as a fallback (pointer heads were pickled under that filename
+    too). Raises FileNotFoundError if neither is present."""
     st = os.path.join(path, "head.safetensors")
-    pt = os.path.join(path, "slot_head.pt")
-    if os.path.exists(st) and os.path.exists(pt):
-        raise ValueError(f"{path}: holds both head.safetensors and slot_head.pt. Keep only one.")
     if os.path.exists(st):
         from safetensors.torch import load_file
 
         loaded: dict[str, torch.Tensor] = load_file(st)
         return loaded
-    # weights_only=True is the default from torch 2.6. It is passed explicitly anyway.
-    state: dict[str, torch.Tensor] = torch.load(pt, map_location="cpu", weights_only=True)
-    return state
+    pt = os.path.join(path, "slot_head.pt")
+    if os.path.exists(pt):
+        import warnings
+
+        warnings.warn(
+            f"{pt}: loading from the pre-pointer pickle filename. Re-save with "
+            "`model.save_pretrained(path)` to write head.safetensors.",
+            UserWarning,
+            stacklevel=2,
+        )
+        # weights_only=True refuses pickle code; it has been the torch default since 2.6.
+        state: dict[str, torch.Tensor] = torch.load(pt, map_location="cpu", weights_only=True)
+        return state
+    raise FileNotFoundError(f"{path}: neither head.safetensors nor slot_head.pt is present")

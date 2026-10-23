@@ -109,9 +109,7 @@ def _tiny_checkpoint(tmp_path):
             head_dim=8,
         )
     ).save_pretrained(base)
-    cfg = StrandsDeciderConfig(
-        base_model=str(base), head_type="pointer", pointer_dim=8, torch_dtype="float32", lora_r=2
-    )
+    cfg = StrandsDeciderConfig(base_model=str(base), pointer_dim=8, torch_dtype="float32", lora_r=2)
     model = StrandsDeciderModel(cfg, Qwen3Model.from_pretrained(base), tok)
     model.attach_lora()
     model.save_pretrained(str(tmp_path / "ckpt"))

@@ -108,13 +108,10 @@ def test_gemma4_trains_and_reloads(tmp_path, layout):
         train_files=[str(tmp_path / "train.jsonl")],
         val_files=[str(tmp_path / "val.jsonl")],
         base_model=str(base),
-        head_type="pointer",
         pointer_dim=16,
         lora_targets=GEMMA_TARGETS,
         force_bos=True,
         host_embeddings=True,
-        kl_frozen_weight=0.3,
-        precompute_frozen_kl=True,
         head_dropout=0.0,
         max_length=2048,
         micro_batch_size=4,
@@ -138,9 +135,7 @@ def test_gemma4_trains_and_reloads(tmp_path, layout):
     table = getattr(torso, "embed_tokens_per_layer", None)
     assert (table is not None) == (layout == "e2b")
     assert table is None or isinstance(table, HostEmbedding)
-    b = T.SystemOneCollator(model.tokenizer, T.CollatorConfig(head_type="pointer"), train=False)(
-        rows[:3]
-    )
+    b = T.SystemOneCollator(model.tokenizer, T.CollatorConfig(), train=False)(rows[:3])
     with torch.no_grad():
         lp = model(
             input_ids=b["input_ids"],
@@ -185,7 +180,6 @@ def test_a_token_budget_per_forward_keeps_the_answers(tmp_path):
             train_files=[str(tmp_path / "train.jsonl")],
             val_files=[str(tmp_path / "val.jsonl")],
             base_model=str(base),
-            head_type="pointer",
             pointer_dim=16,
             lora_targets=GEMMA_TARGETS,
             force_bos=True,

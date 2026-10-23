@@ -24,10 +24,6 @@ from .format import Example
 @dataclass
 class CollatorConfig:
     max_length: int = 3072
-    num_slots: int = 24
-    # "pointer" makes the collator emit option token positions and size the target
-    # distribution to the batch's widest option count instead of num_slots.
-    head_type: str = "slot"
     shuffle_options: bool = True
     # Score levels are ordered, so they are never permuted -- but reversing the whole
     # rubric (and the label with it) is meaning-preserving and doubles the orderings seen.
@@ -140,7 +136,7 @@ class SystemOneCollator:
         if ex.kind != "score" or self.cfg.ordinal_smoothing <= 0:
             return None
 
-        dist = torch.zeros(self.cfg.num_slots, dtype=torch.float32)
+        dist = torch.zeros(n_options, dtype=torch.float32)
         eps = self.cfg.ordinal_smoothing
         gold_level = ex.label
         neighbours = [lv for lv in (gold_level - 1, gold_level + 1) if 0 <= lv < n_options]
@@ -168,15 +164,8 @@ class SystemOneCollator:
         weights: list[float] = []
         teachers: list[list[float] | None] = []
 
-        pointer = self.cfg.head_type == "pointer"
         spans: list[Any] = []
         for ex in batch:
-            # A pointer head has no fixed slot count, so only the slot head caps options.
-            if not pointer and ex.n_options > self.cfg.num_slots:
-                raise ValueError(
-                    f"example from task {ex.task!r} has {ex.n_options} options but the "
-                    f"model has only {self.cfg.num_slots} slots"
-                )
             order = self._option_order(ex)
             prompt, rq = build_prompt(
                 ex.state,
@@ -204,7 +193,7 @@ class SystemOneCollator:
             # Right padding: pool_last_token finds the final real token by mask length,
             # and the shared-prefix cache in infer.py assumes the prompt starts at 0.
             padding_side="right",
-            return_offsets_mapping=pointer,
+            return_offsets_mapping=True,
         )
 
         out: dict[str, torch.Tensor] = {
@@ -214,28 +203,22 @@ class SystemOneCollator:
             "labels": torch.tensor(labels, dtype=torch.long),
             "weights": torch.tensor(weights, dtype=torch.float32),
         }
-        width = self.cfg.num_slots
-        if pointer:
-            offs = enc["offset_mapping"].tolist()
-            per = [self.option_token_index(offs[i], sp, base) for i, (base, sp) in enumerate(spans)]
-            width = max(len(p) for p in per)
-            out["opt_idx"] = torch.tensor(
-                [p + [-1] * (width - len(p)) for p in per], dtype=torch.long
-            )
+        offs = enc["offset_mapping"].tolist()
+        per = [self.option_token_index(offs[i], sp, base) for i, (base, sp) in enumerate(spans)]
+        width = max(len(p) for p in per)
+        out["opt_idx"] = torch.tensor([p + [-1] * (width - len(p)) for p in per], dtype=torch.long)
         if any(d is not None for d in dists):
-            stacked = torch.stack(
-                [
-                    d
-                    if d is not None
-                    else torch.nn.functional.one_hot(
-                        torch.tensor(lab), num_classes=self.cfg.num_slots
-                    ).float()
-                    for d, lab in zip(dists, labels, strict=True)
-                ]
-            )
-            # A pointer head emits one logit per option present, so the target must be
-            # cut to the batch's widest option count rather than the slot count.
-            out["label_dist"] = stacked[:, :width] if pointer else stacked
+            # The pointer head emits one logit per option present, so each target is
+            # padded to the batch's widest option count rather than to a fixed slot count.
+            padded = []
+            for d, lab in zip(dists, labels, strict=True):
+                if d is None:
+                    row = torch.nn.functional.one_hot(torch.tensor(lab), num_classes=width).float()
+                else:
+                    row = torch.zeros(width, dtype=torch.float32)
+                    row[: d.numel()] = d
+                padded.append(row)
+            out["label_dist"] = torch.stack(padded)
         if any(t is not None for t in teachers):
             tt = torch.zeros((len(batch), width), dtype=torch.float32)
             for i, t in enumerate(teachers):

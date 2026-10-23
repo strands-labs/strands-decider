@@ -94,7 +94,7 @@ def _tokenizer():
     )
 
 
-def _checkpoint(tmp_path, head_type, torch_dtype="float32"):
+def _checkpoint(tmp_path, torch_dtype="float32"):
     tok = _tokenizer()
     torch.manual_seed(0)
     base_cfg = transformers.Qwen3_5TextConfig(
@@ -116,7 +116,6 @@ def _checkpoint(tmp_path, head_type, torch_dtype="float32"):
     transformers.Qwen3_5ForCausalLM(base_cfg).save_pretrained(base)
     cfg = StrandsDeciderConfig(
         base_model=str(base),
-        head_type=head_type,
         pointer_dim=16,
         max_length=512,
         torch_dtype=torch_dtype,
@@ -146,9 +145,9 @@ def _probabilities(response):
     return out
 
 
-@pytest.fixture(scope="module", params=["pointer", "slot"])
-def engines(request, tmp_path_factory):
-    path = _checkpoint(tmp_path_factory.mktemp(request.param), request.param)
+@pytest.fixture(scope="module")
+def engines(tmp_path_factory):
+    path = _checkpoint(tmp_path_factory.mktemp("pointer"))
     return load_engine(str(path), device="cpu"), load_engine(str(path), device="mlx"), path
 
 
@@ -272,7 +271,7 @@ def test_an_adapter_the_merge_cannot_represent_is_refused(tmp_path, tensors, con
 )  # PEFT, saving the fixture
 def test_a_checkpoint_with_an_embedding_lora_does_not_load_on_mlx(tmp_path, monkeypatch):
     monkeypatch.setattr(sys.modules[__name__], "LORA_TARGETS", [*LORA_TARGETS, "embed_tokens"])
-    path = _checkpoint(tmp_path, "pointer")
+    path = _checkpoint(tmp_path)
     with pytest.raises(ValueError, match="lora_embedding"):
         load_engine(str(path), device="mlx")
 
@@ -280,9 +279,7 @@ def test_a_checkpoint_with_an_embedding_lora_does_not_load_on_mlx(tmp_path, monk
 def test_a_bf16_checkpoint_answers_from_another_thread(tmp_path):
     # The server evaluates on a thread pool. The base is fp32 here, so loading casts the torso
     # to bf16, and a cast left lazy belongs to the loading thread's stream.
-    engine = load_engine(
-        str(_checkpoint(tmp_path, "pointer", torch_dtype="bfloat16")), device="mlx"
-    )
+    engine = load_engine(str(_checkpoint(tmp_path, torch_dtype="bfloat16")), device="mlx")
     with ThreadPoolExecutor(1) as pool:
         response = pool.submit(engine.evaluate, REQUESTS[1]).result()
     assert set(response.answers) == set(QUESTIONS)
@@ -291,7 +288,7 @@ def test_a_bf16_checkpoint_answers_from_another_thread(tmp_path):
 def test_mlx_loads_the_base_at_the_revision_in_provenance(tmp_path, monkeypatch):
     import strands_decider.mlx_engine as mlx_engine
 
-    path = _checkpoint(tmp_path, "pointer")
+    path = _checkpoint(tmp_path)
     base = str(tmp_path / "base")
     provenance = {"base_model": base, "base_model_revision": "abc123"}
     (path / "provenance.json").write_text(json.dumps(provenance))

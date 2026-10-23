@@ -137,11 +137,7 @@ def collect_logits(
     model = SystemOneEngine(model, EngineConfig(device=device)).model
     coll = SystemOneCollator(
         model.tokenizer,
-        CollatorConfig(
-            max_length=max_length,
-            num_slots=model.config.num_slots,
-            head_type=model.config.head_type,
-        ),
+        CollatorConfig(max_length=max_length),
         train=False,  # no option shuffling: evaluation must be deterministic
     )
     loader = DataLoader(

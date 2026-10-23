@@ -57,12 +57,7 @@ def engine():
         )
     )
     cfg = StrandsDeciderConfig(
-        base_model="tiny",
-        head_type="pointer",
-        pointer_dim=16,
-        use_lora=False,
-        torch_dtype="float32",
-        max_length=512,
+        base_model="tiny", pointer_dim=16, use_lora=False, torch_dtype="float32", max_length=512
     )
     model = StrandsDeciderModel(cfg, torso, tok)
     return SystemOneEngine(model, EngineConfig(device="cpu"))

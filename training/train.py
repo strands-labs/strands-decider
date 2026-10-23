@@ -1,11 +1,10 @@
-"""Training the readout head (slot or pointer; see modeling.py) and a LoRA adapter on the torso.
+"""Training the pointer head (see modeling.py) and a LoRA adapter on the torso.
 
-The objective is deliberately plain -- cross-entropy over the masked slots, plus
-optional teacher and frozen-KL terms (the reference recipe uses both) -- because the
-interesting work is in the *distribution* the examples are drawn from, not the loss.
-Each step shows the model a different task, a different number of options, and a
-different option ordering. What has to be learned to fit that is precisely the
-behaviour we want at serving time.
+The objective is deliberately plain -- cross-entropy over the masked slots, plus an
+optional teacher term -- because the interesting work is in the *distribution* the
+examples are drawn from, not the loss. Each step shows the model a different task, a
+different number of options, and a different option ordering. What has to be learned
+to fit that is precisely the behaviour we want at serving time.
 
 The TrainConfig defaults are sized for a single 24 GB card: a Qwen3-1.7B-Base torso in
 bf16, LoRA rank 16, gradient checkpointing on, micro-batch 8 at 3072 tokens. The
@@ -25,7 +24,6 @@ from typing import Any
 
 import torch
 import typer
-from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import DataLoader, Dataset
 
 from strands_decider.modeling import (
@@ -54,8 +52,6 @@ class TrainConfig:
 
     # model
     base_model: str = "Qwen/Qwen3-1.7B-Base"
-    num_slots: int = 24
-    head_hidden: int = 0
     head_dropout: float = 0.05
     max_length: int = 3072
     use_lora: bool = True
@@ -72,34 +68,34 @@ class TrainConfig:
     # (modeling.HostEmbedding). For one GPU: under torchrun every rank would hold a copy.
     host_embeddings: bool = False
     freeze_torso: bool = False
-    # "lm_head" seeds the slot head from the LM's own option-number readout rather
-    # than at random. Measured teacher quality for that readout on JevBench is
-    # 0.550 overall but uneven -- 0.474 long_policy against the trained model's
-    # 0.368, 0.167 ordinal against 0.833 -- so it is a starting point, not a target.
-    head_type: str = "slot"
     pointer_dim: int = 256
-    head_init: str = "random"
-    # >0 adds KL(frozen || student) so training cannot drift away from that readout.
-    kl_frozen_weight: float = 0.0
-    # A trained checkpoint whose option distribution (temperature 1, no calibration) is the
-    # frozen-KL reference in place of the untouched torso's option-number readout. The same
-    # rows are eligible (at most as many options as the readout covers). It may have
-    # another tokenizer than the student (`_frozen_reference`). Needs precompute_frozen_kl:
-    # the reference is computed once, before step 1. None: the untouched torso, as before.
-    kl_frozen_reference: str | None = None
-    # Rows trained ONLY by that KL term: no label loss, never in the validation split.
-    # For prompts with no gold answer -- e.g. changed questions, where the frozen
-    # torso's own reading is the target (data/question_transforms.py). Each needs <= 9
-    # options, since the frozen readout reads single-token option numbers.
-    kl_only_files: list[str] = field(default_factory=list)
-    # A KL-only row's KL weight. The label loss is weighted 1 per row, so 1.0 gives a
-    # KL-only row the same total weight as a labelled one.
-    kl_only_weight: float = 1.0
     # A frozen teacher's option distribution per training row (data/teacher.py): JSONL of
     # {"i": row index in the concatenated train_files, "probs": [...canonical order]}.
     # Rows it covers get teacher_weight * KL(teacher || student) on top of the label loss.
     teacher_file: str | None = None
     teacher_weight: float = 0.0
+    # > 0 adds KL(reference || student) so training is anchored to a trained reference's
+    # own distribution. The reference is a trained checkpoint (`kl_frozen_reference`), not
+    # the base torso's option-number readout: the pointer head scores each option from its
+    # own hidden state, with no fixed slot grid for the LM's digit rows to project onto.
+    kl_frozen_weight: float = 0.0
+    # Trained checkpoint whose option distribution (temperature 1, no calibration) is the
+    # frozen-KL reference. It may use another tokenizer than the student (`_frozen_reference`
+    # re-renders every row with the reference's tokenizer, keeping the collator's option
+    # permutation). Required when `kl_frozen_weight > 0`.
+    kl_frozen_reference: str | None = None
+    # Rows trained ONLY by the KL term: no label loss, never in the validation split.
+    # For prompts with no gold answer -- e.g. changed questions, where the reference's
+    # own reading is the target (data/question_transforms.py).
+    kl_only_files: list[str] = field(default_factory=list)
+    # A KL-only row's KL weight. The label loss is weighted 1 per row, so 1.0 gives a
+    # KL-only row the same total weight as a labelled one.
+    kl_only_weight: float = 1.0
+    # Speed only: compute the frozen-KL reference for every training row in one no-grad
+    # pass before step 1 (`_frozen_reference`). Required when `kl_frozen_weight > 0` and
+    # `group_by_length` must be on so the batch order is known. Same numbers up to bf16
+    # batch-shape rounding as a per-step forward.
+    precompute_frozen_kl: bool = False
     # Direction of both KL terms, the teacher's and the frozen anchor's: "forward" =
     # KL(target || student) (mass-covering, every run so far); "reverse" = KL(student ||
     # target) (mode-seeking).
@@ -150,10 +146,6 @@ class TrainConfig:
     save_every: int = 0  # 0 = only at the end
     max_steps: int = 0  # 0 = full epochs; otherwise a hard cap (smoke tests)
     attn_implementation: str | None = None
-    # Speed only: compute the frozen-KL reference for every training row in one no-grad
-    # pass before step 1 (`_frozen_reference`) instead of a second forward in every step.
-    # Same numbers up to bf16 batch-shape rounding. Needs group_by_length.
-    precompute_frozen_kl: bool = False
 
     @classmethod
     def from_yaml(cls, path: str) -> TrainConfig:
@@ -161,22 +153,32 @@ class TrainConfig:
 
         with open(path, encoding="utf-8") as fh:
             raw = yaml.safe_load(fh) or {}
-        known = {f for f in cls.__dataclass_fields__}
-        unknown = set(raw) - known
-        if unknown:
-            raise ValueError(f"unknown config keys: {sorted(unknown)}")
+        # Model-architecture fields the slot head owned, which the v1-2610 and earlier YAMLs
+        # still carry. Drop them silently so a historical recipe retrains with the current
+        # pointer-only architecture; a typo in any other key still raises.
+        known = set(cls.__dataclass_fields__)
+        for k, v in raw.items():
+            if k == "head_type" and v != "pointer":
+                raise ValueError(
+                    f"{path}: head_type={v!r}; this version trains pointer-head checkpoints only"
+                )
+            if k not in known and k not in RETIRED_YAML_KEYS:
+                raise ValueError(f"{path}: unknown config key {k!r}")
+        raw = {k: v for k, v in raw.items() if k in known}
         cfg = cls(**raw)
         cfg.yaml_keys = frozenset(raw)  # type: ignore[attr-defined]  # what _given reads
         return cfg
 
 
+# Slot-era TrainConfig keys the current dataclass no longer carries. Dropped silently by
+# from_yaml so a published recipe still parses; a typo in any other key raises.
+RETIRED_YAML_KEYS = frozenset({"num_slots", "head_type", "head_hidden", "head_init"})
+
+
 # The fields of a TrainConfig that a checkpoint fixes: with init_from they are the checkpoint's.
 INIT_FROM_ARCH = (
     "base_model",
-    "num_slots",
-    "head_type",
     "pointer_dim",
-    "head_hidden",
     "use_lora",
     "lora_r",
     "lora_alpha",
@@ -225,8 +227,6 @@ def _init_from(cfg: TrainConfig) -> StrandsDeciderModel:
             f"init_from {cfg.init_from}: the checkpoint has no LoRA adapter to train "
             "on; set freeze_torso: true to train its head alone"
         )
-    if cfg.head_init != "random":
-        raise ValueError("init_from keeps the checkpoint's trained head; head_init must be random")
     if not _given(cfg, "max_length"):
         cfg.max_length = ck.max_length
     print(f"[strands-decider] continuing from {cfg.init_from}")
@@ -242,7 +242,7 @@ def _init_from(cfg: TrainConfig) -> StrandsDeciderModel:
     c.temperature, c.temperature_by_kind = 1.0, {}
     # This run's settings, saved with the result as a run from the base model saves them.
     c.max_length, c.ordinal_smoothing = cfg.max_length, cfg.ordinal_smoothing
-    c.kl_frozen_weight, c.head_dropout = cfg.kl_frozen_weight, cfg.head_dropout
+    c.head_dropout = cfg.head_dropout
     model.head.dropout = (
         torch.nn.Dropout(cfg.head_dropout) if cfg.head_dropout > 0 else torch.nn.Identity()
     )
@@ -365,79 +365,53 @@ def evaluate_loss(
     }
 
 
-# Padded tokens per forward of the frozen-reference pass: it has no backward, and it is
-# launch-bound, so fewer, larger forwards win.
-FROZEN_PASS_TOKENS = 32768
-
-
 def _frozen_reference(
     model: StrandsDeciderModel,
     examples: list[Example],
     batches: list[list[int]],
     coll_cfg: CollatorConfig,
     device: str,
-    ref_model: StrandsDeciderModel | None = None,
+    ref_model: StrandsDeciderModel,
 ) -> torch.Tensor:
-    """`frozen_slot_log_probs` for every row the run trains on: ref[micro-batch, row].
+    """`ref_model`'s log-probs for every row the run trains on: ref[micro-batch, row, slot].
 
     A fresh collator with the training collator's seed walks the run's micro-batches in
-    training order, so each row is rendered exactly as training will render it. Under
-    torchrun rank m % world renders micro-batch m (the others only draw its augmentations)
-    and a sum over ranks assembles the table. Rows are forwarded sorted by length and
-    packed; right padding never reaches a row's real tokens (causal attention and
-    recurrence), the reference is the adapter-disabled torso whose weights training never
-    changes, and it draws no random numbers -- so only the batch shapes differ from
-    computing it inside each step.
+    training order, so each row is rendered exactly as training will render it. Each
+    rendered micro-batch goes through `ref_model` as it is, at temperature 1; columns past
+    a row's option count are -inf. The reference renders with its own tokenizer, so it may
+    have another than the student's (a Gemma student, a Qwen reference): a fresh collator
+    with the reference's tokenizer draws the same option permutation from its seed before
+    any tokenisation, so both see each row with the same options in the same slots.
 
-    With `ref_model` (kl_frozen_reference), each rendered micro-batch goes through that
-    checkpoint as it is, at temperature 1, instead; columns past a row's options are -inf.
-    The reference renders with its own tokenizer, so it may have another than the
-    student's (a Gemma student, a Qwen reference): the table is over option slots, and the
-    collator draws option order and phrasing from its seed alone, before any tokenisation,
-    so both see each row with the same options in the same slots.
+    Under torchrun rank m % world renders micro-batch m (the others only draw its
+    augmentations) and a sum over ranks assembles the table.
     """
     rank, _, world = distributed.env()
-    tok = model.tokenizer if ref_model is None else ref_model.tokenizer
-    coll = SystemOneCollator(tok, coll_cfg, train=True)
-    ref = torch.zeros(len(batches), max(map(len, batches)), model.config.num_slots, device=device)
-    todo: list[Any] = []  # (micro-batch, row, token ids, option count)
+    coll = SystemOneCollator(ref_model.tokenizer, coll_cfg, train=True)
+    width = max(max(examples[i].n_options for i in b) for b in batches)
+    ref = torch.zeros(len(batches), max(map(len, batches)), width, device=device)
     for m, idx in enumerate(batches):
         rows = [examples[i] for i in idx]
         if m % world != rank:
             coll.skip(rows)
             continue
         b = coll(rows)
-        if ref_model is not None:
-            with torch.no_grad():
-                lp = ref_model(
-                    input_ids=b["input_ids"].to(device),
-                    attention_mask=b["attention_mask"].to(device),
-                    n_slots=b["n_slots"].to(device),
-                    opt_idx=b["opt_idx"].to(device) if "opt_idx" in b else None,
-                    temperature=1.0,
-                )["log_probs"]
-            w = min(lp.shape[-1], ref.shape[-1])
-            ref[m, : len(rows)] = float("-inf")
-            ref[m, : len(rows), :w] = lp[:, :w]
-            continue
-        for r in range(len(rows)):
-            n = int(b["attention_mask"][r].sum())
-            todo.append((m, r, b["input_ids"][r, :n], int(b["n_slots"][r])))
-    todo.sort(key=lambda t: -t[2].numel())
-    i = 0
-    while i < len(todo):
-        longest = todo[i][2].numel()
-        chunk = todo[i : i + max(1, FROZEN_PASS_TOKENS // longest)]
-        i += len(chunk)
-        ts = [t for _, _, t, _ in chunk]  # right padding, as the collator pads
-        ids = pad_sequence(ts, batch_first=True, padding_value=model.tokenizer.pad_token_id)
-        mask = pad_sequence([torch.ones_like(t) for t in ts], batch_first=True)
-        n_slots = torch.tensor([t[3] for t in chunk], device=device)
-        lp, _ = model.frozen_slot_log_probs(ids.to(device), mask.to(device), n_slots)
-        if lp.numel():
-            ref[[t[0] for t in chunk], [t[1] for t in chunk]] = lp
+        with torch.no_grad():
+            lp = ref_model(
+                input_ids=b["input_ids"].to(device),
+                attention_mask=b["attention_mask"].to(device),
+                n_slots=b["n_slots"].to(device),
+                opt_idx=b["opt_idx"].to(device),
+                temperature=1.0,
+            )["log_probs"]
+        # -inf past each row's option count and past the batch's max K (padding slots
+        # the ref_model would not score). all_reduce adds zeros from the other ranks,
+        # which leaves both -inf and real values unchanged.
+        w = min(lp.shape[-1], ref.shape[-1])
+        ref[m, : len(rows)] = float("-inf")
+        ref[m, : len(rows), :w] = lp[:, :w]
     if world > 1:
-        torch.distributed.all_reduce(ref)  # others add zeros: -inf + 0 stays -inf
+        torch.distributed.all_reduce(ref)
     return ref
 
 
@@ -477,10 +451,12 @@ def _teacher_kl(tea: torch.Tensor, stu: torch.Tensor, direction: str) -> torch.T
 @distributed.entry_point  # under torchrun, this process is one rank of the run
 def train(cfg: TrainConfig) -> str:
     rank, _, world = distributed.env()
-    if cfg.kl_frozen_reference and not (cfg.precompute_frozen_kl and cfg.kl_frozen_weight > 0):
-        raise ValueError("kl_frozen_reference needs kl_frozen_weight > 0 and precompute_frozen_kl")
     if cfg.kl_direction not in ("forward", "reverse"):
         raise ValueError(f"kl_direction must be forward or reverse, not {cfg.kl_direction!r}")
+    if cfg.kl_frozen_weight > 0 and not cfg.kl_frozen_reference:
+        raise ValueError("kl_frozen_weight > 0 needs kl_frozen_reference (a trained checkpoint)")
+    if cfg.kl_frozen_reference and not (cfg.precompute_frozen_kl and cfg.kl_frozen_weight > 0):
+        raise ValueError("kl_frozen_reference needs kl_frozen_weight > 0 and precompute_frozen_kl")
     if cfg.host_embeddings and world > 1:  # DDP refuses a module with parameters on the CPU
         raise ValueError("host_embeddings is for one GPU; under torchrun keep the table on the GPU")
     torch.manual_seed(cfg.seed)
@@ -493,8 +469,6 @@ def train(cfg: TrainConfig) -> str:
         print(f"[strands-decider] loading base model {cfg.base_model}")
         model_cfg = StrandsDeciderConfig(
             base_model=cfg.base_model,
-            num_slots=cfg.num_slots,
-            head_hidden=cfg.head_hidden,
             head_dropout=cfg.head_dropout,
             max_length=cfg.max_length,
             use_lora=cfg.use_lora and not cfg.freeze_torso,
@@ -505,9 +479,6 @@ def train(cfg: TrainConfig) -> str:
             # Serving needs this to correct the variance floor smoothing imposes on
             # score confidence; without it a score could never reach high confidence.
             ordinal_smoothing=cfg.ordinal_smoothing,
-            head_init=cfg.head_init,
-            kl_frozen_weight=cfg.kl_frozen_weight,
-            head_type=cfg.head_type,
             pointer_dim=cfg.pointer_dim,
         )
         if cfg.lora_targets:
@@ -517,11 +488,6 @@ def train(cfg: TrainConfig) -> str:
         )
         if cfg.freeze_torso:
             model.freeze_torso()
-    if cfg.head_init == "lm_head":
-        seeded = model.init_head_from_lm_head()
-        print(f"[strands-decider] head seeded from lm_head rows for {seeded} slots")
-    elif cfg.head_init != "random":
-        raise ValueError(f"unknown head_init {cfg.head_init!r}")
     # Checkpointing needs a grad-requiring input; a frozen torso has none, and it
     # buys nothing anyway since no backward pass traverses it.
     if cfg.gradient_checkpointing and not cfg.freeze_torso:
@@ -574,8 +540,6 @@ def train(cfg: TrainConfig) -> str:
             raise ValueError("labelled rows must have weight > 0: weight 0 marks KL-only rows")
         kl_rows = load_examples(cfg.kl_only_files)
         for ex in kl_rows:
-            if ex.n_options > 9:
-                raise ValueError(f"KL-only row from {ex.task!r} has {ex.n_options} options")
             ex.weight = 0.0  # no label loss; the training loop reads 0 as "KL only"
         # Added after the split, so none reaches validation, whose labels would be fake.
         train_examples = train_examples + kl_rows
@@ -587,12 +551,10 @@ def train(cfg: TrainConfig) -> str:
 
     coll_cfg = CollatorConfig(
         max_length=cfg.max_length,
-        num_slots=cfg.num_slots,
         shuffle_options=cfg.shuffle_options,
         ordinal_smoothing=cfg.ordinal_smoothing,
         reverse_score_prob=cfg.reverse_score_prob,
         seed=cfg.seed,
-        head_type=cfg.head_type,
     )
     train_collate = SystemOneCollator(model.tokenizer, coll_cfg, train=True)
     if cfg.group_by_length:
@@ -648,10 +610,10 @@ def train(cfg: TrainConfig) -> str:
         os.makedirs(cfg.output_dir, exist_ok=True)
         with open(os.path.join(cfg.output_dir, "train_config.json"), "w", encoding="utf-8") as fh:
             json.dump(asdict(cfg), fh, indent=2)
-    slots = model.slot_token_ids()  # the rows frozen_slot_log_probs covers
-    kl_slots = max(slots) + 1 if slots else 0
     if world > 1:  # each rank iterates its share of every step's rows instead
-        train_loader = distributed.StepSlices(train_loader, kl_slots, cfg.grad_accum, total_steps)
+        # 0 for kl_slots: all rows are eligible under a pointer-head reference, so no
+        # eligibility counter is needed in StepSlices.
+        train_loader = distributed.StepSlices(train_loader, 0, cfg.grad_accum, total_steps)
 
     refs = None
     if cfg.precompute_frozen_kl and cfg.kl_frozen_weight > 0:
@@ -659,18 +621,16 @@ def train(cfg: TrainConfig) -> str:
             raise ValueError("precompute_frozen_kl needs group_by_length (a known batch order)")
         run = [b for e in range(cfg.epochs) for b in sampler.batches(e)]
         t_ref = time.time()
-        model.train()  # the mode the in-step reference forward runs in
-        ref_model = None
-        if cfg.kl_frozen_reference:
-            ref_model = StrandsDeciderModel.load(
-                cfg.kl_frozen_reference, attn_implementation=cfg.attn_implementation
-            )
-            ref_model.to(device).eval()
-            own = ref_model.tokenizer.get_vocab() == model.tokenizer.get_vocab()
-            print(
-                f"[strands-decider] frozen-KL reference: {cfg.kl_frozen_reference}"
-                + ("" if own else " (its own tokenizer, not the student's)")
-            )
+        model.train()
+        ref_model = StrandsDeciderModel.load(
+            cfg.kl_frozen_reference, attn_implementation=cfg.attn_implementation
+        )
+        ref_model.to(device).eval()
+        own = ref_model.tokenizer.get_vocab() == model.tokenizer.get_vocab()
+        print(
+            f"[strands-decider] frozen-KL reference: {cfg.kl_frozen_reference}"
+            + ("" if own else " (its own tokenizer, not the student's)")
+        )
         refs = _frozen_reference(
             model, train_examples, run[: total_steps * cfg.grad_accum], coll_cfg, device, ref_model
         )
@@ -711,37 +671,28 @@ def train(cfg: TrainConfig) -> str:
             )
             step_loss = out["loss"] * part.weights
             if cfg.kl_frozen_weight > 0:
-                if refs is None:
-                    ref_lp, eligible = model.frozen_slot_log_probs(
-                        batch["input_ids"], batch["attention_mask"], batch["n_slots"]
-                    )
-                else:  # the same numbers, computed before step 1 (_frozen_reference)
-                    m, a = (part.micro, part.start) if world > 1 else (micro, 0)
-                    ref_lp = refs[m, a : a + batch["labels"].numel()]
-                    eligible = batch["n_slots"] <= kl_slots
-                if ref_lp.numel() and bool(eligible.any()):
-                    ref = ref_lp[eligible]
-                    stu = out["log_probs"][eligible]
-                    # The frozen reference is always num_slots wide; a pointer student
-                    # is only as wide as the batch's widest question. Every column the
-                    # student drops is past some row's option count and already -inf in
-                    # the reference, so trimming changes no probability mass.
-                    ref = ref[:, : stu.shape[-1]]
-                    # Masked slots are -inf in both; -inf - -inf is NaN, so restrict
-                    # the sum to entries finite on both sides rather than patching
-                    # the NaN afterwards.
-                    valid = torch.isfinite(ref) & torch.isfinite(stu)
-                    per_row = _kl(ref, stu, valid, cfg.kl_direction)
-                    kl = per_row.mean() * part.kl
-                    if cfg.kl_only_files:
-                        # KL-only rows (weight 0) carry their own KL weight; with none
-                        # in the batch this equals kl_frozen_weight * kl exactly.
-                        only = batch["weights"][eligible] == 0
-                        coef = torch.where(only, cfg.kl_only_weight, cfg.kl_frozen_weight)
-                        step_loss = step_loss + (coef * per_row).mean() * part.kl
-                    else:
-                        step_loss = step_loss + cfg.kl_frozen_weight * kl
-                    running_kl += float(kl)
+                m, a = (part.micro, part.start) if world > 1 else (micro, 0)
+                ref_lp = refs[m, a : a + batch["labels"].numel()]
+                stu = out["log_probs"]
+                # The reference is sized to the widest option count the run saw; a batch
+                # whose rows are narrower than that gets the padded columns trimmed off.
+                # Trimmed columns are past some row's option count and already -inf in
+                # both the reference and the student, so no probability mass is dropped.
+                ref_lp = ref_lp[:, : stu.shape[-1]]
+                # Masked slots are -inf in both; -inf - -inf is NaN, so restrict the sum
+                # to entries finite on both sides rather than patching the NaN afterwards.
+                valid = torch.isfinite(ref_lp) & torch.isfinite(stu)
+                per_row = _kl(ref_lp, stu, valid, cfg.kl_direction)
+                kl = per_row.mean() * part.kl
+                if cfg.kl_only_files:
+                    # KL-only rows (weight 0) carry their own KL weight; with none in the
+                    # batch this equals kl_frozen_weight * kl exactly.
+                    only = batch["weights"] == 0
+                    coef = torch.where(only, cfg.kl_only_weight, cfg.kl_frozen_weight)
+                    step_loss = step_loss + (coef * per_row).mean() * part.kl
+                else:
+                    step_loss = step_loss + cfg.kl_frozen_weight * kl
+                running_kl += float(kl)
             if (
                 cfg.teacher_weight > 0
                 and "has_teacher" in batch
@@ -840,7 +791,7 @@ def _cli(
     micro_batch_size: int | None = typer.Option(None),
     max_steps: int | None = typer.Option(None, help="Hard step cap (smoke tests)."),
 ) -> None:
-    """Train the slot heads and a LoRA adapter on the torso."""
+    """Train the pointer head and a LoRA adapter on the torso."""
     cfg = TrainConfig.from_yaml(config) if config else TrainConfig()
     if train_file:
         cfg.train_files = list(train_file)

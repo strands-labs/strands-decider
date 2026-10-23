@@ -7,17 +7,12 @@ downloaded."""
 import copy
 import json
 import os
-import pickle
 import shutil
 
 import pytest
 import torch
 
 from strands_decider.modeling import StrandsDeciderConfig, StrandsDeciderModel
-
-
-class _NotATensor:
-    """A global that torch's weights_only unpickler refuses."""
 
 
 def _tokenizer():
@@ -55,9 +50,7 @@ def ckpt(tmp_path, monkeypatch):
         return copy.deepcopy(base)
 
     monkeypatch.setattr(StrandsDeciderModel, "_load_torso", staticmethod(load_torso))
-    cfg = StrandsDeciderConfig(
-        base_model="tiny", head_type="pointer", pointer_dim=16, lora_r=2, torch_dtype="float32"
-    )
+    cfg = StrandsDeciderConfig(base_model="tiny", pointer_dim=16, lora_r=2, torch_dtype="float32")
     model = StrandsDeciderModel(cfg, copy.deepcopy(base), _tokenizer())
     model.attach_lora()
     with torch.no_grad():  # lora_B starts at zero: make the adapter change the torso
@@ -77,12 +70,7 @@ def _same(a, b):
 def test_a_complete_checkpoint_and_its_safetensors_head_load_unchanged(ckpt):
     path, model, loads = ckpt
     assert _same(StrandsDeciderModel.load(str(path)), model)
-    from safetensors.torch import save_file
-
-    save_file(torch.load(path / "slot_head.pt", weights_only=True), str(path / "head.safetensors"))
-    os.remove(path / "slot_head.pt")
-    assert _same(StrandsDeciderModel.load(str(path)), model)
-    assert loads == ["tiny", "tiny"]
+    assert loads == ["tiny"]
 
 
 def test_a_missing_adapter_is_refused_before_the_torso_loads(ckpt):
@@ -93,27 +81,39 @@ def test_a_missing_adapter_is_refused_before_the_torso_loads(ckpt):
     assert loads == []
 
 
-def test_two_head_files_are_refused_before_the_torso_loads(ckpt):
-    path, model, loads = ckpt
+def test_a_missing_head_file_is_refused_before_the_torso_loads(ckpt):
+    path, _, loads = ckpt
+    os.remove(path / "head.safetensors")
+    with pytest.raises(FileNotFoundError, match="head"):
+        StrandsDeciderModel.load(str(path))
+    assert loads == []
+
+
+def test_load_head_state_falls_back_to_slot_head_pt_with_warning(tmp_path):
+    """A local pointer checkpoint saved before the slot-head removal wrote weights to
+    slot_head.pt. load_head_state reads it with a UserWarning and weights_only=True."""
+    import warnings
+
+    from strands_decider.modeling import load_head_state
+
+    torch.save({"q.weight": torch.randn(4, 8)}, tmp_path / "slot_head.pt")
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        state = load_head_state(str(tmp_path))
+    assert "q.weight" in state
+    assert any("slot_head.pt" in str(w.message) for w in caught)
+
+
+def test_load_head_state_prefers_head_safetensors_when_both_exist(tmp_path):
+    """A directory holding both files reads head.safetensors; the fallback is for the
+    pre-pointer-only shape where only slot_head.pt is on disk."""
     from safetensors.torch import save_file
 
-    save_file(
-        {k: torch.zeros_like(v) for k, v in model.head.state_dict().items()},
-        str(path / "head.safetensors"),
-    )
-    with pytest.raises(ValueError, match="both head"):
-        StrandsDeciderModel.load(str(path))
-    assert loads == []
+    from strands_decider.modeling import load_head_state
 
-
-def test_the_head_pickle_is_read_with_weights_only(ckpt, monkeypatch):
-    path, model, loads = ckpt
-    torch.save(dict(model.head.state_dict(), extra=_NotATensor()), path / "slot_head.pt")
-    # Makes torch.load unpickle anything unless the call itself sets weights_only=True.
-    monkeypatch.setenv("TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD", "1")
-    with pytest.raises(pickle.UnpicklingError, match="Weights only load failed"):
-        StrandsDeciderModel.load(str(path))
-    assert loads == []
+    save_file({"q.weight": torch.zeros(4, 8)}, str(tmp_path / "head.safetensors"))
+    torch.save({"q.weight": torch.ones(4, 8)}, tmp_path / "slot_head.pt")
+    assert torch.equal(load_head_state(str(tmp_path))["q.weight"], torch.zeros(4, 8))
 
 
 def test_a_hub_repo_id_loads_from_the_downloaded_snapshot(ckpt, monkeypatch):

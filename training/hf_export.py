@@ -8,8 +8,8 @@
     python -m training.hf_export index ROOT          (INDEX.json + INDEX.md of every export)
 
 CKPT, OUT, --run-dir and --jevbench may be local paths or s3:// URIs. The folder holds no
-pickles: `slot_head.pt` becomes `head.safetensors` (same tensors, checked), which
-`StrandsDeciderModel.load` reads. Everything else strands-decider needs is copied byte for byte. A model
+pickles: `head.safetensors` is copied through, which `StrandsDeciderModel.load` reads.
+Everything else strands-decider needs is copied byte for byte. A model
 card with Hub metadata, provenance, the run's timings and evals, and a sha256 manifest
 (written last) complete it. The run records (timings, eval reports, JevBench outputs) are
 copied through `scrub`, which removes host paths, cloud identifiers, cost fields and any
@@ -35,8 +35,6 @@ from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from typing import Any
 
-import torch
-
 from strands_decider.modeling import CONFIG_NAME, LEGACY_CONFIG_NAME, config_path
 
 FORMAT = "hobson-hf-export/1"
@@ -48,6 +46,7 @@ COPY = [
     "tokenizer.json",
     "tokenizer_config.json",
     "chat_template.jinja",
+    "head.safetensors",
     "lora/adapter_config.json",
     "lora/adapter_model.safetensors",
 ]
@@ -55,7 +54,7 @@ REQUIRED = [
     "lora/adapter_config.json",
     "lora/adapter_model.safetensors",
     "tokenizer.json",
-    "slot_head.pt",
+    "head.safetensors",
 ]
 # The Hub datasets that the corpus build (data/recipes.py), data/multistep.py and the recipe's
 # downloads read. hotpotqa/hotpot_qa is for evaluation only.
@@ -184,14 +183,13 @@ def _gemma4(size: str, revision: str) -> Base:
         ],
         decoder=f"the Gemma 4 text decoder\n(`transformers.{cls}(...).model.language_model`){moe}",
         example="",
-        teacher_route="They are training\n  targets, next to a frozen-KL anchor toward the v19 "
-        "checkpoint's own distributions\n  (a Qwen3.5-2B decider; `kl_frozen_reference`).",
+        teacher_route="They are training targets, directly or through a parent model that the "
+        "recipe trains first.",
         trained_by="""Trained by `strands-decider train` of the code repository under `torchrun` on a `{host}`
 host ({gpu}): recipe wall clock {wall} s, training stage {train} s. Configs:
 `train_config.json`, `training/configs/`.""",
         retrain="""To retrain, train with the recipe in `train_config.json` on one 8-GPU H100 host, after
-`training/recipe.sh build fetch multistep generated adequacy distill`, with the v19
-checkpoint where its `kl_frozen_reference` points.""",
+`training/recipe.sh build fetch multistep generated adequacy distill`.""",
     )
 
 
@@ -343,31 +341,8 @@ def _record(src: str, dst: str, literals: Sequence[str] = ()) -> None:
 
 
 # ---------------------------------------------------------------- the head
-
-
-def convert_head(ckpt: str, out: str) -> tuple[str, str]:
-    """slot_head.pt -> head.safetensors, proven equal. Returns (pickle sha, safetensors sha)."""
-    from safetensors.torch import load_file, save_file
-
-    src = os.path.join(ckpt, "slot_head.pt")
-    state = torch.load(src, map_location="cpu", weights_only=True)
-    if not isinstance(state, dict) or not all(isinstance(v, torch.Tensor) for v in state.values()):
-        raise SystemExit(f"{src}: not a flat state dict of tensors")
-    pickle_sha = sha256(src)
-    dst = os.path.join(out, "head.safetensors")
-    # One metadata key only: safetensors writes the metadata map in hash order, so more
-    # keys would make the file's bytes differ between runs. The source pickle's sha256 is
-    # in provenance.json.
-    save_file({k: v.contiguous() for k, v in state.items()}, dst, metadata={"format": "pt"})
-    back = load_file(dst)
-    if set(back) != set(state) or not all(
-        back[k].dtype == state[k].dtype
-        and back[k].shape == state[k].shape
-        and torch.equal(back[k], state[k])
-        for k in state
-    ):
-        raise SystemExit("head.safetensors does not equal slot_head.pt")
-    return pickle_sha, sha256(dst)
+# head.safetensors is written directly by `StrandsDeciderModel.save_pretrained`, so the
+# export copies it byte for byte (as a listed COPY file). No conversion step.
 
 
 # ---------------------------------------------------------------- evaluations
@@ -685,14 +660,7 @@ their timings and results; host paths, cloud identifiers and cost fields are rem
 
 
 def provenance(
-    name: str,
-    run_id: str,
-    role: str,
-    ckpt: str,
-    out: str,
-    stages: list[dict],
-    pickle_sha: str,
-    base: Base = QWEN,
+    name: str, run_id: str, role: str, ckpt: str, out: str, stages: list[dict], base: Base = QWEN
 ) -> dict:
     train = [s for s in stages if s.get("stage") in ("parent", "train")]
     mine = [s for s in train if s.get("stage") == ("parent" if role == "parent" else "train")]
@@ -718,7 +686,6 @@ def provenance(
         else None,
         "adapter_sha256": sha256(os.path.join(ckpt, "lora/adapter_model.safetensors")),
         "head_sha256": sha256(os.path.join(out, "head.safetensors")),
-        "source_head_pickle_sha256": pickle_sha,
         "source_checkpoint_fingerprint": fingerprint(ckpt),
         "host_shape": next((s.get("host_shape") for s in stages if s.get("host_shape")), None),
         "gpu": next((s.get("gpu_name") for s in stages if s.get("gpu_name")), None),
@@ -840,7 +807,6 @@ def build(
             _record(src, os.path.join(out, p), redact)
         else:
             _copy(src, os.path.join(out, p))
-    pickle_sha, _ = convert_head(ckpt, out)
     stages: list[dict] = []
     if run_dir:
         for src, dst in (("stages.jsonl", "stages.jsonl"), ("sha256.txt", "data_sha256.txt")):
@@ -886,7 +852,7 @@ def build(
     }
     with open(_mk(os.path.join(out, "eval", "summary.json")), "w") as fh:
         json.dump(summary, fh, indent=2, sort_keys=True)
-    prov = provenance(name, run_id, role, ckpt, out, stages, pickle_sha, base)
+    prov = provenance(name, run_id, role, ckpt, out, stages, base)
     with open(os.path.join(out, "provenance.json"), "w") as fh:
         json.dump(prov, fh, indent=2, sort_keys=True)
     with open(os.path.join(out, "LICENSE.md"), "w") as fh:

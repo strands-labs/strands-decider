@@ -11,6 +11,7 @@ import json
 
 import pytest
 import torch
+from safetensors.torch import load_file
 from test_checkpoint_load import _tokenizer
 from test_ddp import _examples, _tiny_model_factory, _tokenizer_file
 from test_hf_export import _export, _jev
@@ -51,7 +52,6 @@ def ckpts(tmp_path, monkeypatch):
         torch.manual_seed(seed)
         cfg = StrandsDeciderConfig(
             base_model=hf_export.BASE_MODEL,
-            head_type="pointer",
             pointer_dim=16,
             lora_r=2,
             torch_dtype="float32",
@@ -125,23 +125,6 @@ def test_the_soup_averages_delta_w_and_the_heads_logits(ckpts, tmp_path):
         assert not torch.allclose(naive(decide, options), s.head(decide, options), atol=1e-3)
 
 
-@pytest.mark.parametrize("hidden", [0, 8])
-def test_slot_heads_soup_to_their_mean_logit(hidden):
-    from strands_decider.modeling import SlotHead
-    from training.soup import soup_heads
-
-    heads = [SlotHead(32, 5, hidden=hidden) for _ in range(3)]
-    with torch.no_grad():
-        for h in heads:
-            h.norm.weight.normal_()
-            h.norm.bias.normal_()
-    s = SlotHead(32, 5, hidden=3 * hidden)
-    s.load_state_dict(soup_heads([h.state_dict() for h in heads], "slot"))
-    x = torch.randn(4, 32)
-    with torch.no_grad():
-        torch.testing.assert_close(s(x), sum(h(x) for h in heads) / 3)
-
-
 def test_the_soup_exports(ckpts, tmp_path):
     out = tmp_path / "soup"
     soup(ckpts, str(out))
@@ -160,11 +143,38 @@ def test_the_cli_writes_the_soup(ckpts, tmp_path):
 
 def test_checkpoints_of_different_recipes_are_refused(ckpts, tmp_path):
     cfg = json.load(open(f"{ckpts[1]}/strands_decider_config.json"))
-    json.dump(
-        {**cfg, "kl_frozen_weight": 0.5}, open(f"{ckpts[1]}/strands_decider_config.json", "w")
-    )
+    json.dump({**cfg, "lora_r": 4}, open(f"{ckpts[1]}/strands_decider_config.json", "w"))
     with pytest.raises(ValueError, match="one recipe"):
         soup(ckpts, str(tmp_path / "soup"))
+
+
+def test_soup_accepts_stale_slot_era_keys_in_the_input_configs(ckpts, tmp_path):
+    """Pre-PR and v1-2610 configs still carry num_slots, head_type: 'pointer', head_hidden,
+    head_init, kl_frozen_weight. Soup drops them cleanly through from_json and does not
+    propagate them to the output config."""
+    for c in ckpts:
+        p = f"{c}/strands_decider_config.json"
+        cfg = json.load(open(p))
+        cfg.update(
+            {"num_slots": 24, "head_hidden": 0, "head_init": "random", "kl_frozen_weight": 0.3}
+        )
+        json.dump(cfg, open(p, "w"))
+    out = tmp_path / "soup"
+    soup(ckpts, str(out))
+    souped = json.load(open(out / "strands_decider_config.json"))
+    for k in ("num_slots", "head_hidden", "head_init", "kl_frozen_weight"):
+        assert k not in souped, k
+
+
+def test_soup_rejects_a_slot_head_input_config(ckpts, tmp_path):
+    """A slot-era checkpoint fails the config read before any adapter file is written."""
+    p = f"{ckpts[0]}/strands_decider_config.json"
+    cfg = json.load(open(p))
+    json.dump({**cfg, "head_type": "slot"}, open(p, "w"))
+    out = tmp_path / "soup"
+    with pytest.raises(ValueError, match="pointer-head"):
+        soup(ckpts, str(out))
+    assert not out.exists()
 
 
 def _tree(path):
@@ -208,7 +218,10 @@ def test_a_nonempty_out_is_refused_unless_replaced(ckpts, tmp_path):
         soup(ckpts, str(out))
     assert (out / "head.safetensors").read_bytes() == b"stale"
     soup(ckpts, str(out), replace=True)
-    assert not (out / "head.safetensors").exists() and not (out / "provenance.json").exists()
+    # the stale pre-existing files are gone; the fresh soup's head.safetensors replaces the
+    # stale bytes but is a real safetensors file (loads cleanly).
+    assert (out / "head.safetensors").read_bytes() != b"stale"
+    assert not (out / "provenance.json").exists()
     assert StrandsDeciderModel.load(str(out)).config.base_revision is None
 
 
@@ -287,7 +300,6 @@ def _train(corpus, out, monkeypatch, **over):
         train_files=[str(corpus / "a.jsonl")],
         val_fraction=0.1,
         base_model="tiny",
-        head_type="pointer",
         pointer_dim=16,
         head_dropout=0.0,
         max_length=2048,
@@ -299,7 +311,7 @@ def _train(corpus, out, monkeypatch, **over):
         output_dir=str(out),
     )
     T.train(T.TrainConfig(**{**base, **over}))
-    return grads, vals[0], torch.load(out / "slot_head.pt", weights_only=True)
+    return grads, vals[0], load_file(str(out / "head.safetensors"))
 
 
 def _same(a, b):
@@ -316,7 +328,7 @@ def test_val_split_seed_fixes_the_validation_rows_and_nothing_else(corpus, tmp_p
     f1 = _train(corpus, tmp_path / "d", monkeypatch, seed=1, val_split_seed=7)[1]
     assert f0 == f1 and f0 != v0
     g, v, h = _train(corpus, tmp_path / "e", monkeypatch, seed=0, val_split_seed=0)
-    h0 = torch.load(tmp_path / "a" / "slot_head.pt", weights_only=True)
+    h0 = load_file(str(tmp_path / "a" / "head.safetensors"))
     assert v == v0 and _same(g, g0) and all(torch.equal(h[k], h0[k]) for k in h)
 
 

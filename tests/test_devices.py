@@ -80,9 +80,7 @@ def test_the_server_builds_the_mlx_engine_for_device_mlx(monkeypatch):
             (),
             {
                 "config": type(
-                    "Config",
-                    (),
-                    {"base_model": "stub", "num_slots": 24, "temperature": 1.0, "max_length": 512},
+                    "Config", (), {"base_model": "stub", "temperature": 1.0, "max_length": 512}
                 )()
             },
         )()

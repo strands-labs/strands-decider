@@ -149,7 +149,6 @@ def _tiny_checkpoint(out: str, tokenizer_path: str, torso_dir: str, seed: int = 
         **{
             **dict(
                 base_model="tiny",
-                head_type="pointer",
                 pointer_dim=16,
                 lora_r=2,
                 lora_alpha=4,
@@ -230,18 +229,6 @@ def worker(cfg_path: str) -> None:
     torso_dir = spec.pop("torso", None)
     if torso_dir:  # init_from: the base model of the checkpoint
         StrandsDeciderModel._load_torso = staticmethod(_load_saved_torso(torso_dir))
-    ref_tokenizer = spec.pop("ref_tokenizer", None)
-    if ref_tokenizer:  # kl_frozen_reference: a tiny checkpoint, the same on every rank
-
-        def load(path, **k):
-            from strands_decider.modeling import StrandsDeciderConfig
-
-            with torch.random.fork_rng():
-                torch.manual_seed(123)
-                cfg = StrandsDeciderConfig(base_model="tiny", head_type="pointer", pointer_dim=16)
-                return _tiny_model_factory(ref_tokenizer)(cfg)
-
-        StrandsDeciderModel.load = staticmethod(load)
     rank = int(os.environ.get("RANK", "0"))
 
     grads, init = [], []
@@ -274,16 +261,6 @@ def worker(cfg_path: str) -> None:
         return out
 
     SystemOneCollator.__call__ = call
-    real_reference = T._frozen_reference
-
-    def reference(*a, **k):  # renders every row ahead of training: not what a step trains on
-        SystemOneCollator.__call__ = real_call
-        try:
-            return real_reference(*a, **k)
-        finally:
-            SystemOneCollator.__call__ = call
-
-    T._frozen_reference = reference
     if spec.pop("skew_rank1", False) and rank == 1:  # this rank reads a longer last row
         real_load = T.load_examples
 
@@ -312,10 +289,7 @@ def _run(corpus, tmp_path, world: int, *, expect_ok: bool = True, **over) -> dic
         train_files=[str(corpus / "train.jsonl")],
         val_files=[str(corpus / "val.jsonl")],
         base_model="tiny",
-        num_slots=24,
-        head_type="pointer",
         pointer_dim=16,
-        kl_frozen_weight=0.3,
         teacher_file=str(corpus / "teacher.jsonl"),
         teacher_weight=1.0,
         head_dropout=0.0,
@@ -451,62 +425,15 @@ def test_ddp_matches_single_process_variants(corpus, tmp_path, over):
 
 
 @pytest.mark.distributed
-@pytest.mark.parametrize("world", [1, 3, 8])
-def test_precomputed_frozen_reference_matches_single_process(corpus, plain_run, tmp_path, world):
-    """precompute_frozen_kl: the same rows, rendering, gradients and losses."""
-    got = _run(corpus, tmp_path, world, precompute_frozen_kl=True)
-    assert "frozen-KL reference for 32 micro-batches" in got["stdout"]
-    _assert_same_run(plain_run, got, world)
-
-
-@pytest.mark.distributed
-@pytest.mark.parametrize("tokenizer", ["tokenizer.json", "other_tokenizer.json"])
-def test_ddp_frozen_reference_checkpoint_matches_single_process(corpus, tmp_path, tokenizer):
-    """kl_frozen_reference: each rank renders its micro-batches with the reference's tokenizer."""
-    over = dict(
-        precompute_frozen_kl=True,
-        kl_frozen_reference="tiny-ref",
-        ref_tokenizer=str(corpus / tokenizer),
-    )
-    ref = _run(corpus, tmp_path / "a", 1, **over)
-    assert "frozen-KL reference: tiny-ref" in ref["stdout"]
-    _assert_same_run(ref, _run(corpus, tmp_path / "b", 3, **over), 3)
-
-
-@pytest.mark.distributed
 def test_ddp_init_from_matches_single_process(corpus, tmp_path):
-    """init_from a trained checkpoint, anchored to that checkpoint's own answers."""
+    """init_from a trained checkpoint."""
     tok = str(corpus / "tokenizer.json")
     torso = _tiny_torso(str(tmp_path / "torso"), tok)
     ckpt = _tiny_checkpoint(str(tmp_path / "ckpt"), tok, torso)
-    # One epoch, 4 steps: the checkpoint's random adapter amplifies fp32 rounding, and by
-    # step 8 the gradients differ by 3e-4 (relative) with or without the reference.
-    over = dict(
-        init_from=ckpt, torso=torso, precompute_frozen_kl=True, kl_frozen_reference=ckpt, epochs=1
-    )
+    over = dict(init_from=ckpt, torso=torso, epochs=1)
     ref = _run(corpus, tmp_path / "a", 1, **over)
     assert f"continuing from {ckpt}" in ref["stdout"]
     _assert_same_run(ref, _run(corpus, tmp_path / "b", 3, **over), 3)
-
-
-@pytest.fixture(scope="module")
-def kl_only_plain_run(corpus, tmp_path_factory):
-    return _run(
-        corpus,
-        tmp_path_factory.mktemp("klonly"),
-        1,
-        kl_only_files=[str(corpus / "klonly.jsonl")],
-        kl_only_weight=0.7,
-    )
-
-
-@pytest.mark.distributed
-@pytest.mark.parametrize("world", [3, 8])
-def test_ddp_matches_single_process_kl_only_rows(corpus, kl_only_plain_run, tmp_path, world):
-    got = _run(
-        corpus, tmp_path, world, kl_only_files=[str(corpus / "klonly.jsonl")], kl_only_weight=0.7
-    )
-    _assert_same_run(kl_only_plain_run, got, world)
 
 
 @pytest.mark.distributed
@@ -588,7 +515,7 @@ def test_skipping_rows_matches_collating_them(corpus):
 
     tok = _load_tokenizer(str(corpus / "tokenizer.json"))
     rows = _examples(64, seed=5)
-    cfg = CollatorConfig(num_slots=24, head_type="pointer", seed=7, max_length=2048)
+    cfg = CollatorConfig(seed=7, max_length=2048)
     full, part = SystemOneCollator(tok, cfg), SystemOneCollator(tok, cfg)
     for b in range(0, 64, 8):
         whole = full(rows[b : b + 8])

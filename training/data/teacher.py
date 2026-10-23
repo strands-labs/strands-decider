@@ -155,8 +155,7 @@ def label(
     letters = letter_ids(tok)
     head = model.get_output_embeddings().weight
     # The LM's own final transform, where it has one: Gemma soft-caps its logits at 30.
-    # Without it the letters' distribution is not the model's (as for the frozen readout,
-    # modeling.frozen_slot_log_probs).
+    # Without it the letters' distribution is not the model's.
     cfg: Any = getattr(model, "config", None)
     text_cfg = cfg.get_text_config() if hasattr(cfg, "get_text_config") else cfg
     cap = getattr(text_cfg, "final_logit_softcapping", None)

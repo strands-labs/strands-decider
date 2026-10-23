@@ -34,7 +34,6 @@ class _StubCfg:
 
 class _StubModelCfg:
     base_model = "stub"
-    num_slots = 24
     temperature = 1.0
     max_length = 512
 

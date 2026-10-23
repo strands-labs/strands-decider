@@ -21,7 +21,6 @@ from strands_decider.infer import _expand_cache  # noqa: E402
 from strands_decider.modeling import (  # noqa: E402
     HostEmbedding,
     StrandsDeciderConfig,
-    StrandsDeciderModel,
 )
 
 DEV = "cuda" if torch.cuda.is_available() else "cpu"
@@ -51,13 +50,6 @@ def _lm(num_kv_shared_layers=1, softcap=30.0):
     return transformers.Gemma4ForCausalLM(cfg).eval()
 
 
-class _Digits:
-    """Just enough tokenizer for slot_token_ids: "1".."9" -> ids 11..19."""
-
-    def encode(self, text, add_special_tokens=False):
-        return [10 + int(text)] if text.isdigit() and len(text) == 1 else [1, 2]
-
-
 def test_host_embedding_stays_on_cpu_and_matches():
     table = _lm().model.embed_tokens_per_layer
     ids = torch.tensor([[3, 7, 9, 2]])
@@ -71,20 +63,6 @@ def test_host_embedding_stays_on_cpu_and_matches():
     model.to(torch.float64)  # a dtype cast is applied, still on the CPU
     assert host.inner.weight.dtype == torch.float64 and host.inner.weight.device.type == "cpu"
     assert StrandsDeciderConfig().host_embeddings is False
-
-
-def test_frozen_readout_applies_softcap():
-    lm = _lm(softcap=2.0)  # a small cap makes the difference visible on random weights
-    config = StrandsDeciderConfig(base_model="tiny", num_slots=4, head_type="pointer")
-    model = StrandsDeciderModel(config, lm.model, _Digits())
-    ids = torch.tensor([[5, 6, 7, 8, 9, 20, 21]])
-    mask = torch.ones_like(ids)
-    lp, eligible = model.frozen_slot_log_probs(ids, mask, torch.tensor([3]))
-    assert bool(eligible[0])
-    with torch.no_grad():
-        logits = lm(input_ids=ids, attention_mask=mask).logits[0, -1]  # soft-capped by Gemma
-    want = torch.log_softmax(logits[[11, 12, 13]].float(), -1)
-    assert torch.allclose(lp[0, :3], want, atol=1e-4)
 
 
 @pytest.mark.parametrize("shared", [0, 1], ids=["no-kv-sharing", "kv-sharing"])

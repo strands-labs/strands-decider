@@ -180,9 +180,7 @@ def test_real_cpu_checkpoint_calibrates_and_evaluates(rows, tmp_path, monkeypatc
     config = StrandsDeciderConfig(
         base_model=str(base),
         use_lora=False,
-        head_type="pointer",
         pointer_dim=8,
-        num_slots=2,
         torch_dtype="float32",
         max_length=128,
     )

@@ -166,7 +166,6 @@ def ckpt(base_dir, tmp_path_factory):
     """A text Strands Decider checkpoint on that base, with a non-trivial adapter."""
     cfg = StrandsDeciderConfig(
         base_model=base_dir,
-        head_type="pointer",
         pointer_dim=32,
         torch_dtype="float32",
         max_length=1024,

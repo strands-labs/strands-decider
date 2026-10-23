@@ -49,9 +49,7 @@ def saved_torso(corpus, monkeypatch):
 
 def _batch(model, corpus):
     rows = load_examples([str(corpus / "val.jsonl")])[:8]
-    coll = SystemOneCollator(
-        model.tokenizer, CollatorConfig(max_length=2048, head_type="pointer"), train=False
-    )
+    coll = SystemOneCollator(model.tokenizer, CollatorConfig(max_length=2048), train=False)
     b = coll(rows)
     return dict(
         input_ids=b["input_ids"],
@@ -80,7 +78,6 @@ def _train(corpus, out, monkeypatch, cfg=None, **over):
         model.eval()
         with torch.no_grad():
             start["out"] = model(**b)["log_probs"]
-            start["frozen"] = _frozen(model, b)
         model.train()
         start["state"] = _state(model)
         start["trainable"] = {n for n, p in model.named_parameters() if p.requires_grad}
@@ -106,19 +103,13 @@ def _train(corpus, out, monkeypatch, cfg=None, **over):
         return start, json.load(fh)
 
 
-def _frozen(model, b):
-    """The frozen-KL readout: the torso's own option numbers, adapter disabled."""
-    return model.frozen_slot_log_probs(b["input_ids"], b["attention_mask"], b["n_slots"])[0]
-
-
 def _same(a, b):
     return set(a) == set(b) and all(torch.equal(a[k], b[k]) for k in a)
 
 
 def test_training_continues_from_the_checkpoint(corpus, tmp_path, monkeypatch):
     src = StrandsDeciderModel.load(str(corpus / "s0")).eval()
-    # head_type is set to the checkpoint's: no conflict
-    start, _ = _train(corpus, tmp_path / "out", monkeypatch, head_type="pointer")
+    start, _ = _train(corpus, tmp_path / "out", monkeypatch)
     # step 0 is the checkpoint: its head and adapter, its outputs at temperature 1
     assert _same(start["state"], _state(src))
     b = _batch(src, corpus)
@@ -126,14 +117,6 @@ def test_training_continues_from_the_checkpoint(corpus, tmp_path, monkeypatch):
         want = src(**b, temperature=1.0)["log_probs"]
     torch.testing.assert_close(start["out"], want, rtol=0, atol=1e-6)
     assert start["config"].temperature == 1.0 and start["config"].temperature_by_kind == {}
-    # the frozen readout is the base torso's own, without the checkpoint's adapter
-    cfg = copy.deepcopy(src.config)
-    cfg.use_lora = False
-    plain = StrandsDeciderModel(cfg, _load_saved_torso(str(corpus / "torso"))(cfg), src.tokenizer)
-    with torch.no_grad():
-        torch.testing.assert_close(start["frozen"], _frozen(plain, b), rtol=0, atol=1e-6)
-        hidden = src.encode(b["input_ids"], b["attention_mask"])  # the adapter matters here
-        assert not torch.allclose(hidden, plain.encode(b["input_ids"], b["attention_mask"]))
     # the adapter and the head train, the base torso does not; checkpointing is on
     assert start["trainable"] == set(start["state"])
     assert any("lora_A" in n for n in start["trainable"]) and "head.q.weight" in start["trainable"]
@@ -172,28 +155,7 @@ def test_a_soup_trains_on_and_its_fine_tunes_soup(corpus, tmp_path, monkeypatch)
         assert torch.isfinite(s2(**_batch(s2, corpus))["log_probs"][:, :2]).all()
 
 
-def test_anchored_to_the_checkpoint_itself(corpus, tmp_path, monkeypatch):
-    """kl_frozen_reference = init_from: the first step starts at KL 0 from its reference."""
-    _, history = _train(
-        corpus,
-        tmp_path / "out",
-        monkeypatch,
-        kl_frozen_weight=0.3,
-        precompute_frozen_kl=True,
-        group_by_length=True,
-        length_group_mega=2,
-        kl_frozen_reference=str(corpus / "s0"),
-    )
-    kl = [h["kl"] for h in history if "kl" in h]
-    assert len(kl) == 3 and kl[0] < 1e-9 < kl[2]  # step 1 is at lr 0 (warmup)
-    # without a reference, the anchor is the base torso's readout: not 0 at the start
-    _, history = _train(corpus, tmp_path / "base", monkeypatch, kl_frozen_weight=0.3)
-    assert history[0]["kl"] > 1e-3
-
-
-@pytest.mark.parametrize(
-    "over", [dict(pointer_dim=32), dict(base_model="Qwen/Qwen3.5-2B-Base"), dict(head_hidden=8)]
-)
+@pytest.mark.parametrize("over", [dict(pointer_dim=32), dict(base_model="Qwen/Qwen3.5-2B-Base")])
 def test_an_architecture_other_than_the_checkpoint_is_refused(corpus, tmp_path, monkeypatch, over):
     with pytest.raises(ValueError, match=f"sets {next(iter(over))}=.*remove {next(iter(over))}"):
         _train(corpus, tmp_path, monkeypatch, **over)
@@ -224,8 +186,3 @@ def test_a_yaml_null_lora_targets_is_the_default_list(corpus, tmp_path):
     cfg = T.TrainConfig.from_yaml(str(path))
     T._init_from(cfg)
     assert cfg.lora_targets == StrandsDeciderConfig().lora_targets
-
-
-def test_head_init_cannot_replace_the_trained_head(corpus, tmp_path, monkeypatch):
-    with pytest.raises(ValueError, match="head_init"):
-        _train(corpus, tmp_path, monkeypatch, head_init="lm_head")

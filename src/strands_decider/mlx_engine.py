@@ -179,17 +179,15 @@ class MLXEngine(SystemOneEngine):
         """
         rows, width, dim = hidden.shape
         positions = [row * width + position for row, position in enumerate(last)]
-        options = opt_idx.clamp_min(0).tolist() if opt_idx is not None else []
+        assert opt_idx is not None, "pointer head needs opt_idx"
+        options = opt_idx.clamp_min(0).tolist()
         for row, row_options in enumerate(options):
             positions += [row * width + position for position in row_options]
         picked = hidden.reshape(rows * width, dim)[mx.array(positions, dtype=mx.int32)]
         states = _to_torch(picked.astype(mx.float32)).reshape(len(positions), dim)
         pooled = states[:rows]
         with torch.inference_mode():
-            if options:
-                raw = self.model.head(pooled, states[rows:].reshape(rows, len(options[0]), dim))
-            else:
-                raw = self.model.head(pooled)
+            raw = self.model.head(pooled, states[rows:].reshape(rows, len(options[0]), dim))
             logits = apply_temperature(raw, self._temperatures(kinds))
             return masked_log_softmax(logits, torch.tensor(n_slots)).exp()
 
@@ -198,9 +196,7 @@ class MLXEngine(SystemOneEngine):
         rendered: list[RenderedQuestion] | None,
         base: int,
         offsets: list[list[tuple[int, int]]],
-    ) -> torch.Tensor | None:
-        if self.model.config.head_type != "pointer":
-            return None
+    ) -> torch.Tensor:
         assert rendered is not None
         return self._option_idx(rendered, base, offsets)
 

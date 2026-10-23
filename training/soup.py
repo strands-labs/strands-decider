@@ -25,6 +25,7 @@ import json
 import math
 import os
 import shutil
+from dataclasses import asdict
 
 import torch
 import typer
@@ -56,36 +57,22 @@ def _fold_norm(
     return w * g[None, :], w @ beta + b
 
 
-def soup_heads(states: list[dict[str, torch.Tensor]], head_type: str) -> dict[str, torch.Tensor]:
-    """The head whose logit is the mean of `states`' logits (see the module docstring)."""
+def soup_heads(states: list[dict[str, torch.Tensor]]) -> dict[str, torch.Tensor]:
+    """The pointer head whose logit is the mean of `states`' logits (see the module docstring)."""
     n = len(states)
     folded = []
     for s in states:
         g, beta = s["norm.weight"].double(), s["norm.bias"].double()
         f = {}
-        for name in ("q", "k", "proj", "proj.0"):
-            if f"{name}.weight" in s:
-                f[name] = _fold_norm(
-                    s[f"{name}.weight"].double(), s[f"{name}.bias"].double(), g, beta
-                )
-        if "proj.2.weight" in s:
-            f["proj.2"] = (s["proj.2.weight"].double(), s["proj.2.bias"].double())
+        for name in ("q", "k"):
+            f[name] = _fold_norm(s[f"{name}.weight"].double(), s[f"{name}.bias"].double(), g, beta)
         folded.append(f)
     out: dict[str, torch.Tensor] = {}
-    if head_type == "pointer":
-        # cat over heads; 1/sqrt(n) on k turns the new (n * dim) ** -0.5 scale into the old / n
-        out["q.weight"] = torch.cat([f["q"][0] for f in folded])
-        out["q.bias"] = torch.cat([f["q"][1] for f in folded])
-        out["k.weight"] = torch.cat([f["k"][0] for f in folded]) / math.sqrt(n)
-        out["k.bias"] = torch.cat([f["k"][1] for f in folded]) / math.sqrt(n)
-    elif "proj.weight" in states[0]:  # linear slot head
-        out["proj.weight"] = torch.stack([f["proj"][0] for f in folded]).mean(0)
-        out["proj.bias"] = torch.stack([f["proj"][1] for f in folded]).mean(0)
-    else:  # MLP slot head: stack the hidden units
-        out["proj.0.weight"] = torch.cat([f["proj.0"][0] for f in folded])
-        out["proj.0.bias"] = torch.cat([f["proj.0"][1] for f in folded])
-        out["proj.2.weight"] = torch.cat([f["proj.2"][0] for f in folded], dim=1) / n
-        out["proj.2.bias"] = torch.stack([f["proj.2"][1] for f in folded]).mean(0)
+    # cat over heads; 1/sqrt(n) on k turns the new (n * dim) ** -0.5 scale into the old / n
+    out["q.weight"] = torch.cat([f["q"][0] for f in folded])
+    out["q.bias"] = torch.cat([f["q"][1] for f in folded])
+    out["k.weight"] = torch.cat([f["k"][0] for f in folded]) / math.sqrt(n)
+    out["k.bias"] = torch.cat([f["k"][1] for f in folded]) / math.sqrt(n)
     hidden = states[0]["norm.weight"].numel()
     out["norm.weight"] = torch.ones(hidden, dtype=torch.float64)
     out["norm.bias"] = torch.zeros(hidden, dtype=torch.float64)
@@ -130,17 +117,19 @@ def soup(checkpoints: list[str], out: str, replace: bool = False) -> str:
         raise ValueError("no checkpoints")
     _check_paths(checkpoints, out, replace)
     n = len(checkpoints)
-    cfgs = [_json(config_path(c)) for c in checkpoints]
+    # from_json drops stale slot-era keys (num_slots, head_type="pointer", head_hidden,
+    # head_init, kl_frozen_weight) that pre-PR and v1-2610 pointer checkpoints still carry,
+    # and rejects head_type="slot" cleanly so a slot-era input stops here rather than
+    # halfway through, after soup has written an adapter file.
+    typed = [StrandsDeciderConfig.from_json(config_path(c)) for c in checkpoints]
+    cfgs = [asdict(c) for c in typed]
     recipe = [{k: v for k, v in c.items() if k not in FITTED | {"base_revision"}} for c in cfgs]
     if any(r != recipe[0] for r in recipe):
         raise ValueError(
             "the checkpoints' configs differ beyond their temperatures: not one recipe"
         )
     # The base revision is compared as the loader resolves it (config, else provenance.json).
-    revisions = {
-        base_revision(c, StrandsDeciderConfig(**cf))
-        for c, cf in zip(checkpoints, cfgs, strict=True)
-    }
+    revisions = {base_revision(c, t) for c, t in zip(checkpoints, typed, strict=True)}
     if len(revisions) > 1:
         raise ValueError(
             f"the checkpoints were trained on different base revisions: {sorted(map(str, revisions))}"
@@ -184,12 +173,13 @@ def soup(checkpoints: list[str], out: str, replace: bool = False) -> str:
             json.dump({**acfg, "r": n * r, "lora_alpha": alpha}, fh, indent=2)
         cfg = {**cfg, "lora_r": n * r, "lora_alpha": alpha}
 
-    head = soup_heads([load_head_state(c) for c in checkpoints], cfg["head_type"])
-    torch.save(head, os.path.join(out, "slot_head.pt"))
-    if cfg["head_type"] == "pointer":
-        cfg = {**cfg, "pointer_dim": n * cfg["pointer_dim"]}
-    elif cfg.get("head_hidden"):
-        cfg = {**cfg, "head_hidden": n * cfg["head_hidden"]}
+    head = soup_heads([load_head_state(c) for c in checkpoints])
+    save_file(
+        {k: v.contiguous() for k, v in head.items()},
+        os.path.join(out, "head.safetensors"),
+        metadata={"format": "pt"},
+    )
+    cfg = {**cfg, "pointer_dim": n * cfg["pointer_dim"]}
     cfg = {**cfg, "temperature": 1.0, "temperature_by_kind": {}}  # calibrate the soup
     with open(os.path.join(out, CONFIG_NAME), "w", encoding="utf-8") as fh:
         json.dump(cfg, fh, indent=2)
@@ -198,7 +188,6 @@ def soup(checkpoints: list[str], out: str, replace: bool = False) -> str:
     for f in os.listdir(checkpoints[0]):
         src = os.path.join(checkpoints[0], f)
         if os.path.isfile(src) and f not in {
-            "slot_head.pt",
             "head.safetensors",
             "history.json",
             os.path.basename(config_path(checkpoints[0])),

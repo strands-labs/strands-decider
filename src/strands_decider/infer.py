@@ -312,12 +312,8 @@ class SystemOneEngine:
         """
         ids, mask = self._pad([s + qi for qi in q])
         # This path forwards the whole prompt, so option positions sit after the state.
-        assert rendered is not None or self.model.config.head_type != "pointer"
-        opt_idx = (
-            self._option_idx(rendered, len(s), offsets)  # type: ignore[arg-type]
-            if self.model.config.head_type == "pointer"
-            else None
-        )
+        assert rendered is not None
+        opt_idx = self._option_idx(rendered, len(s), offsets)
         out = self.model(
             input_ids=ids,
             attention_mask=mask,
@@ -370,16 +366,13 @@ class SystemOneEngine:
         # last real *suffix* token -- which is `<answer>`, the position that has
         # attended to state and question alike.
         pooled = pool_last_token(hidden, full_mask).to(torch.float32)
-        if self.model.config.head_type == "pointer":
-            # `hidden` is the suffix only, so option positions are suffix-relative and
-            # need no prefix offset -- the cached state never enters the gather.
-            from .modeling import gather_options
+        # `hidden` is the suffix only, so option positions are suffix-relative and
+        # need no prefix offset -- the cached state never enters the gather.
+        from .modeling import gather_options
 
-            assert rendered is not None
-            options = gather_options(hidden, self._option_idx(rendered, 0, offsets))
-            raw = self.model.head(pooled, options.to(torch.float32))
-        else:
-            raw = self.model.head(pooled)
+        assert rendered is not None
+        options = gather_options(hidden, self._option_idx(rendered, 0, offsets))
+        raw = self.model.head(pooled, options.to(torch.float32))
         logits = apply_temperature(raw, self._temperatures(kinds))
         log_probs = masked_log_softmax(logits, torch.tensor(n_slots, device=self.device))
         n_tokens = prefix_len + int(suffix_mask.sum().item())
@@ -393,21 +386,7 @@ class SystemOneEngine:
         names = list(request.questions.keys())
         questions: list[Question] = [request.questions[n] for n in names]
 
-        rendered: list[RenderedQuestion] = []
-        for q in questions:
-            rq = render_question(q)
-            # A pointer head scores each option from its own hidden state, so there is
-            # no slot count to exceed; only the fixed-width readout has a ceiling.
-            if (
-                self.model.config.head_type != "pointer"
-                and rq.n_slots > self.model.config.num_slots
-            ):
-                raise ValueError(
-                    f"question has {rq.n_slots} options but this model has "
-                    f"{self.model.config.num_slots} slots; split the question or "
-                    f"retrain with a larger num_slots"
-                )
-            rendered.append(rq)
+        rendered: list[RenderedQuestion] = [render_question(q) for q in questions]
 
         state_text = render_state(request.state)
         n_slots = [rq.n_slots for rq in rendered]

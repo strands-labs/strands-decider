@@ -9,6 +9,7 @@ import tempfile
 
 import pytest
 import torch
+from safetensors.torch import save_file
 
 from strands_decider.modeling import load_head_state
 from training import hf_export
@@ -17,12 +18,7 @@ from training import hf_export
 def _ckpt(root, window=4096):
     os.makedirs(os.path.join(root, "lora"))
     json.dump(
-        {
-            "base_model": hf_export.BASE_MODEL,
-            "head_type": "pointer",
-            "num_slots": 24,
-            "max_length": window,
-        },
+        {"base_model": hf_export.BASE_MODEL, "max_length": window},
         open(os.path.join(root, "hobson_config.json"), "w"),
         indent=2,
     )
@@ -35,9 +31,11 @@ def _ckpt(root, window=4096):
         "q.weight": torch.randn(4, 8, generator=g),
         "k.bias": torch.randn(4, generator=g),
     }
-    torch.save(head, os.path.join(root, "slot_head.pt"))
-    from safetensors.torch import save_file
-
+    save_file(
+        {k: v.contiguous() for k, v in head.items()},
+        os.path.join(root, "head.safetensors"),
+        metadata={"format": "pt"},
+    )
     save_file(
         {"base_model.model.layers.0.lora_A.weight": torch.randn(2, 8, generator=g)},
         os.path.join(root, "lora", "adapter_model.safetensors"),
@@ -134,7 +132,6 @@ def test_export_is_pickle_free_loadable_and_deterministic(tmp_path):
     out = tmp_path / "out"
     assert _export(tmp_path, ckpt, out, [jev]) == "written"
     hf_export.verify(str(out))
-    assert not os.path.exists(out / "slot_head.pt")
     assert not any(hf_export.is_pickle(str(out / p)) for p in hf_export.files(str(out)))
     back = load_head_state(str(out))
     assert set(back) == set(head) and all(torch.equal(back[k], head[k]) for k in head)
@@ -195,7 +192,9 @@ def test_a_different_export_is_refused(tmp_path):
     _ckpt(str(ckpt))
     out = tmp_path / "out"
     _export(tmp_path, ckpt, out)
-    torch.save({"norm.weight": torch.zeros(8)}, ckpt / "slot_head.pt")
+    save_file(
+        {"norm.weight": torch.zeros(8)}, str(ckpt / "head.safetensors"), metadata={"format": "pt"}
+    )
     with pytest.raises(SystemExit, match="different export"):
         _export(tmp_path, ckpt, out)
 
@@ -264,7 +263,9 @@ def test_a_destination_that_is_not_an_export_is_kept_unless_replace(tmp_path):
     hf_export.verify(str(out))
     os.remove(out / "MANIFEST.sha256")  # an unfinished copy by this module
     assert _export(tmp_path, ckpt, out) == "replaced"
-    torch.save({"norm.weight": torch.zeros(8)}, ckpt / "slot_head.pt")
+    save_file(
+        {"norm.weight": torch.zeros(8)}, str(ckpt / "head.safetensors"), metadata={"format": "pt"}
+    )
     assert _export(tmp_path, ckpt, out, replace=True) == "replaced"  # a different export
 
 

@@ -69,9 +69,7 @@ def _model(texts, max_length):
         StrandsDeciderConfig(
             base_model="tiny-gemma4",
             use_lora=False,
-            head_type="pointer",
             pointer_dim=16,
-            num_slots=4,
             max_length=max_length,
             force_bos=True,
             torch_dtype="float32",

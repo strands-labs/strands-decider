@@ -26,14 +26,16 @@ SMALL_BASE = os.environ.get("STRANDS_DECIDER_TEST_BASE", "Qwen/Qwen3-0.6B-Base")
 def model():
     from strands_decider.modeling import StrandsDeciderConfig, StrandsDeciderModel
 
-    cfg = StrandsDeciderConfig(base_model=SMALL_BASE, num_slots=8, max_length=512, use_lora=False)
+    cfg = StrandsDeciderConfig(base_model=SMALL_BASE, max_length=512, use_lora=False)
     m = StrandsDeciderModel.from_pretrained_base(cfg)
     return m.to("cuda").eval()
 
 
 def test_torso_loads_without_lm_head(model):
     assert not hasattr(model.torso, "lm_head")
-    assert model.head.proj.out_features == 8
+    from strands_decider.modeling import PointerHead
+
+    assert isinstance(model.head, PointerHead)
 
 
 def test_forward_produces_masked_distribution(model):
@@ -47,9 +49,7 @@ def test_forward_produces_masked_distribution(model):
         label=0,
         task="smoke",
     )
-    coll = SystemOneCollator(
-        model.tokenizer, CollatorConfig(num_slots=8, max_length=512), train=False
-    )
+    coll = SystemOneCollator(model.tokenizer, CollatorConfig(max_length=512), train=False)
     batch = {k: v.to("cuda") for k, v in coll([ex]).items()}
     with torch.no_grad():
         out = model(
@@ -74,7 +74,6 @@ def fp32_model():
 
     cfg = StrandsDeciderConfig(
         base_model=SMALL_BASE,
-        num_slots=8,
         max_length=512,
         use_lora=False,
         torch_dtype="float32",
@@ -195,7 +194,6 @@ def test_lora_checkpoint_save_load_roundtrip(tmp_path):
 
     cfg = StrandsDeciderConfig(
         base_model=SMALL_BASE,
-        num_slots=8,
         max_length=512,
         use_lora=True,
         lora_r=4,
@@ -218,7 +216,6 @@ def test_lora_checkpoint_save_load_roundtrip(tmp_path):
     after = SystemOneEngine(reloaded.to("cuda").eval(), EngineConfig()).evaluate(request)
 
     assert _max_answer_delta(before, after) < 1e-4
-    assert reloaded.config.num_slots == 8
     assert reloaded.config.lora_r == 4
 
 
@@ -233,7 +230,6 @@ def test_temperature_is_applied_on_load(tmp_path):
 
     cfg = StrandsDeciderConfig(
         base_model=SMALL_BASE,
-        num_slots=8,
         max_length=512,
         use_lora=False,
         torch_dtype="float32",
