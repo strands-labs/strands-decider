@@ -2,11 +2,11 @@
 
 This document is for someone changing the serving path — the engine, the HTTP server, batching,
 prefix caching, device code, quantization, a new deployment target — and who needs to prove the
-change made the server faster (or at least no slower, and no less accurate) before shipping it.
+change made the server faster (or at least no slower, and no less correct) before shipping it.
 
 Accuracy benchmarks for a *checkpoint* live elsewhere: see [README.md](README.md) and
 [jevbench.md](jevbench.md). The scripts below measure the *serving system* around a checkpoint
-and treat accuracy as a gate: did the perf change move any answers?
+and treat correctness as a gate: did the perf change move any answers?
 
 ## The problem
 
@@ -20,8 +20,8 @@ them apart:
    latency grows as that load rises. A change that is 10% faster per request is worthless if it
    halves the sustainable throughput.
 3. **Correctness.** Whether the change moved any answers. Quantization, kernel changes,
-   batching math, device swaps and precision changes all put accuracy at risk, so we re-check
-   accuracy alongside the perf numbers.
+   batching math, device swaps and precision changes all put correctness at risk, so we re-check
+   it alongside the perf numbers.
 
 Every run records the host it ran on (EC2 instance type for local, function memory for Lambda,
 endpoint instance type for SageMaker). A number without a host is not comparable.
@@ -29,8 +29,8 @@ endpoint instance type for SageMaker). A number without a host is not comparable
 ## Metrics collected
 
 Every row below comes from [`decider_bench.py`](decider_bench.py), one row per
-(model × input length × load) cell, written to `runs/<name>/latency.csv`. Accuracy rows go to
-`accuracy.csv`.
+(model × input length × load) cell, written to `runs/<name>/latency.csv`. Correctness rows go to
+`accuracy.csv` (the file keeps its historical name; the column `score` is what you read).
 
 ### Latency (per-request)
 
@@ -57,9 +57,11 @@ Every row below comes from [`decider_bench.py`](decider_bench.py), one row per
 | `refused` | HTTP 422: prompt longer than the context window. Expected if you benchmark above `max_length`; a problem if you did not. |
 | `errors` | Any other non-2xx. Any non-zero count invalidates the row — fix the server, re-run. |
 
-### Accuracy (gate, not a goal)
+### Correctness (gate, not a goal)
 
 Written to `accuracy.csv` when you pass `--metrics ttft,jevbench` or `--metrics ttft,decision-index`.
+These are the server's correctness check: the same labelled benchmark run before and after the
+change, to prove it did not move answers.
 
 | Column | What it is |
 | --- | --- |
@@ -69,7 +71,8 @@ Written to `accuracy.csv` when you pass `--metrics ttft,jevbench` or `--metrics 
 
 The release rule: a perf change must not drop `score` on JevBench by more than the noise floor
 (SD ≈ 3 tasks out of 231, so about 0.013). See
-[README.md, Limitations](README.md#limitations) for how to size an accuracy effect.
+[README.md, Limitations](README.md#limitations) for how to size the effect. One run's drop
+inside that noise is not a failure; outside it is.
 
 ## Tests
 
@@ -155,7 +158,7 @@ A closed-loop p95 at N concurrency is almost always lower than the open-loop p95
 sustained throughput. Reporting one when you meant the other is a common source of surprised
 pagers.
 
-### 4. Accuracy gate
+### 4. Correctness gate
 
 Every perf change that touches numerics (quantization, kernels, batching, device, precision)
 runs JevBench on both baseline and change through the same bench:
@@ -166,7 +169,7 @@ python evaluation/decider_bench.py \
     --model change=http://127.0.0.1:8001 \
     --metrics ttft,jevbench \
     --input-length 1024 --num-requests 20 \
-    --out runs/accuracy-gate
+    --out runs/correctness-gate
 ```
 
 - JevBench uses its own inputs; the TTFT part uses the ones above. Both land in the same run
