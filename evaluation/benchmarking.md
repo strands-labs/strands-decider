@@ -1,12 +1,17 @@
 # Benchmarking changes to the inference server
 
 This document is for someone changing the serving path — the engine, the HTTP server, batching,
-prefix caching, device code, quantization, a new deployment target — and who needs to prove the
-change made the server faster (or at least no slower, and no less correct) before shipping it.
+prefix caching, device code, quantization — and who wants to prove on their own machine that the
+change made the server faster (or at least no slower, and no less correct) before pushing it.
 
-Accuracy benchmarks for a *checkpoint* live elsewhere: see [README.md](README.md) and
-[jevbench.md](jevbench.md). The scripts below measure the *serving system* around a checkpoint
-and treat correctness as a gate: did the perf change move any answers?
+Scope is **one host, baseline vs change**. The point is incremental: measure what today's server
+does, apply the change, re-measure. Multi-host comparisons ("Lambda vs SageMaker g6 vs the Mac")
+are a separate exercise — see [`skills/benchmark-decider/`](../skills/benchmark-decider/SKILL.md),
+which walks through planning and writing one up in phases.
+
+Accuracy benchmarks for a *checkpoint* also live elsewhere: see [README.md](README.md) and
+[jevbench.md](jevbench.md). The scripts below measure the serving system around a checkpoint and
+treat correctness as a gate — did the perf change move any answers?
 
 ## The problem
 
@@ -31,11 +36,13 @@ benchmark), and comes with figures via `decider_bench.py plot runs/...`.
 
 Four invariants that make the numbers trustworthy:
 
-- **Pair every run.** Baseline (today's server, same commit) and change, under the same inputs
-  and load. A single run tells you nothing — hosts drift and queue depth is noisy.
-- **Record the host.** Every row carries `host`, `gpus`, `cpu`, `spec` (EC2 instance type for
-  local, function memory for Lambda, endpoint instance type for SageMaker). A number without a
-  host is not comparable.
+- **Pin the host.** Baseline and change run on the same hardware in the same session. A number
+  from a different host does not count. `decider_bench.py` records `host`, `gpus`, `cpu`, `spec`
+  on every row so you can see when this slipped.
+- **Pair every run.** Baseline (today's server, same commit) and change, same inputs, same load.
+  A single run tells you nothing — queue depth and warm-up noise swamp small effects. The
+  typical shape is two local servers on `:8000` and `:8001`, with `--model baseline=http://...`
+  and `--model change=http://...` in one command so both are measured against the same clock.
 - **Gate on `n`, `ok`, `refused`, `errors` first.** Any non-zero `errors`, or `ok < n`, means the
   perf numbers for that row do not count. `refused` (HTTP 422, prompt over the context window)
   is expected only when you deliberately exceed `max_length`.
@@ -78,32 +85,26 @@ beyond load — look at GC, allocator warm-up, or a one-off slow path.
 ### 2. Hot vs cold
 
 The first request after a server starts pays for weight load, VRAM allocator warm-up and (for
-serverless) container start. Steady-state TTFT is a separate number, and a change can help one
-and regress the other.
+some devices) kernel compilation. Steady-state TTFT is a separate number, and a change can help
+one and regress the other.
 
 ```bash
 # steady-state is the default; decider_bench discards a warm-up round every run.
-# For a dedicated cold-vs-warm number, use the pinned helper:
+# For a dedicated cold-vs-warm number against a local checkpoint:
 python evaluation/jevbench/jevbench_cold_warm.py <checkpoint>
-
-# Serverless cold start: scale to zero (idle long enough or redeploy), then:
-python evaluation/decider_bench.py \
-    --model change=lambda:strands-decider-live@us-east-1 \
-    --input-length 1024 --concurrency 1 --num-requests 1 \
-    --out runs/cold-start
 ```
 
 | Column | What it is here | Read for |
 | --- | --- | --- |
-| `p50_ms` (n=1) | The one cold TTFT | Cold-start cost on this host |
+| `p50_ms` (cold run, n=1) | The one cold TTFT | Cold-start cost on this host |
 | `p50_ms` (steady suite) | TTFT after warm-up | Steady-state cost |
 
 **Figure:** none standard — report the pair as two numbers in the write-up.
 
-**Pass/tune:** cold start only matters where auto-scaling or scale-to-zero is in play. Drive it
-down by pre-loading weights, pinning containers warm, or (serverless) using provisioned
-concurrency. A change that only pays off on cold start should be verified against a steady-state
-suite — some wins amortize to zero after the first second.
+**Pass/tune:** cold start matters where the server restarts often (dev loop, local kill-and-run,
+auto-restart on crash). Drive it down by pre-loading weights, caching compiled kernels, or
+reducing the warm-up round's work. A change that only pays off on cold start should be verified
+against a steady-state suite — some wins amortize to zero after the first second.
 
 ### 3. Load — closed loop (`--concurrency N`)
 
@@ -194,49 +195,22 @@ changed, which is a legitimate hard pass/fail. A change that does not touch nume
 tweaks, process-level batching, admission control) can skip this test but should say so in the
 change description.
 
-### 6. Cross-host comparison
-
-Which host (or hosts) best serves this model? Run every target as its own `--model`.
-
-```bash
-python evaluation/decider_bench.py \
-    --model g5=sagemaker:strands-decider-g5@us-east-1 \
-    --model g6=sagemaker:strands-decider-g6@us-east-1 \
-    --model lambda=lambda:strands-decider-live@us-east-1 \
-    --input-length 256,1024,4096 --concurrency 1,8,32 \
-    --num-requests 50 \
-    --out runs/host-compare
-```
-
-| Column | What it is here | Read for |
-| --- | --- | --- |
-| `host`, `gpus`, `cpu`, `spec` | Instance type / Lambda memory / Mac chip | How the figures group |
-| Everything from tests 1 and 3 | Per-host rows for the same inputs | Side-by-side comparison |
-
-**Figure:** `ttft_vs_input_length.png` and `ttft_vs_throughput.png`, faceted by host.
-
-**Pass/tune:** for hosts unreachable from one machine, run the bench on each host and combine
-directories at plot time: `python evaluation/decider_bench.py plot runs/g5 runs/g6 runs/lambda`.
-The [benchmark-decider skill](../skills/benchmark-decider/SKILL.md) walks through planning and
-writing up a multi-host comparison in phases, with gates between them.
-
 ## Running the full suite
 
-The quickest end-to-end check for a server change:
+The quickest end-to-end check for a server change on your machine:
 
 ```bash
-# baseline
-python evaluation/decider_bench.py --model baseline=http://127.0.0.1:8000 \
-    --metrics ttft,jevbench --input-length 256,1024,4096 \
-    --concurrency 1,8,32 --num-requests 50 --out runs/baseline
+# serve baseline on :8000 and change on :8001 before running (two shells, or your usual pattern).
 
-# change (same shape)
-python evaluation/decider_bench.py --model change=http://127.0.0.1:8001 \
-    --metrics ttft,jevbench --input-length 256,1024,4096 \
-    --concurrency 1,8,32 --num-requests 50 --out runs/change
+python evaluation/decider_bench.py \
+    --model baseline=http://127.0.0.1:8000 \
+    --model change=http://127.0.0.1:8001 \
+    --metrics ttft,jevbench \
+    --input-length 256,1024,4096 \
+    --concurrency 1,8,32 --num-requests 50 \
+    --out runs/change-vs-baseline
 
-# combined figures and tables
-python evaluation/decider_bench.py plot runs/baseline runs/change
+python evaluation/decider_bench.py plot runs/change-vs-baseline
 ```
 
 Needs `matplotlib` for the figures (`pip install matplotlib`); the CSVs are written without it.
@@ -244,3 +218,6 @@ Needs `matplotlib` for the figures (`pip install matplotlib`); the CSVs are writ
 Outputs per run: `latency.csv`, `accuracy.csv`, `requests.jsonl`, `summary.json`,
 `server.log` (if the bench ran its own server), and `ttft_vs_input_length.png`,
 `ttft_vs_throughput.png`, `throughput_vs_input_length.png` once plotted.
+
+For *host* comparisons (which GPU, which instance type, serverless vs always-on) rather than
+*change* comparisons, see [`skills/benchmark-decider/`](../skills/benchmark-decider/SKILL.md).
