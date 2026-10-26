@@ -60,12 +60,15 @@ The deploy stack refuses these; `strands-decider serve` has no backend for them.
    ```bash
    python evaluation/decider_bench.py plot benchmarks/runs/<host-slug>
    python benchmarks/plot_throughput.py benchmarks/runs/<host-slug>
+   python benchmarks/plot_rps_ramp.py benchmarks/runs/<host-slug>
    ```
    The first writes `ttft_vs_input_length.png`, `ttft_vs_throughput.png` and
    `throughput_vs_input_length.png` (stock, peak throughput only). The second writes
-   `throughput_by_concurrency.png` — one line per concurrency, each point annotated with
-   its p50 latency, so a backend that scales with load reads differently from a batch-of-1
-   backend.
+   `throughput_by_concurrency.png` — one line per concurrency across input lengths, each point
+   annotated with its p50 latency, so a backend that scales with load reads differently from a
+   batch-of-1 backend. The third writes `rps_ramp.png` — p95 vs target rps, one line per input
+   length, each point annotated with delivered decisions/s so you can see where the server
+   fell behind. The sustainable rps at your SLA is the knee of each curve.
 4. **Update this README's host matrix** so the row moves from *not yet measured* to *measured*.
    If you want a cost figure, apply the formulas in [Cost](#cost) below and add the number to
    your host's run README.

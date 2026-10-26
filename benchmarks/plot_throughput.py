@@ -23,18 +23,19 @@ import matplotlib.pyplot as plt
 
 
 def load(run_dir: Path):
-    """Return {(model, mode, load_value): [(input_length, decisions_per_s, n), ...]} sorted by input length."""
+    """Return {(model, concurrency): [(input_length, decisions_per_s, p50_ms), ...]} sorted by input length.
+    Only closed-loop (concurrency) rows; open-loop (rps) is a different chart (plot_rps_ramp.py).
+    """
     rows = defaultdict(list)
     with (run_dir / "latency.csv").open() as f:
         for row in csv.DictReader(f):
+            if row["mode"] != "concurrency":
+                continue
             if row["errors"] and int(row["errors"]) > 0:
                 continue
             if not row["decisions_per_s"]:
                 continue
-            model = row["model"]
-            mode = row["mode"]  # concurrency or rps
-            load_value = int(row["concurrency"] or 0) if mode == "concurrency" else float(row["rps"] or 0)
-            key = (model, mode, load_value)
+            key = (row["model"], int(row["concurrency"]))
             rows[key].append(
                 (
                     int(row["input_length"]),
@@ -53,16 +54,12 @@ def plot(run_dir: Path, out: Path) -> None:
         sys.exit(f"no usable rows in {run_dir / 'latency.csv'}")
 
     fig, ax = plt.subplots(figsize=(8, 5))
-    sorted_keys = sorted(rows.keys())
-    for i, (model, mode, load_value) in enumerate(sorted_keys):
-        pts = rows[(model, mode, load_value)]
+    sorted_keys = sorted(rows.keys(), key=lambda k: (k[0], k[1]))
+    for i, (model, concurrency) in enumerate(sorted_keys):
+        pts = rows[(model, concurrency)]
         xs = [p[0] for p in pts]
         ys = [p[1] for p in pts]
-        label = (
-            f"{model}, {load_value} in flight"
-            if mode == "concurrency"
-            else f"{model}, {load_value} rps"
-        )
+        label = f"{model}, {concurrency} in flight"
         line, = ax.plot(xs, ys, marker="o", label=label)
         # Stagger annotations vertically by series order so overlapping concurrencies read.
         y_offset = 6 + i * 11
