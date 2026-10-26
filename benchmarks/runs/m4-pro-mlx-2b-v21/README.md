@@ -60,8 +60,14 @@ for 256 → 512 → 1024 → 2048. Decisions/s halves correspondingly: 7.7 → 4
 
 - `throughput_by_concurrency.png` — closed-loop sweep, one line per concurrency, p50 annotated.
   From `../../plot_throughput.py`.
-- `ttft_vs_input_length.png`, `ttft_vs_throughput.png`, `throughput_vs_input_length.png` —
-  stock figures from `decider_bench.py plot` (peak-only, less informative than the one above).
+- `ttft_vs_input_length.png`, `throughput_vs_input_length.png` — stock peak-only figures from
+  `decider_bench.py plot`. Less informative than the one above.
+
+> `decider_bench.py plot` also writes `ttft_vs_throughput.png`, which is a goodput curve
+> (latency vs throughput as concurrency grows). On a batch-of-1 backend the throughput axis is
+> clamped and all points pile up at the same x, so the chart is a vertical line without useful
+> structure. Deleted here; the file will come back when the batching PR lands and the curve
+> has a knee.
 
 ## To replace this with a full run
 
