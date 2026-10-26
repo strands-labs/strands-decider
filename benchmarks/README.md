@@ -10,26 +10,54 @@ figures: `ttft_vs_input_length.png`, `ttft_vs_throughput.png`, `throughput_vs_in
 > For *how* to benchmark a change (metrics, tests, pass/tune), see
 > [`benchmarking.md`](benchmarking.md) in this directory.
 
-## Host matrix
+## Related benchmarks (sizing and cross-instance)
+
+This directory is for **incremental testing of changes to the serving stack on one host**. For
+the complementary question — *which instance should I deploy on, with which model?* — there is
+a separate benchmark run against stock vLLM, the current strands_decider engine, and the vLLM
+"Decision 2.0" family across g5, g6, g6e and inf2. Two figures:
+
+- `$ per 1M decisions` vs model size, by input length, per (instance × serving stack).
+- Saturation `decisions/s` vs model size, same layout.
+
+Takeaways relevant to this directory:
+
+- The current `strands_decider` serving engine is **batch of 1**. On the data drop, adding
+  batching and flash linear attention raises throughput ~10×. A PR is in flight.
+- `inf2.8xlarge` with a ported Neuron kernel gives the lowest `$ / 1M decisions` for strands E2B
+  (~$5 vs ~$6.50 on the next best, `g6e.xlarge`), at 256 input tokens.
+- Stock vLLM on the backbone model (no decider head) is 5–10× faster than the current
+  strands_decider engine. This is the ceiling our engine should chase.
+
+The sweep below (`--concurrency 1,8,32`) is chosen so our numbers compare directly against the
+data drop's saturation point (`c=32`). When the batching PR lands, re-run every measured host.
+
+## Host × serving-stack matrix
+
+A row is a `(host, serving stack)` pair. A single host can appear more than once as the engine
+evolves (today's batch-of-1 engine; the batching PR; stock vLLM for a non-decider baseline).
 
 ### Measured
 
-| Host | Device | Model | Run directory | Status |
+| Host | Serving stack | Model | Run directory | Status |
 | --- | --- | --- | --- | --- |
-| Apple M4 Pro | mlx | 2B hobson-v21 | [`runs/m4-pro-mlx-2b-v21/`](runs/m4-pro-mlx-2b-v21/) | Indicative smoke (20 reqs/cell, 2 input lengths, 2 loads) |
+| Apple M4 Pro | strands_decider (batch of 1) | 2B hobson-v21 | [`runs/m4-pro-mlx-2b-v21/`](runs/m4-pro-mlx-2b-v21/) | Indicative — `--concurrency 1,8,32`, 50 reqs/cell |
 
 ### Supported deploy targets, not yet measured
 
-| Host | Device | Reach as | Likely run directory |
+| Host | Serving stack | Reach as | Likely run directory |
 | --- | --- | --- | --- |
-| NVIDIA RTX 3090 (WSL2) | cuda | `http://...` after `strands-decider serve --device cuda` | `runs/rtx-3090-cuda-2b-v21/` |
-| SageMaker, NVIDIA L4 (`ml.g6.xlarge`) | cuda | `sagemaker:ENDPOINT@REGION` | `runs/sagemaker-g6-xlarge-2b-v21/` |
-| SageMaker, NVIDIA A10G (`ml.g5.xlarge`) | cuda | `sagemaker:ENDPOINT@REGION` | `runs/sagemaker-g5-xlarge-2b-v21/` |
-| SageMaker, NVIDIA L40S (`ml.g6e.xlarge`) | cuda | `sagemaker:ENDPOINT@REGION` | `runs/sagemaker-g6e-xlarge-2b-v21/` |
-| SageMaker, NVIDIA H100 (`ml.p5.4xlarge`) | cuda | `sagemaker:ENDPOINT@REGION` | `runs/sagemaker-p5-4xlarge-26b-v21/` |
-| SageMaker CPU (`ml.m5.2xlarge`, etc.) | cpu | `sagemaker:ENDPOINT@REGION` | `runs/sagemaker-m5-2xlarge-2b-v21/` |
-| AWS Lambda | cpu (x86) | `lambda:FUNCTION[:ALIAS][@REGION]` | `runs/lambda-<mem>mb-2b-v21/` |
-| Apple M3 Pro | mps | self-hosted | `runs/m3-pro-mps-2b-v21/` |
+| NVIDIA RTX 3090 (WSL2) | strands_decider | `http://...` after `strands-decider serve --device cuda` | `runs/rtx-3090-cuda-2b-v21/` |
+| SageMaker, NVIDIA L4 (`ml.g6.xlarge`) | strands_decider | `sagemaker:ENDPOINT@REGION` | `runs/sagemaker-g6-xlarge-2b-v21/` |
+| SageMaker, NVIDIA A10G (`ml.g5.xlarge`) | strands_decider | `sagemaker:ENDPOINT@REGION` | `runs/sagemaker-g5-xlarge-2b-v21/` |
+| SageMaker, NVIDIA L40S (`ml.g6e.xlarge`) | strands_decider | `sagemaker:ENDPOINT@REGION` | `runs/sagemaker-g6e-xlarge-2b-v21/` |
+| SageMaker, NVIDIA H100 (`ml.p5.4xlarge`) | strands_decider | `sagemaker:ENDPOINT@REGION` | `runs/sagemaker-p5-4xlarge-26b-v21/` |
+| SageMaker CPU (`ml.m5.2xlarge`, etc.) | strands_decider | `sagemaker:ENDPOINT@REGION` | `runs/sagemaker-m5-2xlarge-2b-v21/` |
+| AWS Lambda | strands_decider | `lambda:FUNCTION[:ALIAS][@REGION]` | `runs/lambda-<mem>mb-2b-v21/` |
+| Apple M3 Pro | strands_decider | self-hosted | `runs/m3-pro-mps-2b-v21/` |
+| AWS Inferentia2 (`inf2.*`) | strands_decider + Neuron port (forked, upstream pending) | self-hosted | `runs/inf2-xlarge-neuron-2b-v21/` |
+| any host above | strands_decider + batching (PR pending) | self-hosted | append `-batched` suffix |
+| any host above | stock vLLM on the backbone (reference, no decider head) | self-hosted | append `-vllm` suffix |
 
 ### Unsupported
 
@@ -38,7 +66,7 @@ The deploy stack refuses these; `strands-decider serve` has no backend for them.
 | Host | Why |
 | --- | --- |
 | Graviton (arm64 EC2) | Torso has no arm64 fused-kernel path |
-| AWS Inferentia (`inf1`, `inf2`) | No Neuron SDK integration |
+| AWS Inferentia 1 (`inf1`) | No Neuron SDK integration; Qwen3.5 / Gemma 4 not supported |
 | AWS Trainium (`trn1`, `trn2`) | Training-only accelerator |
 
 ## Adding a host

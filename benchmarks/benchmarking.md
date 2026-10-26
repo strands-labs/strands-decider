@@ -126,10 +126,14 @@ previous answer arrives (closed-loop load). The population of in-flight requests
 python evaluation/decider_bench.py \
     --model baseline=http://127.0.0.1:8000 \
     --model change=http://127.0.0.1:8001 \
-    --input-length 1024 --concurrency 1,8,32,64 \
+    --input-length 1024 --concurrency 1,8,32 \
     --num-requests 100 \
     --out runs/throughput-sweep
 ```
+
+`1,8,32` is the standard sweep: it covers single-user (`N=1`), light batching (`N=8`) and
+saturation (`N=32`). The data-drop benchmarks against stock vLLM and Decision 2.0 use `c=32`
+as their saturation point, so our numbers compare directly against theirs.
 
 | Column | What it is here | Read for |
 | --- | --- | --- |
