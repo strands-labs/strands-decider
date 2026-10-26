@@ -1,6 +1,6 @@
 # Figures: recipes and style
 
-`python evaluation/decider_bench.py plot runs/*` draws the standard figures. Everything below uses
+`python benchmark/decider_bench.py plot runs/*` draws the standard figures. Everything below uses
 [`../scripts/figures.py`](../scripts/figures.py), which reads `latency.csv` and `accuracy.csv` into
 plain rows (dicts) and needs only matplotlib.
 

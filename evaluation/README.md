@@ -13,6 +13,7 @@ seed replicate finished), so a single-run difference under about 10 tasks is unr
 - [`jevbench.md`](jevbench.md): the external benchmark, the board position, the families, the
   context window, and how to reproduce the run.
 - [`jevbench/`](jevbench/): the JevBench harness driver and its two helpers.
+- [`../benchmark/`](../benchmark/): `decider_bench.py` — TTFT, throughput, JevBench and Decision Index of any served decider.
 
 `training/recipe.sh eval` runs the internal evaluations on the recipe's checkpoint. Each
 script also runs on its own:
@@ -26,7 +27,6 @@ script also runs on its own:
 | [`pair_accuracy.py`](pair_accuracy.py) | Item and pair accuracy on a minimal-pair file (v10) |
 | [`calibrate_mix.py`](calibrate_mix.py) | Refits the temperatures on every held-out set, into a copy of the checkpoint (v19-calmix) |
 | [`bench_local.py`](bench_local.py) | Inference latency against the engine, by state length and question count, on any device |
-| [`decider_bench.py`](decider_bench.py) | Time to first token and throughput of any served decider (a local checkpoint, a `/v1/systemone` server, Lambda or SageMaker) by input length and load, with JevBench and the Decision Index through their own scorers. The [benchmark-decider skill](../skills/benchmark-decider/SKILL.md) turns its runs into figures |
 | [`device_parity.py`](device_parity.py) | Whether two or more devices give one checkpoint the same answers: the largest probability difference and the answers that change, against the first device |
 | [`jevbench/jevbench.sh`](jevbench/jevbench.sh) | The JevBench public set against `strands-decider serve` on one GPU, at the JevBench commit the script pins |
 | [`jevbench/paired.py`](jevbench/paired.py) | A per-task comparison of two JevBench runs, with an exact McNemar test |
