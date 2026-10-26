@@ -3,9 +3,8 @@
 
 The stock `decider_bench.py plot` shows peak decisions/s per input length — one line per model,
 one point per length, max over concurrency. This script reads `latency.csv` from one run and
-plots one line per concurrency (closed loop) or per rps (open loop), with each point labelled
-by the N that produced it. The result exposes whether throughput climbs with load (batching
-helps) or stays flat (batch-of-1 serving).
+plots one line per concurrency, with each point labelled by the cell's p50 latency. The result
+exposes whether throughput climbs with load (batching helps) or stays flat (batch-of-1 serving).
 
     python benchmarks/plot_throughput.py benchmarks/runs/<host-slug>
 
@@ -24,7 +23,7 @@ import matplotlib.pyplot as plt
 
 def load(run_dir: Path):
     """Return {(model, concurrency): [(input_length, decisions_per_s, p50_ms), ...]} sorted by input length.
-    Only closed-loop (concurrency) rows; open-loop (rps) is a different chart (plot_rps_ramp.py).
+    Only closed-loop (concurrency) rows; rps rows (if present) are ignored.
     """
     rows = defaultdict(list)
     with (run_dir / "latency.csv").open() as f:

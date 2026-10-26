@@ -60,15 +60,12 @@ The deploy stack refuses these; `strands-decider serve` has no backend for them.
    ```bash
    python evaluation/decider_bench.py plot benchmarks/runs/<host-slug>
    python benchmarks/plot_throughput.py benchmarks/runs/<host-slug>
-   python benchmarks/plot_rps_ramp.py benchmarks/runs/<host-slug>
    ```
    The first writes `ttft_vs_input_length.png`, `ttft_vs_throughput.png` and
    `throughput_vs_input_length.png` (stock, peak throughput only). The second writes
    `throughput_by_concurrency.png` — one line per concurrency across input lengths, each point
    annotated with its p50 latency, so a backend that scales with load reads differently from a
-   batch-of-1 backend. The third writes `rps_ramp.png` — p95 vs target rps, one line per input
-   length, each point annotated with delivered decisions/s so you can see where the server
-   fell behind. The sustainable rps at your SLA is the knee of each curve.
+   batch-of-1 backend.
 4. **Update this README's host matrix** so the row moves from *not yet measured* to *measured*.
    If you want a cost figure, apply the formulas in [Cost](#cost) below and add the number to
    your host's run README.
@@ -89,8 +86,9 @@ Pick which `decisions_per_s` to use before quoting:
 
 - **Peak** — the highest cell across the sweep. Assumes 100% utilization. Honest for a saturated
   server; a floor on cost, not the expected cost.
-- **Sustained at your SLA rps** — the `--rps` cell where p95 is still under your target. More
-  realistic for traffic that isn't saturated.
+- **Sustained at your SLA concurrency** — the `--concurrency N` cell where p95 is still under
+  your target. More realistic for traffic that isn't saturated; "N" is roughly the number of
+  simultaneous users you can serve.
 
 Prices: SageMaker on-demand at <https://aws.amazon.com/sagemaker-ai/pricing/>, EC2 at your actual
 invoice, `$0` for own hardware (or amortize purchase ÷ hours used if you need a figure).

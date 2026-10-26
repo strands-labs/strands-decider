@@ -110,11 +110,17 @@ auto-restart on crash). Drive it down by pre-loading weights, caching compiled k
 reducing the warm-up round's work. A change that only pays off on cold start should be verified
 against a steady-state suite — some wins amortize to zero after the first second.
 
-### 3. Load — closed loop (`--concurrency N`)
+### 3. Load (`--concurrency N`)
 
 What is the server's maximum sustainable throughput, and how does latency grow as load rises?
-Closed loop keeps `N` requests in flight at all times; each simulated user sends its next request
-when the previous answer arrives.
+Keeps `N` requests in flight at all times; each simulated user sends its next request when the
+previous answer arrives (closed-loop load). The population of in-flight requests is bounded by
+`N`, which makes the measurement reproducible — the right choice for baseline-vs-change diffs.
+
+> Open-loop load (Poisson arrivals at a target rps) answers a different question — "what rps can
+> we serve under a given SLA?" — and is noisier run-to-run because queue depth is unbounded.
+> `decider_bench.py` supports it via `--rps`, but we do not use it for incremental server testing
+> on this host; closed loop is the tool for that.
 
 ```bash
 python evaluation/decider_bench.py \
@@ -142,34 +148,7 @@ strategy, request-coalescing and allocator behaviour. The queue-cost diagnostic
 and admission control pay off; if it stays flat, only model-side work (quantization, kernels,
 smaller model) will help.
 
-### 4. Load — open loop (`--rps R`)
-
-What throughput can we serve before p95 crosses our SLA? Open loop sends `R` requests per second
-at Poisson arrival times, regardless of whether answers keep up — queue time counts toward request latency.
-
-```bash
-python evaluation/decider_bench.py \
-    --model change=http://127.0.0.1:8000 \
-    --input-length 1024 --rps 2,8,24 \
-    --num-requests 200 \
-    --out runs/rps-sweep
-```
-
-| Column | What it is here | Read for |
-| --- | --- | --- |
-| `rps` | Target request rate for this cell | Row key |
-| `p95_ms` | Request latency with queueing, at that rate | **The number a design doc quotes against an SLA** |
-| `p99_ms` | Worst-case tail at that rate | Pager risk under real traffic |
-| `decisions_per_s` | What the server actually delivered | Below `rps` ⇒ the server fell behind |
-
-**Figure:** `ttft_vs_throughput.png`.
-
-**Pass/tune:** closed-loop p95 at `N` concurrency is almost always lower than open-loop p95 at
-the same sustained throughput; reporting one when you meant the other is a common source of
-surprised pagers. Drive down by shortening the critical path (same levers as test 3) or by
-rejecting load before it queues (admission control / timeouts).
-
-### 5. Correctness gate
+### 4. Correctness gate
 
 Did the change move any answers? Run JevBench on both baseline and change through the same bench.
 
