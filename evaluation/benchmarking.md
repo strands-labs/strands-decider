@@ -23,67 +23,32 @@ them apart:
    batching math, device swaps and precision changes all put correctness at risk, so we re-check
    it alongside the perf numbers.
 
-Every run records the host it ran on (EC2 instance type for local, function memory for Lambda,
-endpoint instance type for SageMaker). A number without a host is not comparable.
+## Shared rules
 
-## Metrics collected
+Every test below is one call to [`decider_bench.py`](decider_bench.py), writes to
+`runs/<name>/latency.csv` (perf) and `accuracy.csv` (correctness, when `--metrics` names a
+benchmark), and comes with figures via `decider_bench.py plot runs/...`.
 
-Every row below comes from [`decider_bench.py`](decider_bench.py), one row per
-(model × input length × load) cell, written to `runs/<name>/latency.csv`. Correctness rows go to
-`accuracy.csv` (the file keeps its historical name; the column `score` is what you read).
+Four invariants that make the numbers trustworthy:
 
-### Latency (per-request)
-
-| Column | What it is | What drives it down |
-| --- | --- | --- |
-| `p50_ms` | Median TTFT, as the client sees it | Smaller model, faster device, better kernels |
-| `p90_ms`, `p95_ms`, `p99_ms` | Tail TTFT. **p95 is the number to quote.** | Reduce queueing (batching strategy, admission control) |
-| `mean_ms` | Mean TTFT. Report only alongside p50; the mean on its own hides tails. | — |
-| `server_p50_ms` | What the server itself reported as `latency_ms` for the same request | Diff against `p50_ms` → the client/server gap is network + queueing |
-| `tokens_mean` | Actual input tokens sent, averaged over the cell | Sanity check: did `--input-length 1024` really send ~1024? |
-
-### Throughput and load
-
-| Column | What it is | What drives it up |
-| --- | --- | --- |
-| `decisions_per_s` | Finished requests per second in that cell | Larger batches, more parallelism, prefix cache hits |
-| `load` / `concurrency` / `rps` | How the cell was driven (see [Tests](#tests)) | — |
-| `n`, `ok` | Requests attempted and succeeded | Fix anything causing `ok < n` before trusting the perf numbers |
-
-### Errors
-
-| Column | Meaning |
-| --- | --- |
-| `refused` | HTTP 422: prompt longer than the context window. Expected if you benchmark above `max_length`; a problem if you did not. |
-| `errors` | Any other non-2xx. Any non-zero count invalidates the row — fix the server, re-run. |
-
-### Correctness (gate, not a goal)
-
-Written to `accuracy.csv` when you pass `--metrics ttft,jevbench` or `--metrics ttft,decision-index`.
-These are the server's correctness check: the same labelled benchmark run before and after the
-change, to prove it did not move answers.
-
-| Column | What it is |
-| --- | --- |
-| `score` | Fraction correct on the benchmark (0 to 1) |
-| `correct`, `of` | Numerator and denominator behind the score |
-| `complete` | Whether the run finished every task |
-
-The release rule: a perf change must not drop `score` on JevBench by more than the noise floor
-(SD ≈ 3 tasks out of 231, so about 0.013). See
-[README.md, Limitations](README.md#limitations) for how to size the effect. One run's drop
-inside that noise is not a failure; outside it is.
+- **Pair every run.** Baseline (today's server, same commit) and change, under the same inputs
+  and load. A single run tells you nothing — hosts drift and queue depth is noisy.
+- **Record the host.** Every row carries `host`, `gpus`, `cpu`, `spec` (EC2 instance type for
+  local, function memory for Lambda, endpoint instance type for SageMaker). A number without a
+  host is not comparable.
+- **Gate on `n`, `ok`, `refused`, `errors` first.** Any non-zero `errors`, or `ok < n`, means the
+  perf numbers for that row do not count. `refused` (HTTP 422, prompt over the context window)
+  is expected only when you deliberately exceed `max_length`.
+- **Server-side has only p50.** `decider_bench.py` reports `server_p50_ms` from the model's own
+  `latency_ms` field but no `server_p90/95/99_ms`. The full server distribution is in
+  `requests.jsonl` if you want to re-aggregate; adding server tail columns is a four-line patch.
 
 ## Tests
 
-Every test is run twice — once on the baseline (today's server, same commit) and once on the
-change — and the pair is compared. Running the change on its own tells you nothing: hosts drift
-and queue depth is noisy. All of these are shapes of one `decider_bench.py` command.
-
 ### 1. Short vs long input
 
-Decider latency scales with input tokens; a change can help short prompts and hurt long ones
-(or the other way around). Measure both.
+Does the change help short prompts, long prompts, or both? Decider latency scales with input
+tokens, so a change can help one end and hurt the other.
 
 ```bash
 python evaluation/decider_bench.py \
@@ -94,41 +59,57 @@ python evaluation/decider_bench.py \
     --out runs/length-sweep
 ```
 
-- `--input-length` sweeps synthetic requests trimmed to exactly that many tokens.
-- `--concurrency 1` keeps load out of it so the number reflects pure per-request latency.
-- Both servers must be reachable at the same time (two ports, or baseline + a `sagemaker:` target).
+| Column | What it is here | Read for |
+| --- | --- | --- |
+| `input_length` | The target length for this cell | Row key |
+| `tokens_mean` | Actual tokens sent, averaged | Sanity: did 1024 really hit? |
+| `p50_ms` | Pure per-request TTFT at that length | The floor on how fast one request can be |
+| `p95_ms` | Tail TTFT at that length | How much the slow requests slow down |
+| `server_p50_ms` | Server-reported model-only p50 | Gap vs `p50_ms` = network overhead at zero load |
 
-Figure to read: `ttft_vs_input_length.png` (one line per model). The useful comparison is the
-*slope*, not just the intercept — if the change is faster at 256 and slower at 4096, say so.
+**Figure:** `ttft_vs_input_length.png` — one line per model. The slope matters more than the
+intercept: a change faster at 256 and slower at 4096 is a different change than a flat shift.
+
+**Pass/tune:** this test's `p50_ms` at a representative input length is the clearest signal of
+whether a change made one request faster. Drive it down by shrinking the model, swapping to a
+faster device, or improving kernels. If `p95_ms` is high at `--concurrency 1`, something is wrong
+beyond load — look at GC, allocator warm-up, or a one-off slow path.
 
 ### 2. Hot vs cold
 
-The first request after the server comes up pays for weight load, VRAM allocator warm-up and
-(for serverless) container start. Steady-state TTFT is a separate number. A change that improves
-one can regress the other.
+The first request after a server starts pays for weight load, VRAM allocator warm-up and (for
+serverless) container start. Steady-state TTFT is a separate number, and a change can help one
+and regress the other.
 
-Three ways to measure, in order of fidelity:
+```bash
+# steady-state is the default; decider_bench discards a warm-up round every run.
+# For a dedicated cold-vs-warm number, use the pinned helper:
+python evaluation/jevbench/jevbench_cold_warm.py <checkpoint>
 
-- **Steady-state only (default).** `decider_bench.py` always discards a warm-up round. Every
-  cell is already a hot number.
-- **Cold first-request.** The dedicated script is [`jevbench/jevbench_cold_warm.py`](jevbench/jevbench_cold_warm.py):
-  one task, fired twice, reports the first vs the second (MPS). Generalize it or write a small
-  wrapper if you need the same test against Lambda or SageMaker.
-- **Serverless cold start.** For Lambda or a SageMaker Serverless endpoint, scale to zero
-  before the test (idle long enough, or redeploy) and run `decider_bench.py` with
-  `--num-requests 1 --concurrency 1`. The single TTFT measurement is the cold start.
+# Serverless cold start: scale to zero (idle long enough or redeploy), then:
+python evaluation/decider_bench.py \
+    --model change=lambda:strands-decider-live@us-east-1 \
+    --input-length 1024 --concurrency 1 --num-requests 1 \
+    --out runs/cold-start
+```
 
-A perf change that only ever runs once per cold boot (e.g. a one-time compile) should be
-benchmarked by running the full suite twice: once immediately after start, once after N minutes.
+| Column | What it is here | Read for |
+| --- | --- | --- |
+| `p50_ms` (n=1) | The one cold TTFT | Cold-start cost on this host |
+| `p50_ms` (steady suite) | TTFT after warm-up | Steady-state cost |
 
-### 3. Load (closed loop vs open loop)
+**Figure:** none standard — report the pair as two numbers in the write-up.
 
-The two load knobs answer different questions. Run both.
+**Pass/tune:** cold start only matters where auto-scaling or scale-to-zero is in play. Drive it
+down by pre-loading weights, pinning containers warm, or (serverless) using provisioned
+concurrency. A change that only pays off on cold start should be verified against a steady-state
+suite — some wins amortize to zero after the first second.
 
-**Closed loop: `--concurrency N`** — N requests in flight at all times; each simulated user sends
-its next request when the previous answer arrives. The highest N shows the server's maximum
-sustainable throughput. Use this to size the server and to find batch-size and parallelism
-regressions.
+### 3. Load — closed loop (`--concurrency N`)
+
+What is the server's maximum sustainable throughput, and how does latency grow as load rises?
+Closed loop keeps `N` requests in flight at all times; each simulated user sends its next request
+when the previous answer arrives.
 
 ```bash
 python evaluation/decider_bench.py \
@@ -139,12 +120,27 @@ python evaluation/decider_bench.py \
     --out runs/throughput-sweep
 ```
 
-Figure to read: `throughput_vs_input_length.png` and `ttft_vs_throughput.png`. The latter is the
-plot that quotes a p95 at a chosen decisions-per-second — the one to put in a design doc.
+| Column | What it is here | Read for |
+| --- | --- | --- |
+| `concurrency` | In-flight requests for this cell | Row key |
+| `decisions_per_s` | Throughput at this concurrency | Peak = highest value across the sweep |
+| `p50_ms` | TTFT including time spent in queue | How badly the server slows under load |
+| `p95_ms`, `p99_ms` | Tail under load | Pager risk |
+| `server_p50_ms` | Server-reported model-only p50 | **`p50_ms − server_p50_ms` growing with N = queue cost, not compute** |
 
-**Open loop: `--rps R`** — R requests per second at Poisson arrival times, regardless of whether
-answers keep up. TTFT then *includes* any queueing, which is what a real user with no backoff
-sees. Use this to find the throughput at which p95 crosses your SLA.
+**Figure:** `throughput_vs_input_length.png` (peak) and `ttft_vs_throughput.png` (p95 at each
+decisions-per-second — the plot to put in a design doc).
+
+**Pass/tune:** peak `decisions_per_s` is harder to move than p50; it is gated by batching
+strategy, request-coalescing and allocator behaviour. The queue-cost diagnostic
+(`p50_ms − server_p50_ms`) tells you where to spend time — if the gap grows with `N`, batching
+and admission control pay off; if it stays flat, only model-side work (quantization, kernels,
+smaller model) will help.
+
+### 4. Load — open loop (`--rps R`)
+
+What throughput can we serve before p95 crosses our SLA? Open loop sends `R` requests per second
+at Poisson arrival times, regardless of whether answers keep up — queue time counts toward TTFT.
 
 ```bash
 python evaluation/decider_bench.py \
@@ -154,14 +150,23 @@ python evaluation/decider_bench.py \
     --out runs/rps-sweep
 ```
 
-A closed-loop p95 at N concurrency is almost always lower than the open-loop p95 at the same
-sustained throughput. Reporting one when you meant the other is a common source of surprised
-pagers.
+| Column | What it is here | Read for |
+| --- | --- | --- |
+| `rps` | Target request rate for this cell | Row key |
+| `p95_ms` | TTFT with queueing, at that rate | **The number a design doc quotes against an SLA** |
+| `p99_ms` | Worst-case tail at that rate | Pager risk under real traffic |
+| `decisions_per_s` | What the server actually delivered | Below `rps` ⇒ the server fell behind |
 
-### 4. Correctness gate
+**Figure:** `ttft_vs_throughput.png`.
 
-Every perf change that touches numerics (quantization, kernels, batching, device, precision)
-runs JevBench on both baseline and change through the same bench:
+**Pass/tune:** closed-loop p95 at `N` concurrency is almost always lower than open-loop p95 at
+the same sustained throughput; reporting one when you meant the other is a common source of
+surprised pagers. Drive down by shortening the critical path (same levers as test 3) or by
+rejecting load before it queues (admission control / timeouts).
+
+### 5. Correctness gate
+
+Did the change move any answers? Run JevBench on both baseline and change through the same bench.
 
 ```bash
 python evaluation/decider_bench.py \
@@ -172,21 +177,26 @@ python evaluation/decider_bench.py \
     --out runs/correctness-gate
 ```
 
-- JevBench uses its own inputs; the TTFT part uses the ones above. Both land in the same run
-  directory.
-- Change ships only if the JevBench delta is within noise (about ±3 tasks, see
-  [the limitations section](README.md#limitations)).
-- For a device swap or a Mac-vs-CUDA question, [`device_parity.py`](device_parity.py) is the
-  stronger check: it reports the largest probability difference and lists the answers that
-  changed, not just a scalar score.
+| Column | File | What it is here | Read for |
+| --- | --- | --- | --- |
+| `score` | accuracy.csv | Fraction correct on JevBench's 231 tasks | Baseline-vs-change delta |
+| `correct`, `of` | accuracy.csv | Numerator and denominator | Sanity on `score` |
+| `complete` | accuracy.csv | Whether every task ran | **If false, the row does not count** |
 
-A perf change that does *not* touch numerics (HTTP tweaks, process-level batching, admission
-control) can skip this test, but should say so explicitly in the change description.
+**Figure:** none; this is a scalar gate.
 
-### 5. Cross-host comparison
+**Pass/tune:** the ship rule is "within noise" — SD ≈ 3 tasks of 231, so about 0.013. One run's
+drop inside that band is not a failure; outside it is. See
+[README.md, Limitations](README.md#limitations) for sizing. For a change that *must not* move
+answers (same math, different code path), [`device_parity.py`](device_parity.py) is the stronger
+check — it reports the largest probability difference and lists specific requests whose argmax
+changed, which is a legitimate hard pass/fail. A change that does not touch numerics (HTTP
+tweaks, process-level batching, admission control) can skip this test but should say so in the
+change description.
 
-For "what instance should we run on?" or "is Lambda cheaper than SageMaker for our shape?",
-run the same bench against each target. One `--model` per target:
+### 6. Cross-host comparison
+
+Which host (or hosts) best serves this model? Run every target as its own `--model`.
 
 ```bash
 python evaluation/decider_bench.py \
@@ -198,35 +208,17 @@ python evaluation/decider_bench.py \
     --out runs/host-compare
 ```
 
-Each host is auto-labelled by instance type (SageMaker) or function memory (Lambda), so the
-figures group correctly. For hosts you cannot reach from one machine, run the bench on each
-host and combine the directories at plot time:
+| Column | What it is here | Read for |
+| --- | --- | --- |
+| `host`, `gpus`, `cpu`, `spec` | Instance type / Lambda memory / Mac chip | How the figures group |
+| Everything from tests 1 and 3 | Per-host rows for the same inputs | Side-by-side comparison |
 
-```bash
-python evaluation/decider_bench.py plot runs/g5 runs/g6 runs/lambda
-```
+**Figure:** `ttft_vs_input_length.png` and `ttft_vs_throughput.png`, faceted by host.
 
+**Pass/tune:** for hosts unreachable from one machine, run the bench on each host and combine
+directories at plot time: `python evaluation/decider_bench.py plot runs/g5 runs/g6 runs/lambda`.
 The [benchmark-decider skill](../skills/benchmark-decider/SKILL.md) walks through planning and
 writing up a multi-host comparison in phases, with gates between them.
-
-## Driving metrics down
-
-The order these pay off, from a server-perf change:
-
-1. **`p50_ms` at a representative input length and `--concurrency 1`.** Floor on how fast one
-   request can be. Baseline-to-change delta here is the clearest signal.
-2. **`decisions_per_s` at the highest `--concurrency` the server survives.** Headroom on peak
-   throughput. Harder to move than p50 and gated by batching.
-3. **`p95_ms` on `--rps` at the throughput you need to serve.** The number a design doc should
-   quote. If this is bad, latency improvements at p50 are cosmetic.
-4. **`server_p50_ms` vs `p50_ms`.** If the gap grows under load, your bottleneck is queueing
-   (or network), not model compute. Fix the batching/admission policy; model work will not
-   help.
-5. **Cold-start TTFT.** Only matters for serverless or auto-scaled fleets, where every scale-up
-   costs a user a slow request.
-
-The one trap: before trusting any of the above, verify `ok == n` and `refused == 0` on the row
-you are reading. A 10% latency improvement that comes with silent errors is a regression.
 
 ## Running the full suite
 
