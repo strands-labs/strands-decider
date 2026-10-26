@@ -397,7 +397,7 @@ Strands Decider on your task.
 
 ## Benchmarking speed and accuracy
 
-[`benchmark/decider_bench.py`](benchmark/decider_bench.py) measures a decider wherever it is
+[`evaluation/decider_bench.py`](evaluation/decider_bench.py) measures a decider wherever it is
 served: a local checkpoint, any server that speaks `POST /v1/systemone`, an AWS Lambda function or
 a SageMaker endpoint. It times the first token at chosen input lengths or on your own requests,
 with a fixed number of requests in flight or at a fixed request rate, and runs JevBench and the

@@ -17,7 +17,7 @@ The purpose: answer a performance question with numbers that hold up. That means
 and the same load for every system compared, a recorded host for every number, and accuracy checked
 next to speed whenever the numerics change.
 
-The tool is [`benchmark/decider_bench.py`](../../benchmark/decider_bench.py). It runs on the host
+The tool is [`evaluation/decider_bench.py`](../../evaluation/decider_bench.py). It runs on the host
 where the client should be, measures whatever `--model` points at, and never starts anything
 elsewhere. When the user wants several hosts, you run it on each host (or have the user do so) and
 combine the run directories afterwards.
@@ -46,11 +46,11 @@ directory, and what you concluded. Log failures and corrections too, with their 
 ## The tool in one screen
 
 ```bash
-python benchmark/decider_bench.py --model [NAME=]MODEL [--model ...] \
+python evaluation/decider_bench.py --model [NAME=]MODEL [--model ...] \
     [--metrics ttft,jevbench,decision-index] \
     [--input-length 256,1024,4096] [--dataset requests.jsonl] \
     [--concurrency 1,8,32] [--rps 2,8] [--num-requests 50] [--out runs/NAME]
-python benchmark/decider_bench.py plot runs/a runs/b ...
+python evaluation/decider_bench.py plot runs/a runs/b ...
 ```
 
 - `--model` takes a checkpoint directory or Hub id (served on this host by `strands-decider serve`,
@@ -116,7 +116,7 @@ the first full run.
 
 ## Phase 4. Figures
 
-`python benchmark/decider_bench.py plot runs/*` draws the standard set:
+`python evaluation/decider_bench.py plot runs/*` draws the standard set:
 
 - `ttft_vs_input_length.png`: time to first token against input length, one line per model and load.
 - `ttft_vs_throughput.png`: p95 time to first token against decisions per second, one row per input,
