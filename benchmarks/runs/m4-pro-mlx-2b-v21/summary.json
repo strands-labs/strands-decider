@@ -1,0 +1,149 @@
+{
+  "client": {
+    "time_utc": "2026-10-26T17:40:01.112998+00:00",
+    "argv": [
+      "evaluation/decider_bench.py",
+      "--model",
+      "local=http://127.0.0.1:8000",
+      "--input-length",
+      "256,1024",
+      "--concurrency",
+      "1,4",
+      "--num-requests",
+      "20",
+      "--out",
+      "runs/local-smoke"
+    ],
+    "host": "842f579492f7",
+    "platform": "macOS-26.7.1-arm64-arm-64bit-Mach-O",
+    "python": "3.14.7",
+    "cpu_count": 14,
+    "cpu": "Apple M4 Pro",
+    "strands_decider": "0.1.0"
+  },
+  "metrics": [
+    "ttft"
+  ],
+  "input_length": [
+    256,
+    1024
+  ],
+  "dataset": [],
+  "concurrency": [
+    1,
+    4
+  ],
+  "rps": [],
+  "burstiness": 1.0,
+  "num_requests": 20,
+  "models": {
+    "local": {
+      "model": {
+        "label": "local",
+        "spec": "http://127.0.0.1:8000",
+        "kind": "http",
+        "url": "http://127.0.0.1:8000",
+        "health": {
+          "status": "ok",
+          "model": "strands-decider-2B-hobson-v21",
+          "checkpoint": "StrandsAgents/strands-decider-2B-hobson-v21",
+          "base_model": "Qwen/Qwen3.5-2B-Base",
+          "num_slots": 24,
+          "max_length": 4096,
+          "temperature": 0.935220152138837,
+          "device": "mlx",
+          "prefix_cache": true,
+          "vision": false
+        },
+        "host": "Apple M4 Pro",
+        "gpus": null
+      },
+      "ttft": {
+        "256 tokens": {
+          "1 in flight": {
+            "input": "256 tokens",
+            "input_length": 256,
+            "load": "1 in flight",
+            "mode": "concurrency",
+            "concurrency": 1,
+            "n": 20,
+            "ok": 20,
+            "refused": 0,
+            "errors": 0,
+            "p10_ms": 116.7,
+            "p50_ms": 119.5,
+            "p90_ms": 138.7,
+            "p95_ms": 140.0,
+            "p99_ms": 140.0,
+            "mean_ms": 124.6,
+            "server_p50_ms": 118.6,
+            "tokens_mean": 255.5,
+            "decisions_per_s": 8.035
+          },
+          "4 in flight": {
+            "input": "256 tokens",
+            "input_length": 256,
+            "load": "4 in flight",
+            "mode": "concurrency",
+            "concurrency": 4,
+            "n": 20,
+            "ok": 20,
+            "refused": 0,
+            "errors": 0,
+            "p10_ms": 464.4,
+            "p50_ms": 483.2,
+            "p90_ms": 507.4,
+            "p95_ms": 524.3,
+            "p99_ms": 524.3,
+            "mean_ms": 486.2,
+            "server_p50_ms": 481.7,
+            "tokens_mean": 255.9,
+            "decisions_per_s": 8.176
+          }
+        },
+        "1024 tokens": {
+          "1 in flight": {
+            "input": "1024 tokens",
+            "input_length": 1024,
+            "load": "1 in flight",
+            "mode": "concurrency",
+            "concurrency": 1,
+            "n": 20,
+            "ok": 20,
+            "refused": 0,
+            "errors": 0,
+            "p10_ms": 428.0,
+            "p50_ms": 429.7,
+            "p90_ms": 456.7,
+            "p95_ms": 470.4,
+            "p99_ms": 470.4,
+            "mean_ms": 434.1,
+            "server_p50_ms": 428.6,
+            "tokens_mean": 1022.0,
+            "decisions_per_s": 2.301
+          },
+          "4 in flight": {
+            "input": "1024 tokens",
+            "input_length": 1024,
+            "load": "4 in flight",
+            "mode": "concurrency",
+            "concurrency": 4,
+            "n": 20,
+            "ok": 20,
+            "refused": 0,
+            "errors": 0,
+            "p10_ms": 1711.4,
+            "p50_ms": 1738.0,
+            "p90_ms": 1786.3,
+            "p95_ms": 1788.6,
+            "p99_ms": 1788.6,
+            "mean_ms": 1745.0,
+            "server_p50_ms": 1736.8,
+            "tokens_mean": 1021.9,
+            "decisions_per_s": 2.288
+          }
+        }
+      }
+    }
+  }
+}

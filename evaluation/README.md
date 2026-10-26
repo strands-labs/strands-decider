@@ -14,6 +14,7 @@ seed replicate finished), so a single-run difference under about 10 tasks is unr
   context window, and how to reproduce the run.
 - [`jevbench/`](jevbench/): the JevBench harness driver and its two helpers.
 - [`benchmarking.md`](benchmarking.md): how to benchmark a change to the inference server — the metrics, the tests (short vs long, hot vs cold, closed vs open-loop load) and the correctness gate.
+- [`../benchmarks/`](../benchmarks/): the host matrix, per-host latency/throughput runs and cross-host cost figures.
 
 `training/recipe.sh eval` runs the internal evaluations on the recipe's checkpoint. Each
 script also runs on its own:

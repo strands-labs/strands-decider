@@ -1,0 +1,5 @@
+model,spec,host,gpus,input,input_length,tokens_mean,load,mode,concurrency,rps,burstiness,n,ok,refused,errors,p10_ms,p50_ms,p90_ms,p95_ms,p99_ms,mean_ms,server_p50_ms,decisions_per_s,cpu
+local,http://127.0.0.1:8000,Apple M4 Pro,,256 tokens,256,255.5,1 in flight,concurrency,1,,,20,20,0,0,116.7,119.5,138.7,140.0,140.0,124.6,118.6,8.035,
+local,http://127.0.0.1:8000,Apple M4 Pro,,256 tokens,256,255.9,4 in flight,concurrency,4,,,20,20,0,0,464.4,483.2,507.4,524.3,524.3,486.2,481.7,8.176,
+local,http://127.0.0.1:8000,Apple M4 Pro,,1024 tokens,1024,1022.0,1 in flight,concurrency,1,,,20,20,0,0,428.0,429.7,456.7,470.4,470.4,434.1,428.6,2.301,
+local,http://127.0.0.1:8000,Apple M4 Pro,,1024 tokens,1024,1021.9,4 in flight,concurrency,4,,,20,20,0,0,1711.4,1738.0,1786.3,1788.6,1788.6,1745.0,1736.8,2.288,
