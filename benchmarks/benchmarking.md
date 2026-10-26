@@ -20,8 +20,11 @@ A change to the inference server can affect three different things, and the test
 them apart:
 
 1. **Speed per request.** How long one request takes end-to-end, from the client's point of view.
-   This is what a user feels. On a decider it is time to first token (TTFT); the model decodes
-   nothing, so TTFT is the whole latency.
+   This is what a user feels. A decider forwards once through the torso and reads out the answer
+   with a slot or pointer head — there is no streaming phase and no "time per output token," so
+   request latency *is* the whole latency. (`decider_bench.py` names this metric `ttft` on the
+   command line for compatibility with how LLM serving is normally measured; for a decider it is
+   request latency.)
 2. **Capacity.** How many requests per second the server can finish under sustained load, and how
    latency grows as that load rises. A change that is 10% faster per request is worthless if it
    halves the sustainable throughput.
@@ -71,8 +74,8 @@ python evaluation/decider_bench.py \
 | --- | --- | --- |
 | `input_length` | The target length for this cell | Row key |
 | `tokens_mean` | Actual tokens sent, averaged | Sanity: did 1024 really hit? |
-| `p50_ms` | Pure per-request TTFT at that length | The floor on how fast one request can be |
-| `p95_ms` | Tail TTFT at that length | How much the slow requests slow down |
+| `p50_ms` | Request latency at that length | The floor on how fast one request can be |
+| `p95_ms` | Tail request latency at that length | How much the slow requests slow down |
 | `server_p50_ms` | Server-reported model-only p50 | Gap vs `p50_ms` = network overhead at zero load |
 
 **Figure:** `ttft_vs_input_length.png` — one line per model. The slope matters more than the
@@ -86,7 +89,7 @@ beyond load — look at GC, allocator warm-up, or a one-off slow path.
 ### 2. Hot vs cold
 
 The first request after a server starts pays for weight load, VRAM allocator warm-up and (for
-some devices) kernel compilation. Steady-state TTFT is a separate number, and a change can help
+some devices) kernel compilation. Steady-state request latency is a separate number, and a change can help
 one and regress the other.
 
 ```bash
@@ -97,8 +100,8 @@ python evaluation/jevbench/jevbench_cold_warm.py <checkpoint>
 
 | Column | What it is here | Read for |
 | --- | --- | --- |
-| `p50_ms` (cold run, n=1) | The one cold TTFT | Cold-start cost on this host |
-| `p50_ms` (steady suite) | TTFT after warm-up | Steady-state cost |
+| `p50_ms` (cold run, n=1) | The one cold request latency | Cold-start cost on this host |
+| `p50_ms` (steady suite) | Request latency after warm-up | Steady-state cost |
 
 **Figure:** none standard — report the pair as two numbers in the write-up.
 
@@ -126,7 +129,7 @@ python evaluation/decider_bench.py \
 | --- | --- | --- |
 | `concurrency` | In-flight requests for this cell | Row key |
 | `decisions_per_s` | Throughput at this concurrency | Peak = highest value across the sweep |
-| `p50_ms` | TTFT including time spent in queue | How badly the server slows under load |
+| `p50_ms` | Request latency including time spent in queue | How badly the server slows under load |
 | `p95_ms`, `p99_ms` | Tail under load | Pager risk |
 | `server_p50_ms` | Server-reported model-only p50 | **`p50_ms − server_p50_ms` growing with N = queue cost, not compute** |
 
@@ -142,7 +145,7 @@ smaller model) will help.
 ### 4. Load — open loop (`--rps R`)
 
 What throughput can we serve before p95 crosses our SLA? Open loop sends `R` requests per second
-at Poisson arrival times, regardless of whether answers keep up — queue time counts toward TTFT.
+at Poisson arrival times, regardless of whether answers keep up — queue time counts toward request latency.
 
 ```bash
 python evaluation/decider_bench.py \
@@ -155,7 +158,7 @@ python evaluation/decider_bench.py \
 | Column | What it is here | Read for |
 | --- | --- | --- |
 | `rps` | Target request rate for this cell | Row key |
-| `p95_ms` | TTFT with queueing, at that rate | **The number a design doc quotes against an SLA** |
+| `p95_ms` | Request latency with queueing, at that rate | **The number a design doc quotes against an SLA** |
 | `p99_ms` | Worst-case tail at that rate | Pager risk under real traffic |
 | `decisions_per_s` | What the server actually delivered | Below `rps` ⇒ the server fell behind |
 

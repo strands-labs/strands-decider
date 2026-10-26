@@ -17,7 +17,7 @@ benchmark run. Use the shape, not the magnitudes, until this is rerun with the s
 
 ## Numbers
 
-| Input tokens | In flight | TTFT p50 | TTFT p95 | Decisions/s |
+| Input tokens | In flight | p50 latency | p95 latency | Decisions/s |
 | ---: | ---: | ---: | ---: | ---: |
 | 256 | 1 | 119.5 ms | 140.0 ms | 8.04 |
 | 256 | 4 | 483.2 ms | 524.3 ms | 8.18 |
