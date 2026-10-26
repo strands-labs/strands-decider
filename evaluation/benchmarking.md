@@ -221,3 +221,48 @@ Outputs per run: `latency.csv`, `accuracy.csv`, `requests.jsonl`, `summary.json`
 
 For *host* comparisons (which GPU, which instance type, serverless vs always-on) rather than
 *change* comparisons, see [`skills/benchmark-decider/`](../skills/benchmark-decider/SKILL.md).
+
+## Hosts
+
+What follows is the matrix of hosts the serving path is known to run on. Numbers are from the
+sources named — reproduce them before quoting. A fair baseline/change comparison must stay on
+one row of this table.
+
+### Measured
+
+Numbers already recorded in-repo, model is Strands Decider 2B (`v19` / `strands-decider-2B-qwen3.5-v1-2610`)
+unless noted.
+
+| Host | Device backend | Reference numbers | Source |
+| --- | --- | --- | --- |
+| NVIDIA RTX 3090 (24 GB) under WSL2 | `cuda` | 115 / 299 ms p50 / p95 TTFT across JevBench's 231 tasks (4096 window) | [results.md](results.md#summary) |
+| NVIDIA A100 | `cuda` | Training rig; parity against the training harness (230 / 231 same answers vs 3090) | [results.md](results.md) |
+| NVIDIA H100 on `p5.48xlarge` (8x) | `cuda` | Training rig; `NGPU=8 FAST=1`, used for the v19 retrains that set the ±3-task JevBench noise floor | [results.md](results.md#retraining-on-aws) |
+| Apple M3 Pro (36 GB) | `mps` (torch) | 234 / 2628 ms p50 / p95 TTFT across JevBench; roughly 1/9 the 3090's throughput on long prompts | [docs/inference.md, Serving on a Mac](../docs/inference.md#serving-on-a-mac) |
+| Apple M4 Pro | `mlx` | Indicative smoke only (20 reqs): 256 tok p50 120 ms / p95 140 ms; 1024 tok p50 430 ms / p95 470 ms. 1.4–1.6x MPS on long prompts per [docs/inference.md](../docs/inference.md#serving-on-a-mac-with-mlx) | this branch |
+
+### Supported deploy targets, not yet measured
+
+Reachable via `decider_bench.py --model` today, no numbers recorded in-repo. First contributor to run `python evaluation/decider_bench.py --model NAME=sagemaker:ENDPOINT@REGION --metrics ttft,jevbench ...` lands the first row.
+
+| Target | Reached as | Instance / shape | Notes |
+| --- | --- | --- | --- |
+| SageMaker, NVIDIA L4 | `sagemaker:ENDPOINT@REGION` | `ml.g6.xlarge` (24 GB) | Default in `deploy/sagemaker` for the 2B / E2B / E4B models |
+| SageMaker, NVIDIA A10G | `sagemaker:ENDPOINT@REGION` | `ml.g5.xlarge` (24 GB) | |
+| SageMaker, NVIDIA L40S | `sagemaker:ENDPOINT@REGION` | `ml.g6e.xlarge` (48 GB) | Headroom for the 12B model |
+| SageMaker, NVIDIA H100 | `sagemaker:ENDPOINT@REGION` | `ml.p5.4xlarge` (80 GB) | For the 26B-A4B model |
+| SageMaker CPU (x86) | `sagemaker:ENDPOINT@REGION` | `ml.m5.{2,4}xlarge`, `ml.r5.{2,4}xlarge`, `ml.c6i.2xlarge` | Falls back to the slow convolution per channel path ([docs/inference.md](../docs/inference.md)) |
+| AWS Lambda | `lambda:FUNCTION[:ALIAS][@REGION]` | memory-configurable | Serverless; cold start is the dominant metric |
+| Local x86 Linux + NVIDIA | `http://...` after `strands-decider serve --device cuda` | your box | The RTX 3090 above is this with WSL2 |
+| Local Linux / macOS CPU | `http://...` after `strands-decider serve --device cpu` | your box | Slow by design; useful for correctness only |
+| Any `/v1/systemone` server | `http(s)://URL` | whatever you built | `--serve-cmd` runs a custom server for the local case |
+
+### Unsupported
+
+The deploy stack refuses these; `strands-decider serve` has no backend for them. Do not design around them.
+
+| Host | Why |
+| --- | --- |
+| Graviton (arm64 EC2) | Torso has no arm64 fused-kernel path; `cdk deploy` errors |
+| AWS Inferentia (`inf1`, `inf2`) | No Neuron SDK integration |
+| AWS Trainium (`trn1`, `trn2`) | Training-only accelerator, not a serving target |
