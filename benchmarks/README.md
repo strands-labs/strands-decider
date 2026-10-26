@@ -11,8 +11,7 @@ Cross-host comparisons (cost per 1M decisions, latency/price frontier) go in `fi
 produced by `cost.py` from `runs/` and `prices.yaml`.
 
 > For *how* to benchmark a change (metrics, tests, pass/tune), see
-> [`evaluation/benchmarking.md`](../evaluation/benchmarking.md). This directory holds the data
-> and figures those tests produce; `evaluation/` holds the methodology.
+> [`benchmarking.md`](benchmarking.md) in this directory.
 
 ## Host matrix
 

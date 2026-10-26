@@ -6,12 +6,13 @@ change made the server faster (or at least no slower, and no less correct) befor
 
 Scope is **one host, baseline vs change**. The point is incremental: measure what today's server
 does, apply the change, re-measure. Multi-host comparisons ("Lambda vs SageMaker g6 vs the Mac")
-are a separate exercise — see [`skills/benchmark-decider/`](../skills/benchmark-decider/SKILL.md),
+are a separate exercise — see [`../skills/benchmark-decider/`](../skills/benchmark-decider/SKILL.md),
 which walks through planning and writing one up in phases.
 
-Accuracy benchmarks for a *checkpoint* also live elsewhere: see [README.md](README.md) and
-[jevbench.md](jevbench.md). The scripts below measure the serving system around a checkpoint and
-treat correctness as a gate — did the perf change move any answers?
+Accuracy benchmarks for a *checkpoint* live elsewhere: see
+[`../evaluation/README.md`](../evaluation/README.md) and
+[`../evaluation/jevbench.md`](../evaluation/jevbench.md). The scripts below measure the serving
+system around a checkpoint and treat correctness as a gate — did the perf change move any answers?
 
 ## The problem
 
@@ -30,7 +31,7 @@ them apart:
 
 ## Shared rules
 
-Every test below is one call to [`decider_bench.py`](decider_bench.py), writes to
+Every test below is one call to [`../evaluation/decider_bench.py`](../evaluation/decider_bench.py), writes to
 `runs/<name>/latency.csv` (perf) and `accuracy.csv` (correctness, when `--metrics` names a
 benchmark), and comes with figures via `decider_bench.py plot runs/...`.
 
@@ -188,8 +189,9 @@ python evaluation/decider_bench.py \
 
 **Pass/tune:** the ship rule is "within noise" — SD ≈ 3 tasks of 231, so about 0.013. One run's
 drop inside that band is not a failure; outside it is. See
-[README.md, Limitations](README.md#limitations) for sizing. For a change that *must not* move
-answers (same math, different code path), [`device_parity.py`](device_parity.py) is the stronger
+[`../evaluation/README.md`, Limitations](../evaluation/README.md#limitations) for sizing. For a
+change that *must not* move answers (same math, different code path),
+[`../evaluation/device_parity.py`](../evaluation/device_parity.py) is the stronger
 check — it reports the largest probability difference and lists specific requests whose argmax
 changed, which is a legitimate hard pass/fail. A change that does not touch numerics (HTTP
 tweaks, process-level batching, admission control) can skip this test but should say so in the
@@ -220,6 +222,7 @@ Outputs per run: `latency.csv`, `accuracy.csv`, `requests.jsonl`, `summary.json`
 `ttft_vs_throughput.png`, `throughput_vs_input_length.png` once plotted.
 
 For *host* comparisons (which GPU, which instance type, serverless vs always-on) and the measured
-numbers per `(host, model)` pair, see [`benchmarks/`](../benchmarks/) — the host matrix lives
-there, next to the data and the cost figures. [`skills/benchmark-decider/`](../skills/benchmark-decider/SKILL.md)
+numbers per `(host, model)` pair, see [`README.md`](README.md) in this directory — the host
+matrix lives there, next to the data and the cost figures.
+[`../skills/benchmark-decider/`](../skills/benchmark-decider/SKILL.md)
 walks an agent through planning and writing up a multi-host comparison in phases.

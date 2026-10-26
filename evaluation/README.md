@@ -13,8 +13,9 @@ seed replicate finished), so a single-run difference under about 10 tasks is unr
 - [`jevbench.md`](jevbench.md): the external benchmark, the board position, the families, the
   context window, and how to reproduce the run.
 - [`jevbench/`](jevbench/): the JevBench harness driver and its two helpers.
-- [`benchmarking.md`](benchmarking.md): how to benchmark a change to the inference server — the metrics, the tests (short vs long, hot vs cold, closed vs open-loop load) and the correctness gate.
-- [`../benchmarks/`](../benchmarks/): the host matrix, per-host latency/throughput runs and cross-host cost figures.
+- [`../benchmarks/`](../benchmarks/): server-side benchmarking — the host matrix, per-host runs,
+  cross-host cost figures, and [`../benchmarks/benchmarking.md`](../benchmarks/benchmarking.md)
+  for the test methodology (short vs long input, hot vs cold, load, correctness gate).
 
 `training/recipe.sh eval` runs the internal evaluations on the recipe's checkpoint. Each
 script also runs on its own:
