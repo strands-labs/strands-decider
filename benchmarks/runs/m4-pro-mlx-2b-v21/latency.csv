@@ -1,0 +1,13 @@
+model,spec,host,gpus,input,input_length,tokens_mean,load,mode,concurrency,rps,burstiness,n,ok,refused,errors,p10_ms,p50_ms,p90_ms,p95_ms,p99_ms,mean_ms,server_p50_ms,decisions_per_s,cpu
+m4-pro-mlx,http://127.0.0.1:8000,Apple M4 Pro,,256 tokens,256,256.0,1 in flight,concurrency,1,,,50,50,0,0,116.4,117.1,136.0,136.3,136.5,123.7,116.3,8.076,
+m4-pro-mlx,http://127.0.0.1:8000,Apple M4 Pro,,256 tokens,256,255.9,8 in flight,concurrency,8,,,50,50,0,0,985.1,1022.3,1063.1,1081.9,1087.6,1024.5,1020.5,7.846,
+m4-pro-mlx,http://127.0.0.1:8000,Apple M4 Pro,,256 tokens,256,255.8,32 in flight,concurrency,32,,,50,50,0,0,3891.9,3948.6,3983.7,3986.2,4006.3,3942.7,3947.0,8.114,
+m4-pro-mlx,http://127.0.0.1:8000,Apple M4 Pro,,512 tokens,512,510.6,1 in flight,concurrency,1,,,50,50,0,0,217.7,218.4,219.1,219.6,244.2,219.4,217.4,4.568,
+m4-pro-mlx,http://127.0.0.1:8000,Apple M4 Pro,,512 tokens,512,510.8,8 in flight,concurrency,8,,,50,50,0,0,1738.8,1742.0,1792.8,1816.4,1817.3,1756.6,1740.1,4.554,
+m4-pro-mlx,http://127.0.0.1:8000,Apple M4 Pro,,512 tokens,512,510.7,32 in flight,concurrency,32,,,50,50,0,0,7076.0,7178.5,7401.0,7407.9,7411.1,7227.6,7176.9,4.527,
+m4-pro-mlx,http://127.0.0.1:8000,Apple M4 Pro,,1024 tokens,1024,1021.8,1 in flight,concurrency,1,,,50,50,0,0,428.7,431.2,467.5,474.7,478.6,440.0,430.4,2.271,
+m4-pro-mlx,http://127.0.0.1:8000,Apple M4 Pro,,1024 tokens,1024,1021.8,8 in flight,concurrency,8,,,50,50,0,0,3421.9,3438.6,3538.0,3539.3,3540.5,3450.6,3437.0,2.319,
+m4-pro-mlx,http://127.0.0.1:8000,Apple M4 Pro,,1024 tokens,1024,1021.7,32 in flight,concurrency,32,,,50,50,0,0,13710.0,13944.2,13967.3,13994.4,14027.5,13882.0,13942.6,2.314,
+m4-pro-mlx,http://127.0.0.1:8000,Apple M4 Pro,,2048 tokens,2048,2048.9,1 in flight,concurrency,1,,,50,50,0,0,852.7,875.0,897.6,935.4,957.5,876.5,874.0,1.142,
+m4-pro-mlx,http://127.0.0.1:8000,Apple M4 Pro,,2048 tokens,2048,2048.9,8 in flight,concurrency,8,,,50,50,0,0,6896.3,6948.6,7025.1,7046.4,7101.8,6955.2,6947.5,1.153,
+m4-pro-mlx,http://127.0.0.1:8000,Apple M4 Pro,,2048 tokens,2048,2049.0,32 in flight,concurrency,32,,,50,50,0,0,27729.7,27847.1,27911.9,27912.5,27915.2,27822.8,27845.9,1.148,

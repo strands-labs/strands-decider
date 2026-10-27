@@ -1,0 +1,2 @@
+model,spec,host,benchmark,score,correct,of,complete
+m4-pro-mlx,http://127.0.0.1:8000,Apple M4 Pro,jevbench,76.19,176,231,True

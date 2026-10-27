@@ -41,7 +41,7 @@ evolves (today's batch-of-1 engine; the batching PR; stock vLLM for a non-decide
 
 | Host | Serving stack | Model | Run directory | Status |
 | --- | --- | --- | --- | --- |
-| Apple M4 Pro | strands_decider (batch of 1) | 2B hobson-v21 | [`runs/m4-pro-mlx-2b-v21/`](runs/m4-pro-mlx-2b-v21/) | Indicative — `--concurrency 1,8,32`, 50 reqs/cell |
+| Apple M4 Pro | strands_decider (batch of 1) | 2B hobson-v21 | [`runs/m4-pro-mlx-2b-v21/`](runs/m4-pro-mlx-2b-v21/) | 2026-10-26: `--cold-start --metrics ttft,jevbench --input-length 256,512,1024,2048 --concurrency 1,8,32 -n 50`. Cold 475 ms vs warm 135 ms at 256 tok. Peak 7.8 dps / 4.5 dps / 2.3 dps / 1.15 dps at 256 / 512 / 1024 / 2048 tok (flat across N — no batching). JevBench 176/231 (0.762). All 600 ttft reqs ok. |
 
 ### Supported deploy targets, not yet measured
 
