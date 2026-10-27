@@ -102,8 +102,10 @@ The deploy stack refuses these; `strands-decider serve` has no backend for them.
    ```bash
    python benchmarks/compact.py benchmarks/runs/<host-slug>
    ```
-   Drops always-null fields and the redundant `done` field from `requests.jsonl`, and minifies
-   `summary.json`. Cuts the run size by roughly 40%. Idempotent.
+   Drops `requests.jsonl` entirely (one row per request; `latency.csv` already carries every
+   aggregate we read — p10/p50/p90/p95/p99 of latency, `server_p50_ms`, `decisions_per_s`,
+   `tokens_mean`, counts). Minifies `summary.json`. If a run had errors, only the failing rows
+   of `requests.jsonl` are kept so you can debug them. Idempotent.
 5. **Update this README's host matrix** so the row moves from *not yet measured* to *measured*.
    If you want a cost figure, apply the formulas in [Cost](#cost) below and add the number to
    your host's run README.
