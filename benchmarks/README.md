@@ -98,7 +98,13 @@ The deploy stack refuses these; `strands-decider serve` has no backend for them.
    On a batch-of-1 backend, delete `ttft_vs_throughput.png` after plotting — the throughput
    axis is clamped so all points pile up at one x value and the chart has no useful structure.
    It becomes informative again when the batching PR lands and the curve has a knee.
-4. **Update this README's host matrix** so the row moves from *not yet measured* to *measured*.
+4. **Compact** the data files:
+   ```bash
+   python benchmarks/compact.py benchmarks/runs/<host-slug>
+   ```
+   Drops always-null fields and the redundant `done` field from `requests.jsonl`, and minifies
+   `summary.json`. Cuts the run size by roughly 40%. Idempotent.
+5. **Update this README's host matrix** so the row moves from *not yet measured* to *measured*.
    If you want a cost figure, apply the formulas in [Cost](#cost) below and add the number to
    your host's run README.
 

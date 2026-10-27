@@ -81,6 +81,7 @@ python evaluation/decider_bench.py \
     --out benchmarks/runs/m4-pro-mlx-2b-v21
 python evaluation/decider_bench.py plot benchmarks/runs/m4-pro-mlx-2b-v21
 python benchmarks/plot_throughput.py benchmarks/runs/m4-pro-mlx-2b-v21
+python benchmarks/compact.py benchmarks/runs/m4-pro-mlx-2b-v21
 ```
 
 `--num-requests 100` resolves the "under twice concurrency" warning for N=32 and will produce
