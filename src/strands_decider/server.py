@@ -8,6 +8,7 @@ Compatibility with the Jev API itself is not verified.
 from __future__ import annotations
 
 import contextlib
+import json
 import os
 import threading
 import time
@@ -16,7 +17,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 
 from . import __version__
-from .infer import EngineConfig, SystemOneEngine, load_mlx
+from .infer import EngineConfig, SystemOneEngine, load_mlx, load_neuron
 from .modeling import StrandsDeciderModel
 from .schema import SystemOneRequest, SystemOneResponse
 
@@ -48,6 +49,7 @@ def create_app(
     max_batch: int = 32,
     vision: bool = False,
     max_batch_tokens: int | None = None,
+    neuron_cache: str | None = None,
 ) -> FastAPI:
     global _engine
 
@@ -70,13 +72,19 @@ def create_app(
         max_batch_tokens=max_batch_tokens,
     )
     if vision:
-        if device == "mlx":
-            raise ValueError("--vision runs on torch devices (cuda, mps, cpu), not mlx")
+        if device in ("mlx", "neuron"):
+            raise ValueError(f"--vision runs on torch devices (cuda, mps, cpu), not {device}")
         from .vision import load_vision_engine
 
         _engine = load_vision_engine(checkpoint, config, attn_implementation=attn_implementation)
     elif device == "mlx":
         _engine = load_mlx(checkpoint, config)
+    elif device == "neuron":
+        neuron = load_neuron(checkpoint, config, cache_dir=neuron_cache)
+        # Load every bucket's graph before the server reports healthy, not on a request. That takes
+        # minutes per core, so say how far it has got.
+        neuron.warm(lambda r: print(json.dumps({"warm": r}), flush=True))
+        _engine = neuron
     else:
         model = StrandsDeciderModel.load(checkpoint, attn_implementation=attn_implementation)
         _engine = SystemOneEngine(model, config)
@@ -133,6 +141,7 @@ def serve(
     max_batch: int = 32,
     vision: bool = False,
     max_batch_tokens: int | None = None,
+    neuron_cache: str | None = None,
 ) -> None:
     import uvicorn
 
@@ -145,6 +154,7 @@ def serve(
         max_batch=max_batch,
         vision=vision,
         max_batch_tokens=max_batch_tokens,
+        neuron_cache=neuron_cache,
     )
     # Single worker: the model owns the GPU, and forking more would just duplicate it.
     uvicorn.run(app, host=host, port=port, workers=1)
