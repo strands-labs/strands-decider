@@ -11,7 +11,8 @@ Run `strands-decider serve` on Linux with CUDA, on a Mac, or on CPU. See
 
 ## Amazon SageMaker
 
-A real-time endpoint in your AWS account, on a GPU or CPU instance. One CDK stack copies the model
-to a private S3 bucket, builds the image in AWS CodeBuild and creates the endpoint; `cdk destroy`
-removes it. See
+A real-time endpoint in your AWS account, on a GPU, Inferentia2 or CPU instance. One CDK stack
+copies the model to a private S3 bucket, builds the image in AWS CodeBuild and creates the
+endpoint; on Inferentia2 it also compiles the model on a temporary instance. `cdk destroy` removes
+it. See
 [sagemaker/README.md](sagemaker/README.md).

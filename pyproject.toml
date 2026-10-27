@@ -45,6 +45,14 @@ mlx = [
 # layer's kernel, causal-conv1d, compiles against the local CUDA toolkit and is not listed; on a
 # machine with nvcc: pip install causal-conv1d --no-build-isolation.
 cuda = ["flash-linear-attention>=0.5; sys_platform == 'linux'"]
+# `--device neuron`: AWS Inferentia2 and Trainium through torch-neuronx (src/strands_decider/neuron_engine.py).
+# Both packages are on the Neuron pip repository, not PyPI: add
+# --extra-index-url https://pip.repos.neuron.amazonaws.com. The Neuron runtime and driver are system
+# packages (docs/inference.md). Tested with torch-neuronx 2.14.3 and neuronx-cc 2.28.
+neuron = [
+    "torch-neuronx>=2.14; sys_platform == 'linux'",
+    "neuronx-cc>=2.28; sys_platform == 'linux'",
+]
 # `--device mps` and `--device cpu` need nothing beyond the base install. The extras exist so that
 # every device installs the same way.
 mps = []
@@ -129,6 +137,7 @@ module = [
     "yaml",
     "mlx.*",
     "mlx_lm.*",
+    "torch_neuronx",
     "PIL.*",
     "tokenizers",
 ]

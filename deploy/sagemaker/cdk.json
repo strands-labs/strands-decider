@@ -6,6 +6,8 @@
     "instance_type": "ml.g6.xlarge",
     "instance_count": 1,
     "inference_ami_version": "",
-    "serve_args": ""
+    "serve_args": "",
+    "compile_vpc": "",
+    "compile_subnets": ""
   }
 }

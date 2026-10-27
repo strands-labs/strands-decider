@@ -14,7 +14,13 @@ Copyright 2025 The Qwen Team and The HuggingFace Inc. team. All rights reserved.
 Licensed under the Apache License, Version 2.0. Changes made: the two triangular solves
 of the reference are replaced by one recursive block inversion of the unit-lower-triangular
 system, whose result is applied to both right-hand sides; the function was restructured
-around that change and its variables renamed. The text of the licence follows.
+around that change and its variables renamed.
+
+`src/strands_decider/neuron_kernels.py` adapts `torch_chunk_gated_delta_rule` and the
+`causal_conv1d_fn` fallback from the same file, under the same copyright and licence. Changes
+made: the triangular solves are replaced by the block inversion above; per-chunk outputs are
+stacked instead of written into a slice; the decay mask is applied with zeros instead of -inf;
+the convolution is written as shifted multiply-adds. The text of the licence follows.
 
 ```
                                  Apache License

@@ -108,6 +108,7 @@ npx cdk deploy -c model=StrandsAgents/strands-decider-E4B-gemma4-v1-2610 -c inst
 | `instance_count` | `1` | Instances behind the endpoint |
 | `inference_ami_version` | empty | A SageMaker [inference AMI version](https://docs.aws.amazon.com/sagemaker/latest/dg/instance-types-ami.html) to pin the host AMI to, for GPU families outside the default AL2023 GPU AMI's compatibility list. Empty keeps the default (AL2023 on GPU, SageMaker default on CPU). |
 | `serve_args` | empty | More `strands-decider serve` options, such as `"--max-batch 8 --strict-window"` |
+| `compile_vpc`, `compile_subnets` | empty | On Inferentia2, an existing VPC and comma-separated subnets in it for the compile instance, instead of a VPC of its own ([Deploying on Inferentia2](#deploying-on-inferentia2)) |
 
 A change to a setting updates the endpoint in place: SageMaker moves traffic to the new
 endpoint config when it is ready.
@@ -144,8 +145,9 @@ from [docs/inference.md](../../docs/inference.md#gemma-4-models), and activation
 ## Choosing an instance
 
 The stack picks the device from the instance type: `cuda` on NVIDIA GPU instances (`ml.g*`,
-`ml.p*`), `cpu` on the other x86 instances. Graviton (arm64), Inferentia and Trainium
-instances are not supported, and `cdk deploy` stops with an error for them.
+`ml.p*`), `neuron` on one-chip Inferentia2 (`ml.inf2.xlarge`, `ml.inf2.8xlarge`, [Deploying on Inferentia2](#deploying-on-inferentia2)),
+`cpu` on the other x86 instances. Graviton (arm64), Inferentia1 and Trainium instances are not
+supported, and `cdk deploy` stops with an error for them.
 
 The recommended setup is a GPU:
 
@@ -175,6 +177,54 @@ npx cdk deploy -c instance_type=ml.m5.2xlarge
 On CPU the model runs in fp32, so pick an instance with more memory than the fp32 weights
 ([Choosing a model](#choosing-a-model)). The default model on `ml.m5.2xlarge` answers a
 request with three questions in about 2.5 s.
+
+## Deploying on Inferentia2
+
+```bash
+npx cdk deploy -c instance_type=ml.inf2.xlarge
+```
+
+On `ml.inf2.xlarge` and `ml.inf2.8xlarge` the endpoint runs `strands-decider serve --device neuron`
+([docs/inference.md, Serving on AWS Inferentia2](../../docs/inference.md#serving-on-aws-inferentia2)),
+from an image built from `Dockerfile.neuron`. Only Qwen3.5 models are supported, which includes
+the default. The torso runs as graphs that neuronx-cc compiles ahead of time, one per sequence
+bucket, and compiling must happen on a Neuron device, so the stack adds a step between the model
+copy and the endpoint (`lib/neuron-compile.ts`):
+
+1. A custom resource starts a temporary EC2 instance of the same type (`inf2.xlarge` for
+   `ml.inf2.xlarge`) from the Neuron deep learning AMI, in a VPC of its own with public subnets,
+   no NAT gateway, and a security group that admits no inbound traffic.
+2. The instance copies the model data from the bucket and runs `strands-decider compile-neuron` in
+   the endpoint's image, with no network and no AWS credentials in the container. It writes the
+   model data with the compiled graphs to `s3://<bucket>/<endpoint>/<model_revision>-neuron-<image tag>/`,
+   then terminates itself. It also shuts down after 150 minutes whatever happens.
+3. The SageMaker model serves that prefix with `--neuron-cache /opt/ml/model/neuron-cache`.
+
+The compile takes about 35 minutes for the default model, plus 10 to 15 for the instance to start,
+and `cdk deploy` waits for it. It runs again only when the image or the model data changes: a
+compiled graph only loads in the install that compiled it, so the prefix names the image. The
+endpoint then loads every graph on both NeuronCores before it reports healthy, about 25 minutes,
+and prints a line per graph to its log as it goes. The larger inf2 types are refused: they have
+12 or 24 NeuronCores, and warming them all would outlast SageMaker's 60-minute startup limit.
+
+You need quota for `ml.inf2.xlarge for endpoint usage` (SageMaker), for 4 vCPUs of
+`Running On-Demand Inf instances` (EC2), for the compile instance, and room for one more VPC in
+the region (the default quota is five). If the region has no room, compile in a VPC you have:
+
+```bash
+npx cdk deploy -c instance_type=ml.inf2.xlarge -c compile_vpc=vpc-0abc -c compile_subnets=subnet-0a,subnet-0b
+```
+
+The subnets must reach S3, ECR and CloudWatch Logs: public subnets that assign public IP
+addresses, or private subnets with a NAT gateway or VPC endpoints. The stack adds only a security
+group, with no inbound rules, to that VPC. List subnets in several Availability Zones: the
+instance is tried in each in turn. If no `inf2.xlarge` is free in
+any Availability Zone of the region, the deploy fails and rolls back; try again later or in another
+region. The compile instance's output is in the log group the stack creates
+(`NeuronCompileLogs...`), and its log in `compile.log` under the prefix above.
+
+The server keeps a copy of the model on each of the instance's NeuronCores (two on an
+`ml.inf2.xlarge`) and sends each request to a free one, so it answers two requests at once.
 
 ## Calling it from your code
 
@@ -214,4 +264,5 @@ npx cdk destroy -c model=<Hub id>  # any other model you deployed
 
 This deletes everything that model's `cdk deploy` created: the endpoint, the endpoint config,
 the SageMaker model, the S3 bucket with the model, the ECR repository with the image, the
-CodeBuild projects and the roles.
+CodeBuild projects and the roles. On Inferentia2 it also deletes the compile step's VPC, launch
+template, functions and log group, and stops a compile instance that is still running.
