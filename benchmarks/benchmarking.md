@@ -89,21 +89,35 @@ beyond load — look at GC, allocator warm-up, or a one-off slow path.
 ### 2. Hot vs cold
 
 The first request after a server starts pays for weight load, VRAM allocator warm-up and (for
-some devices) kernel compilation. Steady-state request latency is a separate number, and a change can help
-one and regress the other.
+some devices) kernel compilation. Steady-state request latency is a separate number, and a change
+can help one and regress the other.
+
+Pass `--cold-start` to `decider_bench.py` and it sends one timed request before any warm-up at
+the first `--input-length`, recording the cold pair alongside the normal (warm) ttft rows:
 
 ```bash
-# steady-state is the default; decider_bench discards a warm-up round every run.
-# For a dedicated cold-vs-warm number against a local checkpoint:
-python evaluation/jevbench/jevbench_cold_warm.py <checkpoint>
+python evaluation/decider_bench.py \
+    --model baseline=http://127.0.0.1:8000 \
+    --model change=http://127.0.0.1:8001 \
+    --cold-start \
+    --input-length 256,1024 --concurrency 1,8,32 \
+    --num-requests 50 \
+    --out runs/full-suite
 ```
 
-| Column | What it is here | Read for |
-| --- | --- | --- |
-| `p50_ms` (cold run, n=1) | The one cold request latency | Cold-start cost on this host |
-| `p50_ms` (steady suite) | Request latency after warm-up | Steady-state cost |
+The server must be freshly started for this to measure a real cold request; `decider_bench.py`
+only probes once at startup, so re-running the command on an already-warm server gives you a
+warm number labelled "cold." For AWS Lambda or SageMaker Serverless cold starts, scale to zero
+first (idle long enough or redeploy).
 
-**Figure:** none standard — report the pair as two numbers in the write-up.
+| Field in `summary.json` → `cold_start` | What it is here | Read for |
+| --- | --- | --- |
+| `client_ms` | The one cold request latency, client view | Cold-start cost on this host |
+| `server_ms` | Same request, server-reported duration | Diff vs client is network overhead |
+| `tokens` | Actual input tokens on the cold request | Sanity (no calibration ran yet) |
+| ttft `p50_ms` at the same input length | Request latency after warm-up | Steady-state cost |
+
+**Figure:** none standard — report the cold / warm pair as two numbers in the write-up.
 
 **Pass/tune:** cold start matters where the server restarts often (dev loop, local kill-and-run,
 auto-restart on crash). Drive it down by pre-loading weights, caching compiled kernels, or

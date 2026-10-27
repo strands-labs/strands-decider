@@ -44,6 +44,10 @@ Load for ttft (either or both; default --concurrency 1, one request at a time):
 Each input and load is measured over --num-requests requests (default 50), after a warm-up that is not counted.
 Synthetic requests start with a random ticket id, so no prefix cache can hit.
 
+--cold-start sends one timed request before any warm-up and records client_ms / server_ms as the cold-start pair.
+The ttft rows at the same input length are the warm counterpart. Use this to tell steady-state latency from the
+cost of a freshly-started server.
+
 Where each model ran is recorded automatically: this host's EC2 instance type (or CPU and GPU) for a local
 checkpoint, and the function's memory or the endpoint's instance type for Lambda and SageMaker.
 
@@ -1499,6 +1503,12 @@ def main():
         metavar="N",
         help="requests measured per input and load (default 50)",
     )
+    g.add_argument(
+        "--cold-start",
+        action="store_true",
+        help="before any warm-up, send one timed request at the first --input-length and record "
+        "client_ms / server_ms as the cold-start measurement for this run",
+    )
     g = ap.add_argument_group("local checkpoints")
     g.add_argument(
         "--device",
@@ -1618,6 +1628,20 @@ def main():
             res["model"] = m.describe()
             log(f"{m.label}: on {res['model']['host']}")
             prompts = Prompts(m.url, f"{args.seed}:{m.label}", m.health.get("max_length"))
+            if args.cold_start and args.input_length:
+                n = args.input_length[0]
+                cold = timed(m.url, prompts.body(4 * n))
+                res["cold_start"] = {
+                    "input_length": n,
+                    "client_ms": cold.get("client_ms"),
+                    "server_ms": cold.get("server_ms"),
+                    "tokens": cold.get("tokens"),
+                    "status": cold.get("status"),
+                }
+                log(
+                    f"  cold-start at ~{n} tokens: "
+                    f"client {cold.get('client_ms')} ms, server {cold.get('server_ms')} ms"
+                )
             for metric in metrics:
                 try:
                     res[metric] = (
