@@ -5,9 +5,9 @@ Drops `requests.jsonl` (one row per request — only latency.csv's aggregates an
 host info are read anywhere) and minifies `summary.json`. Keeps every row that is actually used
 to plot, compare runs or quote numbers.
 
-Request-level data goes if either file has errors: a run with `errors == 0` and `ok == n` on
-every row has nothing to debug per-request. If a run has errors, those specific rows are kept —
-rerun compact.py after fixing the issue to drop them.
+If a run has errors, the failing rows of requests.jsonl are kept so you can debug them;
+re-run compact.py after fixing the issue to drop them. If no correctness metric ran,
+accuracy.csv is just a header and is removed too.
 
     python benchmarks/compact.py benchmarks/runs/<host-slug>
 
@@ -78,6 +78,15 @@ def main() -> int:
         before, after = compact_summary(summary)
         pct = 100.0 * (before - after) / before if before else 0.0
         print(f"summary.json:   {before:>8} → {after:>8} bytes  ({pct:4.1f}% saved)")
+
+    accuracy = run_dir / "accuracy.csv"
+    if accuracy.exists():
+        with accuracy.open() as f:
+            data_rows = sum(1 for _ in f) - 1  # header
+        if data_rows <= 0:
+            before = accuracy.stat().st_size
+            accuracy.unlink()
+            print(f"accuracy.csv:   {before:>8} → removed (header only, no correctness metric ran)")
 
     return 0
 

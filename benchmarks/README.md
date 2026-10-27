@@ -107,8 +107,10 @@ The deploy stack refuses these; `strands-decider serve` has no backend for them.
    `tokens_mean`, counts). Minifies `summary.json`. If a run had errors, only the failing rows
    of `requests.jsonl` are kept so you can debug them. Idempotent.
 5. **Update this README's host matrix** so the row moves from *not yet measured* to *measured*.
-   If you want a cost figure, apply the formulas in [Cost](#cost) below and add the number to
-   your host's run README.
+   The row's `Status` column is the place to leave a one-line note about the run
+   (e.g. "indicative; 50 reqs/cell, no jevbench"). Full argv, host details and per-cell numbers
+   are already in `summary.json` and `latency.csv` — no per-run README is needed.
+   If you want a cost figure, apply the formulas in [Cost](#cost) below.
 
 ## Cost
 
