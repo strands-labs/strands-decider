@@ -1,0 +1,1308 @@
+{
+  "closed_loop": [
+    {
+      "decisions_per_second": 8.4312,
+      "failure_rate": 0.0,
+      "failure_rate_max": 0.0,
+      "latency": {
+        "max_ms": 544.45,
+        "mean_ms": 474.39,
+        "min_ms": 464.36,
+        "p50_ms": 471.36,
+        "p95_ms": 516.6,
+        "p99_ms": 544.45
+      },
+      "load": 1,
+      "mode": "concurrency",
+      "ooms": 0,
+      "repetitions": [
+        {
+          "decisions": 256,
+          "decisions_per_second": 8.4384,
+          "elapsed_seconds": 30.338,
+          "errors": {},
+          "failure_rate": 0.0,
+          "failures": 0,
+          "latency": {
+            "max_ms": 496.9,
+            "mean_ms": 473.98,
+            "min_ms": 464.07,
+            "p50_ms": 471.36,
+            "p95_ms": 489.34,
+            "p99_ms": 496.9
+          },
+          "ooms": 0,
+          "rejections": 0,
+          "repeated_state_fraction": 0.5,
+          "requests": 64,
+          "requests_per_second": 2.1096,
+          "server_latency": {
+            "mean_ms": 472.45,
+            "p50_ms": 469.66,
+            "p99_ms": 495.47
+          },
+          "shapes": {
+            "1024t": {
+              "decisions": 256,
+              "decisions_per_second": 8.4384,
+              "failure_rate": 0.0,
+              "failures": 0,
+              "input_tokens": 1023,
+              "p50_ms": 471.36,
+              "p95_ms": 489.34,
+              "p99_ms": 496.9,
+              "questions": 4,
+              "requested_input_tokens": 1024,
+              "requests": 64,
+              "successes": 64
+            }
+          },
+          "successes": 64,
+          "timeouts": 0,
+          "warmup_failures": 0,
+          "warmup_requests": 1
+        },
+        {
+          "decisions": 256,
+          "decisions_per_second": 8.4312,
+          "elapsed_seconds": 30.363,
+          "errors": {},
+          "failure_rate": 0.0,
+          "failures": 0,
+          "latency": {
+            "max_ms": 544.45,
+            "mean_ms": 474.39,
+            "min_ms": 465.29,
+            "p50_ms": 467.84,
+            "p95_ms": 516.6,
+            "p99_ms": 544.45
+          },
+          "ooms": 0,
+          "rejections": 0,
+          "repeated_state_fraction": 0.5,
+          "requests": 64,
+          "requests_per_second": 2.1078,
+          "server_latency": {
+            "mean_ms": 472.97,
+            "p50_ms": 466.24,
+            "p99_ms": 542.4
+          },
+          "shapes": {
+            "1024t": {
+              "decisions": 256,
+              "decisions_per_second": 8.4312,
+              "failure_rate": 0.0,
+              "failures": 0,
+              "input_tokens": 1023,
+              "p50_ms": 467.84,
+              "p95_ms": 516.6,
+              "p99_ms": 544.45,
+              "questions": 4,
+              "requested_input_tokens": 1024,
+              "requests": 64,
+              "successes": 64
+            }
+          },
+          "successes": 64,
+          "timeouts": 0,
+          "warmup_failures": 0,
+          "warmup_requests": 1
+        },
+        {
+          "decisions": 256,
+          "decisions_per_second": 8.1931,
+          "elapsed_seconds": 31.246,
+          "errors": {},
+          "failure_rate": 0.0,
+          "failures": 0,
+          "latency": {
+            "max_ms": 547.44,
+            "mean_ms": 488.17,
+            "min_ms": 464.36,
+            "p50_ms": 480.43,
+            "p95_ms": 543.15,
+            "p99_ms": 547.44
+          },
+          "ooms": 0,
+          "rejections": 0,
+          "repeated_state_fraction": 0.5,
+          "requests": 64,
+          "requests_per_second": 2.0483,
+          "server_latency": {
+            "mean_ms": 486.74,
+            "p50_ms": 479.15,
+            "p99_ms": 545.85
+          },
+          "shapes": {
+            "1024t": {
+              "decisions": 256,
+              "decisions_per_second": 8.1931,
+              "failure_rate": 0.0,
+              "failures": 0,
+              "input_tokens": 1023,
+              "p50_ms": 480.43,
+              "p95_ms": 543.15,
+              "p99_ms": 547.44,
+              "questions": 4,
+              "requested_input_tokens": 1024,
+              "requests": 64,
+              "successes": 64
+            }
+          },
+          "successes": 64,
+          "timeouts": 0,
+          "warmup_failures": 0,
+          "warmup_requests": 1
+        }
+      ],
+      "requests_per_second": 2.1078,
+      "server_latency": {
+        "mean_ms": 472.97,
+        "p50_ms": 469.66,
+        "p99_ms": 542.4
+      }
+    },
+    {
+      "decisions_per_second": 8.4727,
+      "failure_rate": 0.0,
+      "failure_rate_max": 0.0,
+      "latency": {
+        "max_ms": 1003.71,
+        "mean_ms": 936.79,
+        "min_ms": 469.6,
+        "p50_ms": 937.29,
+        "p95_ms": 987.06,
+        "p99_ms": 1003.71
+      },
+      "load": 2,
+      "mode": "concurrency",
+      "ooms": 0,
+      "repetitions": [
+        {
+          "decisions": 256,
+          "decisions_per_second": 8.4335,
+          "elapsed_seconds": 30.355,
+          "errors": {},
+          "failure_rate": 0.0,
+          "failures": 0,
+          "latency": {
+            "max_ms": 1018.16,
+            "mean_ms": 941.24,
+            "min_ms": 464.84,
+            "p50_ms": 944.05,
+            "p95_ms": 987.06,
+            "p99_ms": 1018.16
+          },
+          "ooms": 0,
+          "rejections": 0,
+          "repeated_state_fraction": 0.5,
+          "requests": 64,
+          "requests_per_second": 2.1084,
+          "server_latency": {
+            "mean_ms": 938.8,
+            "p50_ms": 941.84,
+            "p99_ms": 1015.49
+          },
+          "shapes": {
+            "1024t": {
+              "decisions": 256,
+              "decisions_per_second": 8.4335,
+              "failure_rate": 0.0,
+              "failures": 0,
+              "input_tokens": 1023,
+              "p50_ms": 944.05,
+              "p95_ms": 987.06,
+              "p99_ms": 1018.16,
+              "questions": 4,
+              "requested_input_tokens": 1024,
+              "requests": 64,
+              "successes": 64
+            }
+          },
+          "successes": 64,
+          "timeouts": 0,
+          "warmup_failures": 0,
+          "warmup_requests": 2
+        },
+        {
+          "decisions": 256,
+          "decisions_per_second": 8.4727,
+          "elapsed_seconds": 30.215,
+          "errors": {},
+          "failure_rate": 0.0,
+          "failures": 0,
+          "latency": {
+            "max_ms": 1003.71,
+            "mean_ms": 936.79,
+            "min_ms": 469.6,
+            "p50_ms": 937.29,
+            "p95_ms": 987.23,
+            "p99_ms": 1003.71
+          },
+          "ooms": 0,
+          "rejections": 0,
+          "repeated_state_fraction": 0.5,
+          "requests": 64,
+          "requests_per_second": 2.1182,
+          "server_latency": {
+            "mean_ms": 934.37,
+            "p50_ms": 934.75,
+            "p99_ms": 1001.22
+          },
+          "shapes": {
+            "1024t": {
+              "decisions": 256,
+              "decisions_per_second": 8.4727,
+              "failure_rate": 0.0,
+              "failures": 0,
+              "input_tokens": 1023,
+              "p50_ms": 937.29,
+              "p95_ms": 987.23,
+              "p99_ms": 1003.71,
+              "questions": 4,
+              "requested_input_tokens": 1024,
+              "requests": 64,
+              "successes": 64
+            }
+          },
+          "successes": 64,
+          "timeouts": 0,
+          "warmup_failures": 0,
+          "warmup_requests": 2
+        },
+        {
+          "decisions": 256,
+          "decisions_per_second": 8.5488,
+          "elapsed_seconds": 29.946,
+          "errors": {},
+          "failure_rate": 0.0,
+          "failures": 0,
+          "latency": {
+            "max_ms": 950.12,
+            "mean_ms": 928.52,
+            "min_ms": 473.13,
+            "p50_ms": 934.79,
+            "p95_ms": 946.28,
+            "p99_ms": 950.12
+          },
+          "ooms": 0,
+          "rejections": 0,
+          "repeated_state_fraction": 0.5,
+          "requests": 64,
+          "requests_per_second": 2.1372,
+          "server_latency": {
+            "mean_ms": 926.12,
+            "p50_ms": 932.38,
+            "p99_ms": 947.97
+          },
+          "shapes": {
+            "1024t": {
+              "decisions": 256,
+              "decisions_per_second": 8.5488,
+              "failure_rate": 0.0,
+              "failures": 0,
+              "input_tokens": 1022,
+              "p50_ms": 934.79,
+              "p95_ms": 946.28,
+              "p99_ms": 950.12,
+              "questions": 4,
+              "requested_input_tokens": 1024,
+              "requests": 64,
+              "successes": 64
+            }
+          },
+          "successes": 64,
+          "timeouts": 0,
+          "warmup_failures": 0,
+          "warmup_requests": 2
+        }
+      ],
+      "requests_per_second": 2.1182,
+      "server_latency": {
+        "mean_ms": 934.37,
+        "p50_ms": 934.75,
+        "p99_ms": 1001.22
+      }
+    },
+    {
+      "decisions_per_second": 8.5707,
+      "failure_rate": 0.0,
+      "failure_rate_max": 0.0,
+      "latency": {
+        "max_ms": 1897.27,
+        "mean_ms": 1823.11,
+        "min_ms": 466.42,
+        "p50_ms": 1862.07,
+        "p95_ms": 1889.01,
+        "p99_ms": 1897.27
+      },
+      "load": 4,
+      "mode": "concurrency",
+      "ooms": 0,
+      "repetitions": [
+        {
+          "decisions": 256,
+          "decisions_per_second": 8.5861,
+          "elapsed_seconds": 29.816,
+          "errors": {},
+          "failure_rate": 0.0,
+          "failures": 0,
+          "latency": {
+            "max_ms": 1879.84,
+            "mean_ms": 1819.65,
+            "min_ms": 466.42,
+            "p50_ms": 1861.73,
+            "p95_ms": 1876.37,
+            "p99_ms": 1879.84
+          },
+          "ooms": 0,
+          "rejections": 0,
+          "repeated_state_fraction": 0.5,
+          "requests": 64,
+          "requests_per_second": 2.1465,
+          "server_latency": {
+            "mean_ms": 1817.22,
+            "p50_ms": 1859.5,
+            "p99_ms": 1877.5
+          },
+          "shapes": {
+            "1024t": {
+              "decisions": 256,
+              "decisions_per_second": 8.5861,
+              "failure_rate": 0.0,
+              "failures": 0,
+              "input_tokens": 1023,
+              "p50_ms": 1861.73,
+              "p95_ms": 1876.37,
+              "p99_ms": 1879.84,
+              "questions": 4,
+              "requested_input_tokens": 1024,
+              "requests": 64,
+              "successes": 64
+            }
+          },
+          "successes": 64,
+          "timeouts": 0,
+          "warmup_failures": 0,
+          "warmup_requests": 4
+        },
+        {
+          "decisions": 256,
+          "decisions_per_second": 8.5707,
+          "elapsed_seconds": 29.869,
+          "errors": {},
+          "failure_rate": 0.0,
+          "failures": 0,
+          "latency": {
+            "max_ms": 1897.27,
+            "mean_ms": 1823.11,
+            "min_ms": 466.13,
+            "p50_ms": 1862.07,
+            "p95_ms": 1889.01,
+            "p99_ms": 1897.27
+          },
+          "ooms": 0,
+          "rejections": 0,
+          "repeated_state_fraction": 0.5,
+          "requests": 64,
+          "requests_per_second": 2.1427,
+          "server_latency": {
+            "mean_ms": 1820.64,
+            "p50_ms": 1859.59,
+            "p99_ms": 1894.53
+          },
+          "shapes": {
+            "1024t": {
+              "decisions": 256,
+              "decisions_per_second": 8.5707,
+              "failure_rate": 0.0,
+              "failures": 0,
+              "input_tokens": 1023,
+              "p50_ms": 1862.07,
+              "p95_ms": 1889.01,
+              "p99_ms": 1897.27,
+              "questions": 4,
+              "requested_input_tokens": 1024,
+              "requests": 64,
+              "successes": 64
+            }
+          },
+          "successes": 64,
+          "timeouts": 0,
+          "warmup_failures": 0,
+          "warmup_requests": 4
+        },
+        {
+          "decisions": 256,
+          "decisions_per_second": 8.4081,
+          "elapsed_seconds": 30.447,
+          "errors": {},
+          "failure_rate": 0.0,
+          "failures": 0,
+          "latency": {
+            "max_ms": 2094.24,
+            "mean_ms": 1859.48,
+            "min_ms": 467.75,
+            "p50_ms": 1887.05,
+            "p95_ms": 2024.76,
+            "p99_ms": 2094.24
+          },
+          "ooms": 0,
+          "rejections": 0,
+          "repeated_state_fraction": 0.5,
+          "requests": 64,
+          "requests_per_second": 2.102,
+          "server_latency": {
+            "mean_ms": 1857.02,
+            "p50_ms": 1884.57,
+            "p99_ms": 2091.63
+          },
+          "shapes": {
+            "1024t": {
+              "decisions": 256,
+              "decisions_per_second": 8.4081,
+              "failure_rate": 0.0,
+              "failures": 0,
+              "input_tokens": 1023,
+              "p50_ms": 1887.05,
+              "p95_ms": 2024.76,
+              "p99_ms": 2094.24,
+              "questions": 4,
+              "requested_input_tokens": 1024,
+              "requests": 64,
+              "successes": 64
+            }
+          },
+          "successes": 64,
+          "timeouts": 0,
+          "warmup_failures": 0,
+          "warmup_requests": 4
+        }
+      ],
+      "requests_per_second": 2.1427,
+      "server_latency": {
+        "mean_ms": 1820.64,
+        "p50_ms": 1859.59,
+        "p99_ms": 1894.53
+      }
+    },
+    {
+      "decisions_per_second": 8.6242,
+      "failure_rate": 0.0,
+      "failure_rate_max": 0.0,
+      "latency": {
+        "max_ms": 3719.04,
+        "mean_ms": 3507.55,
+        "min_ms": 466.91,
+        "p50_ms": 3709.56,
+        "p95_ms": 3718.13,
+        "p99_ms": 3719.04
+      },
+      "load": 8,
+      "mode": "concurrency",
+      "ooms": 0,
+      "repetitions": [
+        {
+          "decisions": 256,
+          "decisions_per_second": 8.6285,
+          "elapsed_seconds": 29.669,
+          "errors": {},
+          "failure_rate": 0.0,
+          "failures": 0,
+          "latency": {
+            "max_ms": 3719.04,
+            "mean_ms": 3505.93,
+            "min_ms": 465.45,
+            "p50_ms": 3706.69,
+            "p95_ms": 3718.13,
+            "p99_ms": 3719.04
+          },
+          "ooms": 0,
+          "rejections": 0,
+          "repeated_state_fraction": 0.5,
+          "requests": 64,
+          "requests_per_second": 2.1571,
+          "server_latency": {
+            "mean_ms": 3503.41,
+            "p50_ms": 3704.1,
+            "p99_ms": 3716.77
+          },
+          "shapes": {
+            "1024t": {
+              "decisions": 256,
+              "decisions_per_second": 8.6285,
+              "failure_rate": 0.0,
+              "failures": 0,
+              "input_tokens": 1023,
+              "p50_ms": 3706.69,
+              "p95_ms": 3718.13,
+              "p99_ms": 3719.04,
+              "questions": 4,
+              "requested_input_tokens": 1024,
+              "requests": 64,
+              "successes": 64
+            }
+          },
+          "successes": 64,
+          "timeouts": 0,
+          "warmup_failures": 0,
+          "warmup_requests": 8
+        },
+        {
+          "decisions": 256,
+          "decisions_per_second": 8.6242,
+          "elapsed_seconds": 29.684,
+          "errors": {},
+          "failure_rate": 0.0,
+          "failures": 0,
+          "latency": {
+            "max_ms": 3715.07,
+            "mean_ms": 3507.55,
+            "min_ms": 467.05,
+            "p50_ms": 3709.56,
+            "p95_ms": 3713.88,
+            "p99_ms": 3715.07
+          },
+          "ooms": 0,
+          "rejections": 0,
+          "repeated_state_fraction": 0.5,
+          "requests": 64,
+          "requests_per_second": 2.156,
+          "server_latency": {
+            "mean_ms": 3505.0,
+            "p50_ms": 3707.21,
+            "p99_ms": 3712.97
+          },
+          "shapes": {
+            "1024t": {
+              "decisions": 256,
+              "decisions_per_second": 8.6242,
+              "failure_rate": 0.0,
+              "failures": 0,
+              "input_tokens": 1023,
+              "p50_ms": 3709.56,
+              "p95_ms": 3713.88,
+              "p99_ms": 3715.07,
+              "questions": 4,
+              "requested_input_tokens": 1024,
+              "requests": 64,
+              "successes": 64
+            }
+          },
+          "successes": 64,
+          "timeouts": 0,
+          "warmup_failures": 0,
+          "warmup_requests": 8
+        },
+        {
+          "decisions": 256,
+          "decisions_per_second": 8.6196,
+          "elapsed_seconds": 29.7,
+          "errors": {},
+          "failure_rate": 0.0,
+          "failures": 0,
+          "latency": {
+            "max_ms": 3721.78,
+            "mean_ms": 3509.41,
+            "min_ms": 466.91,
+            "p50_ms": 3711.6,
+            "p95_ms": 3720.23,
+            "p99_ms": 3721.78
+          },
+          "ooms": 0,
+          "rejections": 0,
+          "repeated_state_fraction": 0.5,
+          "requests": 64,
+          "requests_per_second": 2.1549,
+          "server_latency": {
+            "mean_ms": 3506.9,
+            "p50_ms": 3709.25,
+            "p99_ms": 3719.22
+          },
+          "shapes": {
+            "1024t": {
+              "decisions": 256,
+              "decisions_per_second": 8.6196,
+              "failure_rate": 0.0,
+              "failures": 0,
+              "input_tokens": 1022,
+              "p50_ms": 3711.6,
+              "p95_ms": 3720.23,
+              "p99_ms": 3721.78,
+              "questions": 4,
+              "requested_input_tokens": 1024,
+              "requests": 64,
+              "successes": 64
+            }
+          },
+          "successes": 64,
+          "timeouts": 0,
+          "warmup_failures": 0,
+          "warmup_requests": 8
+        }
+      ],
+      "requests_per_second": 2.156,
+      "server_latency": {
+        "mean_ms": 3505.0,
+        "p50_ms": 3707.21,
+        "p99_ms": 3716.77
+      }
+    },
+    {
+      "decisions_per_second": 8.6168,
+      "failure_rate": 0.0,
+      "failure_rate_max": 0.0,
+      "latency": {
+        "max_ms": 7436.48,
+        "mean_ms": 6557.02,
+        "min_ms": 466.0,
+        "p50_ms": 7421.42,
+        "p95_ms": 7430.91,
+        "p99_ms": 7436.48
+      },
+      "load": 16,
+      "mode": "concurrency",
+      "ooms": 0,
+      "repetitions": [
+        {
+          "decisions": 256,
+          "decisions_per_second": 8.6168,
+          "elapsed_seconds": 29.709,
+          "errors": {},
+          "failure_rate": 0.0,
+          "failures": 0,
+          "latency": {
+            "max_ms": 7430.49,
+            "mean_ms": 6557.02,
+            "min_ms": 466.0,
+            "p50_ms": 7425.95,
+            "p95_ms": 7428.31,
+            "p99_ms": 7430.49
+          },
+          "ooms": 0,
+          "rejections": 0,
+          "repeated_state_fraction": 0.5,
+          "requests": 64,
+          "requests_per_second": 2.1542,
+          "server_latency": {
+            "mean_ms": 6553.97,
+            "p50_ms": 7423.61,
+            "p99_ms": 7427.47
+          },
+          "shapes": {
+            "1024t": {
+              "decisions": 256,
+              "decisions_per_second": 8.6168,
+              "failure_rate": 0.0,
+              "failures": 0,
+              "input_tokens": 1022,
+              "p50_ms": 7425.95,
+              "p95_ms": 7428.31,
+              "p99_ms": 7430.49,
+              "questions": 4,
+              "requested_input_tokens": 1024,
+              "requests": 64,
+              "successes": 64
+            }
+          },
+          "successes": 64,
+          "timeouts": 0,
+          "warmup_failures": 0,
+          "warmup_requests": 16
+        },
+        {
+          "decisions": 256,
+          "decisions_per_second": 8.6203,
+          "elapsed_seconds": 29.697,
+          "errors": {},
+          "failure_rate": 0.0,
+          "failures": 0,
+          "latency": {
+            "max_ms": 7436.48,
+            "mean_ms": 6555.28,
+            "min_ms": 468.52,
+            "p50_ms": 7421.42,
+            "p95_ms": 7430.91,
+            "p99_ms": 7436.48
+          },
+          "ooms": 0,
+          "rejections": 0,
+          "repeated_state_fraction": 0.5,
+          "requests": 64,
+          "requests_per_second": 2.1551,
+          "server_latency": {
+            "mean_ms": 6552.05,
+            "p50_ms": 7419.07,
+            "p99_ms": 7430.32
+          },
+          "shapes": {
+            "1024t": {
+              "decisions": 256,
+              "decisions_per_second": 8.6203,
+              "failure_rate": 0.0,
+              "failures": 0,
+              "input_tokens": 1023,
+              "p50_ms": 7421.42,
+              "p95_ms": 7430.91,
+              "p99_ms": 7436.48,
+              "questions": 4,
+              "requested_input_tokens": 1024,
+              "requests": 64,
+              "successes": 64
+            }
+          },
+          "successes": 64,
+          "timeouts": 0,
+          "warmup_failures": 0,
+          "warmup_requests": 16
+        },
+        {
+          "decisions": 256,
+          "decisions_per_second": 8.6105,
+          "elapsed_seconds": 29.731,
+          "errors": {},
+          "failure_rate": 0.0,
+          "failures": 0,
+          "latency": {
+            "max_ms": 7469.68,
+            "mean_ms": 6562.83,
+            "min_ms": 465.6,
+            "p50_ms": 7419.98,
+            "p95_ms": 7469.48,
+            "p99_ms": 7469.68
+          },
+          "ooms": 0,
+          "rejections": 0,
+          "repeated_state_fraction": 0.5,
+          "requests": 64,
+          "requests_per_second": 2.1526,
+          "server_latency": {
+            "mean_ms": 6560.05,
+            "p50_ms": 7417.59,
+            "p99_ms": 7467.39
+          },
+          "shapes": {
+            "1024t": {
+              "decisions": 256,
+              "decisions_per_second": 8.6105,
+              "failure_rate": 0.0,
+              "failures": 0,
+              "input_tokens": 1023,
+              "p50_ms": 7419.98,
+              "p95_ms": 7469.48,
+              "p99_ms": 7469.68,
+              "questions": 4,
+              "requested_input_tokens": 1024,
+              "requests": 64,
+              "successes": 64
+            }
+          },
+          "successes": 64,
+          "timeouts": 0,
+          "warmup_failures": 0,
+          "warmup_requests": 16
+        }
+      ],
+      "requests_per_second": 2.1542,
+      "server_latency": {
+        "mean_ms": 6553.97,
+        "p50_ms": 7419.07,
+        "p99_ms": 7430.32
+      }
+    },
+    {
+      "decisions_per_second": 8.6091,
+      "failure_rate": 0.0,
+      "failure_rate_max": 0.0,
+      "latency": {
+        "max_ms": 14872.01,
+        "mean_ms": 11266.22,
+        "min_ms": 468.57,
+        "p50_ms": 14852.02,
+        "p95_ms": 14870.15,
+        "p99_ms": 14872.01
+      },
+      "load": 32,
+      "mode": "concurrency",
+      "ooms": 0,
+      "repetitions": [
+        {
+          "decisions": 256,
+          "decisions_per_second": 8.6281,
+          "elapsed_seconds": 29.67,
+          "errors": {},
+          "failure_rate": 0.0,
+          "failures": 0,
+          "latency": {
+            "max_ms": 14839.25,
+            "mean_ms": 11242.62,
+            "min_ms": 469.95,
+            "p50_ms": 14829.36,
+            "p95_ms": 14838.68,
+            "p99_ms": 14839.25
+          },
+          "ooms": 0,
+          "rejections": 0,
+          "repeated_state_fraction": 0.5,
+          "requests": 64,
+          "requests_per_second": 2.157,
+          "server_latency": {
+            "mean_ms": 11237.98,
+            "p50_ms": 14825.73,
+            "p99_ms": 14836.76
+          },
+          "shapes": {
+            "1024t": {
+              "decisions": 256,
+              "decisions_per_second": 8.6281,
+              "failure_rate": 0.0,
+              "failures": 0,
+              "input_tokens": 1023,
+              "p50_ms": 14829.36,
+              "p95_ms": 14838.68,
+              "p99_ms": 14839.25,
+              "questions": 4,
+              "requested_input_tokens": 1024,
+              "requests": 64,
+              "successes": 64
+            }
+          },
+          "successes": 64,
+          "timeouts": 0,
+          "warmup_failures": 0,
+          "warmup_requests": 32
+        },
+        {
+          "decisions": 256,
+          "decisions_per_second": 8.6091,
+          "elapsed_seconds": 29.736,
+          "errors": {},
+          "failure_rate": 0.0,
+          "failures": 0,
+          "latency": {
+            "max_ms": 14872.01,
+            "mean_ms": 11266.22,
+            "min_ms": 468.57,
+            "p50_ms": 14852.02,
+            "p95_ms": 14870.15,
+            "p99_ms": 14872.01
+          },
+          "ooms": 0,
+          "rejections": 0,
+          "repeated_state_fraction": 0.5,
+          "requests": 64,
+          "requests_per_second": 2.1523,
+          "server_latency": {
+            "mean_ms": 11260.71,
+            "p50_ms": 14849.36,
+            "p99_ms": 14869.3
+          },
+          "shapes": {
+            "1024t": {
+              "decisions": 256,
+              "decisions_per_second": 8.6091,
+              "failure_rate": 0.0,
+              "failures": 0,
+              "input_tokens": 1023,
+              "p50_ms": 14852.02,
+              "p95_ms": 14870.15,
+              "p99_ms": 14872.01,
+              "questions": 4,
+              "requested_input_tokens": 1024,
+              "requests": 64,
+              "successes": 64
+            }
+          },
+          "successes": 64,
+          "timeouts": 0,
+          "warmup_failures": 0,
+          "warmup_requests": 32
+        },
+        {
+          "decisions": 256,
+          "decisions_per_second": 8.6031,
+          "elapsed_seconds": 29.757,
+          "errors": {},
+          "failure_rate": 0.0,
+          "failures": 0,
+          "latency": {
+            "max_ms": 14886.06,
+            "mean_ms": 11276.34,
+            "min_ms": 467.7,
+            "p50_ms": 14868.13,
+            "p95_ms": 14884.36,
+            "p99_ms": 14886.06
+          },
+          "ooms": 0,
+          "rejections": 0,
+          "repeated_state_fraction": 0.5,
+          "requests": 64,
+          "requests_per_second": 2.1508,
+          "server_latency": {
+            "mean_ms": 11271.82,
+            "p50_ms": 14865.68,
+            "p99_ms": 14883.2
+          },
+          "shapes": {
+            "1024t": {
+              "decisions": 256,
+              "decisions_per_second": 8.6031,
+              "failure_rate": 0.0,
+              "failures": 0,
+              "input_tokens": 1023,
+              "p50_ms": 14868.13,
+              "p95_ms": 14884.36,
+              "p99_ms": 14886.06,
+              "questions": 4,
+              "requested_input_tokens": 1024,
+              "requests": 64,
+              "successes": 64
+            }
+          },
+          "successes": 64,
+          "timeouts": 0,
+          "warmup_failures": 0,
+          "warmup_requests": 32
+        }
+      ],
+      "requests_per_second": 2.1523,
+      "server_latency": {
+        "mean_ms": 11260.71,
+        "p50_ms": 14849.36,
+        "p99_ms": 14869.3
+      }
+    }
+  ],
+  "headline": {
+    "cost_per_1m_decisions_usd": null,
+    "failure_rate": 0.0,
+    "max_requests_per_second": 2.156,
+    "reason": "pricing unavailable",
+    "reference_concurrency": 1,
+    "reference_latency": {
+      "max_ms": 1892.34,
+      "mean_ms": 844.73,
+      "min_ms": 152.64,
+      "p50_ms": 490.44,
+      "p95_ms": 1851.04,
+      "p99_ms": 1892.34
+    },
+    "zero_oom_or_crash": true
+  },
+  "health": {
+    "base_model": "Qwen/Qwen3.5-2B-Base",
+    "checkpoint": "StrandsAgents/strands-decider-2B-qwen3.5-v1-2610",
+    "device": "mlx",
+    "max_length": 4096,
+    "model": "strands-decider-2B-qwen3.5-v1-2610",
+    "num_slots": 24,
+    "prefix_cache": true,
+    "status": "ok",
+    "temperature": 1.0545210242263665,
+    "vision": false
+  },
+  "latency_sweep": {
+    "decisions_per_second": 4.735,
+    "failure_rate": 0.0,
+    "failure_rate_max": 0.0,
+    "latency": {
+      "max_ms": 1892.34,
+      "mean_ms": 844.73,
+      "min_ms": 152.64,
+      "p50_ms": 490.44,
+      "p95_ms": 1851.04,
+      "p99_ms": 1892.34
+    },
+    "load": 1,
+    "mode": "input-length",
+    "ooms": 0,
+    "repetitions": [
+      {
+        "decisions": 256,
+        "decisions_per_second": 4.735,
+        "elapsed_seconds": 54.066,
+        "errors": {},
+        "failure_rate": 0.0,
+        "failures": 0,
+        "latency": {
+          "max_ms": 1857.65,
+          "mean_ms": 844.73,
+          "min_ms": 152.64,
+          "p50_ms": 479.1,
+          "p95_ms": 1850.98,
+          "p99_ms": 1857.65
+        },
+        "ooms": 0,
+        "rejections": 0,
+        "repeated_state_fraction": 0.5,
+        "requests": 64,
+        "requests_per_second": 1.1837,
+        "server_latency": {
+          "mean_ms": 843.22,
+          "p50_ms": 477.85,
+          "p99_ms": 1855.82
+        },
+        "shapes": {
+          "1024t": {
+            "decisions": 64,
+            "decisions_per_second": 1.1837,
+            "failure_rate": 0.0,
+            "failures": 0,
+            "input_tokens": 1022,
+            "p50_ms": 471.88,
+            "p95_ms": 479.1,
+            "p99_ms": 479.1,
+            "questions": 4,
+            "requested_input_tokens": 1024,
+            "requests": 16,
+            "successes": 16
+          },
+          "2048t": {
+            "decisions": 64,
+            "decisions_per_second": 1.1837,
+            "failure_rate": 0.0,
+            "failures": 0,
+            "input_tokens": 2050,
+            "p50_ms": 911.16,
+            "p95_ms": 924.05,
+            "p99_ms": 924.05,
+            "questions": 4,
+            "requested_input_tokens": 2048,
+            "requests": 16,
+            "successes": 16
+          },
+          "256t": {
+            "decisions": 64,
+            "decisions_per_second": 1.1837,
+            "failure_rate": 0.0,
+            "failures": 0,
+            "input_tokens": 264,
+            "p50_ms": 153.94,
+            "p95_ms": 156.14,
+            "p99_ms": 156.14,
+            "questions": 4,
+            "requested_input_tokens": 256,
+            "requests": 16,
+            "successes": 16
+          },
+          "4096t": {
+            "decisions": 64,
+            "decisions_per_second": 1.1837,
+            "failure_rate": 0.0,
+            "failures": 0,
+            "input_tokens": 4094,
+            "p50_ms": 1839.44,
+            "p95_ms": 1857.65,
+            "p99_ms": 1857.65,
+            "questions": 4,
+            "requested_input_tokens": 4096,
+            "requests": 16,
+            "successes": 16
+          }
+        },
+        "successes": 64,
+        "timeouts": 0,
+        "warmup_failures": 0,
+        "warmup_requests": 4
+      },
+      {
+        "decisions": 256,
+        "decisions_per_second": 4.6989,
+        "elapsed_seconds": 54.481,
+        "errors": {},
+        "failure_rate": 0.0,
+        "failures": 0,
+        "latency": {
+          "max_ms": 1949.15,
+          "mean_ms": 851.22,
+          "min_ms": 152.79,
+          "p50_ms": 507.25,
+          "p95_ms": 1858.86,
+          "p99_ms": 1949.15
+        },
+        "ooms": 0,
+        "rejections": 0,
+        "repeated_state_fraction": 0.5,
+        "requests": 64,
+        "requests_per_second": 1.1747,
+        "server_latency": {
+          "mean_ms": 849.68,
+          "p50_ms": 505.69,
+          "p99_ms": 1947.64
+        },
+        "shapes": {
+          "1024t": {
+            "decisions": 64,
+            "decisions_per_second": 1.1747,
+            "failure_rate": 0.0,
+            "failures": 0,
+            "input_tokens": 1022,
+            "p50_ms": 471.62,
+            "p95_ms": 507.25,
+            "p99_ms": 507.25,
+            "questions": 4,
+            "requested_input_tokens": 1024,
+            "requests": 16,
+            "successes": 16
+          },
+          "2048t": {
+            "decisions": 64,
+            "decisions_per_second": 1.1747,
+            "failure_rate": 0.0,
+            "failures": 0,
+            "input_tokens": 2049,
+            "p50_ms": 915.23,
+            "p95_ms": 973.58,
+            "p99_ms": 973.58,
+            "questions": 4,
+            "requested_input_tokens": 2048,
+            "requests": 16,
+            "successes": 16
+          },
+          "256t": {
+            "decisions": 64,
+            "decisions_per_second": 1.1747,
+            "failure_rate": 0.0,
+            "failures": 0,
+            "input_tokens": 263,
+            "p50_ms": 155.23,
+            "p95_ms": 168.29,
+            "p99_ms": 168.29,
+            "questions": 4,
+            "requested_input_tokens": 256,
+            "requests": 16,
+            "successes": 16
+          },
+          "4096t": {
+            "decisions": 64,
+            "decisions_per_second": 1.1747,
+            "failure_rate": 0.0,
+            "failures": 0,
+            "input_tokens": 4093,
+            "p50_ms": 1831.23,
+            "p95_ms": 1949.15,
+            "p99_ms": 1949.15,
+            "questions": 4,
+            "requested_input_tokens": 4096,
+            "requests": 16,
+            "successes": 16
+          }
+        },
+        "successes": 64,
+        "timeouts": 0,
+        "warmup_failures": 0,
+        "warmup_requests": 4
+      },
+      {
+        "decisions": 256,
+        "decisions_per_second": 4.739,
+        "elapsed_seconds": 54.02,
+        "errors": {},
+        "failure_rate": 0.0,
+        "failures": 0,
+        "latency": {
+          "max_ms": 1892.34,
+          "mean_ms": 844.03,
+          "min_ms": 152.0,
+          "p50_ms": 490.44,
+          "p95_ms": 1851.04,
+          "p99_ms": 1892.34
+        },
+        "ooms": 0,
+        "rejections": 0,
+        "repeated_state_fraction": 0.5,
+        "requests": 64,
+        "requests_per_second": 1.1847,
+        "server_latency": {
+          "mean_ms": 842.46,
+          "p50_ms": 488.89,
+          "p99_ms": 1890.27
+        },
+        "shapes": {
+          "1024t": {
+            "decisions": 64,
+            "decisions_per_second": 1.1847,
+            "failure_rate": 0.0,
+            "failures": 0,
+            "input_tokens": 1022,
+            "p50_ms": 471.88,
+            "p95_ms": 490.44,
+            "p99_ms": 490.44,
+            "questions": 4,
+            "requested_input_tokens": 1024,
+            "requests": 16,
+            "successes": 16
+          },
+          "2048t": {
+            "decisions": 64,
+            "decisions_per_second": 1.1847,
+            "failure_rate": 0.0,
+            "failures": 0,
+            "input_tokens": 2049,
+            "p50_ms": 908.9,
+            "p95_ms": 940.06,
+            "p99_ms": 940.06,
+            "questions": 4,
+            "requested_input_tokens": 2048,
+            "requests": 16,
+            "successes": 16
+          },
+          "256t": {
+            "decisions": 64,
+            "decisions_per_second": 1.1847,
+            "failure_rate": 0.0,
+            "failures": 0,
+            "input_tokens": 263,
+            "p50_ms": 154.4,
+            "p95_ms": 161.93,
+            "p99_ms": 161.93,
+            "questions": 4,
+            "requested_input_tokens": 256,
+            "requests": 16,
+            "successes": 16
+          },
+          "4096t": {
+            "decisions": 64,
+            "decisions_per_second": 1.1847,
+            "failure_rate": 0.0,
+            "failures": 0,
+            "input_tokens": 4093,
+            "p50_ms": 1821.63,
+            "p95_ms": 1892.34,
+            "p99_ms": 1892.34,
+            "questions": 4,
+            "requested_input_tokens": 4096,
+            "requests": 16,
+            "successes": 16
+          }
+        },
+        "successes": 64,
+        "timeouts": 0,
+        "warmup_failures": 0,
+        "warmup_requests": 4
+      }
+    ],
+    "requests_per_second": 1.1837,
+    "server_latency": {
+      "mean_ms": 843.22,
+      "p50_ms": 488.89,
+      "p99_ms": 1890.27
+    }
+  },
+  "lifecycle": {
+    "first_request": {
+      "input_tokens_reported": 264,
+      "latency_ms": 158.15,
+      "questions": 4,
+      "requested_input_tokens": 256,
+      "status": 200,
+      "success": true
+    },
+    "time_to_ready_seconds": 6.079
+  },
+  "peak": {
+    "concurrency": 8,
+    "requests_per_second": 2.156
+  },
+  "run_id": "1889e96a-728c-4e44-a6d2-035a970ea13a"
+}

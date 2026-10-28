@@ -67,4 +67,4 @@ cross-environment study can present absolute numbers without using baseline-impr
 
 The current suite does not measure correctness, production arrival patterns, cold-start
 distributions, long-run stability, or statistically defensible tail latency. Do not infer those
-properties from these artifacts. Deferred extensions are listed in `benchmark/FOLLOWUPS.md`.
+properties from these artifacts.

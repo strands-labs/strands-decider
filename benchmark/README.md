@@ -2,7 +2,6 @@
 
 This suite measures how an inference-server change affects the configured models in one compute
 environment. It does not rank different environments and does not evaluate model correctness.
-Deferred extensions are tracked in [FOLLOWUPS.md](FOLLOWUPS.md).
 
 During a run the server, model, and environment remain fixed. The benchmark changes only the
 synthetic request shape and calling pattern:
