@@ -306,9 +306,9 @@ def load_mlx_engine(
 
     The MLX torso is loaded on, and every evaluation runs on, a dedicated worker thread the
     returned engine owns. mlx-lm's lazy arrays and Metal streams are thread-local, and
-    Gemma4 keeps state tied to the loading thread's GPU stream (strands-labs#109); FastAPI
-    serves sync handlers from its thread pool, so without this pinning the first request
-    from a worker thread fails with "no Stream(gpu, 1) in current thread".
+    Gemma4 keeps state tied to the loading thread's GPU stream; FastAPI serves sync handlers
+    from its thread pool, so without this pinning the first request from a worker thread
+    fails with "no Stream(gpu, 1) in current thread".
     """
     executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="mlx-engine")
     try:

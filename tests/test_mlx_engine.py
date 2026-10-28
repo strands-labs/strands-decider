@@ -286,9 +286,9 @@ def test_a_bf16_checkpoint_answers_from_another_thread(tmp_path):
 
 
 def test_every_mlx_evaluation_runs_on_the_loading_thread(engines):
-    # strands-labs#109: Gemma4 (and MLX in general) binds Metal streams to the loading
-    # thread. The engine owns a single-worker executor so cross-thread submissions all
-    # land on that one worker, regardless of which caller thread invoked evaluate().
+    # Gemma4 (and MLX in general) binds Metal streams to the loading thread. The engine
+    # owns a single-worker executor so cross-thread submissions all land on that one
+    # worker, regardless of which caller thread invoked evaluate().
     import threading as _threading
 
     _, mlx_engine, _ = engines
