@@ -53,12 +53,6 @@ class EngineConfig:
     use_prefix_cache: bool = True
     max_batch: int = 32
     model_name: str = f"strands-decider-{__version__}"
-    # Largest share of the context window the question may claim before the state
-    # starts being squeezed. Questions are normally short, so this rarely binds.
-    max_question_fraction: float = 0.75
-    # Refuse a prompt that does not fit the window instead of shortening it, for
-    # benchmarks that forbid truncation. The message names the "context window".
-    strict_window: bool = False
     # Also cap the tokens of one forward: a chunk of up to max_batch questions is cut
     # where its rows, fitted to the window and padded to the longest (state + question),
     # would pass this many tokens (one question at least). Questions are fitted before the
@@ -201,8 +195,8 @@ class SystemOneEngine:
     def _fit(
         self, state_text: str, question_texts: list[str]
     ) -> tuple[list[int], list[list[int]], list[list[tuple[int, int]]]]:
-        """prompting.fit_window on this engine's tokenizer and settings: state ids,
-        question ids and each question's character offsets.
+        """prompting.fit_window on this engine's tokenizer: state ids, question ids and
+        each question's character offsets.
 
         The offsets are returned, not kept on the engine: the server runs requests
         concurrently on one engine, so engine state would be shared across requests.
@@ -213,9 +207,6 @@ class SystemOneEngine:
                 state_text,
                 question_texts,
                 self.model.config.max_length,
-                strict=self.cfg.strict_window,
-                max_question_fraction=self.cfg.max_question_fraction,
-                truncation_side=self.tok.truncation_side,
             )
 
     def _option_idx(

@@ -239,10 +239,8 @@ The `state` may be empty when the question carries the whole task. An option des
 may be a string, structured data (rendered as JSON, like a structured `state`), or `null`
 for a bare label.
 
-By default a prompt longer than the checkpoint's window is shortened to fit: the state is
-cut, and the question keeps its options. `--strict-window` refuses such a prompt instead,
-with HTTP 422 and a message that names the context window, for an evaluation that forbids
-truncation. `--max-batch N` (default 32) sets how many questions one forward pass encodes;
+A prompt longer than the checkpoint's window is refused with HTTP 422 and a message that
+names the context window. `--max-batch N` (default 32) sets how many questions one forward pass encodes;
 lower it when a very long state with many questions does not fit in GPU memory.
 `--max-batch-tokens N` also caps the tokens of one forward, as the forward pads them: its
 questions times the longest state + question, after each is fitted to the window. A forward

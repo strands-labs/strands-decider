@@ -113,14 +113,14 @@ def test_the_cap_bounds_the_padded_forward(prefix):
 
 @pytest.mark.parametrize("prefix", [False, True])
 def test_the_cap_keeps_every_input(prefix):
-    # At a 256-token window the long question decides how much of the state is kept; a cap
-    # that puts the short question in a forward of its own must not refit it.
+    # Two questions of very different lengths: a cap that puts the short one in a forward of
+    # its own must not refit it.
     long = ChoiceQuestion(
         instructions=" ".join(["Consider"] * 155), criteria={"yes": None, "no": None}
     )
     state = " ".join(["ordinary"] * 100 + ["important", "evidence"] * 150)
     req = SystemOneRequest(state=state, questions={"short": SHORT, "long": long})
-    model = _model(_texts(req), 256)
+    model = _model(_texts(req), 1024)
     a = SystemOneEngine(model, EngineConfig(device="cpu", use_prefix_cache=prefix)).evaluate(req)
     capped = SystemOneEngine(
         model, EngineConfig(device="cpu", use_prefix_cache=prefix, max_batch_tokens=256)

@@ -469,13 +469,10 @@ class VisionEngine(SystemOneEngine):
     def _fit_images(
         self, state: Content, images: list[Image.Image], question_texts: list[str]
     ) -> tuple[list[int], list[list[int]], dict[str, torch.Tensor], list[list[tuple[int, int]]]]:
-        """Question reserve first, then the image block whole, then state text.
+        """Tokenise state, images and questions, refusing a prompt that does not fit the window.
 
-        As in `_fit`: with `strict_window` an over-long prompt is refused (HTTP 422);
-        otherwise the questions keep their reserve and the state text loses its end, the
-        same side `_fit` and training cut. The images are never cut. Returns the state ids,
-        question ids, multimodal tensors, and per-question option offsets (as a local, not
-        on the engine -- see `_fit` for the reason).
+        Returns the state ids, question ids, multimodal tensors, and per-question option
+        offsets (as a local, not on the engine -- see `_fit` for the reason).
         """
         max_len = self.model.config.max_length
         with self._tok_lock:
@@ -496,28 +493,13 @@ class VisionEngine(SystemOneEngine):
                 expand_image_tokens(render_image_state(state, len(images)), counts),
                 add_special_tokens=True,
             )["input_ids"]
-        vend = self.tok.convert_tokens_to_ids(VISION_END)
-        keep = max(i for i, t in enumerate(s) if t == vend) + 1  # through the last image
 
-        if self.cfg.strict_window:
-            if len(s) + longest > max_len:
-                raise ValueError(
-                    f"prompt of {len(s) + longest} tokens exceeds the context window "
-                    f"of {max_len} tokens"
-                )
-            return s, q, mm, list(offs)
-        reserve = min(longest, max(1, int(max_len * self.cfg.max_question_fraction)))
-        cut = [max(0, len(x) - reserve) for x in q]
-        kept = [o[c:] for o, c in zip(offs, cut, strict=True)]
-        q = [x[c:] for x, c in zip(q, cut, strict=True)]
-        budget = max_len - reserve
-        if keep > budget:
+        if len(s) + longest > max_len:
             raise ValueError(
-                f"the images take {keep} tokens of a {budget}-token state budget; "
-                "send fewer or smaller images"
+                f"prompt of {len(s) + longest} tokens exceeds the context window "
+                f"of {max_len} tokens"
             )
-        s = s[:budget]
-        return s, q, mm, kept
+        return s, q, mm, list(offs)
 
     @torch.inference_mode()  # type: ignore[untyped-decorator]
     def _image_probs(
@@ -581,7 +563,7 @@ def load_vision_engine(
     image_long_side: int = 448,
 ) -> VisionEngine:
     """A vision engine configured as `create_app` configures a text one (device, prefix
-    cache, `strict_window`, `max_batch`, model name), plus the image settings."""
+    cache, `max_batch`, model name), plus the image settings."""
     base = config or EngineConfig()
     names = {f.name for f in fields(EngineConfig)}
     cfg = VisionEngineConfig(

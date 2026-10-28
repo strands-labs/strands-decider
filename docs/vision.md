@@ -34,8 +34,8 @@ curl -s localhost:8000/v1/systemone -H 'content-type: application/json' -d '{
 
 From the command line, `ask --image FILE` (repeatable) loads the vision tower for that call.
 A server started without `--vision` answers a request with `images` with HTTP 422 rather
-than ignore them. `/health` reports `"vision": true|false`. `--strict-window` and
-`--max-batch` apply to image requests as they do to text ones.
+than ignore them. `/health` reports `"vision": true|false`. `--max-batch` applies to image
+requests as it does to text ones.
 
 Limits, fixed per server:
 
@@ -44,9 +44,8 @@ Limits, fixed per server:
 - An image over 4096 x 4096 pixels is refused from its header, before it is decoded.
   Other formats are refused before they are parsed. EXIF rotation is applied, and
   transparent areas are read as white.
-- Images count against the same 4,096-token window as the state. Without
-  `--strict-window`, the questions keep their reserve, the images are kept whole, and the
-  state text loses its end, as text requests do. With it, an over-long prompt gets 422.
+- Images count against the same 4,096-token window as the state. An over-long prompt
+  (state + images + question) is refused with HTTP 422.
 - The vision tower adds about 331M parameters (0.66 GB in bf16).
 
 ## How it works
