@@ -461,11 +461,6 @@ class BenchmarkRunner:
         self.concurrency_levels = concurrency_levels
         if not concurrency_levels or min(concurrency_levels) <= 0:
             raise ValueError("concurrency levels must be positive")
-        if requests_per_point < 2 * max(concurrency_levels):
-            raise ValueError(
-                "requests per point must be at least twice the maximum concurrency "
-                "so every measured point contains two request waves"
-            )
         if requests_per_point % 8:
             raise ValueError("requests per point must be divisible by the 8-request workload cycle")
         self.seed = seed
@@ -498,7 +493,8 @@ class BenchmarkRunner:
     def _closed_repetition(self, concurrency: int, offset: int) -> dict[str, Any]:
         assert self.workload is not None
         warmups = self.workload.throughput_requests(concurrency, sequence=offset + 900_000_000)
-        requests = self.workload.throughput_requests(self.requests_per_point, sequence=offset)
+        request_count = max(self.requests_per_point, 2 * concurrency)
+        requests = self.workload.throughput_requests(request_count, sequence=offset)
         with ThreadPoolExecutor(max_workers=concurrency) as pool:
             warmup_samples = []
             for sample in pool.map(self._invoke, warmups):

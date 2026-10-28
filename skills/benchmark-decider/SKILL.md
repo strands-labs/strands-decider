@@ -37,9 +37,11 @@ Keep the workload and measurement settings fixed when evaluating an inference ch
 - one warm-up request per concurrent client before each throughput repetition;
 - one warm-up request for each serial-latency input shape.
 
-The standard preset measures 64 requests three times at concurrency 1, 2, 4, 8, 16, and 32. The
-smoke preset measures one eight-request workload cycle at concurrency 1. Poisson traffic, bursts,
-soak tests, production datasets, and correctness evaluation are deferred.
+The standard preset measures concurrency 1, 4, 16, and 32 twice. It uses a minimum of 16 requests
+per point and increases that to two complete request waves at higher concurrency: 16, 16, 32, and
+64 requests respectively. The smoke preset measures one eight-request workload cycle at
+concurrency 1. Poisson traffic, bursts, soak tests, production datasets, and correctness
+evaluation are deferred.
 
 The headline metrics are:
 
@@ -116,20 +118,28 @@ resource and endpoint scope, and confirm the paid run before passing `--yes`.
 
 ## Run workflow
 
-Install the benchmark dependencies through the repository's package manager. Add the applicable
-device extra for a managed local server, such as `--extra mlx` on Apple Silicon.
+For an external HTTP or SageMaker endpoint, use the lightweight client project so the load
+generator does not install PyTorch or CUDA:
+
+```bash
+PYTHONPATH=src uv run --project benchmark python -m benchmark.runner run \
+  ENVIRONMENT MODEL --smoke
+```
+
+For a managed local server, use the root project and add the applicable device extra, such as
+`--extra mlx` on Apple Silicon.
 
 Start with one model:
 
 ```bash
-uv run --extra benchmark python -m benchmark.runner run ENVIRONMENT MODEL --smoke
+uv run --extra mlx --extra benchmark python -m benchmark.runner run ENVIRONMENT MODEL --smoke
 ```
 
 Inspect the smoke summary for successful calibration, the expected endpoint/model/instance
 metadata, zero failures, and plausible latency. Then run every model configured for that host:
 
 ```bash
-uv run --extra benchmark python -m benchmark.runner run ENVIRONMENT
+uv run --extra mlx --extra benchmark python -m benchmark.runner run ENVIRONMENT
 ```
 
 Omitting `MODEL` means all configured models. Smoke runs require one model. `--output PATH`

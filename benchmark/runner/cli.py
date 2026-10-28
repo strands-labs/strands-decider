@@ -30,9 +30,9 @@ from benchmark.runner.reporting import (
 from benchmark.runner.workload import INPUT_LENGTHS, THROUGHPUT_INPUT_TOKENS
 
 STANDARD_MEASUREMENT = {
-    "requests_per_point": 64,
-    "repetitions": 3,
-    "concurrency_levels": [1, 2, 4, 8, 16, 32],
+    "requests_per_point": 16,
+    "repetitions": 2,
+    "concurrency_levels": [1, 4, 16, 32],
 }
 SMOKE_MEASUREMENT = {
     "requests_per_point": 8,
@@ -51,6 +51,10 @@ def _run(args: argparse.Namespace) -> int:
         raise ValueError(f"{environment.path}: models are required for a full benchmark")
     measurement = {
         **settings,
+        "throughput_requests_per_concurrency": {
+            str(concurrency): max(settings["requests_per_point"], 2 * concurrency)
+            for concurrency in settings["concurrency_levels"]
+        },
         "preset": "smoke" if args.smoke else "standard",
         "reference_concurrency": 1,
         "failure_rate_limit": 0.01,
@@ -67,7 +71,7 @@ def _run(args: argparse.Namespace) -> int:
         + settings["repetitions"] * (settings["requests_per_point"] + len(INPUT_LENGTHS))
         + settings["repetitions"]
         * sum(
-            settings["requests_per_point"] + concurrency
+            max(settings["requests_per_point"], 2 * concurrency) + concurrency
             for concurrency in settings["concurrency_levels"]
         )
     )

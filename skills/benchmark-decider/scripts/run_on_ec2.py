@@ -297,7 +297,7 @@ def build_remote_script(
     command = " ".join(shlex.quote(argument) for argument in benchmark_arguments)
     environment_dir = str(Path(environment_path).parent)
     benchmark_command = (
-        "/usr/local/bin/uv run --python 3.12 --extra benchmark "
+        "env PYTHONPATH=src /usr/local/bin/uv run --project benchmark --locked --python 3.12 "
         f"python -m benchmark.runner run {command}"
     )
 

@@ -18,7 +18,7 @@ A full multi-model environment run also writes these beside its model directorie
 Regenerate CSV and PNG artifacts from an existing run with:
 
 ```bash
-uv run --extra benchmark python -m benchmark.runner summarize RUN_DIR
+PYTHONPATH=src uv run --project benchmark python -m benchmark.runner summarize RUN_DIR
 ```
 
 ## Interpreting the standard graphs

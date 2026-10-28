@@ -124,28 +124,34 @@ network and authentication controls already permit benchmark access.
 
 ## Running
 
-Install the optional plotting dependency when needed:
+SageMaker and external HTTP clients can use the lightweight benchmark project. It contains only
+the client, tokenizer, AWS, and reporting dependencies, so it does not install PyTorch or CUDA:
 
 ```bash
-pip install -e '.[benchmark]'
+PYTHONPATH=src uv run --project benchmark python -m benchmark.runner run ENVIRONMENT
 ```
 
-Run the standard suite for every model configured in the environment. Models run sequentially,
-and each model’s first run becomes its accepted baseline:
+For a managed local server, run through the root project with the applicable inference extra so
+the server executable and backend are available:
 
 ```bash
-python -m benchmark.runner run local
+uv run --extra mlx --extra benchmark python -m benchmark.runner run local
 ```
+
+The examples below show `python -m benchmark.runner` for brevity; prefix them with the applicable
+lightweight-client or managed-server command above. Run the standard suite for every model
+configured in the environment. Models run sequentially, and each model’s first run becomes its
+accepted baseline.
 
 The supplied `local` environment includes all five v1 models. The 48 GB Mac environment omits the
 26B model because its documented bf16 memory requirement exceeds that machine's memory.
 
 The serial latency sweep warms each input length, then measures an equal mix of all four lengths.
 For throughput, the runner sends one 1,024-token warm-up request per concurrent client using the
-same worker pool. The standard preset measures 64 requests three times at concurrency levels 1
-through 32 in powers of two. The smoke preset uses eight measured requests at concurrency 1. A
-throughput point must contain at least twice as many requests as concurrent clients so it observes
-at least two request waves.
+same worker pool. The standard preset measures concurrency 1, 4, 16, and 32 twice. It uses a
+minimum of 16 requests per point, increasing that to 32 and 64 requests at concurrency 16 and 32
+so every point observes at least two request waves. The smoke preset uses eight measured requests
+at concurrency 1.
 
 Pass a model to run only that model:
 

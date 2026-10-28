@@ -38,14 +38,15 @@ AWS access keys in the repository or environment YAML.
 Clone or copy the same repository revision to the EC2 client. Start with one model:
 
 ```bash
-uv run --extra benchmark python -m benchmark.runner run ENVIRONMENT MODEL --smoke
+PYTHONPATH=src uv run --project benchmark python -m benchmark.runner run \
+  ENVIRONMENT MODEL --smoke
 ```
 
 Check that the recorded SageMaker region, endpoint, instance type, and instance count are correct.
 Then run every model configured for the environment:
 
 ```bash
-uv run --extra benchmark python -m benchmark.runner run ENVIRONMENT
+PYTHONPATH=src uv run --project benchmark python -m benchmark.runner run ENVIRONMENT
 ```
 
 Copy the environment's `runs/` directory back if the canonical results are maintained elsewhere.
@@ -74,7 +75,7 @@ acceptable.
 Validate the plan without creating resources:
 
 ```bash
-uv run --extra benchmark python skills/benchmark-decider/scripts/run_on_ec2.py \
+uv run --project benchmark python skills/benchmark-decider/scripts/run_on_ec2.py \
   ENVIRONMENT MODEL \
   --account ACCOUNT_ID \
   --region us-west-2 \
@@ -85,7 +86,7 @@ uv run --extra benchmark python skills/benchmark-decider/scripts/run_on_ec2.py \
 After the user confirms the endpoint scope and temporary EC2 cost, run the smoke test:
 
 ```bash
-uv run --extra benchmark python skills/benchmark-decider/scripts/run_on_ec2.py \
+uv run --project benchmark python skills/benchmark-decider/scripts/run_on_ec2.py \
   ENVIRONMENT MODEL \
   --account ACCOUNT_ID \
   --region us-west-2 \
