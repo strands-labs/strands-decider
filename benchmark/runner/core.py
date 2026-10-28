@@ -497,8 +497,8 @@ class BenchmarkRunner:
 
     def _closed_repetition(self, concurrency: int, offset: int) -> dict[str, Any]:
         assert self.workload is not None
-        warmups = self.workload.requests(concurrency, sequence=offset + 900_000_000)
-        requests = self.workload.requests(self.requests_per_point, sequence=offset)
+        warmups = self.workload.throughput_requests(concurrency, sequence=offset + 900_000_000)
+        requests = self.workload.throughput_requests(self.requests_per_point, sequence=offset)
         with ThreadPoolExecutor(max_workers=concurrency) as pool:
             warmup_samples = []
             for sample in pool.map(self._invoke, warmups):
@@ -515,12 +515,44 @@ class BenchmarkRunner:
         summary["warmup_failures"] = sum(not sample.success for sample in warmup_samples)
         return summary
 
+    def _latency_repetition(self, offset: int) -> dict[str, Any]:
+        assert self.workload is not None
+        warmups = self.workload.latency_warmups(sequence=offset + 900_000_000)
+        requests = self.workload.requests(self.requests_per_point, sequence=offset)
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            warmup_samples = []
+            for sample in pool.map(self._invoke, warmups):
+                warmup_samples.append(sample)
+                self.advance(1)
+            started = time.monotonic()
+            samples = []
+            for sample in pool.map(self._invoke, requests):
+                samples.append(sample)
+                self.advance(1)
+        elapsed = time.monotonic() - started
+        summary = summarize_samples(samples, elapsed)
+        summary["warmup_requests"] = len(warmup_samples)
+        summary["warmup_failures"] = sum(not sample.success for sample in warmup_samples)
+        return summary
+
+    def _latency_sweep(self) -> dict[str, Any]:
+        repetitions = []
+        for repetition in range(self.repetitions):
+            offset = 500_000_000 + repetition * 1_000_000
+            repetitions.append(self._latency_repetition(offset))
+        point = combine_repetitions("input-length", 1, repetitions)
+        self.progress(
+            f"serial latency: p50 {point['latency']['p50_ms']} ms, "
+            f"failures {100 * (point['failure_rate'] or 0):.2f}%"
+        )
+        return point
+
     def _run_point(self, concurrency: int) -> dict[str, Any]:
         reps = []
         self._point_index += 1
         for repetition in range(self.repetitions):
-            # These multiples preserve the 8-request mix while ensuring that
-            # nominally unique states do not become cross-point cache hits.
+            # These multiples ensure nominally unique states do not become
+            # cross-point cache hits.
             offset = self._point_index * 10_000_000 + repetition * 1_000_000
             reps.append(self._closed_repetition(concurrency, offset))
         point = combine_repetitions("concurrency", concurrency, reps)
@@ -635,6 +667,7 @@ class BenchmarkRunner:
                     f"status={first.invocation.status}, error={first.invocation.error}"
                 )
 
+            latency_sweep = self._latency_sweep()
             closed = self._closed_sweep()
             saturation = max(
                 closed,
@@ -642,13 +675,13 @@ class BenchmarkRunner:
             )
             if not saturation.get("requests_per_second"):
                 raise RuntimeError("closed-loop sweep produced no successful requests")
-            reference = min(closed, key=lambda point: int(point["load"]))
-            failure_rate = max(float(point["failure_rate_max"] or 0) for point in closed)
-            ooms = sum(int(point["ooms"]) for point in closed)
+            measured_points = [latency_sweep, *closed]
+            failure_rate = max(float(point["failure_rate_max"] or 0) for point in measured_points)
+            ooms = sum(int(point["ooms"]) for point in measured_points)
             headline = {
                 "max_requests_per_second": saturation["requests_per_second"],
-                "reference_concurrency": int(reference["load"]),
-                "reference_latency": reference["latency"],
+                "reference_concurrency": 1,
+                "reference_latency": latency_sweep["latency"],
                 "failure_rate": round(failure_rate, 6),
                 "zero_oom_or_crash": ooms == 0 and self.server.alive(),
                 **self._pricing(saturation),
@@ -663,6 +696,7 @@ class BenchmarkRunner:
                     "concurrency": saturation["load"],
                     "requests_per_second": saturation["requests_per_second"],
                 },
+                "latency_sweep": latency_sweep,
                 "closed_loop": closed,
                 "health": health,
             }

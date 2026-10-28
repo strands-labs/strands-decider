@@ -27,6 +27,7 @@ from benchmark.runner.reporting import (
     write_plots,
     write_summary_csv,
 )
+from benchmark.runner.workload import INPUT_LENGTHS, THROUGHPUT_INPUT_TOKENS
 
 STANDARD_MEASUREMENT = {
     "requests_per_point": 64,
@@ -54,11 +55,21 @@ def _run(args: argparse.Namespace) -> int:
         "reference_concurrency": 1,
         "failure_rate_limit": 0.01,
         "traffic": ["closed-loop"],
-        "warmup": "one request per concurrent client before each repetition",
+        "throughput_input_tokens": THROUGHPUT_INPUT_TOKENS,
+        "latency_input_tokens": list(INPUT_LENGTHS),
+        "warmup": (
+            "each latency input length once; one request per concurrent client "
+            "before each throughput repetition"
+        ),
     }
-    requests_per_model = 1 + settings["repetitions"] * sum(
-        settings["requests_per_point"] + concurrency
-        for concurrency in settings["concurrency_levels"]
+    requests_per_model = (
+        1
+        + settings["repetitions"] * (settings["requests_per_point"] + len(INPUT_LENGTHS))
+        + settings["repetitions"]
+        * sum(
+            settings["requests_per_point"] + concurrency
+            for concurrency in settings["concurrency_levels"]
+        )
     )
     summaries: dict[str, dict[str, Any]] = {}
     outputs: list[Path] = []

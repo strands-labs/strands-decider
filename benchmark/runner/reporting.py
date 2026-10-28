@@ -42,7 +42,11 @@ def write_summary_csv(summary: dict[str, Any], path: Path) -> None:
     with path.open("w", newline="") as handle:
         writer = csv.DictWriter(handle, fields, lineterminator="\n")
         writer.writeheader()
-        for point in summary.get("closed_loop", []):
+        points = []
+        if summary.get("latency_sweep"):
+            points.append(summary["latency_sweep"])
+        points.extend(summary.get("closed_loop", []))
+        for point in points:
             for repetition_index, repetition in enumerate(point.get("repetitions", []), 1):
                 for shape in repetition.get("shapes", {}).values():
                     writer.writerow(
@@ -69,6 +73,8 @@ def write_summary_csv(summary: dict[str, Any], path: Path) -> None:
 
 
 def _reference_point(summary: dict[str, Any]) -> dict[str, Any]:
+    if summary.get("latency_sweep"):
+        return summary["latency_sweep"]
     target = int(summary["headline"]["reference_concurrency"])
     return min(summary["closed_loop"], key=lambda point: abs(int(point["load"]) - target))
 
@@ -127,9 +133,7 @@ def write_plots(
         ax.set_xscale("log", base=2)
         ticks = sorted(concurrency_ticks)
         ax.set_xticks(ticks, ticks)
-        ax.set_title(
-            "Throughput by concurrency\nInput tokens: 256, 1024, 2048, 4096 · 4 choices per request"
-        )
+        ax.set_title("Throughput by concurrency\nInput tokens: 1024 · 4 choices per request")
         if len(summaries) > 1:
             ax.legend(fontsize=8)
         ax.grid(alpha=0.25)

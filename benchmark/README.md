@@ -7,10 +7,11 @@ Deferred extensions are tracked in [FOLLOWUPS.md](FOLLOWUPS.md).
 During a run the server, model, and environment remain fixed. The benchmark changes only the
 synthetic request shape and calling pattern:
 
-- input-length targets of 256, 1,024, 2,048, and 4,096 tokens per request, calibrated against
-  the server-reported token count;
+- a serial latency sweep using input-length targets of 256, 1,024, 2,048, and 4,096 tokens per
+  request, calibrated against the server-reported token count;
+- a throughput sweep using only 1,024-token requests;
 - four choice questions per request, with four options each;
-- an equal-weight mixture of the four input lengths;
+- an equal-weight mixture of the four input lengths in the latency sweep;
 - 50% repeated states and 50% unique states;
 - fixed, balanced request batches at each closed-loop concurrency level.
 
@@ -140,11 +141,12 @@ python -m benchmark.runner run local
 The supplied `local` environment includes all five v1 models. The 48 GB Mac environment omits the
 26B model because its documented bf16 memory requirement exceeds that machine's memory.
 
-Before each measured repetition, the runner sends one warm-up request per concurrent client using
-the same worker pool. The standard preset then measures 64 requests three times at concurrency
-levels 1 through 32 in powers of two. The smoke preset checks one complete eight-request workload
-cycle at concurrency 1. A measured point must contain at least twice as many requests as concurrent
-clients so it observes at least two request waves.
+The serial latency sweep warms each input length, then measures an equal mix of all four lengths.
+For throughput, the runner sends one 1,024-token warm-up request per concurrent client using the
+same worker pool. The standard preset measures 64 requests three times at concurrency levels 1
+through 32 in powers of two. The smoke preset uses eight measured requests at concurrency 1. A
+throughput point must contain at least twice as many requests as concurrent clients so it observes
+at least two request waves.
 
 Pass a model to run only that model:
 
@@ -183,14 +185,15 @@ finishes successfully. Unrelated files in the directory are left untouched.
 
 ## Artifacts and graphs
 
-Normal request payloads and per-request measurements are never persisted. Every measured point
-contains complete 8-request workload cycles—four input lengths with repeated and unique
-states—so the request mix remains identical across concurrency levels.
+Normal request payloads and per-request measurements are never persisted. Serial latency
+repetitions contain complete eight-request workload cycles across the four input lengths.
+Throughput points use only 1,024-token requests. Both workloads contain 50% repeated states and
+50% unique states.
 
 - `manifest.json`: run, environment, model, workload, and code identity.
 - `summary.json`: canonical aggregate metrics and repetitions.
 - `summary.csv`: flattened per-shape aggregate measurements.
-- `throughput-vs-concurrency.png`: requests/second across concurrency levels.
+- `throughput-vs-concurrency.png`: 1,024-token requests/second across concurrency levels.
 - `latency-vs-input-length.png`: concurrency-1 p50 latency across the four input lengths.
 
 A full environment run also writes:

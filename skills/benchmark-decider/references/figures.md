@@ -24,11 +24,12 @@ uv run --extra benchmark python -m benchmark.runner summarize RUN_DIR
 ## Interpreting the standard graphs
 
 The throughput graph answers whether added concurrency raises throughput and where the best
-observed point occurs. Its request type is fixed: choice requests with four questions, four options,
-and the calibrated equal-weight input-length mix.
+observed point occurs. Its request type is fixed: 1,024-token choice requests with four questions
+and four options.
 
-The latency graph answers how serial request latency changes with input length. It uses p50 at
-concurrency 1, one line per model in the combined graph.
+The latency graph answers how serial request latency changes across the calibrated, equal-weight
+256-, 1,024-, 2,048-, and 4,096-token request shapes. It uses p50 at concurrency 1, one line per
+model in the combined graph.
 
 Keep model lines within one compute environment. If presenting multiple environments, use separate
 panels or figures and label their baselines independently.

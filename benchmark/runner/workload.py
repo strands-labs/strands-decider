@@ -12,6 +12,7 @@ from strands_decider.prompting import render_question, render_state
 from strands_decider.schema import ChoiceQuestion
 
 INPUT_LENGTHS = (256, 1024, 2048, 4096)
+THROUGHPUT_INPUT_TOKENS = 1024
 QUESTIONS_PER_REQUEST = 4
 OPTIONS = {
     "alpha": "first",
@@ -216,14 +217,32 @@ class Workload:
             requests.append(self.request(shape, repeated=repeated, sequence=current))
         return requests
 
+    def throughput_requests(self, count: int, sequence: int = 0) -> list[Request]:
+        shape = Shape(THROUGHPUT_INPUT_TOKENS)
+        return [
+            self.request(
+                shape,
+                repeated=(sequence + index) % 2 == 0,
+                sequence=sequence + index,
+            )
+            for index in range(count)
+        ]
+
+    def latency_warmups(self, sequence: int = 0) -> list[Request]:
+        return [
+            self.request(shape, repeated=True, sequence=sequence + index)
+            for index, shape in enumerate(self.shapes)
+        ]
+
     def manifest(self) -> dict[str, Any]:
         return {
             "input_length_targets": list(INPUT_LENGTHS),
+            "throughput_input_tokens": THROUGHPUT_INPUT_TOKENS,
             "questions_per_request": QUESTIONS_PER_REQUEST,
             "question_type": "choice",
             "options_per_question": 4,
             "state_reuse": {"repeated": 0.5, "unique": 0.5},
-            "shape_weight": 1 / len(self.shapes),
+            "latency_shape_weight": 1 / len(self.shapes),
             "seed": self.seed,
             "state_characters": self._state_chars,
             "reported_token_ranges": {
