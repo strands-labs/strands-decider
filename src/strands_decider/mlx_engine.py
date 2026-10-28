@@ -26,9 +26,11 @@ from __future__ import annotations
 import json
 import os
 import threading
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 import mlx.core as mx
 import torch
@@ -55,6 +57,8 @@ from .schema import SystemOneRequest, SystemOneResponse
 # a 48 GB M4 Pro), and a new request shape allocates new ones. 1 GiB holds a 2B torso's
 # working set; it cost no latency on the M4 Pro and kept the process near its weights' size.
 DEFAULT_CACHE_LIMIT = 1 << 30
+
+T = TypeVar("T")
 
 _DTYPES = {"bfloat16": mx.bfloat16, "float16": mx.float16, "float32": mx.float32}
 # mlx-lm names the text-only Qwen3.5 checkpoint's type after the multimodal one, whose module
@@ -133,7 +137,12 @@ class MLXEngine(SystemOneEngine):
     """`SystemOneEngine` with the torso forward on MLX. Build one with `load_mlx_engine`."""
 
     def __init__(
-        self, decoder: Any, cache_owner: Any, readout: _Readout, config: EngineConfig
+        self,
+        decoder: Any,
+        cache_owner: Any,
+        readout: _Readout,
+        config: EngineConfig,
+        executor: ThreadPoolExecutor,
     ) -> None:
         # Not super().__init__(): that moves a torch torso to a torch device. These are the
         # attributes the inherited helpers read; `device` is where their small index and
@@ -144,15 +153,23 @@ class MLXEngine(SystemOneEngine):
         self.device = "cpu"
         self._decoder = decoder
         self._cache_owner = cache_owner
-        # One evaluation at a time: mlx-lm's lazy arrays belong to the thread that
-        # produced them, and the server runs requests on its thread pool.
-        self._lock = threading.Lock()
+        # One evaluation at a time, pinned to the loading thread: mlx-lm's lazy arrays and
+        # Metal streams belong to the thread that produced them, and FastAPI runs sync
+        # handlers on its thread pool. A single-worker executor guarantees affinity and
+        # replaces the explicit lock.
+        self._executor = executor
         self._prefix_cache_unforkable = False
         self._tok_lock = threading.Lock()
 
     def evaluate(self, request: SystemOneRequest) -> SystemOneResponse:
-        with self._lock:
-            return super().evaluate(request)
+        return self._run(super().evaluate, request)
+
+    def _run(self, fn: Callable[..., T], *args: Any, **kwargs: Any) -> T:
+        return self._executor.submit(fn, *args, **kwargs).result()
+
+    def close(self) -> None:
+        """Shut down the MLX worker thread. After this the engine cannot evaluate."""
+        self._executor.shutdown(wait=True)
 
     def _hidden(self, rows: list[list[int]], cache: list[Any] | None = None) -> Any:
         """Last hidden states [N, L, d] of right-padded rows. Both layer kinds are causal, so
@@ -286,7 +303,29 @@ def load_mlx_engine(
 
     `config` is the torch engine's `EngineConfig`, with its device set to "mlx".
     `cache_limit_bytes` sets MLX's process-wide buffer cache limit; None leaves it as it is.
+
+    The MLX torso is loaded on, and every evaluation runs on, a dedicated worker thread the
+    returned engine owns. mlx-lm's lazy arrays and Metal streams are thread-local, and
+    Gemma4 keeps state tied to the loading thread's GPU stream (strands-labs#109); FastAPI
+    serves sync handlers from its thread pool, so without this pinning the first request
+    from a worker thread fails with "no Stream(gpu, 1) in current thread".
     """
+    executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="mlx-engine")
+    try:
+        return executor.submit(
+            _load_mlx_engine_on_worker, checkpoint, config, cache_limit_bytes, executor
+        ).result()
+    except BaseException:
+        executor.shutdown(wait=True)
+        raise
+
+
+def _load_mlx_engine_on_worker(
+    checkpoint: str,
+    config: EngineConfig | None,
+    cache_limit_bytes: int | None,
+    executor: ThreadPoolExecutor,
+) -> MLXEngine:
     path = checkpoint_dir(checkpoint)
     decider_config = StrandsDeciderConfig.from_json(config_path(path))
     decider_config.base_revision = base_revision(path, decider_config)
@@ -313,4 +352,6 @@ def load_mlx_engine(
     head.load_state_dict(head_state)
     head.to(torch.float32).eval()
     engine_config = replace(config or EngineConfig(), device="mlx")
-    return MLXEngine(decoder, owner, _Readout(decider_config, tokenizer, head), engine_config)
+    return MLXEngine(
+        decoder, owner, _Readout(decider_config, tokenizer, head), engine_config, executor
+    )
