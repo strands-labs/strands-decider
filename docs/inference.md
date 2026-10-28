@@ -53,7 +53,7 @@ from a clone, for example `pip install -e ".[mlx]"`.
 | `cuda` | `pip install "strands-decider[cuda]"` | flash-linear-attention (Linux). causal-conv1d compiles against the local CUDA toolkit and is installed separately: `pip install causal-conv1d --no-build-isolation`. |
 | `mps` | `pip install "strands-decider[mps]"` | Nothing: the base install. |
 | `cpu` | `pip install "strands-decider[cpu]"` | Nothing: the base install. |
-| `mlx` | `pip install "strands-decider[mlx]"` | mlx and mlx-lm (Apple silicon only). |
+| `mlx` | `pip install "strands-decider[mlx]"` | mlx and mlx-lm (Python 3.11+, Apple silicon only). |
 
 flash-linear-attention installs on a Mac without Triton, but its kernels need Triton, so it
 cannot run there. `mps_kernels.py` therefore steps aside only when Triton is present too, and

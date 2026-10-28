@@ -1,46 +1,60 @@
-# Pitfalls
+# Benchmark pitfalls
 
-Each of these has produced a wrong number before. The tool handles some itself; the rest are yours.
+Review these before running or interpreting the suite.
 
-**Prefix caches.** A server that caches prompt prefixes answers a repeated prompt much faster.
-Synthetic requests start with a random id, so they never repeat. A `--dataset` smaller than the
-requests a run sends repeats rows, and the tool warns; use more rows or fewer requests.
+## Environment identity
 
-**Warm-up and cold starts.** The first request at a new prompt shape is slow on some devices (MPS
-compiles a kernel per input length), and the first request on a new Lambda sandbox is a cold start
-of seconds. The tool discards each client's first request and measures only requests sent after
-every client has warmed up. Open-loop runs can still trigger cold starts when traffic grows faster
-than Lambda adds sandboxes; that is real behavior, but report it as such.
+An environment represents one compute setup. Do not put endpoints backed by different SageMaker
+instance types in one environment even if they serve related models. The runner verifies the live
+instance type but cannot detect every relevant host change, so keep the YAML hardware description
+and pricing current.
 
-**Mixed hosts on Lambda.** Sandboxes of one function land on different Graviton generations, and an
-older one can be twice as slow. One sandbox serves every request of a one-at-a-time run, so a whole
-run can land on the slow one. Look at the `cpu` column before comparing two Lambda runs.
+Run remote latency measurements from a client near the endpoint when network latency matters.
+Client placement is recorded, but laptop-to-region latency is still part of the measured
+round-trip. For SageMaker, follow [aws.md](aws.md) and run the client in the endpoint region before
+making an in-region latency claim.
 
-**Client placement.** A client on a laptop adds tens of milliseconds of network time and jitter to
-every request. For latency claims about a remote endpoint, run the client in the same region.
+## Model coverage
 
-**Thread counts.** Count cores from the process affinity and the cgroup quota, not `os.cpu_count()`,
-which reports the host's cores inside some containers and sandboxes. Libraries with their own thread
-pools (OpenBLAS, OpenMP) can spin idle threads on the cores the engine needs; set their threads to
-1 when they are not the engine.
+A full run means every model listed in the environment, not every model published by the project.
+List only models that fit and are supported on that target host. Missing a model-to-endpoint entry
+in a SageMaker environment is a configuration error.
 
-**Too few requests for the load.** Throughput at concurrency c from fewer than 2c requests is a
-rough estimate, and the tool warns. Open loops need more requests than closed loops, because one
-slow request stretches the measured window.
+## Warm-up and request waves
 
-**Context window and truncation.** Prompts over the window are skipped (synthetic) or refused (HTTP
-422). A server that truncates long prompts and one that refuses them answer different questions, so
-compare like with like, and count refusals rather than dropping them.
+Each repetition warms one request per concurrent client using the same worker pool. Warm-up work is
+not timed. This avoids treating first-use setup as steady-state latency, but the suite does not
+measure cold starts.
 
-**JevBench.** The harness opens its outputs exclusively, so each run needs a fresh `--out`. Check
-that the server answering is the one you meant: the tool starts local servers on a free port for
-this reason.
+A throughput point needs multiple waves of requests. The runner requires at least twice as many
+measured requests as the maximum concurrency. Do not raise concurrency without also raising the
+request count.
 
-**Decision Index.** The suite must be built locally from its sources (some are gated, such as HLE).
-A suite whose hashes differ from the frozen ones is refused unless `--di-no-verify` is given, and the
-index from it is not official. A partial run (`--di-limit`) scores near zero by design, because
-unanswered requests count as wrong; use it only to check the plumbing. Requests an engine refuses for
-capacity count as wrong whichever status the kit records.
+## Input calibration and caches
 
-**Different sessions.** Two runs on different days or instances differ by several percent even for
-the same system. Put the systems you compare in one run, or repeat the key point in one session.
+The workload calibrates the four target input lengths using `usage.input_tokens` reported by the
+server. Calibration failures, truncation, or refusals must be fixed rather than silently dropping
+the 4,096-token case.
+
+Half the requests deliberately reuse an encoded state and half use unique states. Preserve this
+mix when evaluating caching changes. Cache hit rate and state-encoding time may explain a result,
+but they are not broad headline metrics.
+
+## Throughput claims
+
+The highest point in the fixed sweep is only the best observed throughput. If concurrency 32 is
+still rising, say that the benchmark did not locate the ceiling. Small non-monotonic changes can
+come from noise; use the repetitions and adjacent points before diagnosing saturation.
+
+Failure-free throughput matters. Timeouts, refusals, incomplete answer sets, OOMs, and server
+crashes cannot be excluded from the interpretation merely because successful requests were fast.
+
+## Baselines and artifacts
+
+The first standard run becomes the accepted baseline; later compatible runs become candidates.
+Promote only after reviewing the comparison. Promotion replaces aggregate benchmark artifacts, so
+the accepted baseline represents the current accepted implementation rather than a historical
+archive.
+
+Do not edit `manifest.json` or copy a candidate manually to bypass compatibility checks. Do not
+expect raw request samples: the suite intentionally persists aggregate data only.

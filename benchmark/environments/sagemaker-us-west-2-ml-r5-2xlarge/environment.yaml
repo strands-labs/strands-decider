@@ -1,0 +1,13 @@
+name: sagemaker-us-west-2-ml-r5-2xlarge
+models:
+  - StrandsAgents/strands-decider-12B-gemma4-v1-2610
+timeout_s: 300
+lifecycle:
+  type: external
+sagemaker:
+  region: us-west-2
+  instance_type: ml.r5.2xlarge
+  endpoints:
+    StrandsAgents/strands-decider-12B-gemma4-v1-2610: strands-decider-12b-gemma4-v1-2610
+pricing:
+  hourly_usd: 0.605

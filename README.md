@@ -395,17 +395,21 @@ a coding CLI. If your agent supports skills, install the folder where it looks f
 tell the agent to read `skills/customize-decider/SKILL.md` and follow it. Then ask it to evaluate
 Strands Decider on your task.
 
-## Benchmarking speed and accuracy
+## Benchmarking inference performance
 
-[`evaluation/decider_bench.py`](evaluation/decider_bench.py) measures a decider wherever it is
-served: a local checkpoint, any server that speaks `POST /v1/systemone`, an AWS Lambda function or
-a SageMaker endpoint. It times the first token at chosen input lengths or on your own requests,
-with a fixed number of requests in flight or at a fixed request rate, and runs JevBench and the
-Decision Index through their own scorers. Each run writes CSVs and figures, and
-`decider_bench.py plot` combines runs made on different hosts.
-[`skills/benchmark-decider/`](skills/benchmark-decider/SKILL.md) is a skill that guides an agent
-through planning such a comparison, running it, and turning the results into figures and a
-write-up.
+[`benchmark/`](benchmark/README.md) measures how a serving change affects the configured models in
+one compute environment. It runs the same synthetic workload against an accepted baseline and a
+candidate, then records peak requests per second, concurrency-1 latency, optional cost per
+1 million decisions, and a separate reliability gate. It benchmarks managed local servers or an
+already-running HTTP endpoint:
+
+```bash
+python -m benchmark.runner run local
+python -m benchmark.runner run local MODEL  # one model only
+python -m benchmark.runner compare local MODEL CANDIDATE_DIR
+```
+
+Full runs also create environment-level throughput and latency graphs with one line per model.
 
 ## Training
 

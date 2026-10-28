@@ -1,0 +1,202 @@
+# Inference performance benchmarks
+
+This suite measures how an inference-server change affects the configured models in one compute
+environment. It does not rank different environments and does not evaluate model correctness.
+Deferred extensions are tracked in [FOLLOWUPS.md](FOLLOWUPS.md).
+
+During a run the server, model, and environment remain fixed. The benchmark changes only the
+synthetic request shape and calling pattern:
+
+- input-length targets of 256, 1,024, 2,048, and 4,096 tokens per request, calibrated against
+  the server-reported token count;
+- four choice questions per request, with four options each;
+- an equal-weight mixture of the four input lengths;
+- 50% repeated states and 50% unique states;
+- fixed, balanced request batches at each closed-loop concurrency level.
+
+Poisson traffic, short bursts, and long soak tests are intentionally deferred.
+
+## Headline results
+
+Every model/environment summary records:
+
+1. Peak successful requests per second.
+2. p50 request latency at concurrency 1.
+3. Cost per 1 million decisions, when the environment supplies pricing.
+
+Failure rate must remain below 1%, with zero OOMs or server crashes. A later version may add
+open-loop traffic and SLO-constrained goodput as an optional production-style test.
+
+## Environments
+
+Each compute environment is a child of `benchmark/environments/`. Its configuration and generated
+runs live together:
+
+```text
+benchmark/
+  runner/                 # Python benchmark implementation
+  environments/
+    local/
+      environment.yaml
+      runs/
+        models-throughput-vs-concurrency.png
+        models-latency-vs-input-length.png
+        <model-slug>/      # accepted baseline
+          manifest.json
+          summary.json
+          summary.csv
+          throughput-vs-concurrency.png
+          latency-vs-input-length.png
+          candidate/       # latest standard candidate
+            ...
+          smoke/           # latest smoke run
+            ...
+    external-endpoint/
+      environment.yaml
+      runs/
+        ...
+```
+
+Example managed local environment:
+
+```yaml
+name: local
+models:
+  - StrandsAgents/strands-decider-2B-qwen3.5-v1-2610
+  - StrandsAgents/strands-decider-E2B-gemma4-v1-2610
+endpoint: http://127.0.0.1:{port}
+timeout_s: 120
+lifecycle:
+  type: managed
+  command:
+    - strands-decider
+    - serve
+    - "{model}"
+    - --host
+    - 127.0.0.1
+    - --port
+    - "{port}"
+pricing:
+  hourly_usd: null
+```
+
+An environment describes one HTTP endpoint. A managed environment starts the server command; an
+external environment points at an already-running server.
+
+Each measured invocation is one independent HTTP request. The runner does not pool connections or
+retry failures.
+
+```yaml
+name: external
+models:
+  - StrandsAgents/strands-decider-2B-qwen3.5-v1-2610
+endpoint: http://127.0.0.1:8000
+lifecycle:
+  type: external
+```
+
+SageMaker environments map each model to its endpoint. The runner uses boto3's standard AWS
+credential chain and SigV4 authentication, and records each live endpoint configuration, instance
+type, and instance count:
+
+```yaml
+name: sagemaker-us-west-2-ml-g6-xlarge
+models:
+  - StrandsAgents/strands-decider-2B-qwen3.5-v1-2610
+  - StrandsAgents/strands-decider-E2B-gemma4-v1-2610
+lifecycle:
+  type: external
+sagemaker:
+  region: us-west-2
+  profile: default
+  instance_type: ml.g6.xlarge
+  endpoints:
+    StrandsAgents/strands-decider-2B-qwen3.5-v1-2610: QWEN_ENDPOINT
+    StrandsAgents/strands-decider-E2B-gemma4-v1-2610: GEMMA_ENDPOINT
+```
+
+The single-model `sagemaker.endpoint_name` form remains supported. Before invoking a model, the
+runner verifies that its endpoint uses the configured `instance_type`. Different instance types
+need separate environment directories and baselines.
+
+Keep ordinary local HTTP targets on loopback, and use external targets only when their existing
+network and authentication controls already permit benchmark access.
+
+## Running
+
+Install the optional plotting dependency when needed:
+
+```bash
+pip install -e '.[benchmark]'
+```
+
+Run the standard suite for every model configured in the environment. Models run sequentially,
+and each model’s first run becomes its accepted baseline:
+
+```bash
+python -m benchmark.runner run local
+```
+
+The supplied `local` environment includes all five v1 models. The 48 GB Mac environment omits the
+26B model because its documented bf16 memory requirement exceeds that machine's memory.
+
+Before each measured repetition, the runner sends one warm-up request per concurrent client using
+the same worker pool. The standard preset then measures 64 requests three times at concurrency
+levels 1 through 32 in powers of two. The smoke preset checks one complete eight-request workload
+cycle at concurrency 1. A measured point must contain at least twice as many requests as concurrent
+clients so it observes at least two request waves.
+
+Pass a model to run only that model:
+
+```bash
+python -m benchmark.runner run local MODEL
+```
+
+Later standard runs write each model’s latest candidate under its model directory. Compare and
+optionally accept one candidate:
+
+```bash
+python -m benchmark.runner compare \
+  local MODEL benchmark/environments/local/runs/MODEL_SLUG/candidate
+
+python -m benchmark.runner compare \
+  local MODEL benchmark/environments/local/runs/MODEL_SLUG/candidate \
+  --update-baseline
+```
+
+`--update-baseline` requires compatible environment, model, workload, and measurement settings.
+It stages and validates all aggregate artifacts before replacing the accepted baseline.
+
+For a quick development smoke test:
+
+```bash
+python -m benchmark.runner run local MODEL --smoke
+```
+
+Smoke results are written to
+`benchmark/environments/<environment>/runs/<model-slug>/smoke/`. Use `--output` to override any of
+these defaults. For a full multi-model run, `--output` is the shared root and each model is written
+beneath it. Smoke runs require a model.
+
+When `--output` already exists, the runner replaces its benchmark artifacts after the new run
+finishes successfully. Unrelated files in the directory are left untouched.
+
+## Artifacts and graphs
+
+Normal request payloads and per-request measurements are never persisted. Every measured point
+contains complete 8-request workload cycles—four input lengths with repeated and unique
+states—so the request mix remains identical across concurrency levels.
+
+- `manifest.json`: run, environment, model, workload, and code identity.
+- `summary.json`: canonical aggregate metrics and repetitions.
+- `summary.csv`: flattened per-shape aggregate measurements.
+- `throughput-vs-concurrency.png`: requests/second across concurrency levels.
+- `latency-vs-input-length.png`: concurrency-1 p50 latency across the four input lengths.
+
+A full environment run also writes:
+
+- `models-throughput-vs-concurrency.png`: throughput lines for every configured model.
+- `models-latency-vs-input-length.png`: latency lines for every configured model.
+
+Use `python -m benchmark.runner summarize RUN_DIR` to regenerate the CSV and graphs from the
+aggregate JSON files.
