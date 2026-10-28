@@ -46,6 +46,19 @@ The highest point in the fixed sweep is only the best observed throughput. If co
 still rising, say that the benchmark did not locate the ceiling. Small non-monotonic changes can
 come from noise; use the repetitions and adjacent points before diagnosing saturation.
 
+Batching gains depend strongly on input length. A long single request may already keep the GPU
+busy, so adding rows mostly increases latency; a shorter request may leave enough execution
+capacity for a larger forward to improve throughput. On the same E2B Gemma 4 model and
+`ml.g4dn.xlarge` endpoint, the observed concurrency-1-to-peak gain was about 5% at 1,024 input
+tokens but about 33% at 256 input tokens. Treat these values as one measured example, not a
+portable expectation.
+
+Do not conclude that batching is ineffective from one input size. Keep the canonical headline
+shape fixed for baseline comparisons, but use short and representative production-length shapes
+as controlled diagnostics when evaluating batching. Compare concurrency scaling within each
+shape; do not present the higher absolute throughput of a shorter request as an implementation
+improvement. Also report the latency increase required to reach peak throughput.
+
 Failure-free throughput matters. Timeouts, refusals, incomplete answer sets, OOMs, and server
 crashes cannot be excluded from the interpretation merely because successful requests were fast.
 
