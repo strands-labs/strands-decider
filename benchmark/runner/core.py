@@ -725,16 +725,24 @@ def machine_metadata() -> dict[str, Any]:
 
 
 def git_metadata(root: Path) -> dict[str, Any]:
-    def command(*args: str) -> str:
-        return subprocess.run(
-            ["git", "-C", str(root), *args],
-            capture_output=True,
-            text=True,
-            check=False,
-        ).stdout.strip()
+    def command(*args: str) -> str | None:
+        try:
+            result = subprocess.run(
+                ["git", "-C", str(root), *args],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except OSError:
+            return None
+        return result.stdout.strip() if result.returncode == 0 else None
+
+    revision = command("rev-parse", "HEAD")
+    branch = command("branch", "--show-current")
+    status = command("status", "--porcelain")
 
     return {
-        "revision": command("rev-parse", "HEAD") or None,
-        "branch": command("branch", "--show-current") or None,
-        "dirty": bool(command("status", "--porcelain")),
+        "revision": revision or None,
+        "branch": branch or None,
+        "dirty": bool(status) if status is not None else None,
     }
