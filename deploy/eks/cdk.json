@@ -1,0 +1,14 @@
+{
+  "app": "npx tsx bin/cdk-app.ts",
+  "context": {
+    "model": "StrandsAgents/strands-decider-2B-qwen3.5-v1-2610",
+    "model_revision": "main",
+    "instance_types": "m9g.4xlarge",
+    "threads": 16,
+    "min_replicas": 1,
+    "max_replicas": 4,
+    "admin_principal": "",
+    "internal_nlb": false,
+    "serve_args": ""
+  }
+}
