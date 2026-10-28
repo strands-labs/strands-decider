@@ -11,6 +11,7 @@ import contextlib
 import os
 import threading
 import time
+from collections.abc import AsyncIterator
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
@@ -51,10 +52,22 @@ def create_app(
 ) -> FastAPI:
     global _engine
 
+    @contextlib.asynccontextmanager
+    async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        try:
+            yield
+        finally:
+            # The MLX engine owns a worker thread (see mlx_engine.MLXEngine); other engines
+            # have nothing to close.
+            close = getattr(_engine, "close", None)
+            if callable(close):
+                close()
+
     app = FastAPI(
         title="strands-decider System One",
         version=__version__,
         description="Typed, calibrated answers. Choice, Score and Noul over one state.",
+        lifespan=lifespan,
     )
 
     # Identify the response's `model` by the checkpoint served, so multiple servers

@@ -1,0 +1,29 @@
+name: mac-m4-pro-48gb
+models:
+  - StrandsAgents/strands-decider-2B-qwen3.5-v1-2610
+  - StrandsAgents/strands-decider-E2B-gemma4-v1-2610
+  - StrandsAgents/strands-decider-E4B-gemma4-v1-2610
+  - StrandsAgents/strands-decider-12B-gemma4-v1-2610
+hardware:
+  model: MacBook Pro
+  chip: Apple M4 Pro
+  cpu_cores: 14
+  memory_gb: 48
+accelerator:
+  type: Apple integrated GPU
+  runtime: MLX
+endpoint: http://127.0.0.1:{port}
+timeout_s: 120
+lifecycle:
+  type: managed
+  command:
+    - strands-decider
+    - serve
+    - "{model}"
+    - --device
+    - mlx
+    - --host
+    - 127.0.0.1
+    - --port
+    - "{port}"
+  health_timeout_s: 1800

@@ -34,12 +34,13 @@ dependencies = [
 train = ["datasets>=2.20"]
 # Image input (`serve --vision`, `ask --image`, docs/vision.md); also needs transformers >= 5.18.
 vision = ["pillow>=10"]
-# `--device mlx`: the torso on Apple silicon's GPU through mlx-lm (src/strands_decider/mlx_engine.py).
+# `--device mlx`: the torso on Apple silicon's GPU through mlx-lm (Python 3.11+;
+# src/strands_decider/mlx_engine.py).
 # mlx-lm is capped at the minor version tested: the backend uses its Qwen3.5 module layout and
 # prompt-cache classes, which are internals.
 mlx = [
-    "mlx>=0.32.2; sys_platform == 'darwin' and platform_machine == 'arm64'",
-    "mlx-lm>=0.32,<0.33; sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "mlx>=0.32.2; python_version >= '3.11' and sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "mlx-lm>=0.32,<0.33; python_version >= '3.11' and sys_platform == 'darwin' and platform_machine == 'arm64'",
 ]
 # `--device cuda`: flash-linear-attention's Triton kernels for the Gated DeltaNet layers. The conv
 # layer's kernel, causal-conv1d, compiles against the local CUDA toolkit and is not listed; on a
@@ -49,6 +50,7 @@ cuda = ["flash-linear-attention>=0.5; sys_platform == 'linux'"]
 # every device installs the same way.
 mps = []
 cpu = []
+benchmark = ["boto3>=1.34", "matplotlib>=3.8"]
 dev = [
     "pillow>=10",
     "pytest>=8.0",

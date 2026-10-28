@@ -13,6 +13,8 @@ seed replicate finished), so a single-run difference under about 10 tasks is unr
 - [`jevbench.md`](jevbench.md): the external benchmark, the board position, the families, the
   context window, and how to reproduce the run.
 - [`jevbench/`](jevbench/): the JevBench harness driver and its two helpers.
+- [`../benchmark/`](../benchmark/README.md): server inference-performance benchmarking against an
+  environment/model-specific accepted baseline.
 
 `training/recipe.sh eval` runs the internal evaluations on the recipe's checkpoint. Each
 script also runs on its own:

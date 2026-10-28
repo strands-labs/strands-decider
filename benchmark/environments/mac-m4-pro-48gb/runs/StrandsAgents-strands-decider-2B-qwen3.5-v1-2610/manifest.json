@@ -1,0 +1,144 @@
+{
+  "baseline_run_id": null,
+  "client": {
+    "architecture": "arm64",
+    "cpu_count": 14,
+    "hostname": "842f579492f7",
+    "platform": "macOS-26.7.1-arm64-arm-64bit",
+    "python": "3.12.14"
+  },
+  "code": {
+    "branch": "feat/decider-bench",
+    "dirty": false,
+    "revision": "278de3061d5aa64b69efcd5e9a3f3a92fb5aeea5"
+  },
+  "duration_seconds": 813.646,
+  "ended_at": "2026-10-28T14:56:25.176387+00:00",
+  "environment": {
+    "configuration": {
+      "accelerator": {
+        "runtime": "MLX",
+        "type": "Apple integrated GPU"
+      },
+      "endpoint": "http://127.0.0.1:{port}",
+      "hardware": {
+        "chip": "Apple M4 Pro",
+        "cpu_cores": 14,
+        "memory_gb": 48,
+        "model": "MacBook Pro"
+      },
+      "lifecycle": {
+        "command": [
+          "strands-decider",
+          "serve",
+          "{model}",
+          "--device",
+          "mlx",
+          "--host",
+          "127.0.0.1",
+          "--port",
+          "{port}"
+        ],
+        "health_timeout_s": 1800,
+        "type": "managed"
+      },
+      "models": [
+        "StrandsAgents/strands-decider-2B-qwen3.5-v1-2610",
+        "StrandsAgents/strands-decider-E2B-gemma4-v1-2610",
+        "StrandsAgents/strands-decider-E4B-gemma4-v1-2610",
+        "StrandsAgents/strands-decider-12B-gemma4-v1-2610"
+      ],
+      "name": "mac-m4-pro-48gb",
+      "timeout_s": 120
+    },
+    "fingerprint": "08a1f1635f5842efc13d42de7a647615e430cf25e5e0fffdbb1ccb2d39f969a7",
+    "name": "mac-m4-pro-48gb",
+    "path": "/Users/ncclegg/workplace/strands-decider/benchmark/environments/mac-m4-pro-48gb/environment.yaml"
+  },
+  "measurement": {
+    "concurrency_levels": [
+      1,
+      2,
+      4,
+      8,
+      16,
+      32
+    ],
+    "failure_rate_limit": 0.01,
+    "latency_input_tokens": [
+      256,
+      1024,
+      2048,
+      4096
+    ],
+    "preset": "standard",
+    "reference_concurrency": 1,
+    "repetitions": 3,
+    "requests_per_point": 64,
+    "throughput_input_tokens": 1024,
+    "traffic": [
+      "closed-loop"
+    ],
+    "warmup": "each latency input length once; one request per concurrent client before each throughput repetition"
+  },
+  "model": {
+    "health": {
+      "base_model": "Qwen/Qwen3.5-2B-Base",
+      "checkpoint": "StrandsAgents/strands-decider-2B-qwen3.5-v1-2610",
+      "device": "mlx",
+      "max_length": 4096,
+      "model": "strands-decider-2B-qwen3.5-v1-2610",
+      "num_slots": 24,
+      "prefix_cache": true,
+      "status": "ok",
+      "temperature": 1.0545210242263665,
+      "vision": false
+    },
+    "id": "StrandsAgents/strands-decider-2B-qwen3.5-v1-2610",
+    "tokenizer": "StrandsAgents/strands-decider-2B-qwen3.5-v1-2610"
+  },
+  "run_id": "1889e96a-728c-4e44-a6d2-035a970ea13a",
+  "started_at": "2026-10-28T14:42:51.530315+00:00",
+  "workload": {
+    "input_length_targets": [
+      256,
+      1024,
+      2048,
+      4096
+    ],
+    "latency_shape_weight": 0.25,
+    "options_per_question": 4,
+    "question_type": "choice",
+    "questions_per_request": 4,
+    "reported_token_ranges": {
+      "256": {
+        "maximum": 264,
+        "minimum": 264
+      },
+      "1024": {
+        "maximum": 1023,
+        "minimum": 1023
+      },
+      "2048": {
+        "maximum": 2050,
+        "minimum": 2050
+      },
+      "4096": {
+        "maximum": 4094,
+        "minimum": 4094
+      }
+    },
+    "seed": 0,
+    "state_characters": {
+      "256": 0,
+      "1024": 4475,
+      "2048": 10518,
+      "4096": 22567
+    },
+    "state_reuse": {
+      "repeated": 0.5,
+      "unique": 0.5
+    },
+    "throughput_input_tokens": 1024
+  }
+}
