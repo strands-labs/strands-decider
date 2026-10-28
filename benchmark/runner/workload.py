@@ -12,7 +12,7 @@ from strands_decider.prompting import render_question, render_state
 from strands_decider.schema import ChoiceQuestion
 
 INPUT_LENGTHS = (256, 1024, 2048, 4096)
-THROUGHPUT_INPUT_TOKENS = 1024
+THROUGHPUT_INPUT_TOKENS = 256
 QUESTIONS_PER_REQUEST = 4
 OPTIONS = {
     "alpha": "first",
