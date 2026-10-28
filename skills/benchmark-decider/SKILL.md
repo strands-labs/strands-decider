@@ -30,10 +30,12 @@ Keep the workload and measurement settings fixed when evaluating an inference ch
 
 - synthetic input targets: 256, 1,024, 2,048, and 4,096 server-reported tokens per request;
 - four choice questions per request, with four options each;
-- equal weighting across input lengths;
+- throughput uses a fixed 1,024-token request shape;
+- serial latency uses an equal mix of 256-, 1,024-, 2,048-, and 4,096-token requests;
 - 50% repeated and 50% unique request states;
 - closed-loop concurrency only;
-- one warm-up request per concurrent client before each repetition.
+- one warm-up request per concurrent client before each throughput repetition;
+- one warm-up request for each serial-latency input shape.
 
 The standard preset measures 64 requests three times at concurrency 1, 2, 4, 8, 16, and 32. The
 smoke preset measures one eight-request workload cycle at concurrency 1. Poisson traffic, bursts,
@@ -108,7 +110,9 @@ without the user's explicit approval. Confirm scope and expected cost before a f
 The configured AWS region selects which SageMaker API endpoint receives the requests; it does not
 move the benchmark client. For latency claims, tell the user to run the benchmark from an EC2
 instance in the same region as the SageMaker endpoints. Follow
-[references/aws.md](references/aws.md) for the setup and checks.
+[references/aws.md](references/aws.md) for the setup and checks. When the user authorizes creating
+a temporary load generator, use `scripts/run_on_ec2.py`; first run it with `--dry-run`, show the
+resource and endpoint scope, and confirm the paid run before passing `--yes`.
 
 ## Run workflow
 

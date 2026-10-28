@@ -51,6 +51,53 @@ uv run --extra benchmark python -m benchmark.runner run ENVIRONMENT
 Copy the environment's `runs/` directory back if the canonical results are maintained elsewhere.
 Preserve the generated client metadata: it documents where the benchmark process ran.
 
+## Temporary EC2 load generator
+
+The skill includes `scripts/run_on_ec2.py` for a repeatable same-region run. It:
+
+- derives the region and endpoint allowlist from the SageMaker environment;
+- verifies the expected AWS account before creating anything;
+- copies a committed Git revision through a temporary private, encrypted S3 bucket;
+- creates a temporary EC2 instance, instance profile, and no-ingress security group;
+- requires IMDSv2 and uses SSM instead of SSH;
+- runs one model or every model configured in the environment;
+- mirrors the benchmark's live request-count progress through SSM;
+- downloads the aggregate `runs/` artifacts into the local checkout; and
+- terminates the instance and deletes its IAM, S3, and security-group resources in a `finally`
+  cleanup path.
+
+The default `t3.medium` is only a load generator; inference remains on SageMaker. The default-VPC
+instance receives a public IP for outbound package and tokenizer downloads, but its security group
+has no inbound rules. Use an existing private-network client instead when public egress is not
+acceptable.
+
+Validate the plan without creating resources:
+
+```bash
+uv run --extra benchmark python skills/benchmark-decider/scripts/run_on_ec2.py \
+  ENVIRONMENT MODEL \
+  --account ACCOUNT_ID \
+  --region us-west-2 \
+  --smoke \
+  --dry-run
+```
+
+After the user confirms the endpoint scope and temporary EC2 cost, run the smoke test:
+
+```bash
+uv run --extra benchmark python skills/benchmark-decider/scripts/run_on_ec2.py \
+  ENVIRONMENT MODEL \
+  --account ACCOUNT_ID \
+  --region us-west-2 \
+  --smoke \
+  --yes
+```
+
+Remove `MODEL` and `--smoke` to run every configured model with the standard preset. `--ref`
+selects the committed revision copied to EC2; uncommitted working-tree changes are intentionally
+excluded. A failed remote run saves its retrieved log as `benchmark-ec2-failure.log` before
+cleanup.
+
 ## Interpret latency correctly
 
 Client latency still includes serialization, the in-region network path, SageMaker request
