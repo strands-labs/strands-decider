@@ -6,7 +6,6 @@ models:
   - StrandsAgents/strands-decider-12B-gemma4-v1-2610
 hardware:
   model: MacBook Pro
-  identifier: Mac16,7
   chip: Apple M4 Pro
   cpu_cores: 14
   memory_gb: 48
