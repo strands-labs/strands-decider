@@ -128,7 +128,7 @@ def write_plots(
         ticks = sorted(concurrency_ticks)
         ax.set_xticks(ticks, ticks)
         ax.set_title(
-            "Throughput by concurrency\nChoice requests · 4 questions x 4 options · calibrated input mix"
+            "Throughput by concurrency\nInput tokens: 256, 1024, 2048, 4096 · 4 choices per request"
         )
         if len(summaries) > 1:
             ax.legend(fontsize=8)
