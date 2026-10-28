@@ -107,7 +107,7 @@ npx cdk deploy -c model=StrandsAgents/strands-decider-E4B-gemma4-v1-2610 -c inst
 | `instance_type` | `ml.g6.xlarge` | The SageMaker instance type ([Choosing an instance](#choosing-an-instance)) |
 | `instance_count` | `1` | Instances behind the endpoint |
 | `inference_ami_version` | empty | A SageMaker [inference AMI version](https://docs.aws.amazon.com/sagemaker/latest/dg/instance-types-ami.html) to pin the host AMI to, for GPU families outside the default AL2023 GPU AMI's compatibility list. Empty keeps the default (AL2023 on GPU, SageMaker default on CPU). |
-| `serve_args` | empty | More `strands-decider serve` options, such as `"--max-batch 8 --strict-window"` |
+| `serve_args` | empty | More `strands-decider serve` options, such as `"--max-batch 8"` |
 
 A change to a setting updates the endpoint in place: SageMaker moves traffic to the new
 endpoint config when it is ready.

@@ -11,8 +11,7 @@ The tests pin what the feature promises:
 * answers over images through the shared-prefix path equal a plain full forward, which
   fails without the explicit M-RoPE positions;
 * no position state leaks from an image forward into the next text request;
-* the window rules match the text path: `strict_window` refuses, otherwise the state text
-  loses its end and the images are never cut;
+* the window rules match the text path: a prompt that does not fit the window is refused;
 * only the promised image formats are opened, sizes are checked before decoding, and
   rotation and transparency are handled;
 * a text-only engine refuses images instead of ignoring them, at the engine and the API.
@@ -340,29 +339,24 @@ def test_image_forward_leaves_no_position_state(engines):
 # ---- the window ----------------------------------------------------------------------------
 
 
-def _small_window(vision: VisionEngine, max_length: int, strict: bool) -> VisionEngine:
+def _small_window(vision: VisionEngine, max_length: int) -> VisionEngine:
     model = vision.model
     eng = VisionEngine.__new__(VisionEngine)
     eng.__dict__.update(vision.__dict__)
-    eng.cfg = eng.vcfg = replace(vision.vcfg, strict_window=strict)
+    eng.cfg = eng.vcfg = replace(vision.vcfg)
     eng.model = model
     model.config.max_length = max_length
     return eng
 
 
-def test_long_state_keeps_its_head_and_the_images(engines):
+def test_long_prompt_with_images_is_refused(engines):
     _, vision = engines
     original = vision.model.config.max_length
     try:
-        eng = _small_window(vision, 700, strict=False)
         state = "First words stay. " + "filler " * 200 + "Last words go."
         img = [fit_image(decode_image(_b64(320, 320, 4)), 448)]
-        s, _, _, _ = eng._fit_images(state, img, [render_question(QUESTIONS["signed"]).text])
-        assert s.count(eng.tok.convert_tokens_to_ids(IMAGE_PAD)) == 100  # the image is whole
-        kept = eng.tok.decode(s)
-        assert "First words stay." in kept and "Last words go." not in kept
         with pytest.raises(ValueError, match="context window"):
-            _small_window(vision, 700, strict=True)._fit_images(
+            _small_window(vision, 700)._fit_images(
                 state, img, [render_question(QUESTIONS["signed"]).text]
             )
     finally:
@@ -463,10 +457,8 @@ def test_image_only_request_and_refusals(engines):
 
 
 def test_load_vision_engine_keeps_the_server_settings(ckpt):
-    eng = load_vision_engine(
-        ckpt, EngineConfig(device="cpu", strict_window=True, max_batch=3, model_name="vd-test")
-    )
-    assert (eng.cfg.strict_window, eng.cfg.max_batch, eng.cfg.model_name) == (True, 3, "vd-test")
+    eng = load_vision_engine(ckpt, EngineConfig(device="cpu", max_batch=3, model_name="vd-test"))
+    assert (eng.cfg.max_batch, eng.cfg.model_name) == (3, "vd-test")
 
 
 def test_server_routes_images(ckpt):
