@@ -115,6 +115,8 @@ instance in the same region as the SageMaker endpoints. Follow
 [references/aws.md](references/aws.md) for the setup and checks. When the user authorizes creating
 a temporary load generator, use `scripts/run_on_ec2.py`; first run it with `--dry-run`, show the
 resource and endpoint scope, and confirm the paid run before passing `--yes`.
+After the remote SSM command starts, give the user the copy-paste status and live-progress
+commands printed by the script; do not wait for them to ask how to monitor it.
 
 ## Run workflow
 

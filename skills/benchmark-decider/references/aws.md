@@ -63,6 +63,8 @@ The skill includes `scripts/run_on_ec2.py` for a repeatable same-region run. It:
 - requires IMDSv2 and uses SSM instead of SSH;
 - runs one model or every model configured in the environment;
 - mirrors the benchmark's live request-count progress through SSM;
+- prints copy-paste commands for checking SSM status and tailing `/tmp/benchmark.log` as soon as
+  the remote benchmark starts;
 - downloads the aggregate `runs/` artifacts into the local checkout; and
 - terminates the instance and deletes its IAM, S3, and security-group resources in a `finally`
   cleanup path.

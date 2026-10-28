@@ -619,6 +619,19 @@ def main() -> int:
                 Comment=f"Run strands-decider benchmark from {region}",
             )["Command"]["CommandId"]
             print(f"started SSM command {command_id}", flush=True)
+            print(
+                "check status:\n"
+                f"aws ssm get-command-invocation --region {region} "
+                f"--command-id {command_id} --instance-id {instance_id} "
+                "--query Status --output text",
+                flush=True,
+            )
+            print(
+                "watch live progress:\n"
+                f"aws ssm start-session --region {region} --target {instance_id}\n"
+                "then run: tail -f /tmp/benchmark.log",
+                flush=True,
+            )
             invocation = wait_for_command(ssm, command_id, instance_id)
             if invocation.get("StandardOutputContent"):
                 print(invocation["StandardOutputContent"], flush=True)
