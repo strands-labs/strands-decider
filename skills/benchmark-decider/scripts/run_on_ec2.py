@@ -282,11 +282,11 @@ def secure_bucket(s3: Any, bucket_name: str) -> None:
 
 def build_remote_script(
     *,
-    source_url: str,
-    result_url: str,
-    log_url: str,
+    bucket_name: str,
+    object_prefix: str,
     environment_path: str,
     model: str | None,
+    region: str,
     smoke: bool,
 ) -> str:
     benchmark_arguments = [environment_path]
@@ -303,10 +303,14 @@ def build_remote_script(
 
     return f"""set -e
 dnf install -y gzip tar util-linux
+command -v aws
 curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh
 rm -rf /opt/strands-decider
 mkdir -p /opt/strands-decider
-curl --fail --retry 3 -o /tmp/strands-decider-source.tgz {shlex.quote(source_url)}
+aws s3 cp \
+  {shlex.quote(f"s3://{bucket_name}/{object_prefix}/source.tgz")} \
+  /tmp/strands-decider-source.tgz \
+  --region {shlex.quote(region)}
 tar -xzf /tmp/strands-decider-source.tgz -C /opt/strands-decider
 cd /opt/strands-decider
 set +e
@@ -315,9 +319,15 @@ benchmark_status=$?
 set -e
 if [ -d {shlex.quote(environment_dir + "/runs")} ]; then
   tar -czf /tmp/benchmark-results.tgz {shlex.quote(environment_dir + "/runs")}
-  curl --fail --retry 3 -T /tmp/benchmark-results.tgz {shlex.quote(result_url)}
+  aws s3 cp \
+    /tmp/benchmark-results.tgz \
+    {shlex.quote(f"s3://{bucket_name}/{object_prefix}/benchmark-results.tgz")} \
+    --region {shlex.quote(region)}
 fi
-curl --fail --retry 3 -T /tmp/benchmark.log {shlex.quote(log_url)}
+aws s3 cp \
+  /tmp/benchmark.log \
+  {shlex.quote(f"s3://{bucket_name}/{object_prefix}/benchmark.log")} \
+  --region {shlex.quote(region)}
 tail -n 100 /tmp/benchmark.log
 exit $benchmark_status
 """
@@ -479,6 +489,12 @@ def main() -> int:
                         "Action": "sagemaker:InvokeEndpoint",
                         "Resource": endpoint_arns,
                     },
+                    {
+                        "Sid": "TransferBenchmarkFiles",
+                        "Effect": "Allow",
+                        "Action": ["s3:GetObject", "s3:PutObject"],
+                        "Resource": f"arn:aws:s3:::{bucket_name}/{object_prefix}/*",
+                    },
                 ],
             }
             iam.put_role_policy(
@@ -587,31 +603,12 @@ def main() -> int:
             wait_for_ssm(ssm, instance_id)
             print(f"{instance_id} is online in SSM", flush=True)
 
-            expiration = min(args.command_timeout_seconds + 1800, 604800)
-            source_url = s3.generate_presigned_url(
-                "get_object",
-                Params={"Bucket": bucket_name, "Key": f"{object_prefix}/source.tgz"},
-                ExpiresIn=expiration,
-            )
-            result_url = s3.generate_presigned_url(
-                "put_object",
-                Params={
-                    "Bucket": bucket_name,
-                    "Key": f"{object_prefix}/benchmark-results.tgz",
-                },
-                ExpiresIn=expiration,
-            )
-            log_url = s3.generate_presigned_url(
-                "put_object",
-                Params={"Bucket": bucket_name, "Key": f"{object_prefix}/benchmark.log"},
-                ExpiresIn=expiration,
-            )
             remote_script = build_remote_script(
-                source_url=source_url,
-                result_url=result_url,
-                log_url=log_url,
+                bucket_name=bucket_name,
+                object_prefix=object_prefix,
                 environment_path=environment_path,
                 model=args.model,
+                region=region,
                 smoke=args.smoke,
             )
             command_id = ssm.send_command(
@@ -628,11 +625,20 @@ def main() -> int:
             if invocation.get("StandardErrorContent"):
                 print(invocation["StandardErrorContent"], file=sys.stderr, flush=True)
 
-            s3.download_file(
-                bucket_name,
-                f"{object_prefix}/benchmark.log",
-                str(log_path),
-            )
+            try:
+                s3.download_file(
+                    bucket_name,
+                    f"{object_prefix}/benchmark.log",
+                    str(log_path),
+                )
+            except ClientError as error:
+                if error.response["Error"]["Code"] not in {"404", "NoSuchKey"}:
+                    raise
+                log_path.write_text(
+                    invocation.get("StandardOutputContent", "")
+                    + "\n"
+                    + invocation.get("StandardErrorContent", "")
+                )
             if invocation["Status"] != "Success":
                 failed_log = root / "benchmark-ec2-failure.log"
                 failed_log.write_bytes(log_path.read_bytes())
