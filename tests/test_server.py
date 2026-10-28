@@ -14,8 +14,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from strands_decider import server
-from strands_decider.infer import _to_answer
-from strands_decider.prompting import render_question
+from strands_decider.prompting import render_question, to_answer
 from strands_decider.schema import (
     ChoiceQuestion,
     NoulQuestion,
@@ -55,7 +54,7 @@ class _StubEngine:
             n = rq.n_slots
             # Concentrated on slot 0, so answers are deterministic and non-uniform.
             probs = [0.7] + [0.3 / (n - 1)] * (n - 1)
-            answers[name] = _to_answer(rq, probs)
+            answers[name] = to_answer(rq, probs)
         return SystemOneResponse(
             model=self.cfg.model_name,
             answers=answers,
@@ -195,13 +194,13 @@ def test_score_answer_is_expected_value_not_argmax():
     """The API returns a continuous score, so a split belief must land between levels."""
     q = ScoreQuestion(instructions="x", criteria=["low", "mid", "high"])
     rq = render_question(q)
-    ans = _to_answer(rq, [0.0, 0.5, 0.5])
+    ans = to_answer(rq, [0.0, 0.5, 0.5])
     assert ans.score == pytest.approx(1.5)
 
 
 def test_noul_answer_carries_no_confidence_field():
     rq = render_question(NoulQuestion(instructions="is it?"))
-    ans = _to_answer(rq, [0.1, 0.9])
+    ans = to_answer(rq, [0.1, 0.9])
     assert ans.noul == pytest.approx(0.9)
     assert not hasattr(ans, "confidence")
 
@@ -209,7 +208,7 @@ def test_noul_answer_carries_no_confidence_field():
 def test_choice_answer_picks_argmax():
     q = ChoiceQuestion(instructions="x", criteria={"a": "", "b": "", "c": ""})
     rq = render_question(q)
-    ans = _to_answer(rq, [0.2, 0.5, 0.3])
+    ans = to_answer(rq, [0.2, 0.5, 0.3])
     assert ans.choice == "b"
     assert ans.confidence == pytest.approx((3 * 0.5 - 1) / 2)
 

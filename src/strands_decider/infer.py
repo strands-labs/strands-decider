@@ -29,9 +29,14 @@ import torch
 
 from . import __version__
 from .modeling import StrandsDeciderModel, apply_temperature, masked_log_softmax, pool_last_token
-from .prompting import RenderedQuestion, render_question, render_state
-from .prompting import option_token_index as _option_token_index
-from .prompting import to_answer as _to_answer
+from .prompting import (
+    RenderedQuestion,
+    fit_window,
+    option_token_index,
+    render_question,
+    render_state,
+    to_answer,
+)
 from .schema import (
     Answer,
     Content,
@@ -196,54 +201,22 @@ class SystemOneEngine:
     def _fit(
         self, state_text: str, question_texts: list[str]
     ) -> tuple[list[int], list[list[int]], list[list[tuple[int, int]]]]:
-        """Tokenise state and questions, giving the QUESTION first claim on the window.
+        """prompting.fit_window on this engine's tokenizer and settings: state ids,
+        question ids and each question's character offsets.
 
-        The question and its options are what make a task answerable; the state is the
-        part that can be sampled. Letting the state take the window first meant a long
-        state consumed all of it and left the question a floor of 8 tokens -- far too
-        few to hold the option list, so the model was choosing among options it could
-        not see. Measured on JevBench, all 19 `long_policy` states hit the cap exactly,
-        and accuracy there (0.316) sat on top of the 0.301 chance rate for those option
-        counts.
-
-        A question longer than its reserve is truncated from the FRONT, keeping the
-        tail. The options and the trailing `<answer>` marker are structurally required
-        -- `<answer>` is the pooling position, so losing it makes the head read an
-        arbitrary token -- whereas losing some instruction text only costs meaning.
-
-        Returns state ids, question ids, and each question's character offsets. The
-        offsets are returned, not kept on the engine: the server runs requests
+        The offsets are returned, not kept on the engine: the server runs requests
         concurrently on one engine, so engine state would be shared across requests.
         """
-        max_len = self.model.config.max_length
         with self._tok_lock:
-            enc = self.tok(question_texts, add_special_tokens=False, return_offsets_mapping=True)
-            q = enc["input_ids"]
-            offs = enc["offset_mapping"]
-            longest = max(len(x) for x in q)
-            if self.cfg.strict_window:
-                s = self.tok(state_text, add_special_tokens=True)["input_ids"]
-                if len(s) + longest > max_len:
-                    raise ValueError(
-                        f"prompt of {len(s) + longest} tokens exceeds the context window "
-                        f"of {max_len} tokens"
-                    )
-                return s, q, list(offs)
-            # Cap the reserve so a pathological question cannot starve the state entirely.
-            reserve = min(longest, max(1, int(max_len * self.cfg.max_question_fraction)))
-            # Front truncation shifts every token index, so the offsets move with the ids
-            # and a pointer readout keeps pointing at the right option.
-            cut = [max(0, len(x) - reserve) for x in q]
-            kept = [o[c:] for o, c in zip(offs, cut, strict=True)]
-            q = [x[c:] for x, c in zip(q, cut, strict=True)]
-            state_budget = max(1, max_len - reserve)
-            s = self.tok(
+            return fit_window(
+                self.tok.backend_tokenizer,
                 state_text,
-                add_special_tokens=True,
-                truncation=True,
-                max_length=state_budget,
-            )["input_ids"]
-        return s, q, kept
+                question_texts,
+                self.model.config.max_length,
+                strict=self.cfg.strict_window,
+                max_question_fraction=self.cfg.max_question_fraction,
+                truncation_side=self.tok.truncation_side,
+            )
 
     def _option_idx(
         self,
@@ -258,7 +231,7 @@ class SystemOneEngine:
         whole prompt. `offsets` are `_fit`'s, so front truncation is accounted for.
         """
         rows = [
-            _option_token_index(offs, rq.option_spans, 0)
+            option_token_index(offs, rq.option_spans, 0)
             for rq, offs in zip(rendered, offsets, strict=True)
         ]
         width = max(len(r) for r in rows)
@@ -425,7 +398,7 @@ class SystemOneEngine:
             for i, name in enumerate(names[chunk]):
                 rq = chunk_rendered[i]
                 row = probs[i, : rq.n_slots].tolist()
-                answers[name] = _to_answer(
+                answers[name] = to_answer(
                     rq, row, ordinal_smoothing=self.model.config.ordinal_smoothing
                 )
 

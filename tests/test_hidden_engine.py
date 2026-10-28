@@ -13,8 +13,8 @@ from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 import pytest
-import torch
 
+torch = pytest.importorskip("torch")
 transformers = pytest.importorskip("transformers")
 if not hasattr(transformers, "Qwen3_5TextConfig"):
     pytest.skip("this transformers has no Qwen3.5", allow_module_level=True)
@@ -33,7 +33,7 @@ from strands_decider.modeling import (  # noqa: E402
     StrandsDeciderModel,
     ensure_bos,
 )
-from strands_decider.prompting import render_question, render_state  # noqa: E402
+from strands_decider.prompting import fit_window, render_question, render_state  # noqa: E402
 from strands_decider.schema import (  # noqa: E402
     ChoiceQuestion,
     NoulQuestion,
@@ -198,15 +198,17 @@ def engines(request, tmp_path_factory):
     return torch_engine, assets
 
 
-def test_numpy_head_matches_pointer_head():
+@pytest.mark.parametrize("eps", [1e-5, 1e-2])
+def test_numpy_head_matches_pointer_head(eps):
     torch.manual_seed(1)
     head = PointerHead(hidden_size=32, dim=8).eval()
+    head.norm.eps = eps
     with torch.no_grad():
         head.norm.weight.normal_()
         head.norm.bias.normal_()
-        decide, options = torch.randn(32) * 3, torch.randn(5, 32) * 3
+        decide, options = torch.randn(32) * 0.01, torch.randn(5, 32) * 0.01
         want = head(decide[None], options[None])[0].numpy()
-    got = NumpyPointerHead({k: v.numpy() for k, v in head.state_dict().items()}, 8)
+    got = NumpyPointerHead({k: v.numpy() for k, v in head.state_dict().items()}, 8, eps)
     np.testing.assert_allclose(
         got.logits(decide.numpy(), options.numpy()), want, rtol=1e-5, atol=1e-5
     )
@@ -217,12 +219,16 @@ def test_assets_hold_the_head_and_settings(engines):
     cfg = torch_engine.model.config
     saved = json.loads((assets / "head_config.json").read_text())
     assert saved == {
+        "format": 1,
+        "readout": "pointer",
         "model_name": "tiny",
         "pointer_dim": cfg.pointer_dim,
+        "eps": torch_engine.model.head.norm.eps,
         "max_length": cfg.max_length,
         "temperature": cfg.temperature,
         "temperature_by_kind": cfg.temperature_by_kind,
         "ordinal_smoothing": cfg.ordinal_smoothing,
+        "truncation_side": "right",
     }
     assert _hidden_engine(torch_engine, assets).cfg.model_name == torch_engine.cfg.model_name
 
@@ -305,3 +311,102 @@ def test_concurrent_requests_answer_as_sequential_ones(engines):
     sequential = [engine.evaluate(r).answers for r in requests]
     with ThreadPoolExecutor(6) as pool:
         assert list(pool.map(lambda r: engine.evaluate(r).answers, requests)) == sequential
+
+
+class _WrongRows:
+    """A backend that returns the wrong rows: every position of each question, one row
+    too few, or one array too few."""
+
+    def __init__(self, inner: TorsoBackend, mistake: str):
+        self.inner, self.mistake = inner, mistake
+
+    def forward(self, state, questions, rows):
+        if self.mistake == "every position":
+            rows = [list(range(len(q))) for q in questions]
+        out = self.inner.forward(state, questions, rows)
+        if self.mistake == "a row too few":
+            return [h[:-1] for h in out]
+        if self.mistake == "an array too few":
+            return out[:-1]
+        return out
+
+
+@pytest.mark.parametrize(
+    ("mistake", "message"),
+    [
+        ("every position", r"backend returned shape \(\d+, 64\) for question 'team'; expected"),
+        (
+            "a row too few",
+            r"backend returned shape \(3, 64\) for question 'team'; expected \(4, hidden\)",
+        ),
+        ("an array too few", "backend returned 2 arrays for 3 questions"),
+    ],
+)
+def test_a_backend_returning_the_wrong_rows_is_named(engines, mistake, message):
+    torch_engine, assets = engines
+    engine = HiddenStateEngine.from_assets(
+        str(assets), _WrongRows(TorsoBackend(torch_engine.model), mistake)
+    )
+    with pytest.raises(ValueError, match=message):
+        engine.evaluate(REQUESTS["three questions"])
+
+
+def _resave(assets, tmp_path, **changes):
+    """A copy of the assets with head_config.json's keys changed (None removes one)."""
+    import shutil
+
+    copy = tmp_path / "assets"
+    shutil.copytree(assets, copy)
+    config = json.loads((copy / "head_config.json").read_text())
+    config.update(changes)
+    config = {k: v for k, v in config.items() if v is not None}
+    (copy / "head_config.json").write_text(json.dumps(config))
+    return copy
+
+
+def test_assets_from_a_newer_release_load_with_a_warning(engines, tmp_path):
+    torch_engine, assets = engines
+    newer = _resave(assets, tmp_path, format=2, a_later_setting=True)
+    with pytest.warns(UserWarning, match="newer strands-decider"):
+        engine = _hidden_engine(torch_engine, newer)
+    expected = _hidden_engine(torch_engine, assets).evaluate(REQUESTS["one question"])
+    assert engine.evaluate(REQUESTS["one question"]) == expected
+
+
+def test_assets_from_before_the_format_key_load(engines, tmp_path):
+    torch_engine, assets = engines
+    older = _resave(assets, tmp_path, format=None, readout=None, eps=None, truncation_side=None)
+    expected = _hidden_engine(torch_engine, assets).evaluate(REQUESTS["one question"])
+    assert _hidden_engine(torch_engine, older).evaluate(REQUESTS["one question"]) == expected
+
+
+def test_assets_for_another_readout_are_refused(engines, tmp_path):
+    torch_engine, assets = engines
+    with pytest.raises(ValueError, match="not for a pointer head"):
+        _hidden_engine(torch_engine, _resave(assets, tmp_path, readout="slot"))
+
+
+@pytest.mark.parametrize("side", ["right", "left"])
+def test_a_long_state_is_trimmed_on_the_tokenizers_side(engines, tmp_path, monkeypatch, side):
+    """fit_window trims the state as the Hugging Face tokenizer does with its
+    truncation_side, and save_assets carries that side to the hidden-state engine."""
+    torch_engine, _ = engines
+    monkeypatch.setattr(torch_engine.tok, "truncation_side", side)
+    state = render_state(REQUESTS["trimmed state"].state)
+    question = render_question(QUESTIONS["urgent"]).text
+    reserve = len(torch_engine.tok(question, add_special_tokens=False)["input_ids"])
+    want = torch_engine.tok(
+        state, add_special_tokens=True, truncation=True, max_length=512 - reserve
+    )["input_ids"]
+    s, _, _ = fit_window(
+        torch_engine.tok.backend_tokenizer, state, [question], 512, truncation_side=side
+    )
+    assert s == want
+    assert torch_engine._fit(state, [question])[0] == want
+    save_assets(torch_engine.model, str(tmp_path / "assets"), "tiny")
+    assert _hidden_engine(torch_engine, tmp_path / "assets").fit(state, [question])[0] == want
+
+
+def test_the_head_uses_the_saved_eps(engines, tmp_path):
+    torch_engine, assets = engines
+    assert _hidden_engine(torch_engine, _resave(assets, tmp_path, eps=0.01)).head.eps == 0.01
