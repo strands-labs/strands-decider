@@ -1,4 +1,4 @@
-name: sagemaker-us-west-2-ml-g4dn-xlarge-qwen-no-batching
+name: sagemaker-us-west-2-ml-g6-xlarge-qwen
 models:
   - StrandsAgents/strands-decider-2B-qwen3.5-v1-2610
 lifecycle:
@@ -6,7 +6,7 @@ lifecycle:
 timeout_s: 120
 sagemaker:
   region: us-west-2
-  instance_type: ml.g4dn.xlarge
-  endpoint_name: strands-decider-2b-qwen3-5-v1-2610-nobatch-pr112
+  instance_type: ml.g6.xlarge
+  endpoint_name: strands-decider-2b-qwen3-5-v1-2610
 pricing:
   hourly_usd: 0.736
