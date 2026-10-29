@@ -1,0 +1,12 @@
+name: sagemaker-us-west-2-ml-g4dn-xlarge-no-batching
+models:
+  - StrandsAgents/strands-decider-E2B-gemma4-v1-2610
+lifecycle:
+  type: external
+timeout_s: 120
+sagemaker:
+  region: us-west-2
+  instance_type: ml.g4dn.xlarge
+  endpoint_name: strands-decider-e2b-gemma4-v1-2610-nobatch-pr112
+pricing:
+  hourly_usd: 0.736
