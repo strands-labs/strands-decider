@@ -93,6 +93,22 @@ def _model_label(model: str) -> str:
     return model.rsplit("/", 1)[-1].removeprefix("strands-decider-")
 
 
+def _throughput_subtitle(summaries: dict[str, dict[str, Any]]) -> str:
+    input_tokens: set[int] = set()
+    questions: set[int] = set()
+    for summary in summaries.values():
+        for point in summary.get("closed_loop", []):
+            for repetition in point.get("repetitions", []):
+                for shape in repetition.get("shapes", {}).values():
+                    input_tokens.add(
+                        int(shape.get("requested_input_tokens", shape["input_tokens"]))
+                    )
+                    questions.add(int(shape["questions"]))
+    tokens_label = ", ".join(f"{value:,}" for value in sorted(input_tokens)) or "unknown"
+    questions_label = ", ".join(str(value) for value in sorted(questions)) or "unknown"
+    return f"Input tokens: {tokens_label} · {questions_label} choices per request"
+
+
 def write_plots(
     summaries: dict[str, dict[str, Any]],
     out: Path,
@@ -133,7 +149,7 @@ def write_plots(
         ax.set_xscale("log", base=2)
         ticks = sorted(concurrency_ticks)
         ax.set_xticks(ticks, ticks)
-        ax.set_title("Throughput by concurrency\nInput tokens: 1024 · 4 choices per request")
+        ax.set_title(f"Throughput by concurrency\n{_throughput_subtitle(summaries)}")
         if len(summaries) > 1:
             ax.legend(fontsize=8)
         ax.grid(alpha=0.25)
