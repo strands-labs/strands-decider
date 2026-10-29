@@ -316,6 +316,42 @@ def test_every_mlx_evaluation_runs_on_the_loading_thread(engines):
     assert _threading.get_ident() not in seen, "evaluate ran on the calling thread"
 
 
+def test_mlx_evaluations_run_on_the_thread_that_loaded_the_torso(tmp_path, monkeypatch):
+    # Stronger than test_every_mlx_evaluation_runs_on_the_loading_thread: records which
+    # thread actually ran _load_torso and asserts evaluations land on that same thread.
+    import threading as _threading
+
+    import strands_decider.mlx_engine as mlx_engine
+
+    loaded_on: list[int] = []
+    original_load = mlx_engine._load_torso
+
+    def spy(*args, **kwargs):
+        loaded_on.append(_threading.get_ident())
+        return original_load(*args, **kwargs)
+
+    monkeypatch.setattr(mlx_engine, "_load_torso", spy)
+    engine = load_engine(str(_checkpoint(tmp_path)), device="mlx")
+
+    seen: list[int] = []
+    original_decoder = engine._decoder
+
+    class _Spy:
+        def __call__(self, *args, **kwargs):
+            seen.append(_threading.get_ident())
+            return original_decoder(*args, **kwargs)
+
+        def __getattr__(self, name):
+            return getattr(original_decoder, name)
+
+    engine._decoder = _Spy()
+    with ThreadPoolExecutor(3) as pool:
+        for future in [pool.submit(engine.evaluate, REQUESTS[0]) for _ in range(3)]:
+            future.result()
+    assert seen, "the decoder was never called"
+    assert set(seen) == set(loaded_on), f"evaluations ran on {seen}, loaded on {loaded_on}"
+
+
 def test_closing_the_engine_shuts_down_its_worker(tmp_path):
     engine = load_engine(str(_checkpoint(tmp_path)), device="mlx")
     engine.close()

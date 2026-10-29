@@ -26,9 +26,9 @@ _engine_lock = threading.Lock()
 
 
 def _needs_serialisation(device: str) -> bool:
-    """MPS aborts the process with a Metal command-buffer assertion (issue #9) when
-    two overlapping threads hit the same device. CUDA and CPU are thread-safe for
-    inference, and MLX serialises on its own scheduler."""
+    """MPS aborts the process with a Metal command-buffer assertion when two overlapping
+    threads hit the same device. CUDA and CPU are thread-safe for inference, and the MLX
+    engine runs every evaluation on a single worker thread."""
     return str(device).startswith("mps")
 
 

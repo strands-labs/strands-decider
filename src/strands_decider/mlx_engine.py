@@ -26,11 +26,10 @@ from __future__ import annotations
 import json
 import os
 import threading
-from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
-from typing import Any, TypeVar
+from typing import Any
 
 import mlx.core as mx
 import torch
@@ -57,8 +56,6 @@ from .schema import SystemOneRequest, SystemOneResponse
 # a 48 GB M4 Pro), and a new request shape allocates new ones. 1 GiB holds a 2B torso's
 # working set; it cost no latency on the M4 Pro and kept the process near its weights' size.
 DEFAULT_CACHE_LIMIT = 1 << 30
-
-T = TypeVar("T")
 
 _DTYPES = {"bfloat16": mx.bfloat16, "float16": mx.float16, "float32": mx.float32}
 # mlx-lm names the text-only Qwen3.5 checkpoint's type after the multimodal one, whose module
@@ -162,10 +159,7 @@ class MLXEngine(SystemOneEngine):
         self._tok_lock = threading.Lock()
 
     def evaluate(self, request: SystemOneRequest) -> SystemOneResponse:
-        return self._run(super().evaluate, request)
-
-    def _run(self, fn: Callable[..., T], *args: Any, **kwargs: Any) -> T:
-        return self._executor.submit(fn, *args, **kwargs).result()
+        return self._executor.submit(super().evaluate, request).result()
 
     def close(self) -> None:
         """Shut down the MLX worker thread. After this the engine cannot evaluate."""
@@ -287,8 +281,7 @@ def _load_torso(base: Path, dtype: str) -> tuple[Any, Any, Any, str]:
     ]
     if cast:
         lm.load_weights(cast, strict=False)
-    # Evaluate the casts now: a lazy array belongs to this thread's stream, and the server
-    # evaluates requests on its thread pool.
+    # Evaluate the casts now so the loaded weights aren't left as pending computations.
     mx.eval(lm.parameters())
     return lm, owner.model, owner, prefix
 
@@ -308,7 +301,8 @@ def load_mlx_engine(
     returned engine owns. mlx-lm's lazy arrays and Metal streams are thread-local, and
     Gemma4 keeps state tied to the loading thread's GPU stream; FastAPI serves sync handlers
     from its thread pool, so without this pinning the first request from a worker thread
-    fails with "no Stream(gpu, 1) in current thread".
+    fails with "no Stream(gpu, 1) in current thread". Ctrl+C during load does not interrupt
+    the worker; the call returns once the load finishes.
     """
     executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="mlx-engine")
     try:
