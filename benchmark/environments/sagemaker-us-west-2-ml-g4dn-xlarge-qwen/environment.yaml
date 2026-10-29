@@ -1,0 +1,12 @@
+name: sagemaker-us-west-2-ml-g4dn-xlarge-qwen
+models:
+  - StrandsAgents/strands-decider-2B-qwen3.5-v1-2610
+lifecycle:
+  type: external
+timeout_s: 120
+sagemaker:
+  region: us-west-2
+  instance_type: ml.g4dn.xlarge
+  endpoint_name: strands-decider-2b-qwen3-5-v1-2610
+pricing:
+  hourly_usd: 0.736
