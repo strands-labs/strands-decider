@@ -285,6 +285,86 @@ def test_a_bf16_checkpoint_answers_from_another_thread(tmp_path):
     assert set(response.answers) == set(QUESTIONS)
 
 
+def test_every_mlx_evaluation_runs_on_the_loading_thread(engines):
+    # Gemma4 (and MLX in general) binds Metal streams to the loading thread. The engine
+    # owns a single-worker executor so cross-thread submissions all land on that one
+    # worker, regardless of which caller thread invoked evaluate().
+    import threading as _threading
+
+    _, mlx_engine, _ = engines
+    seen: list[int] = []
+    original = mlx_engine._decoder
+
+    class _Spy:
+        def __call__(self, *args, **kwargs):
+            seen.append(_threading.get_ident())
+            return original(*args, **kwargs)
+
+        def __getattr__(self, name):
+            return getattr(original, name)
+
+    mlx_engine._decoder = _Spy()
+    try:
+        with ThreadPoolExecutor(3) as pool:
+            futures = [pool.submit(mlx_engine.evaluate, REQUESTS[0]) for _ in range(3)]
+            for future in futures:
+                future.result()
+    finally:
+        mlx_engine._decoder = original
+    assert seen, "the decoder was never called"
+    assert len(set(seen)) == 1, f"evaluations ran on {len(set(seen))} threads: {seen}"
+    assert _threading.get_ident() not in seen, "evaluate ran on the calling thread"
+
+
+def test_mlx_evaluations_run_on_the_thread_that_loaded_the_torso(tmp_path, monkeypatch):
+    # Stronger than test_every_mlx_evaluation_runs_on_the_loading_thread: records which
+    # thread actually ran _load_torso and asserts evaluations land on that same thread.
+    import threading as _threading
+
+    import strands_decider.mlx_engine as mlx_engine
+
+    loaded_on: list[int] = []
+    original_load = mlx_engine._load_torso
+
+    def spy(*args, **kwargs):
+        loaded_on.append(_threading.get_ident())
+        return original_load(*args, **kwargs)
+
+    monkeypatch.setattr(mlx_engine, "_load_torso", spy)
+    engine = load_engine(str(_checkpoint(tmp_path)), device="mlx")
+
+    seen: list[int] = []
+    original_decoder = engine._decoder
+
+    class _Spy:
+        def __call__(self, *args, **kwargs):
+            seen.append(_threading.get_ident())
+            return original_decoder(*args, **kwargs)
+
+        def __getattr__(self, name):
+            return getattr(original_decoder, name)
+
+    engine._decoder = _Spy()
+    with ThreadPoolExecutor(3) as pool:
+        for future in [pool.submit(engine.evaluate, REQUESTS[0]) for _ in range(3)]:
+            future.result()
+    assert seen, "the decoder was never called"
+    assert set(seen) == set(loaded_on), f"evaluations ran on {seen}, loaded on {loaded_on}"
+
+
+def test_closing_the_engine_shuts_down_its_worker(tmp_path):
+    engine = load_engine(str(_checkpoint(tmp_path)), device="mlx")
+    engine.close()
+    with pytest.raises(RuntimeError):
+        engine.evaluate(REQUESTS[0])
+
+
+def test_torch_engines_do_not_grow_an_mlx_executor(tmp_path):
+    engine = load_engine(str(_checkpoint(tmp_path)), device="cpu")
+    assert not hasattr(engine, "_executor")
+    assert not hasattr(engine, "close")
+
+
 def test_mlx_loads_the_base_at_the_revision_in_provenance(tmp_path, monkeypatch):
     import strands_decider.mlx_engine as mlx_engine
 

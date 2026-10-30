@@ -11,6 +11,7 @@ import contextlib
 import os
 import threading
 import time
+from collections.abc import AsyncIterator
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
@@ -25,9 +26,9 @@ _engine_lock = threading.Lock()
 
 
 def _needs_serialisation(device: str) -> bool:
-    """MPS aborts the process with a Metal command-buffer assertion (issue #9) when
-    two overlapping threads hit the same device. CUDA and CPU are thread-safe for
-    inference, and MLX serialises on its own scheduler."""
+    """MPS aborts the process with a Metal command-buffer assertion when two overlapping
+    threads hit the same device. CUDA and CPU are thread-safe for inference, and the MLX
+    engine runs every evaluation on a single worker thread."""
     return str(device).startswith("mps")
 
 
@@ -51,10 +52,22 @@ def create_app(
 ) -> FastAPI:
     global _engine
 
+    @contextlib.asynccontextmanager
+    async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        try:
+            yield
+        finally:
+            # The MLX engine owns a worker thread (see mlx_engine.MLXEngine); other engines
+            # have nothing to close.
+            close = getattr(_engine, "close", None)
+            if callable(close):
+                close()
+
     app = FastAPI(
         title="strands-decider System One",
         version=__version__,
         description="Typed, calibrated answers. Choice, Score and Noul over one state.",
+        lifespan=lifespan,
     )
 
     # Identify the response's `model` by the checkpoint served, so multiple servers
