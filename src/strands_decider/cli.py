@@ -69,11 +69,6 @@ def serve_cmd(
         "--model-name",
         help="Value returned as `model` in responses. Defaults to the checkpoint basename.",
     ),
-    strict_window: bool = typer.Option(
-        False,
-        "--strict-window",
-        help="Reject (HTTP 422) a prompt longer than the context window instead of truncating it.",
-    ),
     vision: bool = typer.Option(
         False,
         "--vision",
@@ -102,7 +97,6 @@ def serve_cmd(
         device=selected_device,
         use_prefix_cache=not no_prefix_cache,
         model_name=model_name,
-        strict_window=strict_window,
         max_batch=max_batch,
         vision=vision,
         max_batch_tokens=max_batch_tokens,

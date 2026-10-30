@@ -341,66 +341,12 @@ def _long_state(n_chars: int = 12000) -> str:
     return "".join(out)
 
 
-def test_long_state_does_not_starve_the_question(model):
-    """The regression this guards: a state longer than the window used to consume all
-    of it, leaving the question a floor of 8 tokens -- too few to hold the option list,
-    so the model chose among options it could not see. Every JevBench long_policy task
-    hit that path."""
+def test_long_prompt_is_refused(model):
+    """A prompt that does not fit the window is refused; one that fits is kept whole."""
     from strands_decider.infer import EngineConfig, SystemOneEngine
-    from strands_decider.prompting import render_question, render_state
-    from strands_decider.schema import ChoiceQuestion
+    from strands_decider.prompting import render_state
 
     eng = SystemOneEngine(model, EngineConfig())
-    q = ChoiceQuestion(
-        instructions="Under the stated policy, what is the correct outcome?",
-        criteria={
-            "full_refund": "money back in full",
-            "store_credit": "credit only, no cash",
-            "reject": "no remedy available",
-            "partial": "refund minus a restocking fee",
-        },
-    )
-    rq = render_question(q)
-    wanted = len(eng.tok(rq.text, add_special_tokens=False)["input_ids"])
-
-    s, kept, _ = eng._fit(render_state(_long_state()), [rq.text])
-
-    assert len(kept[0]) == wanted, "the whole question should survive a long state"
-    assert len(s) > 0, "the state must not be squeezed to nothing"
-    assert len(s) + len(kept[0]) <= model.config.max_length
-
-    # The option names are what the slots bind to; losing them makes the task blind.
-    decoded = eng.tok.decode(kept[0])
-    for name in q.criteria:
-        assert name in decoded
-
-
-def test_question_reserve_is_capped_so_state_survives(model):
-    """A pathological question must not take the entire window.
-
-    Both inputs are oversized here on purpose. With a short state the cap is
-    untestable, because the state simply does not fill the budget it is given.
-    """
-    from strands_decider.infer import EngineConfig, SystemOneEngine
-    from strands_decider.prompting import render_state
-
-    eng = SystemOneEngine(model, EngineConfig(max_question_fraction=0.75))
-    huge = "Is this permitted under the policy? " * 2000
-    s, kept, _ = eng._fit(render_state(_long_state()), [huge])
-
-    cap = int(model.config.max_length * 0.75)
-    assert len(kept[0]) == cap, "an oversized question should be trimmed to the cap"
-    # The state gets everything the cap leaves, and it is long enough to use it.
-    assert len(s) == model.config.max_length - cap
-    assert len(s) + len(kept[0]) <= model.config.max_length
-
-
-def test_strict_window_refuses_instead_of_truncating(model):
-    """--strict-window: a prompt over the window is refused, one that fits is kept whole."""
-    from strands_decider.infer import EngineConfig, SystemOneEngine
-    from strands_decider.prompting import render_state
-
-    eng = SystemOneEngine(model, EngineConfig(strict_window=True))
     with pytest.raises(ValueError, match="context window"):
         eng._fit(render_state(_long_state()), ["Is this permitted?"])
 
@@ -409,43 +355,3 @@ def test_strict_window_refuses_instead_of_truncating(model):
     s, kept, _ = eng._fit(short, [question])
     assert len(kept[0]) == len(eng.tok(question, add_special_tokens=False)["input_ids"])
     assert s == eng.tok(short, add_special_tokens=True)["input_ids"]
-
-
-def test_long_state_answer_is_still_well_formed(model):
-    """End to end: a long state must still yield a valid distribution over the options."""
-    from strands_decider.infer import EngineConfig, SystemOneEngine
-    from strands_decider.schema import ChoiceQuestion, SystemOneRequest
-
-    eng = SystemOneEngine(model, EngineConfig())
-    req = SystemOneRequest(
-        state=_long_state(),
-        questions={
-            "outcome": ChoiceQuestion(
-                instructions="What is the correct outcome?",
-                criteria={"refund": "money back", "credit": "store credit", "reject": "none"},
-            )
-        },
-    )
-    ans = eng.evaluate(req).answers["outcome"]
-    assert set(ans.probabilities) == {"refund", "credit", "reject"}
-    assert sum(ans.probabilities.values()) == pytest.approx(1.0, abs=1e-3)
-
-
-def test_both_paths_agree_on_a_long_state(model):
-    """_fit changed tokenisation on both paths; they must still match."""
-    from strands_decider.infer import EngineConfig, SystemOneEngine
-    from strands_decider.schema import ChoiceQuestion, SystemOneRequest
-
-    req = SystemOneRequest(
-        state=_long_state(),
-        questions={
-            "outcome": ChoiceQuestion(
-                instructions="What is the correct outcome?",
-                criteria={"refund": "money back", "credit": "store credit", "reject": "none"},
-            )
-        },
-    )
-    cached = SystemOneEngine(model, EngineConfig(use_prefix_cache=True)).evaluate(req)
-    naive = SystemOneEngine(model, EngineConfig(use_prefix_cache=False)).evaluate(req)
-    for k, v in cached.answers["outcome"].probabilities.items():
-        assert v == pytest.approx(naive.answers["outcome"].probabilities[k], abs=1e-2)
