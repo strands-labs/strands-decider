@@ -187,7 +187,7 @@ def test_the_prefix_path_matches_whole_prompts_and_leaves_no_state(engines):
         assert whole[name] == pytest.approx(shared[name], abs=1e-4), name
 
 
-def test_max_batch_and_strict_window_apply_on_mlx(engines):
+def test_max_batch_and_window_apply_on_mlx(engines):
     _, mlx_engine, _ = engines
     original = mlx_engine.cfg
     try:
@@ -197,7 +197,6 @@ def test_max_batch_and_strict_window_apply_on_mlx(engines):
         whole = _probabilities(mlx_engine.evaluate(REQUESTS[1]))
         for name in whole:
             assert chunked[name] == pytest.approx(whole[name], abs=1e-4), name
-        mlx_engine.cfg = dataclasses.replace(original, strict_window=True)
         too_long = SystemOneRequest(state=POLICY * 100, questions={"team": QUESTIONS["team"]})
         with pytest.raises(ValueError, match="context window"):
             mlx_engine.evaluate(too_long)

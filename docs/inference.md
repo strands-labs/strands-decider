@@ -239,10 +239,9 @@ The `state` may be empty when the question carries the whole task. An option des
 may be a string, structured data (rendered as JSON, like a structured `state`), or `null`
 for a bare label.
 
-By default a prompt longer than the checkpoint's window is shortened to fit: the state is
-cut, and the question keeps its options. `--strict-window` refuses such a prompt instead,
-with HTTP 422 and a message that names the context window, for an evaluation that forbids
-truncation. `--max-batch N` (default 32) sets how many questions one forward pass encodes;
+A prompt longer than the checkpoint's context window is refused with HTTP 422 and a
+message that names the window. The server never truncates the state or the question.
+`--max-batch N` (default 32) sets how many questions one forward pass encodes;
 lower it when a very long state with many questions does not fit in GPU memory.
 `--max-batch-tokens N` also caps the tokens of one forward, as the forward pads them: its
 questions times the longest state + question, after each is fitted to the window. A forward
@@ -250,6 +249,36 @@ then ends early, before it would pass N tokens, and always holds at least one qu
 Questions are fitted before the cut and scored independently, so answers change only by
 float rounding. Long-context torsos (Gemma 4 at a 32,768-token window) need it; unset, only
 `--max-batch` applies.
+
+**On CUDA, concurrent requests share forwards.** One thread owns the GPU. It takes every
+request already queued, up to `--max-batch` questions and `--max-batch-tokens` padded tokens
+(16,384 when unset), and scores them in right-padded forwards. Rows are padded on the right
+and masked, so each answer equals the answer to the same request served alone, to float
+rounding; `tests/test_batching.py` checks this for Qwen3, Qwen3.5 and Gemma 4 torsos. A
+request with several questions on one state still takes the shared-prefix path alone.
+
+At startup the server tunes the batches to the GPU, as vLLM sizes its batches with a profiling
+run. It times forwards of 1, 2, 4, ... rows at 256, 1,024 and 4,096 tokens, stopping at the
+first that runs out of memory, and caps shared forwards at the fastest size for each width.
+Short prompts are launch-bound and gain from large forwards; long prompts already fill the
+GPU, and the tune keeps their forwards small. It takes a few seconds for 2B and E2B, and `--no-batch-tune` skips it.
+`--batch-wait-ms N` holds a request up to N ms for others to join it (default 0, no wait).
+`--no-batching` gives each request its own forward again, and `--batching` turns batching on
+for other devices. `/health` reports the budgets, the tuned caps and how many requests shared
+a forward.
+
+On one L40S, strands-decider-2B-qwen3.5-v1-2610 with 32 requests in flight serves 49.1
+decisions/s on 256-token prompts (+42.7 vs. 6.4 without batching), 7.77 on 1,024-token
+prompts (+4.74 vs. 3.03) and 3.20 on 4,096-token prompts (+2.13 vs. 1.07), and a lone request
+takes 83.5 ms (−2.0 ms vs. 85.5). With tuned forwards, argmax answers agree with unbatched
+serving on 99.58% of 1,895 decision prompts for 2B and 99.47% for E2B, and the decisions that
+differ are near ties. Untuned forwards moved E2B's answers twice as far (98.94%).
+
+Batching costs where the GPU is already busy. Four concurrent 2,000-token requests on one
+state share a forward and finish together, so each request's median latency rises 25-35% over
+a server that runs forwards one at a time, while the turn, done when all four are answered,
+ends as before. On E4B and 12B with 1,024-token prompts the GPU is 93-99% busy without
+batching, and throughput is 2-6% lower with it (measured with a 5 ms wait).
 
 ## Gemma 4 models
 
