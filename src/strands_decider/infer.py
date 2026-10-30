@@ -151,6 +151,11 @@ def _expand_cache(cache: Any, n: int) -> Any:
     raise UnforkableCache(f"unsupported KV cache type: {type(cache)!r}")
 
 
+def spans_gpus(torso: torch.nn.Module) -> bool:
+    """True for a torso whose layers were split across GPUs when it loaded."""
+    return len({p.device for p in torso.parameters() if p.device.type == "cuda"}) > 1
+
+
 class SystemOneEngine:
     """Stateless evaluator around a loaded StrandsDeciderModel."""
 
@@ -166,7 +171,12 @@ class SystemOneEngine:
             from .cpu_kernels import install as install_cpu
 
             install_cpu()
-        self.model = model.to(self.cfg.device).eval()
+        if spans_gpus(model.torso):
+            # Loaded with a device_map: the layers stay on their GPUs, the head joins the inputs.
+            model.head.to(self.cfg.device)
+            self.model = model.eval()
+        else:
+            self.model = model.to(self.cfg.device).eval()
         if str(self.cfg.device) == "cpu":
             self._upcast_torso_for_cpu()
         self.tok = model.tokenizer

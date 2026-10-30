@@ -251,6 +251,12 @@ Questions are fitted before the cut and scored independently, so answers change 
 float rounding. Long-context torsos (Gemma 4 at a 32,768-token window) need it; unset, only
 `--max-batch` applies.
 
+`--device-map auto` splits a model larger than one GPU across the visible GPUs, with the
+transformers `device_map` of the same name; the head runs on `cuda:0`. The layers run one GPU
+after the other, so the split adds memory, not speed. The 26B-A4B serves this way on four
+48 GB L40S GPUs (16 to 21 GB on each), at about 200 ms for one short question and 370 ms for
+two, with probabilities within 0.03 of the model on CPU. CUDA only, and not with `--vision`.
+
 ## Gemma 4 models
 
 The four Gemma 4 models serve with the same commands as the Qwen3.5 model. They need the code on

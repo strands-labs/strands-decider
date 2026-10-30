@@ -441,7 +441,8 @@ class StrandsDeciderModel(nn.Module):
             use_cache=past_key_values is not None,
             return_dict=True,
         )
-        return out.last_hidden_state
+        # A torso split across GPUs (`device_map`) ends on its last GPU, not the head's.
+        return out.last_hidden_state.to(next(self.head.parameters()).device)
 
     def forward(
         self,
