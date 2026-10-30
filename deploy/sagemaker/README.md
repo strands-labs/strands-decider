@@ -202,6 +202,10 @@ print(json.loads(response["Body"].read())["answers"])
 Callers need IAM permission `sagemaker:InvokeEndpoint` on the endpoint. The container has no
 authentication of its own.
 
+The notebook [samples/ask-the-endpoint.ipynb](samples/ask-the-endpoint.ipynb) calls the endpoint
+step by step: each question type, the confidence, a check of an agent's tool call, and the error
+for a request that is not valid.
+
 ## Deleting it
 
 An endpoint costs money for every hour it runs, whether or not it gets requests. When you
