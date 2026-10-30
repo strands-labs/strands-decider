@@ -19,9 +19,24 @@ from __future__ import annotations
 import json
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from .schema import ChoiceQuestion, Content, NoulQuestion, Question, ScoreQuestion
+from .schema import (
+    Answer,
+    ChoiceAnswer,
+    ChoiceQuestion,
+    Content,
+    NoulAnswer,
+    NoulQuestion,
+    Question,
+    ScoreAnswer,
+    ScoreQuestion,
+    derive_confidence,
+    derive_score_confidence,
+)
+
+if TYPE_CHECKING:
+    from tokenizers import Tokenizer
 
 # Rendered on both sides of a noul so the two slots read like any other option list.
 NOUL_SLOT_LABELS = ("false", "true")
@@ -180,3 +195,126 @@ def read_score(probs: Sequence[float], rq: RenderedQuestion) -> tuple[float, dic
     expected = sum(int(level) * p for level, p in by_level.items())
     ordered = {str(i): by_level[str(i)] for i in range(len(by_level))}
     return float(expected), ordered
+
+
+def fit_window(
+    tok: Tokenizer,
+    state_text: str,
+    question_texts: list[str],
+    max_length: int,
+    *,
+    strict: bool = False,
+    max_question_fraction: float = 0.75,
+    truncation_side: str = "right",
+) -> tuple[list[int], list[list[int]], list[list[tuple[int, int]]]]:
+    """Tokenize a state and its questions to fit a window of `max_length` tokens, giving
+    the questions first claim on it.
+
+    The question and its options are what make a task answerable; the state is the part
+    that can be sampled. Letting the state take the window first meant a long state
+    consumed all of it and left the question a floor of 8 tokens -- far too few to hold
+    the option list, so the model was choosing among options it could not see. Measured
+    on JevBench, all 19 `long_policy` states hit the cap exactly, and accuracy there
+    (0.316) sat on top of the 0.301 chance rate for those option counts.
+
+    So every question keeps up to `max_question_fraction` of the window, the same reserve
+    for all of them: as many tokens as the longest needs, within that cap. A question
+    longer than the reserve loses its front and keeps its tail. The options and the
+    trailing `<answer>` marker are structurally required -- `<answer>` is the pooling
+    position, so losing it makes the head read an arbitrary token -- whereas losing some
+    instruction text only costs meaning. The state gets the rest of the window and loses
+    its end, or its start with `truncation_side="left"`, as a Hugging Face tokenizer's
+    `truncation_side` sets. With `strict`, a state and longest question over the window
+    raise a ValueError instead.
+
+    Returns the state's ids, each question's ids, and each question's character offsets,
+    which move with its ids when its front is cut, so a pointer readout keeps pointing at
+    the right option. `tok` is a `tokenizers.Tokenizer`, such as a Hugging Face fast
+    tokenizer's `backend_tokenizer`. This function turns its padding and truncation off,
+    and turns truncation on for the state, so callers must not run it on one tokenizer
+    from two threads at once.
+    """
+    tok.no_padding()
+    tok.no_truncation()
+    encodings = tok.encode_batch(question_texts, add_special_tokens=False)
+    q = [e.ids for e in encodings]
+    offsets = [list(e.offsets) for e in encodings]
+    longest = max(len(x) for x in q)
+    if strict:
+        s = tok.encode(state_text, add_special_tokens=True).ids
+        if len(s) + longest > max_length:
+            raise ValueError(
+                f"prompt of {len(s) + longest} tokens exceeds the context window "
+                f"of {max_length} tokens"
+            )
+        return s, q, offsets
+    # Capped, so a pathological question cannot starve the state entirely.
+    reserve = min(longest, max(1, int(max_length * max_question_fraction)))
+    cut = [max(0, len(x) - reserve) for x in q]
+    q = [x[c:] for x, c in zip(q, cut, strict=True)]
+    offsets = [o[c:] for o, c in zip(offsets, cut, strict=True)]
+    tok.enable_truncation(max_length=max(1, max_length - reserve), direction=truncation_side)
+    try:
+        s = tok.encode(state_text, add_special_tokens=True).ids
+    finally:
+        tok.no_truncation()
+    return s, q, offsets
+
+
+def option_token_index(
+    offsets: Sequence[Sequence[int]],
+    spans: Sequence[Sequence[int]],
+    base: int,
+) -> list[int]:
+    """Last token index of each option's line, for a pointer readout.
+
+    The last token of the span is the one that has just read the whole option under
+    causal attention. Raises when an option has no surviving token: truncation has
+    removed it, and scoring it from a neighbour's representation would be silently
+    wrong.
+    """
+    out: list[int] = []
+    for s, e in spans:
+        a, b = base + s, base + e
+        last = -1
+        for j, (lo, hi) in enumerate(offsets):
+            if hi <= lo:
+                continue
+            if lo >= a and hi <= b:
+                last = j
+        if last < 0:
+            raise ValueError(
+                f"option span ({a},{b}) has no tokens left; the prompt was "
+                "truncated through its option list"
+            )
+        out.append(last)
+    return out
+
+
+def to_answer(
+    rq: RenderedQuestion, probs: list[float], *, ordinal_smoothing: float = 0.0
+) -> Answer:
+    if rq.kind == "noul":
+        return NoulAnswer(noul=round(read_noul(probs, rq), 4))
+
+    if rq.kind == "choice":
+        by_name = read_choice(probs, rq)
+        best = max(by_name, key=lambda k: by_name[k])
+        return ChoiceAnswer(
+            choice=best,
+            probabilities={k: round(v, 4) for k, v in by_name.items()},
+            confidence=round(derive_confidence(list(by_name.values())), 4),
+        )
+
+    score, ordered = read_score(probs, rq)
+    return ScoreAnswer(
+        score=round(score, 4),
+        # Report the rubric in canonical ascending order, not the order rendered.
+        legend=score_legend(rq),
+        probabilities={k: round(v, 4) for k, v in ordered.items()},
+        # Ordinal confidence, not max-probability: see derive_score_confidence.
+        confidence=round(
+            derive_score_confidence(list(ordered.values()), ordinal_smoothing=ordinal_smoothing),
+            4,
+        ),
+    )

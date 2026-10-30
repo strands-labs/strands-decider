@@ -31,7 +31,7 @@ from typing import TYPE_CHECKING, Any, cast
 import torch
 from torch import nn
 
-from .infer import EngineConfig, SystemOneEngine, UnforkableCache, _expand_cache, _to_answer
+from .infer import EngineConfig, SystemOneEngine, UnforkableCache, _expand_cache
 from .modeling import (
     StrandsDeciderConfig,
     StrandsDeciderModel,
@@ -44,7 +44,7 @@ from .modeling import (
     masked_log_softmax,
     pool_last_token,
 )
-from .prompting import RenderedQuestion, render_question, render_state
+from .prompting import RenderedQuestion, render_question, render_state, to_answer
 from .schema import Answer, Content, Question, SystemOneRequest, SystemOneResponse, Usage
 
 if TYPE_CHECKING:
@@ -448,7 +448,7 @@ class VisionEngine(SystemOneEngine):
             total += ntok
             for i, name in enumerate(names[start : start + self.cfg.max_batch]):
                 rq = chunk[i]
-                answers[name] = _to_answer(
+                answers[name] = to_answer(
                     rq,
                     probs[i, : rq.n_slots].tolist(),
                     ordinal_smoothing=self.model.config.ordinal_smoothing,
