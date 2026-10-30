@@ -15,3 +15,8 @@ A real-time endpoint in your AWS account, on a GPU or CPU instance. One CDK stac
 to a private S3 bucket, builds the image in AWS CodeBuild and creates the endpoint; `cdk destroy`
 removes it. See
 [sagemaker/README.md](sagemaker/README.md).
+
+## Choosing an AWS host
+
+How SageMaker, Bedrock AgentCore Runtime and Lambda MicroVMs compare on speed and start-up, and what
+to watch for on each: [aws-hosts.md](aws-hosts.md).
