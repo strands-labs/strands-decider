@@ -89,6 +89,12 @@ def serve_cmd(
         "--max-batch-tokens",
         help="Also cap one forward's padded tokens (questions x longest state + question); for long-context torsos.",
     ),
+    device_map: str | None = typer.Option(
+        None,
+        "--device-map",
+        help="Split the model across the visible GPUs (a transformers device_map, such as auto), "
+        "for a model larger than one GPU.",
+    ),
 ) -> None:
     """Serve POST /v1/systemone. JevBench's typesafe adapter runs against it unchanged."""
     from .server import serve
@@ -106,6 +112,7 @@ def serve_cmd(
         max_batch=max_batch,
         vision=vision,
         max_batch_tokens=max_batch_tokens,
+        device_map=device_map,
     )
 
 

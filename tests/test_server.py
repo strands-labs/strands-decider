@@ -343,3 +343,27 @@ def test_too_many_options_returns_422(monkeypatch):
     )
     assert r.status_code == 422
     assert "24 slots" in r.json()["detail"]
+
+
+def test_device_map_reaches_the_loader(monkeypatch):
+    from strands_decider import server
+
+    seen = {}
+
+    def load(*_args, **kwargs):
+        seen.update(kwargs)
+        return _StubModel()
+
+    monkeypatch.setattr(server, "_engine", None)
+    monkeypatch.setattr(server.StrandsDeciderModel, "load", load)
+    monkeypatch.setattr(server, "SystemOneEngine", lambda model, cfg: _StubEngine())
+    server.create_app("checkpoints/strands-decider-test", device="cuda", device_map="auto")
+    assert seen["device_map"] == "auto"
+
+
+@pytest.mark.parametrize("kwargs", [{"device": "cpu"}, {"device": "cuda", "vision": True}])
+def test_device_map_needs_the_text_engine_on_cuda(kwargs):
+    from strands_decider import server
+
+    with pytest.raises(ValueError, match="device-map"):
+        server.create_app("checkpoints/strands-decider-test", device_map="auto", **kwargs)
