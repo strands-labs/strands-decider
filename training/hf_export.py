@@ -519,7 +519,7 @@ def card(
     data = ModelCardData(
         base_model=base.model,
         base_model_relation="adapter",
-        library_name="peft",
+        library_name="strands-decider",
         pipeline_tag="text-classification",
         tags=base.tags,
         license="apache-2.0",
