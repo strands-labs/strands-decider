@@ -46,9 +46,8 @@ import torch
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from metrics import image_dependence, naturalbench_paired, summarise
 
-from strands_decider.infer import _option_token_index
 from strands_decider.modeling import StrandsDeciderConfig, masked_log_softmax
-from strands_decider.prompting import render_question
+from strands_decider.prompting import option_token_index, render_question
 from strands_decider.schema import ChoiceQuestion, NoulQuestion, Question
 from strands_decider.vision import (
     VisionDeciderModel,
@@ -231,7 +230,7 @@ class _DeciderSystem:
             mm = {"pixel_values": out["pixel_values"], "image_grid_thw": out["image_grid_thw"]}
         text = expand_image_tokens(render_image_state("", n_img), counts) + rq.text
         enc = self.model.tokenizer(text, return_offsets_mapping=True)
-        opt = _option_token_index(enc["offset_mapping"], rq.option_spans, len(text) - len(rq.text))
+        opt = option_token_index(enc["offset_mapping"], rq.option_spans, len(text) - len(rq.text))
         ids = torch.tensor([enc["input_ids"]], device=self.device)
         mm = {k: v.to(self.device) for k, v in mm.items()}
         return rq, ids, torch.tensor([opt], device=self.device), mm

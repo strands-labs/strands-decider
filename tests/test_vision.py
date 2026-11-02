@@ -35,13 +35,13 @@ if tuple(int(x) for x in re.findall(r"\d+", transformers.__version__)[:2]) < (5,
 import torch  # noqa: E402
 from PIL import Image  # noqa: E402
 
-from strands_decider.infer import EngineConfig, SystemOneEngine, _option_token_index  # noqa: E402
+from strands_decider.infer import EngineConfig, SystemOneEngine  # noqa: E402
 from strands_decider.modeling import (  # noqa: E402
     StrandsDeciderConfig,
     StrandsDeciderModel,
     masked_log_softmax,
 )
-from strands_decider.prompting import render_question  # noqa: E402
+from strands_decider.prompting import option_token_index, render_question  # noqa: E402
 from strands_decider.schema import (  # noqa: E402
     ChoiceQuestion,
     NoulQuestion,
@@ -294,7 +294,7 @@ def _reference(vision: VisionEngine, state: str, images: list[str], q) -> list[f
     )
     text = expand_image_tokens(render_image_state(state, len(images)), counts) + rq.text
     enc = vision.tok(text, return_offsets_mapping=True)
-    opt = _option_token_index(enc["offset_mapping"], rq.option_spans, len(text) - len(rq.text))
+    opt = option_token_index(enc["offset_mapping"], rq.option_spans, len(text) - len(rq.text))
     ids = torch.tensor([enc["input_ids"]])
     with torch.no_grad():
         out = vision.model(

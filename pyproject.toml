@@ -163,7 +163,8 @@ format = "ruff format {args:.}"
 
 # Detached lint env: skips the project install (and therefore torch) so `hatch run lint:check`
 # stays fast in CI and locally. The typed runtime deps are listed explicitly so mypy can resolve
-# their imports; keep this list in sync with [project].dependencies for pydantic/fastapi/typer/rich/uvicorn.
+# their imports; keep this list in sync with [project].dependencies for
+# pydantic/fastapi/typer/rich/uvicorn/numpy.
 [tool.hatch.envs.lint]
 detached = true
 dependencies = [
@@ -174,6 +175,7 @@ dependencies = [
     "uvicorn[standard]>=0.30",
     "typer>=0.12",
     "rich>=13.7",
+    "numpy>=1.24",
 ]
 
 [tool.hatch.envs.lint.scripts]
