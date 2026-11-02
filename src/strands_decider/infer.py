@@ -219,7 +219,7 @@ class SystemOneEngine:
 
         `base` is 0 when the caller forwards only the question (the shared-prefix path,
         where `hidden` is the suffix) and the state's token count when it forwards the
-        whole prompt. `offsets` are `_fit`'s, so front truncation is accounted for.
+        whole prompt. `offsets` come from `_fit`'s tokenisation of the question.
         """
         rows = [
             option_token_index(offs, rq.option_spans, 0)
@@ -255,12 +255,8 @@ class SystemOneEngine:
         rendered: list[RenderedQuestion] | None = None,
     ) -> tuple[torch.Tensor, int]:
         """Fallback: encode each full prompt independently, from `_fit`'s state `s` and
-        questions `q`.
-
-        Previously this concatenated state and question into one string and let the
-        tokeniser truncate, which cuts from the right -- removing the options and the
-        `<answer>` marker the head pools at. Now it shares `_fit` with the cached path,
-        so both truncate the same thing in the same direction.
+        questions `q`. Sharing `_fit` with the cached path keeps the two paths' token
+        sequences identical.
         """
         ids, mask = self._pad([s + qi for qi in q])
         # This path forwards the whole prompt, so option positions sit after the state.

@@ -7,7 +7,7 @@ with v19 on an M4 Pro (`evaluation/bench_local.py`, median): one question at 222
 input tokens takes 162 / 682 / 2,685 ms on MPS and 113 / 486 / 1,764 ms here.
 
 Only the torso forward moves. `MLXEngine` subclasses `SystemOneEngine`, so rendering,
-tokenisation, the question-first truncation, option positions, batching, temperatures and the
+tokenisation, the context-window check, option positions, batching, temperatures and the
 masked softmax are the torch engine's own code, and the head is the checkpoint's own fp32
 module, run by torch on the CPU. Both of `evaluate`'s paths are kept: one question forwards the
 whole prompt; several encode the state once into an mlx-lm prompt cache, which is copied

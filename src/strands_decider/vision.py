@@ -495,8 +495,10 @@ class VisionEngine(SystemOneEngine):
             )["input_ids"]
 
         if len(s) + longest > max_len:
+            image_toks = sum(counts)
             raise ValueError(
-                f"prompt of {len(s) + longest} tokens exceeds the context window "
+                f"prompt of {len(s) + longest} tokens ({len(s) - image_toks} state + "
+                f"{image_toks} image + {longest} question) exceeds the context window "
                 f"of {max_len} tokens"
             )
         return s, q, mm, list(offs)
