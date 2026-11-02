@@ -90,7 +90,7 @@ def _exit_if_failed(future: Future) -> None:
 if os.environ.get("AWS_LAMBDA_INITIALIZATION_TYPE") == "on-demand":
     _engine: Future = ThreadPoolExecutor(max_workers=1).submit(_load)
     _engine.add_done_callback(_exit_if_failed)
-else:  # snap-start
+else:  # snap-start, provisioned concurrency, or not on Lambda
     _engine = Future()
     _engine.set_result(_load())
 

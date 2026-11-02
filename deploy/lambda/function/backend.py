@@ -1,9 +1,15 @@
 """llama.cpp as the backend of strands_decider.hidden_engine.HiddenStateEngine, through
-shim.c (libdecider.so)."""
+shim.c (libdecider.so).
+
+Calls run one at a time, as HiddenStateEngine's Backend contract asks of a backend that has
+not been shown to run them concurrently: each call already uses a thread per core. Lambda sends
+an execution environment one request at a time, so there the lock never waits.
+"""
 
 from __future__ import annotations
 
 import ctypes
+import threading
 from typing import Any
 
 import numpy as np
@@ -30,21 +36,23 @@ class LlamaBackend:
             raise RuntimeError(f"llama.cpp could not load {model_path}")
         self.lib = lib
         self.n_embd = n_embd.value
+        self._lock = threading.Lock()
 
     def forward(
         self, state: list[int], questions: list[list[int]], rows: list[list[int]]
     ) -> list[np.ndarray]:
         lens = [len(q) for q in questions]
         out = np.empty((sum(lens), self.n_embd), dtype=np.float32)
-        rc = self.lib.dh_forward(
-            self.handle,
-            _ints(state),
-            len(state),
-            _ints([t for q in questions for t in q]),
-            _ints(lens),
-            len(lens),
-            out.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
-        )
+        with self._lock:
+            rc = self.lib.dh_forward(
+                self.handle,
+                _ints(state),
+                len(state),
+                _ints([t for q in questions for t in q]),
+                _ints(lens),
+                len(lens),
+                out.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+            )
         if rc != 0:
             raise RuntimeError(f"dh_forward failed with {rc}")
         hidden = np.split(out, np.cumsum(lens)[:-1])
