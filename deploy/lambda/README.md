@@ -123,7 +123,7 @@ SnapStart decides the rest:
 | | `snapstart=true` (default) | `snapstart=false` |
 | --- | --- | --- |
 | First request on a new execution environment | about 6 s | up to 30 s |
-| Each new execution environment | $0.0014 to restore the snapshot | about $0.002, the 11 to 23 s the model takes to load |
+| Each new execution environment | $0.0014 to restore the snapshot | about $0.002, the 6 to 25 s the model takes to load |
 | Nobody calling | **about $39.50 a month** for the snapshot, and the image | **about $0.25 a month**, the image in ECR |
 
 With SnapStart, Lambda loads the model when it publishes a version, snapshots that execution
@@ -152,8 +152,9 @@ cheaper than separate requests. Peak memory stayed at 5.6 GB, with a 3,900-token
 questions, and with 300 questions (19,400 tokens, 4 minutes on Graviton2).
 
 With SnapStart, 10 new execution environments answered their first request in 5.6 to 7.5 s.
-Without it, 15 new environments loaded the model in 11 to 23 s, and their first requests took
-up to 30 s.
+Without it, 30 new environments over two runs loaded the model in 6 to 25 s, and their first
+requests took up to 30 s. Two more environments in one of those runs took 161 s to load; no
+request waited on one, and every request finished within 30.5 s.
 
 Compared with the torch engine in fp32 on CPU, over 20 requests that cover every question type,
 structured and Unicode states, 40, 64 and 300 questions and a 3,800-token state, the function
