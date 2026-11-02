@@ -57,7 +57,13 @@ export class DeciderFunctionStack extends Stack {
   constructor(scope: Construct, id: string, props?: StackProps) {
     super(scope, id, props);
     const ctx = (key: string) => this.node.tryGetContext(key);
+    // Off by default. SnapStart's snapshot is billed for as long as the stack exists, about
+    // $39.50 a month at 10 GB with no traffic at all, which is not what a serverless deploy
+    // should cost at rest. It cuts a new environment's first answer from up to 30 s to about 6 s;
+    // README.md, What it costs, says when to turn it on.
     const snapStart = flag(ctx("snapstart"), "snapstart");
+    // Keeps every request inside the function's 15-minute timeout: a larger one gets a 422
+    // naming its size before any work, not a timeout after 15 billed minutes.
     const maxRequestTokens = Number(ctx("max_request_tokens"));
     if (!Number.isInteger(maxRequestTokens) || maxRequestTokens < 0) {
       throw new Error(`max_request_tokens must be a whole number, 0 for no limit, not ${ctx("max_request_tokens")}`);
@@ -98,16 +104,16 @@ export class DeciderFunctionStack extends Stack {
       timeout: Duration.minutes(15),
       snapStart: snapStart ? lambda.SnapStartConf.ON_PUBLISHED_VERSIONS : undefined,
       logGroup,
-      environment: {
-        DECIDER_STRICT_WINDOW: String(flag(ctx("strict_window"), "strict_window")),
-        DECIDER_MAX_REQUEST_TOKENS: String(maxRequestTokens),
-      },
+      environment: { DECIDER_MAX_REQUEST_TOKENS: String(maxRequestTokens) },
       // Each deploy that changes the function publishes a version, and CloudFormation deletes the
       // one it replaces: Lambda bills a version's SnapStart snapshot for as long as it exists.
       currentVersionOptions: { removalPolicy: RemovalPolicy.DESTROY },
     });
-    // The image's tag is known only once it is built, so the version's hash does not change with
-    // it: add the build's inputs, and a new image publishes a new version.
+    // CDK publishes a new version, which the `live` alias then serves, only when the hash of the
+    // function's settings changes. The image is built during the deploy, so its tag is not known
+    // when CDK computes that hash: a new image alone would leave `live` on the old version.
+    // Hashing what the build reads, the source files and the build arguments, publishes a new
+    // version whenever the image can differ.
     fn.invalidateVersionBasedOn(
       FileSystem.fingerprint(REPO_ROOT, { exclude: ASSET_EXCLUDE, ignoreMode: IgnoreMode.DOCKER }) +
         JSON.stringify(buildArgs),

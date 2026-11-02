@@ -95,8 +95,7 @@ def load(model_dir, monkeypatch):
     def _load(**env: str):
         monkeypatch.setenv("DECIDER_MODEL_DIR", str(model_dir))
         monkeypatch.delenv("AWS_LAMBDA_INITIALIZATION_TYPE", raising=False)
-        for key in ("DECIDER_STRICT_WINDOW", "DECIDER_MAX_REQUEST_TOKENS"):
-            monkeypatch.delenv(key, raising=False)
+        monkeypatch.delenv("DECIDER_MAX_REQUEST_TOKENS", raising=False)
         for key, value in env.items():
             monkeypatch.setenv(key, value)
         monkeypatch.setitem(sys.modules, "backend", types.SimpleNamespace(LlamaBackend=FakeBackend))
@@ -146,13 +145,12 @@ def test_health_reports_the_model_and_settings(load):
             "model": "tiny-q8_0",
             "max_length": 512,
             "temperature": 1.0,
-            "strict_window": False,
             "max_request_tokens": None,
         },
     )
-    handler = load(DECIDER_STRICT_WINDOW="true", DECIDER_MAX_REQUEST_TOKENS="24576")
+    handler = load(DECIDER_MAX_REQUEST_TOKENS="24576")
     _, body = call(handler, url_event("GET", "/health"))
-    assert (body["strict_window"], body["max_request_tokens"]) == (True, 24576)
+    assert body["max_request_tokens"] == 24576
 
 
 @pytest.mark.parametrize("b64", [False, True], ids=["text", "base64"])
@@ -207,16 +205,6 @@ def test_requests_the_engine_refuses_get_422_before_the_forward(load):
     )
     assert status == 422 and "images are not supported" in body["detail"]
     assert not FakeBackend.calls
-
-
-def test_strict_window_refuses_a_prompt_over_the_window(load):
-    long_request = {**REQUEST, "state": "word " * 600}
-    status, body = call(
-        load(DECIDER_STRICT_WINDOW="true"), url_event("POST", "/v1/systemone", long_request)
-    )
-    assert status == 422 and "exceeds the context window of 512 tokens" in body["detail"]
-    status, _ = call(load(), url_event("POST", "/v1/systemone", long_request))
-    assert status == 200  # trimmed to fit, as `serve` does by default
 
 
 def test_on_demand_init_loads_in_the_background(load):

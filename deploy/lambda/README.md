@@ -95,8 +95,8 @@ for the default. It holds:
    torch. It runs on the CodeBuild project's `LARGE` instance (16 GB of memory), as the merge
    takes about 8 GB.
 2. The function: arm64, 10,240 MB (the most Lambda gives, and the only size with 6 vCPUs), a
-   15-minute timeout, SnapStart ([What it costs](#what-it-costs)), and a log group that keeps two
-   weeks. Its `live` alias points at the latest version, and the Function URL serves the alias.
+   15-minute timeout, SnapStart if you turn it on ([What it costs](#what-it-costs)), and a log
+   group that keeps two weeks. Its `live` alias points at the latest version, and the Function URL serves the alias.
    Each deploy that changes the function publishes a new version and deletes the one before.
 
 ## Configuration
@@ -106,10 +106,9 @@ Every setting is a CDK context value. Change it in `cdk.json`, or pass `-c key=v
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
-| `model` | `StrandsAgents/strands-decider-2B-qwen3.5-v1-2610` | The strands-decider model, a Hugging Face Hub id. Any Qwen3.5 model with a pointer head works; the Gemma 4 models do not. It names the stack. |
+| `model` | `StrandsAgents/strands-decider-2B-qwen3.5-v1-2610` | The strands-decider model, a Hugging Face Hub id. Any Qwen3.5 model with a pointer head works. It names the stack. |
 | `model_revision` | `main` | The model's revision. Use a release's date tag (`YYMMDD`) to pin it ([docs/inference.md, Model artifact](../../docs/inference.md#model-artifact)). |
-| `snapstart` | `true` | `false` turns SnapStart off ([What it costs](#what-it-costs)) |
-| `strict_window` | `false` | `true` refuses a prompt over the window with a 422, as `serve --strict-window` does |
+| `snapstart` | `false` | `true` turns SnapStart on: new execution environments answer in about 6 s instead of up to 30 s, for about $39.50 a month while the stack exists ([What it costs](#what-it-costs)) |
 | `max_request_tokens` | `24576` | The most tokens one request may forward, the state once plus every question; `0` for no limit ([Limits](#limits)) |
 
 ## What it costs
@@ -120,11 +119,16 @@ CloudWatch Logs adds $0.50 per GB ingested, and a request writes a few hundred b
 
 SnapStart decides the rest:
 
-| | `snapstart=true` (default) | `snapstart=false` |
+| | `snapstart=false` (default) | `snapstart=true` |
 | --- | --- | --- |
-| First request on a new execution environment | about 6 s | up to 30 s |
-| Each new execution environment | $0.0014 to restore the snapshot | about $0.002, the 6 to 25 s the model takes to load |
-| Nobody calling | **about $39.50 a month** for the snapshot, and the image | **about $0.25 a month**, the image in ECR |
+| Nobody calling | **about $0.25 a month**, the image in ECR | **about $39.50 a month** for the snapshot, and the image |
+| First request on a new execution environment | up to 30 s | about 6 s |
+| Each new execution environment | about $0.002, the 6 to 25 s the model takes to load | $0.0014 to restore the snapshot |
+
+SnapStart is off by default, so a deploy costs nothing while nobody calls it. Turn it on
+(`npx cdk deploy -c snapstart=true`) when the first answer of a new environment matters: once
+you are measuring latency for real traffic, or traffic is bursty enough that Lambda often adds
+environments.
 
 With SnapStart, Lambda loads the model when it publishes a version, snapshots that execution
 environment, and starts new ones from the snapshot. For Python functions Lambda bills the
@@ -165,9 +169,8 @@ went from 0.495 to 0.505. The quantization to Q8_0 accounts for most of that. Re
 ## Limits
 
 - The state and the longest question must fit the model's window (`max_length`, 4,096 tokens for
-  the v1 release). As with `serve`, a question may take at most three quarters of it, and the state
-  is trimmed from the end to fit the rest; a question trimmed into its options is refused with a
-  422. With `strict_window=true`, a prompt over the window is refused with a 422 instead.
+  the v1 release). A prompt over it is handled as `serve` handles one
+  ([docs/inference.md](../../docs/inference.md)), with a 422 where `serve` refuses it.
 - A request may forward at most `max_request_tokens` tokens, the state once plus every question.
   The default, 24,576, stays well inside the 15-minute timeout; a larger request is refused with
   a 422 before any work is done.

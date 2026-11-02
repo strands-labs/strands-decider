@@ -65,11 +65,7 @@ def _load() -> HiddenStateEngine:
         model,
         os.cpu_count() or 1,
     )
-    engine = HiddenStateEngine.from_assets(
-        os.path.join(MODEL_DIR, "assets"),
-        backend,
-        strict_window=os.environ.get("DECIDER_STRICT_WINDOW") == "true",
-    )
+    engine = HiddenStateEngine.from_assets(os.path.join(MODEL_DIR, "assets"), backend)
     # The first forward's one-time costs, paid before the snapshot is taken, and before the
     # request limit, which could refuse even this.
     engine.evaluate(
@@ -142,7 +138,6 @@ def _http(event: dict[str, Any]) -> dict[str, Any]:
                 "model": engine.cfg.model_name,
                 "max_length": engine.cfg.max_length,
                 "temperature": engine.cfg.temperature,
-                "strict_window": engine.cfg.strict_window,
                 "max_request_tokens": engine.cfg.max_request_tokens,
             },
         )
@@ -161,6 +156,10 @@ def _http(event: dict[str, Any]) -> dict[str, Any]:
 
 
 def handler(event: Any, context: Any) -> dict[str, Any]:
+    # Two ways in. A Function URL request arrives wrapped in an HTTP event, with a
+    # requestContext.http, and gets serve's routes and status codes. A direct invocation (the
+    # Invoke API, Step Functions, EventBridge, another service in the account) passes the
+    # System One request itself as the event, and gets the response as the result.
     if isinstance(event, dict) and "http" in event.get("requestContext", {}):
         return _http(event)
     return _evaluate(SystemOneRequest.model_validate(event))
