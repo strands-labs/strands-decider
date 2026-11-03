@@ -6,6 +6,7 @@ CPU only: a stub engine records what the warm-up asks; a tiny random torso runs 
 from __future__ import annotations
 
 import pytest
+from fastapi.testclient import TestClient
 from test_engine_concurrency import _tokenizer
 
 from strands_decider import server
@@ -24,28 +25,37 @@ class _RecordingEngine:
         self.requests.append(request)
 
 
+def _run_lifespan(app) -> None:
+    with TestClient(app):
+        pass
+
+
 @pytest.fixture
-def engine(monkeypatch):
-    recorder = _RecordingEngine()
-    monkeypatch.setattr(server, "_engine", None)
-    monkeypatch.setattr(server.StrandsDeciderModel, "load", lambda *a, **k: object())
-    monkeypatch.setattr(server, "SystemOneEngine", lambda model, cfg: recorder)
-    return recorder
+def engine():
+    return _RecordingEngine()
 
 
 @pytest.mark.parametrize("device", ["cuda", "cuda:1", "cpu", "mps"])
 def test_warmup_is_on_by_default_on_every_device(engine, device):
-    server.create_app("checkpoints/test", device=device)
+    _run_lifespan(server.create_app("checkpoints/test", device=device, build_engine=lambda: engine))
     assert engine.requests
 
 
 def test_no_warmup_skips_it(engine):
-    server.create_app("checkpoints/test", device="cuda", warmup=False)
+    _run_lifespan(
+        server.create_app(
+            "checkpoints/test", device="cuda", warmup=False, build_engine=lambda: engine
+        )
+    )
     assert not engine.requests
 
 
 def test_warmup_asks_each_kind_and_every_question_count(engine):
-    server.create_app("checkpoints/test", device="cuda", max_batch=8)
+    _run_lifespan(
+        server.create_app(
+            "checkpoints/test", device="cuda", max_batch=8, build_engine=lambda: engine
+        )
+    )
 
     kinds_alone = {
         next(iter(r.questions.values())).type for r in engine.requests if len(r.questions) == 1
@@ -56,12 +66,11 @@ def test_warmup_asks_each_kind_and_every_question_count(engine):
     assert {len(r.questions) for r in engine.requests} == set(range(1, 9))
 
 
-def test_a_failed_warmup_stops_startup(monkeypatch):
-    monkeypatch.setattr(server, "_engine", None)
-    monkeypatch.setattr(server.StrandsDeciderModel, "load", lambda *a, **k: object())
-    monkeypatch.setattr(server, "SystemOneEngine", lambda model, cfg: _RecordingEngine(fail=True))
+def test_a_failed_warmup_stops_startup():
+    failing = _RecordingEngine(fail=True)
+    app = server.create_app("checkpoints/test", device="cuda", build_engine=lambda: failing)
     with pytest.raises(RuntimeError, match="compile"):
-        server.create_app("checkpoints/test", device="cuda")
+        _run_lifespan(app)
 
 
 def test_warmup_runs_on_a_real_engine():
@@ -86,13 +95,17 @@ def test_warmup_runs_on_a_real_engine():
     server.warm_up(engine, max_batch=4)
 
 
-def test_vision_warmup_sends_an_image_request(monkeypatch):
-    from strands_decider import vision
-
+def test_vision_warmup_sends_an_image_request():
     recorder = _RecordingEngine()
-    monkeypatch.setattr(server, "_engine", None)
-    monkeypatch.setattr(vision, "load_vision_engine", lambda *a, **k: recorder)
-    server.create_app("checkpoints/test", device="cuda", vision=True, max_batch=5)
+    _run_lifespan(
+        server.create_app(
+            "checkpoints/test",
+            device="cuda",
+            vision=True,
+            max_batch=5,
+            build_engine=lambda: recorder,
+        )
+    )
 
     with_images = [r for r in recorder.requests if r.images]
     assert len(with_images) == 1
@@ -100,5 +113,5 @@ def test_vision_warmup_sends_an_image_request(monkeypatch):
 
 
 def test_text_warmup_sends_no_images(engine):
-    server.create_app("checkpoints/test", device="cuda")
+    _run_lifespan(server.create_app("checkpoints/test", device="cuda", build_engine=lambda: engine))
     assert not any(r.images for r in engine.requests)

@@ -471,10 +471,10 @@ def test_server_routes_images(ckpt):
         "images": [_b64(320, 320, 3)],
         "questions": {"signed": {"type": "noul", "instructions": "Is the form signed?"}},
     }
-    vision_app = TestClient(server.create_app(ckpt, device="cpu", vision=True))
-    r = vision_app.post("/v1/systemone", json=body)
-    assert r.status_code == 200, r.text
-    assert 0.0 <= r.json()["answers"]["signed"]["noul"] <= 1.0
-    assert vision_app.get("/health").json()["vision"] is True
-    text_app = TestClient(server.create_app(ckpt, device="cpu"))
-    assert text_app.post("/v1/systemone", json=body).status_code == 422
+    with TestClient(server.create_app(ckpt, device="cpu", vision=True)) as vision_app:
+        r = vision_app.post("/v1/systemone", json=body)
+        assert r.status_code == 200, r.text
+        assert 0.0 <= r.json()["answers"]["signed"]["noul"] <= 1.0
+        assert vision_app.get("/health").json()["vision"] is True
+    with TestClient(server.create_app(ckpt, device="cpu")) as text_app:
+        assert text_app.post("/v1/systemone", json=body).status_code == 422
