@@ -10,17 +10,11 @@ tests/test_hidden_engine.py checks that the two engines give the same answers.
 The engine asks the backend only for the hidden states the head reads: at each option's
 last token, and at the question's last token, `<answer>`.
 
-The answers are the same; two things around them can differ:
-
-- `usage.input_tokens`. This engine counts the state once, then every question.
-  `SystemOneEngine` counts the state once per question on its batched path (with
-  `use_prefix_cache=False`, or when its cache cannot be forked), and once per chunk of up
-  to `max_batch` questions on its shared-prefix path. For a request with one question,
-  all three counts agree.
-- Which part of a long state is kept. `SystemOneEngine` fits the state to the window
-  separately for each chunk of questions, this engine once for all of them. With more
-  questions than one chunk holds and a state too long for the window, this engine trims
-  the state to leave room for the longest question in the whole request.
+The answers are the same; `usage.input_tokens` can differ: this engine counts the state
+once, then every question. `SystemOneEngine` counts the state once per question on its
+batched path (with `use_prefix_cache=False`, or when its cache cannot be forked), and
+once per chunk of up to `max_batch` questions on its shared-prefix path. For a request
+with one question, all three counts agree.
 """
 
 from __future__ import annotations
@@ -94,12 +88,6 @@ class HiddenEngineConfig:
     temperature_by_kind: dict[str, float] = field(default_factory=dict)
     ordinal_smoothing: float = 0.0
     model_name: str = "strands-decider"
-    # The side a long state loses tokens from, as the Hugging Face tokenizer's
-    # `truncation_side` sets it for SystemOneEngine.
-    truncation_side: str = "right"
-    # As in EngineConfig.
-    strict_window: bool = False
-    max_question_fraction: float = 0.75
     # The most tokens one request may run through the backend, the state once plus every
     # question; a larger request is refused before the backend runs. None: no limit.
     max_request_tokens: int | None = None
@@ -114,8 +102,8 @@ class HiddenStateEngine:
         backend: Backend,
     ):
         self.tok = tokenizer
-        # fit_window changes the tokenizer's truncation, so two threads must not run it at
-        # once.
+        # fit_window turns the tokenizer's padding and truncation off, so two threads must
+        # not run it on the same tokenizer at once.
         self._tok_lock = threading.Lock()
         self.head = head
         self.cfg = config
@@ -147,18 +135,10 @@ class HiddenStateEngine:
     def fit(
         self, state_text: str, question_texts: list[str]
     ) -> tuple[list[int], list[list[int]], list[list[tuple[int, int]]]]:
-        """prompting.fit_window with this engine's settings, as SystemOneEngine._fit runs it
-        with its own: state ids, question ids and each question's character offsets."""
+        """prompting.fit_window on this engine's tokenizer: state ids, question ids and
+        each question's character offsets."""
         with self._tok_lock:
-            return fit_window(
-                self.tok,
-                state_text,
-                question_texts,
-                self.cfg.max_length,
-                strict=self.cfg.strict_window,
-                max_question_fraction=self.cfg.max_question_fraction,
-                truncation_side=self.cfg.truncation_side,
-            )
+            return fit_window(self.tok, state_text, question_texts, self.cfg.max_length)
 
     def evaluate(self, request: SystemOneRequest | Mapping[str, Any]) -> SystemOneResponse:
         req = (
@@ -227,7 +207,6 @@ def save_assets(model: StrandsDeciderModel, path: str, model_name: str) -> None:
         "temperature": cfg.temperature,
         "temperature_by_kind": cfg.temperature_by_kind,
         "ordinal_smoothing": cfg.ordinal_smoothing,
-        "truncation_side": model.tokenizer.truncation_side,
     }
     with open(os.path.join(path, "head_config.json"), "w", encoding="utf-8") as f:
         json.dump(saved, f, indent=2)

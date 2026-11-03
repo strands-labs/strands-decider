@@ -26,14 +26,14 @@ from strands_decider.hidden_engine import (  # noqa: E402
     NumpyPointerHead,
     save_assets,
 )
-from strands_decider.infer import EngineConfig, SystemOneEngine, load_engine  # noqa: E402
+from strands_decider.infer import SystemOneEngine, load_engine  # noqa: E402
 from strands_decider.modeling import (  # noqa: E402
     PointerHead,
     StrandsDeciderConfig,
     StrandsDeciderModel,
     ensure_bos,
 )
-from strands_decider.prompting import fit_window, render_question, render_state  # noqa: E402
+from strands_decider.prompting import render_question, render_state  # noqa: E402
 from strands_decider.schema import (  # noqa: E402
     ChoiceQuestion,
     NoulQuestion,
@@ -59,17 +59,8 @@ QUESTIONS = {
         instructions="How frustrated is the patron?", criteria=["calm", "annoyed", "angry"]
     ),
 }
-# Over 384 tokens, the most of a 512-token window a question may claim: trimmed from the
-# front, it loses its first options, and both engines refuse it.
-LONG_CHOICE = ChoiceQuestion(
-    instructions="Which shelf holds the book?",
-    criteria={f"shelf {i}": "fiction and poetry, rows A to F" for i in range(60)},
-)
-# Over 384 tokens of instructions and two options: trimmed from the front to the
-# question's reserve, it keeps its options and is answered.
-LONG_NOUL = NoulQuestion(
-    instructions="Read the whole policy before you answer. " * 60 + "Is it renewable?"
-)
+# About 1,100 tokens against a 512-token window: both engines refuse it.
+OVERSIZE_REQUEST = SystemOneRequest(state=POLICY * 30 + "Help!", questions=QUESTIONS)
 REQUESTS = {
     "one question": SystemOneRequest(
         state=POLICY + "Can I renew the cookbook?", questions={"team": QUESTIONS["team"]}
@@ -77,9 +68,6 @@ REQUESTS = {
     "three questions": SystemOneRequest(
         state=POLICY * 6 + "My renewal failed and I leave Friday!", questions=QUESTIONS
     ),
-    # About 1,100 tokens against a 512-token window: both engines trim the state.
-    "trimmed state": SystemOneRequest(state=POLICY * 30 + "Help!", questions=QUESTIONS),
-    "trimmed question": SystemOneRequest(state=POLICY, questions={"renewable": LONG_NOUL}),
 }
 
 
@@ -89,7 +77,8 @@ def _tokenizer(bos: bool):
     from transformers import PreTrainedTokenizerFast
 
     texts = [render_state(r.state) for r in REQUESTS.values()]
-    texts += [render_question(q).text for q in [*QUESTIONS.values(), LONG_CHOICE, LONG_NOUL]]
+    texts.append(render_state(OVERSIZE_REQUEST.state))
+    texts += [render_question(q).text for q in QUESTIONS.values()]
     words = {w for text in texts for w, _ in pre_tokenizers.Whitespace().pre_tokenize_str(text)}
     vocab = {w: i for i, w in enumerate(["<pad>", "<eos>", "<unk>", "<bos>", *sorted(words)])}
     tok = Tokenizer(models.WordLevel(vocab, unk_token="<unk>"))
@@ -228,7 +217,6 @@ def test_assets_hold_the_head_and_settings(engines):
         "temperature": cfg.temperature,
         "temperature_by_kind": cfg.temperature_by_kind,
         "ordinal_smoothing": cfg.ordinal_smoothing,
-        "truncation_side": "right",
     }
     assert _hidden_engine(torch_engine, assets).cfg.model_name == torch_engine.cfg.model_name
 
@@ -248,16 +236,14 @@ def test_answers_as_torch_does(engines, name):
             assert got.answers[q].choice == answer.choice
 
 
-@pytest.mark.parametrize("name", ["trimmed state", "trimmed question"])
-def test_fit_matches_system_one_engine(engines, name):
+def test_fit_matches_system_one_engine(engines):
     torch_engine, assets = engines
-    state = render_state(REQUESTS[name].state)
-    texts = [render_question(q).text for q in REQUESTS[name].questions.values()]
+    state = render_state(REQUESTS["three questions"].state)
+    texts = [render_question(q).text for q in REQUESTS["three questions"].questions.values()]
     s, q, offs = _hidden_engine(torch_engine, assets).fit(state, texts)
     want_s, want_q, want_offs = torch_engine._fit(state, texts)
     assert (s, q) == (want_s, want_q)
     assert offs == [[tuple(o) for o in x] for x in want_offs]
-    assert len(s) + max(len(x) for x in q) <= torch_engine.model.config.max_length
     if torch_engine.tok.bos_token_id is not None:
         assert s[0] == torch_engine.tok.bos_token_id
 
@@ -272,25 +258,12 @@ def test_backend_is_asked_for_the_option_ends_then_the_last_token(engines):
         assert r[-1] == len(q) - 1 and r[:-1] == sorted(r[:-1])
 
 
-def test_strict_window_refuses_as_torch_does(engines):
+def test_oversize_request_is_refused_as_torch_does(engines):
     torch_engine, assets = engines
-    strict_torch = SystemOneEngine(
-        torch_engine.model, EngineConfig(device="cpu", strict_window=True)
-    )
-    strict = _hidden_engine(torch_engine, assets, strict_window=True)
-    for engine in (strict_torch, strict):
-        with pytest.raises(ValueError, match="exceeds the context window of 512 tokens"):
-            engine.evaluate(REQUESTS["trimmed state"])
-    assert strict.evaluate(REQUESTS["one question"]).answers.keys() == {"team"}
-
-
-def test_question_trimmed_into_its_options_is_refused_before_the_forward(engines):
-    torch_engine, assets = engines
-    request = SystemOneRequest(state="Where is it?", questions={"shelf": LONG_CHOICE})
     engine = _hidden_engine(torch_engine, assets)
     for e in (torch_engine, engine):
-        with pytest.raises(ValueError, match="truncated through its option list"):
-            e.evaluate(request)
+        with pytest.raises(ValueError, match="exceeds the context window of 512 tokens"):
+            e.evaluate(OVERSIZE_REQUEST)
     assert not engine.backend.calls
 
 
@@ -384,27 +357,6 @@ def test_assets_for_another_readout_are_refused(engines, tmp_path):
     torch_engine, assets = engines
     with pytest.raises(ValueError, match="not for a pointer head"):
         _hidden_engine(torch_engine, _resave(assets, tmp_path, readout="slot"))
-
-
-@pytest.mark.parametrize("side", ["right", "left"])
-def test_a_long_state_is_trimmed_on_the_tokenizers_side(engines, tmp_path, monkeypatch, side):
-    """fit_window trims the state as the Hugging Face tokenizer does with its
-    truncation_side, and save_assets carries that side to the hidden-state engine."""
-    torch_engine, _ = engines
-    monkeypatch.setattr(torch_engine.tok, "truncation_side", side)
-    state = render_state(REQUESTS["trimmed state"].state)
-    question = render_question(QUESTIONS["urgent"]).text
-    reserve = len(torch_engine.tok(question, add_special_tokens=False)["input_ids"])
-    want = torch_engine.tok(
-        state, add_special_tokens=True, truncation=True, max_length=512 - reserve
-    )["input_ids"]
-    s, _, _ = fit_window(
-        torch_engine.tok.backend_tokenizer, state, [question], 512, truncation_side=side
-    )
-    assert s == want
-    assert torch_engine._fit(state, [question])[0] == want
-    save_assets(torch_engine.model, str(tmp_path / "assets"), "tiny")
-    assert _hidden_engine(torch_engine, tmp_path / "assets").fit(state, [question])[0] == want
 
 
 def test_the_head_uses_the_saved_eps(engines, tmp_path):
