@@ -48,8 +48,11 @@ def create_app(
     max_batch: int = 32,
     vision: bool = False,
     max_batch_tokens: int | None = None,
+    device_map: str | None = None,
 ) -> FastAPI:
     global _engine
+    if device_map and (vision or not device.startswith("cuda")):
+        raise ValueError("--device-map splits the text torso across CUDA GPUs: use it with cuda")
 
     @contextlib.asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -89,7 +92,9 @@ def create_app(
     elif device == "mlx":
         _engine = load_mlx(checkpoint, config)
     else:
-        model = StrandsDeciderModel.load(checkpoint, attn_implementation=attn_implementation)
+        model = StrandsDeciderModel.load(
+            checkpoint, device_map=device_map, attn_implementation=attn_implementation
+        )
         _engine = SystemOneEngine(model, config)
 
     # SageMaker and AgentCore Runtime call /ping and /invocations; each is the same
@@ -143,6 +148,7 @@ def serve(
     max_batch: int = 32,
     vision: bool = False,
     max_batch_tokens: int | None = None,
+    device_map: str | None = None,
 ) -> None:
     import uvicorn
 
@@ -154,6 +160,7 @@ def serve(
         max_batch=max_batch,
         vision=vision,
         max_batch_tokens=max_batch_tokens,
+        device_map=device_map,
     )
     # Single worker: the model owns the GPU, and forking more would just duplicate it.
     uvicorn.run(app, host=host, port=port, workers=1)
