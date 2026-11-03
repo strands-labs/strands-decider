@@ -96,12 +96,15 @@ def test_health(client):
     assert r.json()["status"] == "ok"
 
 
-def test_health_identifies_checkpoint(monkeypatch):
+def test_health_identifies_checkpoint():
     """The real /health names the loaded checkpoint and window, so a stale server
     still holding the port cannot pass for the one just started."""
-    monkeypatch.setattr(server.StrandsDeciderModel, "load", lambda *a, **k: _StubModel())
-    monkeypatch.setattr(server, "SystemOneEngine", lambda model, cfg: _StubEngine())
-    app = server.create_app("checkpoints/strands-decider-test", device="cpu", warmup=False)
+    app = server.create_app(
+        "checkpoints/strands-decider-test",
+        device="cpu",
+        warmup=False,
+        build_engine=_StubEngine,
+    )
     with TestClient(app) as client:
         r = client.get("/health")
     assert r.status_code == 200
@@ -109,12 +112,15 @@ def test_health_identifies_checkpoint(monkeypatch):
     assert r.json()["max_length"] == 512
 
 
-def test_sagemaker_paths_alias_the_api(monkeypatch):
+def test_sagemaker_paths_alias_the_api():
     """SageMaker and AgentCore Runtime call GET /ping and POST /invocations; the real app
     answers them as /health and /v1/systemone."""
-    monkeypatch.setattr(server.StrandsDeciderModel, "load", lambda *a, **k: _StubModel())
-    monkeypatch.setattr(server, "SystemOneEngine", lambda model, cfg: _StubEngine())
-    app = server.create_app("checkpoints/strands-decider-test", device="cpu", warmup=False)
+    app = server.create_app(
+        "checkpoints/strands-decider-test",
+        device="cpu",
+        warmup=False,
+        build_engine=_StubEngine,
+    )
     with TestClient(app) as client:
         assert client.get("/ping").json() == client.get("/health").json()
         body = {"state": "x", "questions": {"q": {"type": "noul", "instructions": "Yes?"}}}
@@ -214,22 +220,16 @@ def test_choice_answer_picks_argmax():
     assert ans.confidence == pytest.approx((3 * 0.5 - 1) / 2)
 
 
-def test_real_create_app_routes_work(monkeypatch):
+def test_real_create_app_routes_work():
     """Exercise the shipped create_app, not a hand-rolled copy of it.
 
     The earlier tests mount their own routes, which would not catch a mistake in
     server.create_app itself -- for instance an unresolvable request annotation,
     which FastAPI turns into a silent 422 rather than an import error.
     """
-    from strands_decider import infer
-
-    monkeypatch.setattr(
-        server.StrandsDeciderModel, "load", classmethod(lambda cls, *a, **k: _StubModel())
+    app = server.create_app(
+        "checkpoints/does-not-exist", device="cpu", warmup=False, build_engine=_StubEngine
     )
-    monkeypatch.setattr(server, "SystemOneEngine", lambda model, cfg: _StubEngine())
-    monkeypatch.setattr(infer, "SystemOneEngine", lambda model, cfg=None: _StubEngine())
-
-    app = server.create_app("checkpoints/does-not-exist", device="cpu", warmup=False)
     with TestClient(app) as client:
         assert client.get("/health").status_code == 200
 
@@ -276,15 +276,12 @@ def _racing_engine_cls():
     return _RacingEngine, state
 
 
-def _run_racing(monkeypatch, device):
+def _run_racing(device):
     EngineCls, state = _racing_engine_cls()
-    monkeypatch.setattr(
-        server.StrandsDeciderModel, "load", classmethod(lambda cls, *a, **k: _StubModel())
-    )
-    monkeypatch.setattr(server, "SystemOneEngine", lambda model, cfg: EngineCls())
-
     # Warm-up would call this blocking engine before the test releases it.
-    app = server.create_app("checkpoints/does-not-exist", device=device, warmup=False)
+    app = server.create_app(
+        "checkpoints/does-not-exist", device=device, warmup=False, build_engine=EngineCls
+    )
     payload = {"state": "x", "questions": {"q": {"type": "noul", "instructions": "y"}}}
 
     with TestClient(app) as client:
@@ -307,38 +304,35 @@ def _run_racing(monkeypatch, device):
     return state["peak"]
 
 
-def test_mps_serialises_engine_calls(monkeypatch):
+def test_mps_serialises_engine_calls():
     """MPS crashes on concurrent GPU calls (issue #9), so requests must take turns."""
-    peak = _run_racing(monkeypatch, device="mps")
+    peak = _run_racing(device="mps")
     assert peak < 2, (
         f"two requests entered the engine concurrently on MPS (peak={peak}); "
         "GPU calls must be serialised to avoid the Metal command-buffer crash"
     )
 
 
-def test_cpu_allows_concurrent_engine_calls(monkeypatch):
+def test_cpu_allows_concurrent_engine_calls():
     """CPU (and CUDA) don't need serialisation; the lock would just block throughput."""
-    peak = _run_racing(monkeypatch, device="cpu")
+    peak = _run_racing(device="cpu")
     assert peak == 2, (
         f"CPU requests were serialised (peak={peak}); the lock should be lifted on "
         "devices that tolerate overlapping engine calls"
     )
 
 
-def test_too_many_options_returns_422(monkeypatch):
+def test_too_many_options_returns_422():
     """A question wider than the model's slots is caller error, not a 500."""
 
     class _NarrowEngine(_StubEngine):
         def evaluate(self, request):
             raise ValueError("question has 30 options but this model has 24 slots")
 
-    monkeypatch.setattr(
-        server.StrandsDeciderModel, "load", classmethod(lambda cls, *a, **k: _StubModel())
-    )
-    monkeypatch.setattr(server, "SystemOneEngine", lambda model, cfg: _NarrowEngine())
-
     # No warm-up: this engine rejects every request.
-    app = server.create_app("checkpoints/does-not-exist", device="cpu", warmup=False)
+    app = server.create_app(
+        "checkpoints/does-not-exist", device="cpu", warmup=False, build_engine=_NarrowEngine
+    )
     with TestClient(app) as client:
         r = client.post(
             "/v1/systemone",

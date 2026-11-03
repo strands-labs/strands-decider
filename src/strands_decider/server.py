@@ -11,7 +11,7 @@ import contextlib
 import os
 import threading
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -90,6 +90,7 @@ def create_app(
     max_batch_tokens: int | None = None,
     device_map: str | None = None,
     warmup: bool = True,
+    build_engine: Callable[[], SystemOneEngine] | None = None,
 ) -> FastAPI:
     if device_map and (vision or not device.startswith("cuda")):
         raise ValueError("--device-map splits the text torso across CUDA GPUs: use it with cuda")
@@ -108,7 +109,7 @@ def create_app(
         max_batch_tokens=max_batch_tokens,
     )
 
-    def _build_engine() -> SystemOneEngine:
+    def _default_build_engine() -> SystemOneEngine:
         if vision:
             from .vision import load_vision_engine
 
@@ -120,9 +121,13 @@ def create_app(
         )
         return SystemOneEngine(model, config)
 
+    # Tests inject a stub via `build_engine=...` to skip model loading. Construction
+    # still runs under the lifespan, so a half-built engine is still closed.
+    build = build_engine or _default_build_engine
+
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        engine = _build_engine()
+        engine = build()
         app.state.engine = engine
         try:
             # Listener binds only after lifespan startup returns, so /health (/ping)
