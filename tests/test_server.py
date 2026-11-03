@@ -335,7 +335,8 @@ def test_too_many_options_returns_422(monkeypatch):
     )
     monkeypatch.setattr(server, "SystemOneEngine", lambda model, cfg: _NarrowEngine())
 
-    app = server.create_app("checkpoints/does-not-exist", device="cpu")
+    # No warm-up: this engine rejects every request.
+    app = server.create_app("checkpoints/does-not-exist", device="cpu", warmup=False)
     r = TestClient(app).post(
         "/v1/systemone",
         json={"state": "x", "questions": {"q": {"type": "noul", "instructions": "y"}}},
