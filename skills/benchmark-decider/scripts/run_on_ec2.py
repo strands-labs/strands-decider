@@ -296,6 +296,7 @@ def build_remote_script(
         benchmark_arguments.append("--smoke")
     command = " ".join(shlex.quote(argument) for argument in benchmark_arguments)
     environment_dir = str(Path(environment_path).parent)
+    environment_object = f"s3://{bucket_name}/{object_prefix}/environment.yaml"
     benchmark_command = (
         "env PYTHONPATH=src /usr/local/bin/uv run --project benchmark --locked --python 3.12 "
         f"python -m benchmark.runner run {command}"
@@ -313,6 +314,11 @@ aws s3 cp \
   --region {shlex.quote(region)}
 tar -xzf /tmp/strands-decider-source.tgz -C /opt/strands-decider
 cd /opt/strands-decider
+mkdir -p {shlex.quote(environment_dir)}
+aws s3 cp \
+  {shlex.quote(environment_object)} \
+  {shlex.quote(environment_path)} \
+  --region {shlex.quote(region)}
 set +e
 script --quiet --return --command {shlex.quote(benchmark_command)} /tmp/benchmark.log
 benchmark_status=$?
@@ -392,6 +398,7 @@ def main() -> int:
         "models": selected_models,
         "endpoints": endpoints,
         "git_ref": args.ref,
+        "environment_transfer": "local environment.yaml copied separately from the Git archive",
         "smoke": args.smoke,
         "network": "default VPC, public egress, no inbound rules",
         "cleanup": "terminate instance and delete temporary IAM, S3, and security group",
@@ -441,6 +448,12 @@ def main() -> int:
                 str(source_archive),
                 bucket_name,
                 f"{object_prefix}/source.tgz",
+                ExtraArgs={"ServerSideEncryption": "AES256"},
+            )
+            s3.upload_file(
+                str(environment_file),
+                bucket_name,
+                f"{object_prefix}/environment.yaml",
                 ExtraArgs={"ServerSideEncryption": "AES256"},
             )
             print(f"created private transfer bucket {bucket_name}", flush=True)

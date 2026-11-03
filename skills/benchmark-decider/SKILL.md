@@ -55,10 +55,10 @@ tail-latency claims.
 
 ## Environments
 
-Each compute environment has
-`benchmark/environments/<environment>/environment.yaml`; its results belong under the adjacent
-`runs/` directory. A full run benchmarks every model listed in `models` sequentially. List only
-models the target host can actually load.
+Each compute environment has a local
+`benchmark/environments/<environment>/environment.yaml`; the entire `environments/` tree is
+gitignored, and results belong under the adjacent `runs/` directory. A full run benchmarks every
+model listed in `models` sequentially. List only models the target host can actually load.
 
 Use a managed environment for a local server:
 
@@ -115,6 +115,8 @@ instance in the same region as the SageMaker endpoints. Follow
 [references/aws.md](references/aws.md) for the setup and checks. When the user authorizes creating
 a temporary load generator, use `scripts/run_on_ec2.py`; first run it with `--dry-run`, show the
 resource and endpoint scope, and confirm the paid run before passing `--yes`.
+The script archives the selected committed Git revision and transfers the ignored local
+`environment.yaml` separately through its private, encrypted temporary S3 bucket.
 After the remote SSM command starts, give the user the copy-paste status and live-progress
 commands printed by the script; do not wait for them to ask how to monitor it.
 

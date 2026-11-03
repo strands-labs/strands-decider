@@ -58,7 +58,8 @@ The skill includes `scripts/run_on_ec2.py` for a repeatable same-region run. It:
 
 - derives the region and endpoint allowlist from the SageMaker environment;
 - verifies the expected AWS account before creating anything;
-- copies a committed Git revision through a temporary private, encrypted S3 bucket;
+- copies a committed Git revision and the selected ignored local `environment.yaml` through a
+  temporary private, encrypted S3 bucket;
 - creates a temporary EC2 instance, instance profile, and no-ingress security group;
 - requires IMDSv2 and uses SSM instead of SSH;
 - runs one model or every model configured in the environment;
@@ -97,9 +98,10 @@ uv run --project benchmark python skills/benchmark-decider/scripts/run_on_ec2.py
 ```
 
 Remove `MODEL` and `--smoke` to run every configured model with the standard preset. `--ref`
-selects the committed revision copied to EC2; uncommitted working-tree changes are intentionally
-excluded. A failed remote run saves its retrieved log as `benchmark-ec2-failure.log` before
-cleanup.
+selects the committed revision copied to EC2; uncommitted source changes are intentionally
+excluded. The selected local environment file is transferred separately because
+`benchmark/environments/` is gitignored. A failed remote run saves its retrieved log as
+`benchmark-ec2-failure.log` before cleanup.
 
 ## Interpret latency correctly
 
