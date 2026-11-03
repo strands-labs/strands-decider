@@ -1,0 +1,26 @@
+{
+  "name": "strands-decider-eks",
+  "version": "0.1.0",
+  "description": "CDK app that deploys strands-decider on Amazon EKS Auto Mode with Graviton (arm64) CPU nodes",
+  "private": true,
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsc --noEmit",
+    "cdk": "cdk"
+  },
+  "devDependencies": {
+    "@huggingface/hub": "2.17.8",
+    "@types/node": "22.20.5",
+    "aws-cdk": "2.1145.0",
+    "tsx": "^4.23.15",
+    "typescript": "7.0.2"
+  },
+  "dependencies": {
+    "@aws-cdk/lambda-layer-kubectl-v36": "^2.0.1",
+    "@cdklabs/deploy-time-build": "^0.1.11",
+    "aws-cdk-lib": "2.273.0",
+    "constructs": "^10.8.1"
+  }
+}
