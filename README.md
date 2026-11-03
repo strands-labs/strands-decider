@@ -395,6 +395,22 @@ a coding CLI. If your agent supports skills, install the folder where it looks f
 tell the agent to read `skills/customize-decider/SKILL.md` and follow it. Then ask it to evaluate
 Strands Decider on your task.
 
+## Benchmarking inference performance
+
+[`benchmark/`](benchmark/README.md) measures how a serving change affects the configured models in
+one compute environment. It runs the same synthetic workload against an accepted baseline and a
+candidate, then records peak requests per second, concurrency-1 latency, optional cost per
+1 million decisions, and a separate reliability gate. It benchmarks managed local servers or an
+already-running HTTP endpoint:
+
+```bash
+python -m benchmark.runner run local
+python -m benchmark.runner run local MODEL  # one model only
+python -m benchmark.runner compare local MODEL CANDIDATE_DIR
+```
+
+Full runs also create environment-level throughput and latency graphs with one line per model.
+
 ## Training
 
 Two entry points, both on a Linux or WSL2 host with NVIDIA GPUs and the training

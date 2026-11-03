@@ -3,6 +3,8 @@ __pycache__/
 *.egg-info/
 .pytest_cache/
 .ruff_cache/
+uv.lock
+!benchmark/uv.lock
 
 # Training artefacts
 checkpoints/
@@ -32,3 +34,6 @@ build/
 dist/
 # Runner output written inside the checkout (training/run_recipe.sh RUN_DIR default)
 /runs/
+
+# Local inference benchmark environments and generated runs
+/benchmark/environments/
