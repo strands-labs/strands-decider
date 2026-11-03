@@ -549,12 +549,17 @@ def main() -> int:
                     },
                 ]
             else:  # lambda
+                # IAM evaluates lambda:InvokeFunctionUrl against the unqualified function ARN
+                # even when the URL is attached to an alias; the alias ARN here 403s.
+                lambda_arn = target["function_arn"]
+                if lambda_arn.count(":") >= 7:
+                    lambda_arn = lambda_arn.rsplit(":", 1)[0]
                 target_statements = [
                     {
                         "Sid": "InvokeConfiguredFunctionUrl",
                         "Effect": "Allow",
                         "Action": "lambda:InvokeFunctionUrl",
-                        "Resource": target["function_arn"],
+                        "Resource": lambda_arn,
                     },
                 ]
             inline_policy = {
