@@ -154,7 +154,8 @@ def create_app(
     guard = engine_lock if _needs_serialisation(device) else contextlib.nullcontext()
 
     def get_engine(request: Request) -> SystemOneEngine:
-        return request.app.state.engine
+        engine: SystemOneEngine = request.app.state.engine
+        return engine
 
     # SageMaker and AgentCore Runtime call /ping and /invocations; each is the same
     # handler as the path above it.
