@@ -255,11 +255,10 @@ after the other, so the split adds memory, not speed. The 26B-A4B serves this wa
 48 GB L40S GPUs (16 to 21 GB on each), at about 200 ms for one short question and 370 ms for
 two, with probabilities within 0.03 of the model on CPU. CUDA only, and not with `--vision`.
 
-On CUDA the server warms up before it accepts requests, so no request waits for a kernel to
-compile: it asks each question kind once, then every number of questions up to `--max-batch`
-(larger requests run in chunks of at most that many). `/health` and `/ping` fail until it is
-done, so startup and health-check timeouts must allow for it. `--no-warmup` skips it;
-`--warmup` turns it on for CPU, MPS or MLX, where it is off by default.
+The server warms up before it accepts requests, so no request waits for a kernel to compile:
+it asks each question kind once, then every number of questions up to `--max-batch` (larger
+requests run in chunks of at most that many). `/health` and `/ping` fail until it is done, so
+startup and health-check timeouts must allow for it. `--no-warmup` skips it.
 
 ## Gemma 4 models
 

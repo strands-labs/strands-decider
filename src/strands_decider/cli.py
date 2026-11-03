@@ -90,11 +90,10 @@ def serve_cmd(
         help="Split the model across the visible GPUs (a transformers device_map, such as auto), "
         "for a model larger than one GPU.",
     ),
-    warmup: bool | None = typer.Option(
-        None,
+    warmup: bool = typer.Option(
+        True,
         "--warmup/--no-warmup",
-        help="Compile every request shape before serving, so no request waits for it. "
-        "Default: on for CUDA, off otherwise.",
+        help="Answer every request shape once before serving, so no request waits for a compile.",
     ),
 ) -> None:
     """Serve POST /v1/systemone. JevBench's typesafe adapter runs against it unchanged."""

@@ -80,7 +80,7 @@ def create_app(
     vision: bool = False,
     max_batch_tokens: int | None = None,
     device_map: str | None = None,
-    warmup: bool | None = None,
+    warmup: bool = True,
 ) -> FastAPI:
     global _engine
     if device_map and (vision or not device.startswith("cuda")):
@@ -130,7 +130,7 @@ def create_app(
         _engine = SystemOneEngine(model, config)
 
     # serve() listens only after create_app returns, so /health (/ping) fails until this is done.
-    if warmup if warmup is not None else device.split(":", 1)[0] == "cuda":
+    if warmup:
         warm_up(_engine, max_batch)
 
     # SageMaker and AgentCore Runtime call /ping and /invocations; each is the same
@@ -185,7 +185,7 @@ def serve(
     vision: bool = False,
     max_batch_tokens: int | None = None,
     device_map: str | None = None,
-    warmup: bool | None = None,
+    warmup: bool = True,
 ) -> None:
     import uvicorn
 

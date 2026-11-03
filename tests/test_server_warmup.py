@@ -33,20 +33,15 @@ def engine(monkeypatch):
     return recorder
 
 
-@pytest.mark.parametrize(
-    ("device", "warmup", "warmed"),
-    [
-        ("cuda", None, True),
-        ("cuda:1", None, True),
-        ("cpu", None, False),
-        ("mps", None, False),
-        ("cuda", False, False),
-        ("cpu", True, True),
-    ],
-)
-def test_warmup_defaults_to_cuda_and_can_be_set(engine, device, warmup, warmed):
-    server.create_app("checkpoints/test", device=device, warmup=warmup)
-    assert bool(engine.requests) is warmed
+@pytest.mark.parametrize("device", ["cuda", "cuda:1", "cpu", "mps"])
+def test_warmup_is_on_by_default_on_every_device(engine, device):
+    server.create_app("checkpoints/test", device=device)
+    assert engine.requests
+
+
+def test_no_warmup_skips_it(engine):
+    server.create_app("checkpoints/test", device="cuda", warmup=False)
+    assert not engine.requests
 
 
 def test_warmup_asks_each_kind_and_every_question_count(engine):
