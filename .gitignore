@@ -35,5 +35,5 @@ dist/
 # Runner output written inside the checkout (training/run_recipe.sh RUN_DIR default)
 /runs/
 
-# Generated inference benchmark summaries and graphs
-/benchmark/environments/*/runs/
+# Local inference benchmark environments and generated runs
+/benchmark/environments/

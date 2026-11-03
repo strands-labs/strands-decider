@@ -29,8 +29,8 @@ open-loop traffic and SLO-constrained goodput as an optional production-style te
 
 ## Environments
 
-Each compute environment is a child of `benchmark/environments/`. Its configuration and generated
-runs live together:
+Each compute environment is a local, ignored child of `benchmark/environments/`. Create its
+configuration there; its generated runs will live beside it:
 
 ```text
 benchmark/
@@ -143,8 +143,8 @@ lightweight-client or managed-server command above. Run the standard suite for e
 configured in the environment. Models run sequentially, and each model’s first run becomes its
 accepted baseline.
 
-The supplied `local` environment includes all five v1 models. The 48 GB Mac environment omits the
-26B model because its documented bf16 memory requirement exceeds that machine's memory.
+A local environment may include all five v1 models. Omit models that do not fit the target
+hardware; for example, the 26B model's documented bf16 memory requirement exceeds a 48 GB Mac.
 
 The serial latency sweep warms each input length, then measures an equal mix of all four lengths.
 For throughput, the runner sends one 1,024-token warm-up request per concurrent client using the
