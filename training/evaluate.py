@@ -500,8 +500,9 @@ def _fmt_temperature(t: float | dict[str, float]) -> str:
 def _device(device: str | None) -> str:
     from strands_decider.cli import resolve_device
 
-    if device == "mlx":  # the MLX backend serves only; it has no logits path for evaluation
-        raise typer.BadParameter("--device mlx is for serving; evaluate on cuda, mps or cpu")
+    # MLX and Neuron are serving backends only; they have no logits path for evaluation.
+    if device in ("mlx", "neuron"):
+        raise typer.BadParameter(f"--device {device} is for serving; evaluate on cuda, mps or cpu")
     return resolve_device(device)
 
 

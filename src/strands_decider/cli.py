@@ -1,4 +1,4 @@
-"""The strands-decider CLI: ask and serve.
+"""The strands-decider CLI: ask, serve and compile-neuron.
 
 Training, evaluation, calibration and corpus-building live outside this package.
 Run them as `python -m training.train`, `python -m training.evaluate`,
@@ -29,7 +29,7 @@ console = Console()
 
 
 def _auto_device() -> str:
-    """Best available torch device: cuda > mps > cpu. MLX is opt-in (`--device mlx`)."""
+    """Best available torch device: cuda > mps > cpu. MLX and Neuron are opt-in (`--device`)."""
     if torch.cuda.is_available():
         return "cuda"
     if getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available():
@@ -38,7 +38,7 @@ def _auto_device() -> str:
 
 
 def _configure_inference_logging(device: str) -> None:
-    if str(device).split(":", 1)[0] in {"cpu", "mps", "mlx"}:
+    if str(device).split(":", 1)[0] in {"cpu", "mps", "mlx", "neuron"}:
         logging.getLogger("transformers.integrations.hub_kernels").setLevel(logging.ERROR)
 
 
@@ -60,8 +60,9 @@ def serve_cmd(
     device: str | None = typer.Option(
         None,
         "--device",
-        help="cuda, mps or cpu (torch), or mlx (Apple silicon, needs the mlx extra). "
-        "Auto-detected when omitted: cuda > mps > cpu; mlx only when asked for.",
+        help="cuda, mps or cpu (torch), mlx (Apple silicon, needs the mlx extra), or neuron "
+        "(Inferentia2/Trainium, needs the neuron extra). "
+        "Auto-detected when omitted: cuda > mps > cpu; mlx and neuron only when asked for.",
     ),
     no_prefix_cache: bool = typer.Option(False, "--no-prefix-cache"),
     model_name: str | None = typer.Option(
@@ -89,11 +90,19 @@ def serve_cmd(
         "--max-batch-tokens",
         help="Also cap one forward's padded tokens (questions x longest state + question); for long-context torsos.",
     ),
+    neuron_cache: str | None = typer.Option(
+        None,
+        "--neuron-cache",
+        help="--device neuron: the directory `compile-neuron` wrote. Without it every bucket "
+        "compiles at start-up (about 35 minutes for a 2B torso).",
+    ),
 ) -> None:
     """Serve POST /v1/systemone. JevBench's typesafe adapter runs against it unchanged."""
     from .server import serve
 
     selected_device = resolve_device(device)
+    if neuron_cache and selected_device != "neuron":
+        raise typer.BadParameter("--neuron-cache is for --device neuron")
     console.print(f"[green]serving[/] {checkpoint} on http://{host}:{port} ({selected_device})")
     serve(
         checkpoint,
@@ -106,7 +115,45 @@ def serve_cmd(
         max_batch=max_batch,
         vision=vision,
         max_batch_tokens=max_batch_tokens,
+        neuron_cache=neuron_cache,
     )
+
+
+@app.command("compile-neuron")
+def compile_neuron_cmd(
+    checkpoint: str = typer.Argument(...),
+    cache_dir: str = typer.Argument(..., help="Where to write the compiled graphs and manifest."),
+    buckets: str | None = typer.Option(
+        None,
+        "--buckets",
+        help="Comma-separated sequence lengths, one graph each; the largest must cover the "
+        "checkpoint's max_length. Default: neuron_engine.DEFAULT_BUCKETS.",
+    ),
+    reps: int = typer.Option(8, "--reps", help="Timed calls per bucket once compiled."),
+) -> None:
+    """Compile a checkpoint's torso for a NeuronCore, for `serve --device neuron --neuron-cache`.
+
+    Run it on an Inferentia2 or Trainium host, from the same install that will serve: the graphs
+    are only reused by the same library versions and paths, and the manifest records them.
+    """
+    import json
+
+    from .infer import neuron_available
+
+    if not neuron_available():
+        raise typer.BadParameter("compile-neuron needs the neuron extra: see docs/inference.md")
+    from .neuron_engine import DEFAULT_BUCKETS, compile_neuron
+
+    lengths = [int(b) for b in buckets.split(",")] if buckets else list(DEFAULT_BUCKETS)
+    _configure_inference_logging("neuron")
+    manifest = compile_neuron(
+        checkpoint,
+        cache_dir,
+        buckets=lengths,
+        reps=reps,
+        log=lambda r: console.print_json(json.dumps(r)),
+    )
+    console.print_json(json.dumps(manifest))
 
 
 @app.command("ask")
@@ -126,8 +173,9 @@ def ask_cmd(
     device: str | None = typer.Option(
         None,
         "--device",
-        help="cuda, mps or cpu (torch), or mlx (Apple silicon, needs the mlx extra). "
-        "Auto-detected when omitted: cuda > mps > cpu; mlx only when asked for.",
+        help="cuda, mps or cpu (torch), mlx (Apple silicon, needs the mlx extra), or neuron "
+        "(Inferentia2/Trainium, needs the neuron extra). "
+        "Auto-detected when omitted: cuda > mps > cpu; mlx and neuron only when asked for.",
     ),
     as_json: bool = typer.Option(False, "--json", help="Print the raw API response."),
 ) -> None:

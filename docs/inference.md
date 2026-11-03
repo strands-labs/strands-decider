@@ -5,8 +5,8 @@ from the command line, and serve it over HTTP. Strands decider answers typed que
 state, the text to classify; it does not generate text. A question is a `noul` (yes or no,
 returned as P(true)), a `choice` (one of N options) or a `score` (a level on an ordered
 scale). Install the package, point the commands at the published Hub id or at a checkpoint you
-trained, then `strands-decider ask` or `strands-decider serve`. Pass `--device cuda`, `mps`, `cpu` or `mlx`
-explicitly; without it the CLI picks cuda, then mps, then cpu, and mlx only when asked for. A
+trained, then `strands-decider ask` or `strands-decider serve`. Pass `--device cuda`, `mps`, `cpu`, `mlx` or `neuron`
+explicitly; without it the CLI picks cuda, then mps, then cpu, and mlx or neuron only when asked for. A
 checkpoint from `training/recipe.sh all` is already calibrated; calibrate any other
 checkpoint with `python -m training.evaluate calibrate` before you serve it.
 
@@ -22,6 +22,8 @@ CPU), so they report the numbers serving returns. `--device mlx` is refused.
 - [Asking many questions is nearly free](#asking-many-questions-is-nearly-free): the shared-prefix cache.
 - [Serving on a Mac](#serving-on-a-mac): MPS, and the one kernel that had to be replaced.
 - [Serving on a Mac with MLX](#serving-on-a-mac-with-mlx): `--device mlx`, measured against MPS.
+- [Serving on AWS Inferentia2](#serving-on-aws-inferentia2): `--device neuron`, compiled graphs per
+  sequence bucket.
 - [`../deploy/`](../deploy/README.md): hosting the server, for example on an Amazon SageMaker
   real-time endpoint.
 - [`../examples/strands/`](../examples/strands/README.md): an agent built with the Strands
@@ -54,6 +56,7 @@ from a clone, for example `pip install -e ".[mlx]"`.
 | `mps` | `pip install "strands-decider[mps]"` | Nothing: the base install. |
 | `cpu` | `pip install "strands-decider[cpu]"` | Nothing: the base install. |
 | `mlx` | `pip install "strands-decider[mlx]"` | mlx and mlx-lm (Apple silicon only). |
+| `neuron` | `pip install "strands-decider[neuron]" --extra-index-url https://pip.repos.neuron.amazonaws.com` | torch-neuronx and neuronx-cc (Linux, on Inferentia2 or Trainium). The Neuron driver and runtime are system packages. |
 
 flash-linear-attention installs on a Mac without Triton, but its kernels need Triton, so it
 cannot run there. `mps_kernels.py` therefore steps aside only when Triton is present too, and
@@ -371,3 +374,66 @@ trainable token embeddings, per-module ranks and quantised base weights. `--dtyp
 (`mlx_engine.DEFAULT_CACHE_LIMIT`); MLX's own default is its memory limit, nearly all of RAM.
 Evaluations run one at a time, because `_fit` keeps a request's option offsets on the engine for
 `_option_idx` to read; the torch engine has the same race (#9).
+
+## Serving on AWS Inferentia2
+
+`--device neuron` runs the torso on a NeuronCore through torch-neuronx
+([`neuron_engine.py`](../src/strands_decider/neuron_engine.py)). It supports Qwen3.5 torsos. As
+with MLX, only the torso forward moves: `NeuronEngine` subclasses `SystemOneEngine`, and the
+fp32 head runs on the host CPU.
+
+neuronx-cc compiles a graph ahead of time for one input shape. The torso therefore runs as one
+graph per sequence bucket (`neuron_engine.DEFAULT_BUCKETS`, 128 to 4,096 tokens): each question's
+prompt is right-padded to the smallest bucket that holds it. Right padding is exact, because
+every layer is causal. Two Gated DeltaNet kernels of the reference do not compile, so
+`neuron_kernels.py` replaces them for Neuron tensors with static versions: the chunk rule uses
+`mps_kernels.py`'s block inversion in place of the triangular solves, and the causal
+convolution is `cpu_kernels.py`'s multiply-adds. The LoRA adapter is merged in fp32 at load, and
+the torso is cast to bf16. The shared-prefix cache is off, since a compiled graph takes no KV
+cache, so every question forwards its whole prompt.
+
+Compiling all nine buckets takes about 35 minutes on inf2.xlarge, so compile once and serve
+from the result:
+
+```bash
+export TORCH_NEURONX_ENABLE_NKI_SDPA=0   # its flash-attention kernel does not compile on inf2
+strands-decider compile-neuron StrandsAgents/strands-decider-2B-qwen3.5-v1-2610 ./neuron-cache
+strands-decider serve StrandsAgents/strands-decider-2B-qwen3.5-v1-2610 --device neuron \
+    --neuron-cache ./neuron-cache
+```
+
+`compile-neuron` writes the graphs and a `manifest.json`, which records the library versions,
+the install path and each bucket's time. The compile cache key covers those, so a graph only
+loads in the same install. `serve` refuses a cache whose manifest does not match, because it
+would compile every bucket again. The runtime writes to the cache as it loads, so a read-only
+directory is copied to a temporary one first. `serve` loads every graph on every core before it
+answers, and prints a line per bucket and core as it goes. Even from the cache, the first call
+of each graph traces it and loads it: about 12 minutes per NeuronCore, so about 24 minutes on an
+inf2.xlarge.
+
+`serve` uses every NeuronCore it can see: it keeps a copy of the torso on each, and each request
+takes whichever core is free, so an inf2.xlarge's two NeuronCores answer two requests at once.
+Set `NEURON_RT_VISIBLE_CORES` to limit it, for example to run one process per core. The cores
+load the graphs that `compile-neuron` compiled on one; they are the same.
+
+Measured with `strands-decider-2B-qwen3.5-v1-2610` on inf2.xlarge (torch-neuronx 2.14.3,
+neuronx-cc 2.28, bf16):
+
+| Bucket (tokens) | 128 | 256 | 512 | 1,024 | 1,536 | 2,048 | 2,816 | 3,584 | 4,096 |
+|---|---|---|---|---|---|---|---|---|---|
+| Torso forward, median (ms) | 23 | 34 | 57 | 115 | 190 | 263 | 390 | 487 | 597 |
+
+On the 231 JevBench public tasks, one NeuronCore answers 8.9 questions per second at
+concurrency 1, with a median latency of 38 ms and a 95th percentile of 403 ms. Both NeuronCores
+at concurrency 2 answer 17.2 per second (p50 40 ms, p95 416 ms), measured with one process per
+core. One `serve` process on both cores, behind a SageMaker endpoint (`deploy/sagemaker`),
+answers 16.3 per second at saturation (concurrency 16), with the same answers as at
+concurrency 1. Accuracy matches the published model:
+JevBench scores 181 of 231 (Brier 0.2802). Against the model in fp32 on the CPU, on 50 JevBench
+tasks, no answer changes and the largest probability difference is 0.0062.
+
+The per-bucket times and the SageMaker figures come from this backend; the rest from the
+[prototype](https://github.com/strands-labs/strands-decider/issues/106) it was ported from. Both
+score the same on JevBench. `tests/test_neuron_engine.py` runs the bucketed engine on the CPU with the static
+kernels on a tiny random Qwen3.5 and checks that it answers as the torch engine does. The CPU
+tests do not cover the compiled graphs on a device.

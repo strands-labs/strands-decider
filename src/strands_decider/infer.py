@@ -23,7 +23,7 @@ from __future__ import annotations
 import copy
 import threading
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 
@@ -45,6 +45,9 @@ from .schema import (
     SystemOneResponse,
     Usage,
 )
+
+if TYPE_CHECKING:
+    from .neuron_engine import NeuronEngine
 
 
 @dataclass
@@ -441,9 +444,13 @@ def load_engine(
     use_prefix_cache: bool = True,
     attn_implementation: str | None = None,
 ) -> SystemOneEngine:
-    """An engine on a torch device ("cuda", "mps", "cpu"), or on MLX with `device="mlx"`."""
+    """An engine on a torch device ("cuda", "mps", "cpu"), on MLX with `device="mlx"`, or on a
+    NeuronCore with `device="neuron"` (compiling every bucket on first use; see
+    `load_neuron` for a precompiled cache)."""
     if device == "mlx":
         return load_mlx(checkpoint, EngineConfig(device="mlx", use_prefix_cache=use_prefix_cache))
+    if device == "neuron":
+        return load_neuron(checkpoint, EngineConfig(device="neuron"))
     model = StrandsDeciderModel.load(checkpoint, attn_implementation=attn_implementation)
     return SystemOneEngine(model, EngineConfig(device=device, use_prefix_cache=use_prefix_cache))
 
@@ -479,3 +486,27 @@ def load_mlx(checkpoint: str, config: EngineConfig | None = None) -> SystemOneEn
     from .mlx_engine import load_mlx_engine
 
     return load_mlx_engine(checkpoint, config)
+
+
+def neuron_available() -> bool:
+    """True with the `neuron` extra installed (torch-neuronx, Linux). Whether a Neuron device is
+    attached is only known when the runtime opens it."""
+    import importlib.util
+
+    return importlib.util.find_spec("torch_neuronx") is not None
+
+
+def load_neuron(
+    checkpoint: str, config: EngineConfig | None = None, *, cache_dir: str | None = None
+) -> NeuronEngine:
+    """An engine with the torso compiled for every visible NeuronCore (see neuron_engine.py).
+    `cache_dir` is a directory `strands-decider compile-neuron` wrote."""
+    if not neuron_available():
+        raise RuntimeError(
+            "device 'neuron' needs an Inferentia2 or Trainium host and the neuron extra: "
+            "pip install 'strands-decider[neuron]' --extra-index-url "
+            "https://pip.repos.neuron.amazonaws.com"
+        )
+    from .neuron_engine import load_neuron_engine
+
+    return load_neuron_engine(checkpoint, config, cache_dir=cache_dir)
