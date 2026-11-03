@@ -123,7 +123,7 @@ SnapStart decides the rest:
 | --- | --- | --- |
 | Nobody calling | **about $0.25 a month**, the image in ECR | **about $39.50 a month** for the snapshot, and the image |
 | First request on a new execution environment | up to 30 s | about 6 s |
-| Each new execution environment | about $0.002, the 6 to 26 s the model takes to load | $0.0014 to restore the snapshot |
+| Each new execution environment | about $0.002, the 6 to 27 s the model takes to load | $0.0014 to restore the snapshot |
 
 SnapStart is off by default, so a deploy costs nothing while nobody calls it. Turn it on
 (`npx cdk deploy -c snapstart=true`) when the first answer of a new environment matters: once
@@ -156,7 +156,7 @@ cheaper than separate requests. Peak memory stayed at 5.6 GB, with a 3,900-token
 questions, and with 300 questions (19,400 tokens, 4 minutes on Graviton2).
 
 With SnapStart, 10 new execution environments answered their first request in 5.6 to 7.5 s.
-Without it, 45 new environments over three runs loaded the model in 6 to 26 s, and their first
+Without it, 60 new environments over four runs loaded the model in 6 to 27 s, and their first
 requests took up to 30 s. Two more environments in one of those runs took 161 s to load; no
 request waited on one, and every request finished within 30.5 s.
 
