@@ -84,3 +84,21 @@ def test_warmup_runs_on_a_real_engine():
     )
     engine = SystemOneEngine(StrandsDeciderModel(cfg, torso, tok), EngineConfig(device="cpu"))
     server.warm_up(engine, max_batch=4)
+
+
+def test_vision_warmup_sends_an_image_request(monkeypatch):
+    from strands_decider import vision
+
+    recorder = _RecordingEngine()
+    monkeypatch.setattr(server, "_engine", None)
+    monkeypatch.setattr(vision, "load_vision_engine", lambda *a, **k: recorder)
+    server.create_app("checkpoints/test", device="cuda", vision=True, max_batch=5)
+
+    with_images = [r for r in recorder.requests if r.images]
+    assert len(with_images) == 1
+    assert {len(r.questions) for r in recorder.requests if not r.images} == set(range(1, 6))
+
+
+def test_text_warmup_sends_no_images(engine):
+    server.create_app("checkpoints/test", device="cuda")
+    assert not any(r.images for r in engine.requests)
