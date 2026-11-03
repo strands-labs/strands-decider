@@ -67,6 +67,14 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="confirm creation of temporary paid AWS resources",
     )
+    parser.add_argument(
+        "--debug-hold",
+        action="store_true",
+        help=(
+            "on remote-benchmark failure, keep the EC2 instance alive and wait for a sentinel "
+            "file (/tmp/benchmark-release-<suffix>) before cleanup; use with `aws ssm start-session`"
+        ),
+    )
     return parser.parse_args()
 
 
@@ -752,6 +760,25 @@ def main() -> int:
             if invocation["Status"] != "Success":
                 failed_log = root / "benchmark-ec2-failure.log"
                 failed_log.write_bytes(log_path.read_bytes())
+                if args.debug_hold:
+                    release_path = Path(f"/tmp/benchmark-release-{suffix}")
+                    print(
+                        "\n=== DEBUG HOLD ===\n"
+                        f"instance: {instance_id}\n"
+                        f"region: {region}\n"
+                        f"ssm session: aws ssm start-session --region {region} "
+                        f"--target {instance_id}\n"
+                        f"failure log: {failed_log}\n"
+                        f"release the hold with: touch {release_path}\n"
+                        "cleanup will proceed as soon as that file exists.",
+                        flush=True,
+                    )
+                    while not release_path.exists():
+                        time.sleep(5)
+                    try:
+                        release_path.unlink()
+                    except OSError:
+                        pass
                 raise RuntimeError(
                     f"remote benchmark failed with {invocation['Status']}; log: {failed_log}"
                 )
