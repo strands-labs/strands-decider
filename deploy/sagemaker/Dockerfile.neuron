@@ -1,0 +1,77 @@
+# SageMaker inference image for strands-decider on Inferentia2 (ml.inf2, `--device neuron`): the
+# package, without model weights (README.md). `cdk deploy` builds it for ml.inf2 instance types; by
+# hand, from the repository root:
+#   docker build --platform linux/amd64 -f deploy/sagemaker/Dockerfile.neuron -t strands-decider-neuron .
+# The same image compiles the graphs (neuron-compile.ts) and serves them: a compiled graph only
+# loads in the install that compiled it.
+#
+# Ubuntu 26.04: the torch-neuronx 2.14.3 wheels need glibc 2.43, and its Python is 3.14.
+FROM public.ecr.aws/docker/library/ubuntu:26.04
+
+ARG DEBIAN_FRONTEND=noninteractive
+# The Neuron runtime, at the versions of Neuron SDK 2.33. The Neuron driver is on the host.
+# libarchive: the compiler's backend loads it at run time.
+ARG NEURON_RUNTIME_VERSION=2.35.30.0-d2725ccb8
+ARG NEURON_COLLECTIVES_VERSION=2.35.43.0-354ad3064
+ARG NEURON_TOOLS_VERSION=2.33.38.0-f874d5618
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl gnupg python3 python3-venv \
+       libarchive13t64 \
+    && curl -fsSL https://apt.repos.neuron.amazonaws.com/GPG-PUB-KEY-AMAZON-AWS-NEURON.PUB \
+       | gpg --dearmor -o /usr/share/keyrings/neuron.gpg \
+    && echo "deb [signed-by=/usr/share/keyrings/neuron.gpg] https://apt.repos.neuron.amazonaws.com resolute main" \
+       > /etc/apt/sources.list.d/neuron.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+       "aws-neuronx-runtime-lib=${NEURON_RUNTIME_VERSION}" \
+       "aws-neuronx-collectives=${NEURON_COLLECTIVES_VERSION}" \
+       "aws-neuronx-tools=${NEURON_TOOLS_VERSION}" \
+    && rm -rf /var/lib/apt/lists/*
+
+# TORCH_DEVICE_BACKEND_AUTOLOAD=0: `import torch` does not load torch-neuronx, which would open the
+# Neuron runtime in every process; the engine imports it, after setting its environment.
+# TORCH_NEURONX_ENABLE_NKI_SDPA=0: torch-neuronx's flash-attention kernel does not compile on inf2.
+ENV PATH=/opt/venv/bin:/opt/aws/neuron/bin:$PATH \
+    PIP_NO_CACHE_DIR=1 \
+    PYTHONUNBUFFERED=1 \
+    HF_HOME=/opt/hf \
+    TORCH_DEVICE_BACKEND_AUTOLOAD=0 \
+    TORCH_NEURONX_ENABLE_NKI_SDPA=0
+
+WORKDIR /opt/strands-decider
+COPY pyproject.toml README.md LICENSE ./
+COPY src ./src
+# No .git in the build context, so setuptools-scm takes the version from here.
+ARG PACKAGE_VERSION=0.0.0+sagemaker
+# The versions tested together: torch-neuronx 2.14.3 is built for torch 2.14.0, and Qwen3.5 was
+# measured with transformers 5.17.0 (docs/inference.md, Serving on AWS Inferentia2).
+ARG TORCH_VERSION=2.14.0+cpu
+ARG TORCH_NEURONX_VERSION=2.14.3.0.282
+ARG NEURONX_CC_VERSION=2.28.7631.0
+ARG TRANSFORMERS_VERSION=5.17.0
+RUN python3 -m venv /opt/venv \
+    && SETUPTOOLS_SCM_PRETEND_VERSION=${PACKAGE_VERSION} pip install \
+       --extra-index-url https://download.pytorch.org/whl/cpu \
+       --extra-index-url https://pip.repos.neuron.amazonaws.com \
+       ".[neuron]" "torch==${TORCH_VERSION}" "torch-neuronx==${TORCH_NEURONX_VERSION}" \
+       "neuronx-cc==${NEURONX_CC_VERSION}" "transformers==${TRANSFORMERS_VERSION}" \
+    && rm -rf build src/*.egg-info \
+    # Every compiler and runtime binary must find its shared libraries: the compiler only runs on
+    # a Neuron host, so a missing one would otherwise show up during the compile. libnccom-net is
+    # the EFA plugin for collectives across instances, which one inf2 instance does not use.
+    && site=$(python -c "import sysconfig; print(sysconfig.get_paths()['purelib'])") \
+    && missing=$(find "$site/neuronxcc" "$site/torch_neuronx" /opt/aws/neuron \
+         -type f \( -perm -u+x -o -name '*.so*' \) ! -name libnccom-net.so \
+         -exec sh -c 'ldd "$1" 2>/dev/null | grep "not found" | sed "s|^|$1:|"' _ {} \;) \
+    && if [ -n "$missing" ]; then echo "$missing"; exit 1; fi
+
+# As in Dockerfile: SageMaker copies the model to /opt/ml/model, and the stack sets
+# DECIDER_CHECKPOINT and DECIDER_ARGS (with --neuron-cache, the compiled graphs).
+ENV DECIDER_CHECKPOINT=/opt/ml/model/checkpoint \
+    DECIDER_DEVICE=neuron \
+    DECIDER_ARGS="" \
+    HF_HUB_OFFLINE=1
+
+EXPOSE 8080
+# SageMaker runs `docker run IMAGE serve`; that trailing `serve` becomes $0 and is ignored.
+ENTRYPOINT ["sh", "-c", "exec strands-decider serve \"$DECIDER_CHECKPOINT\" --host 0.0.0.0 --port 8080 --device \"$DECIDER_DEVICE\" $DECIDER_ARGS"]

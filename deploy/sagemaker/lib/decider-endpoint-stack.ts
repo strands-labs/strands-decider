@@ -8,6 +8,7 @@ import * as s3 from "aws-cdk-lib/aws-s3";
 import * as sagemaker from "aws-cdk-lib/aws-sagemaker";
 import { Construct } from "constructs";
 import { ContainerImageBuild, NodejsBuild } from "@cdklabs/deploy-time-build";
+import { NeuronCompile } from "./neuron-compile";
 
 /**
  * The stack and endpoint name for a model's Hugging Face Hub id: its name, lowercased, with
@@ -44,19 +45,31 @@ const ASSET_EXCLUDE = [
   "!LICENSE",
   "!src/",
   "!deploy/sagemaker/Dockerfile",
+  "!deploy/sagemaker/Dockerfile.neuron",
   "**/__pycache__",
   "**/*.egg-info",
 ];
 
 /**
  * The image's device for a SageMaker instance type: `cuda` on NVIDIA GPU families
- * (ml.g4dn, ml.g5, ml.g6, ml.p4d, ...), `cpu` on x86 CPU families. The image is x86 and has
- * no Neuron support, so Graviton (ml.c7g, ml.m6gd, ...) and Inferentia or Trainium types fail.
+ * (ml.g4dn, ml.g5, ml.g6, ml.p4d, ...), `neuron` on one-chip Inferentia2 (ml.inf2.xlarge,
+ * ml.inf2.8xlarge), `cpu` on x86 CPU families. Graviton (ml.c7g, ml.m6gd, ...), Inferentia1,
+ * Trainium and the larger inf2 types fail: the server warms each NeuronCore in turn, about 12
+ * minutes each, and their 12 or 24 cores would outlast SageMaker's 60-minute startup limit.
  */
-export function deviceFor(instanceType: string): "cuda" | "cpu" {
+export function deviceFor(instanceType: string): "cuda" | "cpu" | "neuron" {
   const family = instanceType.replace(/^ml\./, "").split(".")[0];
+  if (family === "inf2") {
+    if (!/^ml\.inf2\.(xlarge|8xlarge)$/.test(instanceType)) {
+      throw new Error(
+        `${instanceType}: of Inferentia2, only ml.inf2.xlarge and ml.inf2.8xlarge (one chip, two ` +
+          "NeuronCores) are supported; warming more cores outlasts the 60-minute startup limit",
+      );
+    }
+    return "neuron";
+  }
   if (/^(inf|trn)\d/.test(family)) {
-    throw new Error(`${instanceType}: Inferentia and Trainium instances are not supported`);
+    throw new Error(`${instanceType}: of Inferentia and Trainium, only ml.inf2 is supported`);
   }
   if (/^[a-z]+\d+[a-z]*g[a-z]*$/.test(family) && !/^g\d/.test(family)) {
     throw new Error(`${instanceType}: Graviton (arm64) instances are not supported; the image is x86`);
@@ -85,6 +98,21 @@ const MODEL_VOLUME_GB = 128;
 export interface DeciderEndpointStackProps extends StackProps {
   /** The endpoint name, from endpointNameFor(model). */
   readonly endpointName: string;
+}
+
+/** `compile_vpc` and `compile_subnets` (comma-separated), both or neither. */
+export function compileNetwork(
+  vpcId: string | undefined,
+  subnets: string | undefined,
+): { vpcId: string; subnetIds: string[] } | undefined {
+  const subnetIds = (subnets ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+  if (!vpcId && subnetIds.length === 0) {
+    return undefined;
+  }
+  if (!vpcId || subnetIds.length === 0) {
+    throw new Error("compile_vpc and compile_subnets go together: the VPC and subnets in it to compile in");
+  }
+  return { vpcId, subnetIds };
 }
 
 export class DeciderEndpointStack extends Stack {
@@ -138,9 +166,11 @@ export class DeciderEndpointStack extends Stack {
 
     // Builds the image in AWS CodeBuild during `cdk deploy` (deploy-time-build) and publishes it
     // to an ECR repository that belongs to the stack. The image holds no model weights.
+    // Neuron has its own image (Dockerfile.neuron): torch-neuronx needs a newer glibc and Python
+    // than the CUDA image's.
     const image = new ContainerImageBuild(this, "Image", {
       directory: REPO_ROOT,
-      file: "deploy/sagemaker/Dockerfile",
+      file: device === "neuron" ? "deploy/sagemaker/Dockerfile.neuron" : "deploy/sagemaker/Dockerfile",
       exclude: ASSET_EXCLUDE,
       ignoreMode: IgnoreMode.DOCKER,
       buildArgs: { DEVICE: device },
@@ -148,28 +178,51 @@ export class DeciderEndpointStack extends Stack {
     });
     image.repository.grantPull(role);
 
+    // On Neuron the torso runs as graphs compiled ahead of time, by the same image. They are
+    // compiled once, on a temporary instance, into a copy of the model data (neuron-compile.ts).
+    const checkpoint = modelId.split("/").pop()!;
+    let servedPrefix = modelPrefix;
+    let compile: NeuronCompile | undefined;
+    if (device === "neuron") {
+      servedPrefix = `${modelPrefix.replace(/\/$/, "")}-neuron-${image.imageTag}/`;
+      compile = new NeuronCompile(this, "NeuronCompile", {
+        bucket,
+        sourcePrefix: modelPrefix,
+        targetPrefix: servedPrefix,
+        repository: image.repository,
+        imageUri: image.imageUri,
+        checkpoint,
+        instanceType: instanceType.replace(/^ml\./, ""),
+        network: compileNetwork(ctx("compile_vpc"), ctx("compile_subnets")),
+      });
+      compile.node.addDependency(modelData);
+    }
+    const serveArgs = [device === "neuron" ? "--neuron-cache /opt/ml/model/neuron-cache" : "", ctx("serve_args") ?? ""]
+      .filter(Boolean)
+      .join(" ");
+
     const model = new sagemaker.CfnModel(this, "Model", {
       executionRoleArn: role.roleArn,
       primaryContainer: {
         image: image.imageUri,
         modelDataSource: {
           s3DataSource: {
-            s3Uri: bucket.s3UrlForObject(modelPrefix),
+            s3Uri: bucket.s3UrlForObject(servedPrefix),
             s3DataType: "S3Prefix",
             compressionType: "None",
           },
         },
         environment: {
           // scripts/fetch-model.ts's layout: /opt/ml/model/<model name>/ and /opt/ml/model/base/.
-          DECIDER_CHECKPOINT: `/opt/ml/model/${modelId.split("/").pop()}`,
+          DECIDER_CHECKPOINT: `/opt/ml/model/${checkpoint}`,
           DECIDER_DEVICE: device,
-          DECIDER_ARGS: ctx("serve_args") ?? "",
+          DECIDER_ARGS: serveArgs,
         },
       },
     });
     // The role's policy must exist before SageMaker checks that it can pull the image, and the
     // model must be in S3 before SageMaker copies it.
-    model.node.addDependency(role, modelData);
+    model.node.addDependency(role, modelData, ...(compile ? [compile] : []));
 
     const config = new sagemaker.CfnEndpointConfig(this, "EndpointConfig", {
       productionVariants: [
@@ -186,9 +239,10 @@ export class DeciderEndpointStack extends Stack {
           inferenceAmiVersion: ctx("inference_ami_version") || (device === "cuda" ? GPU_AMI_VERSION : undefined),
           volumeSizeInGb: hasInstanceStorage(instanceType) ? undefined : MODEL_VOLUME_GB,
           // Copying up to about 52 GB from S3, then loading it (about 100 GB of float32 weights
-          // on CPU for the largest model), takes minutes.
+          // on CPU for the largest model), takes minutes. On Neuron, loading every compiled graph
+          // takes longer.
           modelDataDownloadTimeoutInSeconds: 3600,
-          containerStartupHealthCheckTimeoutInSeconds: 1800,
+          containerStartupHealthCheckTimeoutInSeconds: device === "neuron" ? 3600 : 1800,
         },
       ],
     });
@@ -200,7 +254,7 @@ export class DeciderEndpointStack extends Stack {
 
     new CfnOutput(this, "EndpointName", { value: endpoint.attrEndpointName });
     new CfnOutput(this, "Device", { value: device });
-    new CfnOutput(this, "ModelDataS3Uri", { value: bucket.s3UrlForObject(modelPrefix) });
+    new CfnOutput(this, "ModelDataS3Uri", { value: bucket.s3UrlForObject(servedPrefix) });
     new CfnOutput(this, "InvokeUrl", {
       value: `https://runtime.sagemaker.${this.region}.amazonaws.com/endpoints/${endpointName}/invocations`,
     });
