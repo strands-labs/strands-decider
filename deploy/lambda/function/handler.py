@@ -57,6 +57,12 @@ def _prefetch(path: str, chunk: int = 16 << 20, readers: int = 32) -> None:
 
 def _load() -> HiddenStateEngine:
     started = time.perf_counter()
+    # Checked before the model loads, so a misconfiguration fails at once.
+    max_request_tokens = int(os.environ.get("DECIDER_MAX_REQUEST_TOKENS") or 0)
+    if max_request_tokens < 0:
+        raise ValueError(
+            f"DECIDER_MAX_REQUEST_TOKENS must be 0 (no limit) or more, not {max_request_tokens}"
+        )
     model = os.path.join(MODEL_DIR, "decider-q8_0.gguf")
     _prefetch(model)
     log.info("model read in %.1f s", time.perf_counter() - started)
@@ -71,7 +77,7 @@ def _load() -> HiddenStateEngine:
     engine.evaluate(
         {"state": "Warm up.", "questions": {"q": {"type": "noul", "instructions": "?"}}}
     )
-    engine.cfg.max_request_tokens = int(os.environ.get("DECIDER_MAX_REQUEST_TOKENS") or 0) or None
+    engine.cfg.max_request_tokens = max_request_tokens or None
     log.info("model ready in %.1f s", time.perf_counter() - started)
     return engine
 

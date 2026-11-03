@@ -227,6 +227,12 @@ def test_a_failed_background_load_exits(load, model_dir, monkeypatch):
     assert exits == [1]
 
 
+def test_a_negative_request_limit_fails_the_init_before_the_load(load):
+    with pytest.raises(ValueError, match="must be 0 \\(no limit\\) or more, not -5"):
+        load(DECIDER_MAX_REQUEST_TOKENS="-5")
+    assert not FakeBackend.calls  # refused before the model loaded
+
+
 def test_a_failed_load_at_import_fails_the_init(load, model_dir):
     (model_dir / "assets" / "head_config.json").unlink()
     with pytest.raises(FileNotFoundError):

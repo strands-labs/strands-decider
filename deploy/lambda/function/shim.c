@@ -22,12 +22,13 @@ typedef struct {
 } dh_handle;
 
 // llama logs hundreds of lines per context below WARN, about 150 KB a request, which
-// CloudWatch Logs bills at ingestion. A CONT record continues the line before it.
-static enum ggml_log_level dh_log_level = GGML_LOG_LEVEL_NONE;
+// CloudWatch Logs bills at ingestion. A CONT record continues the line before it, so it is
+// shown at that line's level. ggml can log from its worker threads, so the level is atomic.
+static _Atomic int dh_log_level = GGML_LOG_LEVEL_NONE;
 static void dh_log(enum ggml_log_level level, const char * text, void * user_data) {
     (void) user_data;
-    if (level != GGML_LOG_LEVEL_CONT) dh_log_level = level;
-    if (dh_log_level >= GGML_LOG_LEVEL_WARN) fputs(text, stderr);
+    const int shown = level == GGML_LOG_LEVEL_CONT ? dh_log_level : (dh_log_level = level);
+    if (shown >= GGML_LOG_LEVEL_WARN) fputs(text, stderr);
 }
 
 // Load a GGUF. Returns NULL on failure; sets *n_embd_out to the hidden size.
@@ -37,6 +38,10 @@ void * dh_load(const char * model_path, int n_threads, int * n_embd_out) {
     struct llama_model * model = llama_model_load_from_file(model_path, llama_model_default_params());
     if (!model) return NULL;
     dh_handle * h = (dh_handle *) calloc(1, sizeof(dh_handle));
+    if (!h) {
+        llama_model_free(model);
+        return NULL;
+    }
     h->model     = model;
     h->n_embd    = llama_model_n_embd_out(model);
     h->n_threads = n_threads > 0 ? n_threads : 1;
