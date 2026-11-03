@@ -57,6 +57,25 @@ def test_one_device_is_not_a_split():
     assert not spans_gpus(_model().torso)
 
 
+def test_a_split_torso_stays_where_it_is_and_only_the_head_moves(monkeypatch):
+    # CPU stand-in for a split: the engine must not move the model (that would gather every
+    # layer onto one GPU), only the head, and it still answers.
+    from strands_decider import infer
+
+    model = _model()
+    moved = []
+    monkeypatch.setattr(infer, "spans_gpus", lambda torso: True)
+    monkeypatch.setattr(model, "to", lambda *a, **k: moved.append("model") or model)
+    monkeypatch.setattr(model.torso, "to", lambda *a, **k: moved.append("torso") or model.torso)
+
+    engine = SystemOneEngine(model, EngineConfig(device="cpu"))
+
+    assert moved == []
+    assert engine.model is model
+    assert next(model.head.parameters()).device.type == "cpu"
+    assert engine.evaluate(_request(3)).answers.keys() == {"q0", "q1", "q2"}
+
+
 @pytest.mark.skipif(not TWO_GPUS, reason="needs two CUDA GPUs")
 @pytest.mark.parametrize("n_questions", [1, 3])  # batched forward, shared-prefix forward
 def test_split_torso_answers_as_on_one_gpu(n_questions):
