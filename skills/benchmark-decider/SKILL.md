@@ -177,10 +177,23 @@ A SageMaker `sagemaker.region` or a Lambda `aws_sigv4.region` selects the AWS AP
 not relocate the benchmark process. A laptop run records the laptop-to-AWS round trip. For a
 same-region latency claim, run the client in the endpoint's region.
 
-Use `scripts/run_on_ec2.py` to drive a temporary same-region EC2 load generator. It covers both
-SageMaker and Lambda (`aws_sigv4`) environments, scopes a temporary instance role to just the
-configured endpoints or function URL, and cleans up every resource it created on exit. Validate
-first with `--dry-run`, confirm the scope and cost with the user, then re-run with `--yes`:
+**You MUST use `scripts/run_on_ec2.py` for any SageMaker or Lambda benchmark.** This applies to
+smoke runs as well as standard runs, and to one-off exploratory invocations the moment they
+produce numbers you might report. Do not:
+
+- run `benchmark.runner` against a SageMaker endpoint or a Lambda Function URL from a laptop,
+  CI runner, or any machine outside the endpoint's region;
+- hand-provision an EC2 client, IAM role, or security group for a benchmark run — the script
+  owns the scoped IAM role, the Function URL `lambda:AddPermission` grant (and its revocation),
+  the no-ingress security group, the temporary private S3 bucket, and all cleanup;
+- bypass the script because it "looks slow" or "the user is in a hurry": the setup it does is
+  what makes the numbers reportable and the resources safe to leave behind.
+
+The only sanctioned alternative is an existing in-region EC2 that already satisfies every
+prerequisite in [references/aws.md](references/aws.md); if any item is unclear, use the script.
+
+Validate first with `--dry-run`, confirm the scope and cost with the user, then re-run with
+`--yes`:
 
 ```bash
 uv run --project benchmark python skills/benchmark-decider/scripts/run_on_ec2.py \
