@@ -247,6 +247,15 @@ def make_source_archive(root: Path, ref: str, destination: Path) -> str:
     return revision
 
 
+def make_environment_archive(
+    environment_file: Path, environment_path: str, destination: Path
+) -> None:
+    environment_dir_local = environment_file.parent
+    arcname = str(Path(environment_path).parent)
+    with tarfile.open(destination, "w:gz") as archive:
+        archive.add(environment_dir_local, arcname=arcname)
+
+
 def create_bucket(s3: Any, bucket_name: str, region: str) -> None:
     kwargs: dict[str, Any] = {
         "Bucket": bucket_name,
@@ -296,44 +305,35 @@ def build_remote_script(
         benchmark_arguments.append("--smoke")
     command = " ".join(shlex.quote(argument) for argument in benchmark_arguments)
     environment_dir = str(Path(environment_path).parent)
-    environment_object = f"s3://{bucket_name}/{object_prefix}/environment.yaml"
     benchmark_command = (
         "env PYTHONPATH=src /usr/local/bin/uv run --project benchmark --locked --python 3.12 "
         f"python -m benchmark.runner run {command}"
     )
 
+    s3_base = shlex.quote(f"s3://{bucket_name}/{object_prefix}")
+    region_quoted = shlex.quote(region)
+    runs_dir = shlex.quote(environment_dir + "/runs")
     return f"""set -e
 dnf install -y gzip tar util-linux
 command -v aws
 curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh
+s3cp() {{ aws s3 cp "$1" "$2" --region {region_quoted}; }}
 rm -rf /opt/strands-decider
 mkdir -p /opt/strands-decider
-aws s3 cp \
-  {shlex.quote(f"s3://{bucket_name}/{object_prefix}/source.tgz")} \
-  /tmp/strands-decider-source.tgz \
-  --region {shlex.quote(region)}
+s3cp {s3_base}/source.tgz /tmp/strands-decider-source.tgz
 tar -xzf /tmp/strands-decider-source.tgz -C /opt/strands-decider
 cd /opt/strands-decider
-mkdir -p {shlex.quote(environment_dir)}
-aws s3 cp \
-  {shlex.quote(environment_object)} \
-  {shlex.quote(environment_path)} \
-  --region {shlex.quote(region)}
+s3cp {s3_base}/environment.tgz /tmp/strands-decider-environment.tgz
+tar -xzf /tmp/strands-decider-environment.tgz -C /opt/strands-decider
 set +e
 script --quiet --return --command {shlex.quote(benchmark_command)} /tmp/benchmark.log
 benchmark_status=$?
 set -e
-if [ -d {shlex.quote(environment_dir + "/runs")} ]; then
-  tar -czf /tmp/benchmark-results.tgz {shlex.quote(environment_dir + "/runs")}
-  aws s3 cp \
-    /tmp/benchmark-results.tgz \
-    {shlex.quote(f"s3://{bucket_name}/{object_prefix}/benchmark-results.tgz")} \
-    --region {shlex.quote(region)}
+if [ -d {runs_dir} ]; then
+  tar -czf /tmp/benchmark-results.tgz {runs_dir}
+  s3cp /tmp/benchmark-results.tgz {s3_base}/benchmark-results.tgz
 fi
-aws s3 cp \
-  /tmp/benchmark.log \
-  {shlex.quote(f"s3://{bucket_name}/{object_prefix}/benchmark.log")} \
-  --region {shlex.quote(region)}
+s3cp /tmp/benchmark.log {s3_base}/benchmark.log
 tail -n 100 /tmp/benchmark.log
 exit $benchmark_status
 """
@@ -398,7 +398,7 @@ def main() -> int:
         "models": selected_models,
         "endpoints": endpoints,
         "git_ref": args.ref,
-        "environment_transfer": "local environment.yaml copied separately from the Git archive",
+        "environment_source": "working-tree",
         "smoke": args.smoke,
         "network": "default VPC, public egress, no inbound rules",
         "cleanup": "terminate instance and delete temporary IAM, S3, and security group",
@@ -435,27 +435,28 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="strands-decider-ec2-") as temporary_directory:
         temporary = Path(temporary_directory)
         source_archive = temporary / "source.tgz"
+        environment_archive = temporary / "environment.tgz"
         result_archive = temporary / "benchmark-results.tgz"
         log_path = temporary / "benchmark.log"
         revision = make_source_archive(root, args.ref, source_archive)
+        make_environment_archive(environment_file, environment_path, environment_archive)
         print(f"copying committed revision {revision}", flush=True)
 
         try:
             create_bucket(s3, bucket_name, region)
             bucket_created = True
             secure_bucket(s3, bucket_name)
-            s3.upload_file(
-                str(source_archive),
-                bucket_name,
-                f"{object_prefix}/source.tgz",
-                ExtraArgs={"ServerSideEncryption": "AES256"},
-            )
-            s3.upload_file(
-                str(environment_file),
-                bucket_name,
-                f"{object_prefix}/environment.yaml",
-                ExtraArgs={"ServerSideEncryption": "AES256"},
-            )
+
+            def upload_bundle(local_path: Path, key_suffix: str) -> None:
+                s3.upload_file(
+                    str(local_path),
+                    bucket_name,
+                    f"{object_prefix}/{key_suffix}",
+                    ExtraArgs={"ServerSideEncryption": "AES256"},
+                )
+
+            upload_bundle(source_archive, "source.tgz")
+            upload_bundle(environment_archive, "environment.tgz")
             print(f"created private transfer bucket {bucket_name}", flush=True)
 
             trust = {
