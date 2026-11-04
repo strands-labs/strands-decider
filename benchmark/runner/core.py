@@ -19,8 +19,11 @@ from typing import Any
 
 import boto3
 import numpy as np
+from botocore.auth import SigV4Auth
+from botocore.awsrequest import AWSRequest
 from botocore.config import Config
 from botocore.exceptions import BotoCoreError, ClientError, ConnectTimeoutError, ReadTimeoutError
+from botocore.httpsession import URLLib3Session
 from transformers import AutoTokenizer
 
 from benchmark.runner.config import Environment
@@ -224,6 +227,86 @@ class SageMakerClient:
             "backend": "sagemaker",
             "region": self.region,
             **self.metadata,
+        }
+
+
+class LambdaFunctionUrlClient:
+    """SigV4-signed client for a Lambda Function URL with AWS_IAM auth."""
+
+    def __init__(
+        self,
+        function_url: str,
+        function_arn: str,
+        region: str,
+        model: str,
+        *,
+        timeout_s: float,
+        profile: str | None,
+        max_pool_connections: int,
+    ):
+        session = boto3.Session(profile_name=profile, region_name=region)
+        credentials = session.get_credentials()
+        if credentials is None:
+            raise RuntimeError("no AWS credentials available for Lambda SigV4 signing")
+        self._credentials = credentials
+        self._signer = SigV4Auth(credentials, "lambda", region)
+        self._http = URLLib3Session(
+            timeout=timeout_s,
+            max_pool_connections=max_pool_connections,
+        )
+        self.base_url = function_url.rstrip("/")
+        self.function_arn = function_arn
+        self.region = region
+        self.model = model
+        self.timeout_s = timeout_s
+
+    def _signed(self, method: str, path: str, data: bytes | None) -> AWSRequest:
+        headers = {"host": urllib.parse.urlsplit(self.base_url).netloc}
+        if data is not None:
+            headers["content-type"] = "application/json"
+        request = AWSRequest(
+            method=method,
+            url=f"{self.base_url}{path}",
+            data=data,
+            headers=headers,
+        )
+        self._signer.add_auth(request)
+        return request
+
+    def invoke(self, payload: bytes) -> Invocation:
+        started = time.perf_counter()
+        try:
+            request = self._signed("POST", "/v1/systemone", payload)
+            response = self._http.send(request.prepare())
+            status = response.status_code
+            body = response.content or b""
+        except Exception as exc:
+            return Invocation(
+                status=0,
+                latency_ms=(time.perf_counter() - started) * 1000,
+                error=f"{type(exc).__name__}: {exc}"[:500],
+                timeout="timeout" in type(exc).__name__.lower(),
+            )
+        return parse_invocation(status, body, (time.perf_counter() - started) * 1000)
+
+    def health(self) -> dict[str, Any]:
+        try:
+            request = self._signed("GET", "/health", None)
+            response = self._http.send(request.prepare())
+            if response.status_code != 200:
+                return {}
+            parsed = json.loads(response.content or b"{}")
+        except (OSError, ValueError, BotoCoreError, ClientError):
+            return {}
+        upstream = parsed if isinstance(parsed, dict) else {}
+        return {
+            "checkpoint": self.model,
+            "backend": "lambda",
+            "region": self.region,
+            "function_arn": self.function_arn,
+            "function_url": self.base_url,
+            "server_model": upstream.get("model"),
+            **{k: v for k, v in upstream.items() if k != "model"},
         }
 
 
@@ -467,7 +550,7 @@ class BenchmarkRunner:
         self.progress = progress
         self.advance = advance or (lambda _: None)
         self.server = ManagedServer(environment, model)
-        self.client: HTTPClient | SageMakerClient | None = None
+        self.client: HTTPClient | SageMakerClient | LambdaFunctionUrlClient | None = None
         self.workload: Workload | None = None
         self._point_index = 0
 
@@ -621,6 +704,17 @@ class BenchmarkRunner:
                 self.model,
                 timeout_s=self.environment.timeout_s,
                 profile=self.environment.sagemaker.get("profile"),
+                max_pool_connections=max(self.concurrency_levels),
+            )
+        elif self.environment.aws_sigv4:
+            sigv4 = self.environment.aws_sigv4
+            self.client = LambdaFunctionUrlClient(
+                sigv4["function_url"],
+                sigv4["function_arn"],
+                sigv4["region"],
+                self.model,
+                timeout_s=self.environment.timeout_s,
+                profile=sigv4.get("profile"),
                 max_pool_connections=max(self.concurrency_levels),
             )
         else:
