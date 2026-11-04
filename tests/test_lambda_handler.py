@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 import importlib
+import io
 import itertools
 import json
 import os
@@ -57,6 +58,21 @@ class FakeBackend:
         ]
 
 
+class FakeVisionBackend(FakeBackend):
+    """FakeBackend that also reads images, sizing each as the engine does."""
+
+    images: ClassVar[list[list[tuple[int, int]]]] = []
+
+    def __init__(self, lib_path: str, model_path: str, mmproj_path: str, threads: int):
+        super().__init__(lib_path, model_path, threads)
+        self.mmproj_path = mmproj_path
+
+    def forward_images(self, segments, images, questions, rows):
+        FakeVisionBackend.images.append([(w, h) for _, w, h in images])
+        state = [t for segment in segments for t in segment]
+        return self.forward(state, questions, rows), [w // 32 * (h // 32) + 2 for _, w, h in images]
+
+
 @pytest.fixture
 def model_dir(tmp_path):
     """What the image holds in /opt/model: the GGUF (any bytes here) and the assets."""
@@ -98,10 +114,15 @@ def load(model_dir, monkeypatch):
         monkeypatch.delenv("DECIDER_MAX_REQUEST_TOKENS", raising=False)
         for key, value in env.items():
             monkeypatch.setenv(key, value)
-        monkeypatch.setitem(sys.modules, "backend", types.SimpleNamespace(LlamaBackend=FakeBackend))
+        monkeypatch.setitem(
+            sys.modules,
+            "backend",
+            types.SimpleNamespace(LlamaBackend=FakeBackend, LlamaVisionBackend=FakeVisionBackend),
+        )
         monkeypatch.syspath_prepend(str(FUNCTION))
         monkeypatch.delitem(sys.modules, "handler", raising=False)
         FakeBackend.calls.clear()
+        FakeVisionBackend.images.clear()
         return importlib.import_module("handler")
 
     yield _load
@@ -146,6 +167,7 @@ def test_health_reports_the_model_and_settings(load):
             "max_length": 512,
             "temperature": 1.0,
             "max_request_tokens": None,
+            "vision": False,
         },
     )
     handler = load(DECIDER_MAX_REQUEST_TOKENS="24576")
@@ -255,3 +277,39 @@ def test_prefetch_reads_every_byte_once(load, model_dir, monkeypatch):
     assert covered[0][0] == 0
     assert all(a + n == b for (a, n), (b, _) in itertools.pairwise(covered))
     assert sum(n for _, n in covered) == 1000
+
+
+def _png(width: int, height: int) -> str:
+    from PIL import Image
+
+    buf = io.BytesIO()
+    Image.new("RGB", (width, height), (40, 120, 200)).save(buf, "PNG")
+    return base64.b64encode(buf.getvalue()).decode()
+
+
+def test_an_image_with_a_vision_tower_answers_over_images(load, model_dir):
+    pytest.importorskip("PIL")
+    (model_dir / "mmproj-f16.gguf").write_bytes(os.urandom(500))
+    handler = load()
+    backend = handler._engine.result().backend
+    assert isinstance(backend, FakeVisionBackend)
+    assert backend.mmproj_path == str(model_dir / "mmproj-f16.gguf")
+    # The image warm-up: 64 px, raised to the processor grid's least area, 256 x 256.
+    assert FakeVisionBackend.images == [[(256, 256)]]
+    assert call(handler, url_event("GET", "/health"))[1]["vision"] is True
+    status, body = call(
+        handler, url_event("POST", "/v1/systemone", {**REQUEST, "images": [_png(600, 400)]})
+    )
+    assert status == 200 and set(body["answers"]) == {"urgent", "team"}
+    assert FakeVisionBackend.images[-1] == [(448, 288)]  # 448 x 299, on the processor's grid
+
+
+def test_an_image_without_a_vision_tower_refuses_images(load):
+    pytest.importorskip("PIL")
+    handler = load()
+    assert not isinstance(handler._engine.result().backend, FakeVisionBackend)
+    status, body = call(
+        handler, url_event("POST", "/v1/systemone", {**REQUEST, "images": [_png(64, 64)]})
+    )
+    assert status == 422 and "images are not supported" in body["detail"]
+    assert not FakeVisionBackend.images

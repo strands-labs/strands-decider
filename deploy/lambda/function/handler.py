@@ -20,7 +20,7 @@ import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Any
 
-from backend import LlamaBackend
+from backend import LlamaBackend, LlamaVisionBackend
 from pydantic import ValidationError
 
 from strands_decider.hidden_engine import HiddenStateEngine
@@ -31,6 +31,11 @@ log.setLevel(logging.INFO)
 
 MODEL_DIR = os.environ.get("DECIDER_MODEL_DIR", "/opt/model")  # the Dockerfile's, unless set
 ROUTES = {"/health": "GET", "/v1/systemone": "POST"}
+# A 64x64 white PNG, for the image warm-up.
+_WARM_UP_IMAGE = (
+    "iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAATUlEQVR42u3PQQ0AAAgEILV/5zOFDzdoQCepz6aeEx"
+    "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQELi3cqoDfaKuZM4AAAAASUVORK5CYII="
+)
 
 
 def _prefetch(path: str, chunk: int = 16 << 20, readers: int = 32) -> None:
@@ -64,19 +69,29 @@ def _load() -> HiddenStateEngine:
             f"DECIDER_MAX_REQUEST_TOKENS must be 0 (no limit) or more, not {max_request_tokens}"
         )
     model = os.path.join(MODEL_DIR, "decider-q8_0.gguf")
-    _prefetch(model)
+    # The vision tower, in an image built with vision on (README.md, Images).
+    mmproj = os.path.join(MODEL_DIR, "mmproj-f16.gguf")
+    vision = os.path.exists(mmproj)
+    for path in (model, mmproj) if vision else (model,):
+        _prefetch(path)
     log.info("model read in %.1f s", time.perf_counter() - started)
-    backend = LlamaBackend(
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), "libdecider.so"),
-        model,
-        os.cpu_count() or 1,
+    lib = os.path.join(os.path.dirname(os.path.abspath(__file__)), "libdecider.so")
+    threads = os.cpu_count() or 1
+    backend = (
+        LlamaVisionBackend(lib, model, mmproj, threads)
+        if vision
+        else LlamaBackend(lib, model, threads)
     )
     engine = HiddenStateEngine.from_assets(os.path.join(MODEL_DIR, "assets"), backend)
     # The first forward's one-time costs, paid before the snapshot is taken, and before the
     # request limit, which could refuse even this.
-    engine.evaluate(
-        {"state": "Warm up.", "questions": {"q": {"type": "noul", "instructions": "?"}}}
-    )
+    warm_up: dict[str, Any] = {
+        "state": "Warm up.",
+        "questions": {"q": {"type": "noul", "instructions": "?"}},
+    }
+    engine.evaluate(warm_up)
+    if vision:
+        engine.evaluate({**warm_up, "images": [_WARM_UP_IMAGE]})
     engine.cfg.max_request_tokens = max_request_tokens or None
     log.info("model ready in %.1f s", time.perf_counter() - started)
     return engine
@@ -145,6 +160,7 @@ def _http(event: dict[str, Any]) -> dict[str, Any]:
                 "max_length": engine.cfg.max_length,
                 "temperature": engine.cfg.temperature,
                 "max_request_tokens": engine.cfg.max_request_tokens,
+                "vision": hasattr(engine.backend, "forward_images"),
             },
         )
     body = event.get("body") or ""
