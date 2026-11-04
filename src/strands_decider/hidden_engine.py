@@ -10,6 +10,9 @@ tests/test_hidden_engine.py checks that the two engines give the same answers.
 The engine asks the backend only for the hidden states the head reads: at each option's
 last token, and at the question's last token, `<answer>`.
 
+With a backend that also reads images (`ImageBackend`), it answers over images as
+`vision.VisionEngine` does: images.py renders, decodes and sizes them for both engines.
+
 The answers are the same; `usage.input_tokens` can differ: this engine counts the state
 once, then every question. `SystemOneEngine` counts the state once per question on its
 batched path (with `use_prefix_cache=False`, or when its cache cannot be forked), and
@@ -31,8 +34,15 @@ from typing import TYPE_CHECKING, Any, Protocol, cast
 import numpy as np
 from tokenizers import Tokenizer
 
-from .prompting import fit_window, option_token_index, render_question, render_state, to_answer
-from .schema import Answer, SystemOneRequest, SystemOneResponse, Usage
+from .prompting import (
+    RenderedQuestion,
+    fit_window,
+    option_token_index,
+    render_question,
+    render_state,
+    to_answer,
+)
+from .schema import Answer, Content, SystemOneRequest, SystemOneResponse, Usage
 
 if TYPE_CHECKING:
     from torch import nn
@@ -57,6 +67,25 @@ class Backend(Protocol):
         run calls concurrently serializes them itself. A backend whose answers can depend
         on what it batches together should say so. Later backends may declare
         capabilities such as these, and media support, through an optional attribute."""
+        ...
+
+
+class ImageBackend(Backend, Protocol):
+    """A backend that also reads images. The engine sends a request with images to
+    forward_images, and refuses images when its backend has no such method."""
+
+    def forward_images(
+        self,
+        segments: list[list[int]],
+        images: list[tuple[bytes, int, int]],
+        questions: list[list[int]],
+        rows: list[list[int]],
+    ) -> tuple[list[np.ndarray], list[int]]:
+        """forward over a state that holds images. The state is `segments`, its text as
+        token ids around the images, with image i between segment i and segment i + 1;
+        each image is (RGB bytes, width, height), already at the processor's grid size
+        (images.to_grid). Returns forward's hidden states, and each image's token count,
+        its `<|vision_start|>` and `<|vision_end|>` included."""
         ...
 
 
@@ -91,6 +120,10 @@ class HiddenEngineConfig:
     # The most tokens one request may run through the backend, the state once plus every
     # question; a larger request is refused before the backend runs. None: no limit.
     max_request_tokens: int | None = None
+    # As in VisionEngineConfig, for an engine whose backend reads images.
+    image_long_side: int = 448
+    max_images: int = 4
+    max_image_pixels: int = 4096 * 4096
 
 
 class HiddenStateEngine:
@@ -140,30 +173,110 @@ class HiddenStateEngine:
         with self._tok_lock:
             return fit_window(self.tok, state_text, question_texts, self.cfg.max_length)
 
+    def fit_images(
+        self, state: Content, image_tokens: list[int], question_texts: list[str]
+    ) -> tuple[list[list[int]], list[list[int]], list[list[tuple[int, int]]]]:
+        """VisionEngine._fit_images for a backend: the state's text around its images
+        (images.state_segments) as token ids, then each question's ids and character
+        offsets. `image_tokens` are each image's tokens, its start and end included. A
+        prompt over the window is refused, as VisionEngine refuses it."""
+        from .images import state_segments
+
+        texts = state_segments(state, len(image_tokens))
+        with self._tok_lock:
+            self.tok.no_padding()
+            self.tok.no_truncation()
+            segments = [
+                self.tok.encode(t, add_special_tokens=i == 0).ids for i, t in enumerate(texts)
+            ]
+            encodings = self.tok.encode_batch(question_texts, add_special_tokens=False)
+        q = [e.ids for e in encodings]
+        offsets = [list(e.offsets) for e in encodings]
+        longest = max(len(x) for x in q)
+        n_state = sum(len(x) for x in segments) + sum(image_tokens)
+        if n_state + longest > self.cfg.max_length:
+            # VisionEngine's message: the image's start and end tokens count as state.
+            n_image = sum(image_tokens) - 2 * len(image_tokens)
+            raise ValueError(
+                f"prompt of {n_state + longest} tokens ({n_state - n_image} state + "
+                f"{n_image} image + {longest} question) exceeds the context window "
+                f"of {self.cfg.max_length} tokens"
+            )
+        return segments, q, offsets
+
     def evaluate(self, request: SystemOneRequest | Mapping[str, Any]) -> SystemOneResponse:
         req = (
             request
             if isinstance(request, SystemOneRequest)
             else SystemOneRequest.model_validate(request)
         )
-        if req.images:
-            raise ValueError("this engine has no vision tower; images are not supported")
         names = list(req.questions)
         rendered = [render_question(req.questions[n]) for n in names]
+        if req.images:
+            return self._evaluate_images(req, names, rendered)
         s, q, offs = self.fit(render_state(req.state), [rq.text for rq in rendered])
-        n_input = len(s) + sum(len(x) for x in q)
+        n_input = self._check_limit(len(s), q)
+        rows = self._rows(rendered, q, offs)
+        return self._read(names, rendered, self.backend.forward(s, q, rows), rows, n_input)
+
+    def _evaluate_images(
+        self, req: SystemOneRequest, names: list[str], rendered: list[RenderedQuestion]
+    ) -> SystemOneResponse:
+        forward_images = getattr(self.backend, "forward_images", None)
+        if forward_images is None:
+            raise ValueError("this engine has no vision tower; images are not supported")
+        if len(req.images) > self.cfg.max_images:
+            raise ValueError(
+                f"{len(req.images)} images; this server takes at most {self.cfg.max_images}"
+            )
+        from .images import decode_image, fit_image, to_grid
+
+        long_side, max_pixels = self.cfg.image_long_side, self.cfg.max_image_pixels
+        pictures = [to_grid(fit_image(decode_image(b, max_pixels), long_side)) for b in req.images]
+        image_tokens = [n + 2 for *_, n in pictures]  # with <|vision_start|> and <|vision_end|>
+        segments, q, offs = self.fit_images(req.state, image_tokens, [rq.text for rq in rendered])
+        n_input = self._check_limit(sum(len(x) for x in segments) + sum(image_tokens), q)
+        rows = self._rows(rendered, q, offs)
+        hidden, made = forward_images(segments, [(rgb, w, h) for rgb, w, h, _ in pictures], q, rows)
+        if list(made) != image_tokens:
+            # The backend sized an image otherwise, so the window and the token count were
+            # computed for a prompt it did not run.
+            raise RuntimeError(f"backend made {list(made)} image tokens; expected {image_tokens}")
+        return self._read(names, rendered, hidden, rows, n_input)
+
+    def _check_limit(self, n_state: int, q: list[list[int]]) -> int:
+        """The request's tokens, the state once then every question, within the limit."""
+        n_input = n_state + sum(len(x) for x in q)
         if self.cfg.max_request_tokens and n_input > self.cfg.max_request_tokens:
             raise ValueError(
-                f"request of {n_input} tokens (the state's {len(s)} once, then its questions) "
+                f"request of {n_input} tokens (the state's {n_state} once, then its questions) "
                 f"exceeds the limit of {self.cfg.max_request_tokens} tokens per request"
             )
-        # Found before the backend runs, so a question whose options were trimmed away is
-        # refused without the work.
+        return n_input
+
+    @staticmethod
+    def _rows(
+        rendered: list[RenderedQuestion],
+        q: list[list[int]],
+        offs: list[list[tuple[int, int]]],
+    ) -> list[list[int]]:
+        """Each question's rows for the backend: its options' last tokens, then
+        `<answer>`. Found before the backend runs, so a question whose options were
+        trimmed away is refused without the work."""
         options = [
             option_token_index(o, rq.option_spans, 0) for rq, o in zip(rendered, offs, strict=True)
         ]
-        rows = [[*opts, len(x) - 1] for opts, x in zip(options, q, strict=True)]
-        hidden = self.backend.forward(s, q, rows)
+        return [[*opts, len(x) - 1] for opts, x in zip(options, q, strict=True)]
+
+    def _read(
+        self,
+        names: list[str],
+        rendered: list[RenderedQuestion],
+        hidden: list[np.ndarray],
+        rows: list[list[int]],
+        n_input: int,
+    ) -> SystemOneResponse:
+        """The answers from the backend's hidden states, checked against what was asked."""
         if len(hidden) != len(names):
             raise ValueError(f"backend returned {len(hidden)} arrays for {len(names)} questions")
         answers: dict[str, Answer] = {}
