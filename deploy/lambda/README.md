@@ -92,7 +92,7 @@ for the default. It holds:
    Hub, folds the model's LoRA into the torso (`scripts/prepare_model.py`), converts the torso to a
    GGUF and quantizes it to Q8_0 (about 2 GB), and builds llama.cpp and `function/shim.c` into
    one library. The image holds those, the pointer head, the tokenizer, and the package without
-   torch. It runs on the CodeBuild project's `LARGE` instance (16 GB of memory), as the merge
+   torch; with `vision=true`, also the base model's vision tower ([Images](#images)). It runs on the CodeBuild project's `LARGE` instance (16 GB of memory), as the merge
    takes about 8 GB.
 2. The function: arm64, 10,240 MB (the most Lambda gives, and the only size with 6 vCPUs), a
    15-minute timeout, SnapStart if you turn it on ([What it costs](#what-it-costs)), and a log
@@ -109,6 +109,7 @@ Every setting is a CDK context value. Change it in `cdk.json`, or pass `-c key=v
 | `model` | `StrandsAgents/strands-decider-2B-qwen3.5-v1-2610` | The strands-decider model, a Hugging Face Hub id. Any Qwen3.5 model with a pointer head works. It names the stack. |
 | `model_revision` | `main` | The model's revision. Use a release's date tag (`YYMMDD`) to pin it ([docs/inference.md, Model artifact](../../docs/inference.md#model-artifact)). |
 | `snapstart` | `false` | `true` turns SnapStart on: new execution environments answer in about 6 s instead of up to 30 s, for about $39.50 a month while the stack exists ([What it costs](#what-it-costs)) |
+| `vision` | `false` | `true` adds the base model's vision tower, for requests with images ([Images](#images)) |
 | `max_request_tokens` | `24576` | The most tokens one request may forward, the state once plus every question; `0` for no limit ([Limits](#limits)) |
 
 ## What it costs
@@ -166,6 +167,47 @@ moved probabilities and confidences by at most 0.026 and changed no choice; one 
 went from 0.495 to 0.505. The quantization to Q8_0 accounts for most of that. Requests that
 `serve` refuses, this function refuses too, with the same status.
 
+## Images
+
+The 2B Qwen3.5 decider can answer over images: its base model is multimodal, and with the base
+model's vision tower beside it, the published checkpoint reads images with no image training
+([docs/vision.md](../../docs/vision.md)). Deploy with the vision tower:
+
+```bash
+npx cdk deploy -c vision=true
+```
+
+A request then takes `images`, as `serve --vision` does: up to 4 base64 PNG, JPEG, WebP or GIF
+images, each scaled so its longer side is at most 448 px (a square image is 196 tokens). They
+go first in the state, and count against the same window.
+
+```bash
+awscurl --service lambda --region <region> -X POST -H 'content-type: application/json' \
+  -d '{"state": "The checkout page after the user tapped Pay.",
+       "images": ["'"$(base64 < screenshot.png | tr -d '\n')"'"],
+       "questions": {"paid": {"type": "noul", "instructions": "Did the payment succeed?"}}}' \
+  <FunctionUrl>v1/systemone
+```
+
+The vision tower is the base model's, unchanged, since the decider's adapter never touched it.
+The build converts it to a GGUF (about 0.7 GB, in f16), and llama.cpp's multimodal library
+(`mtmd`) runs it. The engine sizes each image as the Qwen image processor does, so the vision
+tower sees the processor's pixels.
+
+Measured in us-east-1 with vision on: a request with one 448 px screenshot and three questions
+(411 tokens) takes 5.5 s on Graviton3 and 8.5 s on Graviton2 (medians of 15), against 1.6 s and
+2.4 s for three questions about a short text state. Over eight requests (screenshots, a photograph,
+a chart, a non-square and an upscaled image, two and four images, and a state over the window),
+the function's token counts matched `serve --vision`'s exactly, and its answers were within 0.02
+of `serve --vision`'s in fp32 on CPU, with no choice changed. A prompt over the window gets the
+same 422.
+
+The vision tower makes the image about 0.7 GB larger, and a new execution environment slower to
+start. Without SnapStart, 14 new environments loaded the model and the vision tower in 16 to 34 s,
+and the first one after the deploy took 3 minutes. With
+SnapStart, new environments answered in 6.6 to 8.9 s, so turn it on for image traffic
+(`npx cdk deploy -c vision=true -c snapstart=true`).
+
 ## Limits
 
 - The state and the longest question must fit the model's window (`max_length`, 4,096 tokens for
@@ -174,8 +216,9 @@ went from 0.495 to 0.505. The quantization to Q8_0 accounts for most of that. Re
 - A request may forward at most `max_request_tokens` tokens, the state once plus every question.
   The default, 24,576, stays well inside the 15-minute timeout; a larger request is refused with
   a 422 before any work is done.
-- No images: a request with `images` gets a 422.
-- A Function URL request or response is at most 6 MB.
+- Images need `vision=true` ([Images](#images)); without it, a request with `images` gets a 422.
+- A Function URL request or response is at most 6 MB, so send images at the size they are read
+  at, not as camera originals.
 - One request at a time per execution environment. Lambda scales by adding environments.
 
 ## Deleting it

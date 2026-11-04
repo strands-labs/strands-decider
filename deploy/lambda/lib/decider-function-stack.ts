@@ -72,7 +72,13 @@ export class DeciderFunctionStack extends Stack {
     // Builds the image in AWS CodeBuild during `cdk deploy` (deploy-time-build) and publishes it
     // to an ECR repository that belongs to the stack. The build downloads the model, folds its
     // LoRA into the torso and converts it, so the image holds the model.
-    const buildArgs = { MODEL: ctx("model"), MODEL_REVISION: ctx("model_revision") };
+    // Vision adds the base model's vision tower (about 0.7 GB) to the image, for requests with
+    // images; without it, they get a 422.
+    const buildArgs = {
+      MODEL: ctx("model"),
+      MODEL_REVISION: ctx("model_revision"),
+      VISION: String(flag(ctx("vision"), "vision")),
+    };
     const image = new ContainerImageBuild(this, "Image", {
       directory: REPO_ROOT,
       file: "deploy/lambda/Dockerfile",

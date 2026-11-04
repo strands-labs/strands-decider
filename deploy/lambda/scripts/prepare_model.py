@@ -1,11 +1,13 @@
 """Write what the Lambda image serves from a strands-decider checkpoint.
 
-    python prepare_model.py MODEL REVISION OUT_DIR
+    python prepare_model.py MODEL REVISION OUT_DIR [VISION]
 
 MODEL is a Hugging Face Hub id. The script writes OUT_DIR/torso, the torso with its LoRA folded
 in, as the Qwen3_5ForCausalLM checkpoint llama.cpp's convert_hf_to_gguf.py reads, and
 OUT_DIR/assets, the tokenizer, pointer head and settings HiddenStateEngine.from_assets reads.
-The Dockerfile runs it.
+With VISION `true`, OUT_DIR/vision links to the base model at the revision MODEL records: its
+vision tower, which the adapter leaves as it is, for convert_hf_to_gguf.py --mmproj. The
+Dockerfile runs it.
 """
 
 from __future__ import annotations
@@ -20,7 +22,7 @@ from strands_decider.hidden_engine import save_assets
 from strands_decider.modeling import StrandsDeciderModel, checkpoint_dir
 
 
-def main(model_id: str, revision: str, out: str) -> None:
+def main(model_id: str, revision: str, out: str, vision: str = "false") -> None:
     model = StrandsDeciderModel.load(checkpoint_dir(model_id, revision))
     torso = (
         model.torso.merge_and_unload() if hasattr(model.torso, "merge_and_unload") else model.torso
@@ -37,6 +39,18 @@ def main(model_id: str, revision: str, out: str) -> None:
     model.tokenizer.save_pretrained(os.path.join(out, "torso"))
     # Named as `strands-decider serve` names it, and for the quantization the Dockerfile applies.
     save_assets(model, os.path.join(out, "assets"), f"{model_id.split('/')[-1]}-q8_0")
+    if vision == "true":
+        from huggingface_hub import snapshot_download
+
+        # The weights, the config, and the image processor's preprocessor_config.json.
+        base = snapshot_download(
+            model.config.base_model,
+            revision=model.config.base_revision,
+            allow_patterns=["*.json", "*.safetensors", "*.txt"],
+        )
+        os.symlink(base, os.path.join(out, "vision"))
+    elif vision != "false":
+        raise SystemExit(f"VISION must be true or false, not {vision!r}")
 
 
 if __name__ == "__main__":
