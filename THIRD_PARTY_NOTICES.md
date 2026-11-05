@@ -4,6 +4,12 @@ This repository contains code adapted from third-party projects. The notices req
 their licences are below. Each notice names the file that carries the adapted code, the
 project it comes from and what was changed.
 
+## autojev
+
+The wording of the lettered decision prompt in `src/strands_decider/prompting.py` (the system,
+question and option lines) comes from the autojev decider package, licensed under the Apache
+License, Version 2.0 (the text follows below). The code is written anew.
+
 ## Hugging Face Transformers
 
 `src/strands_decider/mps_kernels.py` adapts `torch_chunk_gated_delta_rule` from the Qwen3.5 model

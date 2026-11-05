@@ -48,6 +48,7 @@ from .modeling import (
     config_path,
     load_head_state,
     masked_log_softmax,
+    refuse_token_readout,
 )
 from .prompting import RenderedQuestion
 from .schema import SystemOneRequest, SystemOneResponse
@@ -322,6 +323,7 @@ def _load_mlx_engine_on_worker(
 ) -> MLXEngine:
     path = checkpoint_dir(checkpoint)
     decider_config = StrandsDeciderConfig.from_json(config_path(path))
+    refuse_token_readout(decider_config)
     decider_config.base_revision = base_revision(path, decider_config)
     lora_dir = os.path.join(path, "lora")
     if decider_config.use_lora and not os.path.isdir(lora_dir):

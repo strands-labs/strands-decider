@@ -27,6 +27,7 @@ import typer
 from torch.utils.data import DataLoader, Dataset
 
 from strands_decider.modeling import (
+    HEAD_TYPES,
     StrandsDeciderConfig,
     StrandsDeciderModel,
     checkpoint_dir,
@@ -68,6 +69,11 @@ class TrainConfig:
     # (modeling.HostEmbedding). For one GPU: under torchrun every rank would hold a copy.
     host_embeddings: bool = False
     freeze_torso: bool = False
+    # "pointer" (the default) or "token_readout" (modeling.TokenReadoutHead), which goes with
+    # render "lettered" and takes attention_mode "causal" or "prefix_bidir".
+    head_type: str = "pointer"
+    render: str = "numbered"
+    attention_mode: str = "causal"
     pointer_dim: int = 256
     # A frozen teacher's option distribution per training row (data/teacher.py): JSONL of
     # {"i": row index in the concatenated train_files, "probs": [...canonical order]}.
@@ -120,6 +126,8 @@ class TrainConfig:
     head_lr: float = 1e-3
     weight_decay: float = 0.01
     warmup_ratio: float = 0.03
+    # The cosine schedule ends at lr_floor x the peak (0: at zero; the reference recipe: 0.1).
+    lr_floor: float = 0.0
     max_grad_norm: float = 1.0
     # > 0 keeps an exponential moving average of the trained weights (adapter and head), in
     # fp32, updated after every optimizer step with decay min(ema_decay, (1 + step) /
@@ -158,9 +166,10 @@ class TrainConfig:
         # pointer-only architecture; a typo in any other key still raises.
         known = set(cls.__dataclass_fields__)
         for k, v in raw.items():
-            if k == "head_type" and v != "pointer":
+            if k == "head_type" and v not in HEAD_TYPES:
                 raise ValueError(
-                    f"{path}: head_type={v!r}; this version trains pointer-head checkpoints only"
+                    f"{path}: head_type={v!r}; this version trains "
+                    "pointer-head and token-readout-head checkpoints only"
                 )
             if k not in known and k not in RETIRED_YAML_KEYS:
                 raise ValueError(f"{path}: unknown config key {k!r}")
@@ -172,12 +181,15 @@ class TrainConfig:
 
 # Slot-era TrainConfig keys the current dataclass no longer carries. Dropped silently by
 # from_yaml so a published recipe still parses; a typo in any other key raises.
-RETIRED_YAML_KEYS = frozenset({"num_slots", "head_type", "head_hidden", "head_init"})
+RETIRED_YAML_KEYS = frozenset({"num_slots", "head_hidden", "head_init"})
 
 
 # The fields of a TrainConfig that a checkpoint fixes: with init_from they are the checkpoint's.
 INIT_FROM_ARCH = (
     "base_model",
+    "head_type",
+    "render",
+    "attention_mode",
     "pointer_dim",
     "use_lora",
     "lora_r",
@@ -327,11 +339,11 @@ class _Ema:
         self.live = []
 
 
-def _lr_lambda(step: int, warmup: int, total: int) -> float:
+def _lr_lambda(step: int, warmup: int, total: int, floor: float = 0.0) -> float:
     if step < warmup:
         return step / max(1, warmup)
     progress = (step - warmup) / max(1, total - warmup)
-    return 0.5 * (1.0 + math.cos(math.pi * min(1.0, progress)))
+    return floor + (1.0 - floor) * 0.5 * (1.0 + math.cos(math.pi * min(1.0, progress)))
 
 
 @torch.no_grad()  # type: ignore[untyped-decorator]
@@ -349,6 +361,7 @@ def evaluate_loss(
             attention_mask=batch["attention_mask"],
             n_slots=batch["n_slots"],
             opt_idx=batch.get("opt_idx"),
+            prefix_end=batch.get("prefix_end"),
             labels=batch["labels"],
             label_dist=batch.get("label_dist"),
             weights=batch.get("weights"),
@@ -457,6 +470,8 @@ def train(cfg: TrainConfig) -> str:
         raise ValueError("kl_frozen_weight > 0 needs kl_frozen_reference (a trained checkpoint)")
     if cfg.kl_frozen_reference and not (cfg.precompute_frozen_kl and cfg.kl_frozen_weight > 0):
         raise ValueError("kl_frozen_reference needs kl_frozen_weight > 0 and precompute_frozen_kl")
+    if cfg.head_type == "token_readout" and cfg.kl_frozen_weight > 0:
+        raise ValueError("head_type token_readout does not train with a frozen-KL reference yet")
     if cfg.host_embeddings and world > 1:  # DDP refuses a module with parameters on the CPU
         raise ValueError("host_embeddings is for one GPU; under torchrun keep the table on the GPU")
     torch.manual_seed(cfg.seed)
@@ -480,6 +495,9 @@ def train(cfg: TrainConfig) -> str:
             # score confidence; without it a score could never reach high confidence.
             ordinal_smoothing=cfg.ordinal_smoothing,
             pointer_dim=cfg.pointer_dim,
+            head_type=cfg.head_type,
+            render=cfg.render,
+            attention_mode=cfg.attention_mode,
         )
         if cfg.lora_targets:
             model_cfg.lora_targets = list(cfg.lora_targets)
@@ -555,6 +573,7 @@ def train(cfg: TrainConfig) -> str:
         ordinal_smoothing=cfg.ordinal_smoothing,
         reverse_score_prob=cfg.reverse_score_prob,
         seed=cfg.seed,
+        render=cfg.render,
     )
     train_collate = SystemOneCollator(model.tokenizer, coll_cfg, train=True)
     if cfg.group_by_length:
@@ -604,7 +623,9 @@ def train(cfg: TrainConfig) -> str:
     warmup = max(1, int(total_steps * cfg.warmup_ratio))
 
     optim = _build_optimizer(model, cfg)
-    sched = torch.optim.lr_scheduler.LambdaLR(optim, lambda s: _lr_lambda(s, warmup, total_steps))
+    sched = torch.optim.lr_scheduler.LambdaLR(
+        optim, lambda s: _lr_lambda(s, warmup, total_steps, cfg.lr_floor)
+    )
 
     if rank == 0:
         os.makedirs(cfg.output_dir, exist_ok=True)
@@ -666,6 +687,7 @@ def train(cfg: TrainConfig) -> str:
                 attention_mask=batch["attention_mask"],
                 n_slots=batch["n_slots"],
                 opt_idx=batch.get("opt_idx"),
+                prefix_end=batch.get("prefix_end"),
                 labels=batch["labels"],
                 label_dist=batch.get("label_dist"),
                 weights=batch.get("weights"),

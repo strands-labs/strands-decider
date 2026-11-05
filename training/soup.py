@@ -12,8 +12,8 @@ pointer head's logit is a dot product q . k, invariant to any rotation of the q/
 so independently initialised heads have unrelated bases. After folding each head's
 LayerNorm gain and bias into its projections, the heads are stacked: the soup's head has
 pointer_dim N * dim and its logit is exactly the mean of the N heads' logits on the same
-features. A linear slot head is averaged directly (its logit is linear in its weights);
-an MLP slot head stacks its hidden units.
+features. A token readout head (one linear map, no norm, no bias) is averaged directly: its
+logit is linear in its weights.
 
 The temperatures fitted on each checkpoint do not describe the soup: they are reset to
 1, so run `python -m training.evaluate calibrate` on the soup before evaluating or serving it.
@@ -57,9 +57,14 @@ def _fold_norm(
     return w * g[None, :], w @ beta + b
 
 
-def soup_heads(states: list[dict[str, torch.Tensor]]) -> dict[str, torch.Tensor]:
-    """The pointer head whose logit is the mean of `states`' logits (see the module docstring)."""
+def soup_heads(
+    states: list[dict[str, torch.Tensor]], head_type: str = "pointer"
+) -> dict[str, torch.Tensor]:
+    """The head whose logit is the mean of `states`' logits (see the module docstring)."""
     n = len(states)
+    if head_type == "token_readout":
+        mean = torch.stack([s["proj.weight"].double() for s in states]).mean(0)
+        return {"proj.weight": mean.float()}
     folded = []
     for s in states:
         g, beta = s["norm.weight"].double(), s["norm.bias"].double()
@@ -173,16 +178,17 @@ def soup(checkpoints: list[str], out: str, replace: bool = False) -> str:
             json.dump({**acfg, "r": n * r, "lora_alpha": alpha}, fh, indent=2)
         cfg = {**cfg, "lora_r": n * r, "lora_alpha": alpha}
 
-    head = soup_heads([load_head_state(c) for c in checkpoints])
+    head = soup_heads([load_head_state(c) for c in checkpoints], cfg["head_type"])
     save_file(
         {k: v.contiguous() for k, v in head.items()},
         os.path.join(out, "head.safetensors"),
         metadata={"format": "pt"},
     )
-    cfg = {**cfg, "pointer_dim": n * cfg["pointer_dim"]}
+    if cfg["head_type"] == "pointer":
+        cfg = {**cfg, "pointer_dim": n * cfg["pointer_dim"]}
     cfg = {**cfg, "temperature": 1.0, "temperature_by_kind": {}}  # calibrate the soup
     with open(os.path.join(out, CONFIG_NAME), "w", encoding="utf-8") as fh:
-        json.dump(cfg, fh, indent=2)
+        fh.write(StrandsDeciderConfig(**cfg).to_json())  # a pointer soup's JSON as before
 
     # tokenizer, chat template and the first checkpoint's train_config.json (the recipe)
     for f in os.listdir(checkpoints[0]):

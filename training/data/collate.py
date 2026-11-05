@@ -16,7 +16,7 @@ from typing import Any
 
 import torch
 
-from strands_decider.prompting import build_prompt
+from strands_decider.prompting import build_prompt, chat_frame, lettered_prompt
 
 from .format import Example
 
@@ -24,6 +24,9 @@ from .format import Example
 @dataclass
 class CollatorConfig:
     max_length: int = 3072
+    # "numbered" (the default) or "lettered" (prompting.lettered_prompt, for a token readout).
+    # Lettered shuffles only a choice's options, as the reference recipe does.
+    render: str = "numbered"
     shuffle_options: bool = True
     # Score levels are ordered, so they are never permuted -- but reversing the whole
     # rubric (and the label with it) is meaning-preserving and doubles the orderings seen.
@@ -44,12 +47,15 @@ class SystemOneCollator:
         self.cfg = config
         self.train = train
         self.rng = random.Random(config.seed)
+        self.frame = chat_frame(tokenizer) if config.render == "lettered" else None
 
     # ---- option ordering -------------------------------------------------
 
     def _option_order(self, ex: Example) -> list[int] | None:
         n = ex.n_options
         if not self.cfg.shuffle_options or not self.train:
+            return None
+        if self.frame is not None and ex.kind != "choice":
             return None
         if ex.kind == "score":
             if self.rng.random() < self.cfg.reverse_score_prob:
@@ -165,16 +171,19 @@ class SystemOneCollator:
         teachers: list[list[float] | None] = []
 
         spans: list[Any] = []
+        states: list[str] = []
         for ex in batch:
             order = self._option_order(ex)
-            prompt, rq = build_prompt(
-                ex.state,
-                ex.to_question(self._instruction(ex)),
-                option_order=order,
-            )
-            texts.append(prompt)
-            # Option spans are relative to the question; the prompt is state + question.
-            spans.append((len(prompt) - len(rq.text), rq.option_spans))
+            question = ex.to_question(self._instruction(ex))
+            if self.frame is not None:
+                state, rest = lettered_prompt(ex.state, question, self.frame, order)
+                states.append(state)
+                texts.append(state + rest)
+            else:
+                prompt, rq = build_prompt(ex.state, question, option_order=order)
+                texts.append(prompt)
+                # Option spans are relative to the question; the prompt is state + question.
+                spans.append((len(prompt) - len(rq.text), rq.option_spans))
             labels.append(self._remap_label(ex.label, order))
             n_slots.append(ex.n_options)
             dists.append(self._target_distribution(ex, ex.label, ex.n_options, order))
@@ -184,17 +193,22 @@ class SystemOneCollator:
             t = getattr(ex, "teacher", None)
             teachers.append(None if t is None else (t if order is None else [t[i] for i in order]))
 
+        lettered = self.frame is not None
         enc = self.tok(
             texts,
             padding=True,
-            truncation=True,
-            max_length=self.cfg.max_length,
+            # A lettered prompt is read at its last token: refuse it whole rather than cut it.
+            truncation=not lettered,
+            max_length=None if lettered else self.cfg.max_length,
             return_tensors="pt",
             # Right padding: pool_last_token finds the final real token by mask length,
             # and the shared-prefix cache in infer.py assumes the prompt starts at 0.
             padding_side="right",
-            return_offsets_mapping=True,
+            return_offsets_mapping=not lettered,
+            add_special_tokens=not lettered,  # the chat template writes its own BOS
         )
+        if lettered and enc["input_ids"].size(1) > self.cfg.max_length:
+            raise ValueError(f"a lettered prompt is longer than max_length {self.cfg.max_length}")
 
         out: dict[str, torch.Tensor] = {
             "input_ids": enc["input_ids"],
@@ -203,10 +217,20 @@ class SystemOneCollator:
             "labels": torch.tensor(labels, dtype=torch.long),
             "weights": torch.tensor(weights, dtype=torch.float32),
         }
-        offs = enc["offset_mapping"].tolist()
-        per = [self.option_token_index(offs[i], sp, base) for i, (base, sp) in enumerate(spans)]
-        width = max(len(p) for p in per)
-        out["opt_idx"] = torch.tensor([p + [-1] * (width - len(p)) for p in per], dtype=torch.long)
+        if lettered:
+            # Each row's first question token, where its tokens stop matching its state's own
+            # (a token across the boundary goes to the question); attention_mode prefix_bidir.
+            own = self.tok(states, add_special_tokens=False)["input_ids"]
+            ends = [_shared_len(r, o) for r, o in zip(enc["input_ids"].tolist(), own, strict=True)]
+            out["prefix_end"] = torch.tensor(ends, dtype=torch.long)
+            width = max(n_slots)
+        else:
+            offs = enc["offset_mapping"].tolist()
+            per = [self.option_token_index(offs[i], sp, base) for i, (base, sp) in enumerate(spans)]
+            width = max(len(p) for p in per)
+            out["opt_idx"] = torch.tensor(
+                [p + [-1] * (width - len(p)) for p in per], dtype=torch.long
+            )
         if any(d is not None for d in dists):
             # The pointer head emits one logit per option present, so each target is
             # padded to the batch's widest option count rather than to a fixed slot count.
@@ -227,3 +251,9 @@ class SystemOneCollator:
             out["teacher"] = tt
             out["has_teacher"] = torch.tensor([t is not None for t in teachers])
         return out
+
+
+def _shared_len(a: Sequence[int], b: Sequence[int]) -> int:
+    """The length of the longest common start of `a` and `b`."""
+    n = min(len(a), len(b))
+    return next((i for i in range(n) if a[i] != b[i]), n)

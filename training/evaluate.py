@@ -137,7 +137,7 @@ def collect_logits(
     model = SystemOneEngine(model, EngineConfig(device=device)).model
     coll = SystemOneCollator(
         model.tokenizer,
-        CollatorConfig(max_length=max_length),
+        CollatorConfig(max_length=max_length, render=getattr(model.config, "render", "numbered")),
         train=False,  # no option shuffling: evaluation must be deterministic
     )
     loader = DataLoader(
@@ -152,6 +152,7 @@ def collect_logits(
             attention_mask=batch["attention_mask"],
             n_slots=batch["n_slots"],
             opt_idx=batch.get("opt_idx"),
+            **({"prefix_end": batch["prefix_end"]} if "prefix_end" in batch else {}),
             temperature=1.0,  # raw logits; calibration is applied afterwards
         )
         logits = out["logits"].float()
