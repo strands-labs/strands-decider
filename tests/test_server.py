@@ -367,3 +367,70 @@ def test_device_map_needs_the_text_engine_on_cuda(kwargs):
 
     with pytest.raises(ValueError, match="device-map"):
         server.create_app("checkpoints/strands-decider-test", device_map="auto", **kwargs)
+
+
+def test_ping_answers_while_every_worker_thread_is_busy():
+    """/ping must not queue behind /invocations: with more requests in flight than the
+    thread pool has threads, a health check still answers within SageMaker's 2 s."""
+    import json
+    import socket
+    import threading
+    import time
+    import urllib.request
+
+    import anyio
+    import uvicorn
+
+    from strands_decider import server
+
+    async def _pool_size() -> int:  # Starlette runs sync handlers on anyio's default limiter
+        return int(anyio.to_thread.current_default_thread_limiter().total_tokens)
+
+    pool = anyio.run(_pool_size)
+    release = threading.Event()
+    blocked = threading.Semaphore(0)
+
+    class _BlockingEngine(_StubEngine):
+        def evaluate(self, request):
+            blocked.release()
+            release.wait(timeout=30)
+            return super().evaluate(request)
+
+    app = server.create_app(
+        "checkpoints/strands-decider-test", device="cpu", warmup=False, build_engine=_BlockingEngine
+    )
+
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))  # handed to uvicorn, so no other process can take the port
+    port = sock.getsockname()[1]
+    srv = uvicorn.Server(uvicorn.Config(app, log_level="error"))
+    srv_thread = threading.Thread(target=srv.run, kwargs={"sockets": [sock]}, daemon=True)
+    srv_thread.start()
+    deadline = time.monotonic() + 10
+    while not srv.started:
+        assert time.monotonic() < deadline, "server did not start"
+        time.sleep(0.05)
+    url = f"http://127.0.0.1:{port}"
+    body = json.dumps({"state": "x", "questions": {"q": {"type": "noul", "instructions": "y"}}})
+
+    def invoke():
+        req = urllib.request.Request(
+            f"{url}/invocations", body.encode(), {"content-type": "application/json"}
+        )
+        urllib.request.urlopen(req, timeout=60).read()
+
+    callers = [threading.Thread(target=invoke) for _ in range(pool + 5)]
+    try:
+        for t in callers:
+            t.start()
+        for _ in range(pool):  # every worker thread is now inside a request
+            assert blocked.acquire(timeout=10)
+        with urllib.request.urlopen(f"{url}/ping", timeout=2) as r:
+            assert r.status == 200
+    finally:
+        release.set()
+        for t in callers:
+            t.join(timeout=30)
+        srv.should_exit = True
+        srv_thread.join(timeout=10)
+        sock.close()

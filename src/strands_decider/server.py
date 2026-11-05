@@ -153,15 +153,18 @@ def create_app(
     guard: contextlib.AbstractContextManager
     guard = engine_lock if _needs_serialisation(device) else contextlib.nullcontext()
 
-    def get_engine(request: Request) -> SystemOneEngine:
+    # async, like /ping below: FastAPI runs a sync dependency in the worker thread pool too.
+    async def get_engine(request: Request) -> SystemOneEngine:
         engine: SystemOneEngine = request.app.state.engine
         return engine
 
     # SageMaker and AgentCore Runtime call /ping and /invocations; each is the same
-    # handler as the path above it.
+    # handler as the path above it. /ping is async: a sync handler would wait for a free
+    # thread in the pool that /invocations fills (40 threads), and SageMaker allows a
+    # health check 2 s.
     @app.get("/health")
     @app.get("/ping")
-    def health(eng: SystemOneEngine = Depends(get_engine)) -> dict:
+    async def health(eng: SystemOneEngine = Depends(get_engine)) -> dict:
         return {
             "status": "ok",
             "model": eng.cfg.model_name,
