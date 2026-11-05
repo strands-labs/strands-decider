@@ -1,0 +1,53 @@
+{
+  "schemaVersion": 1,
+  "product": {
+    "id": "strands-decider",
+    "name": "Strands Decider"
+  },
+  "pages": [
+    {
+      "id": "inference",
+      "source": "docs/inference.md",
+      "slug": "inference",
+      "title": "Inference",
+      "description": "Install Strands Decider, ask typed questions, serve the HTTP API, and choose an inference device.",
+      "nav": {
+        "group": "Using Decider",
+        "order": 1
+      }
+    },
+    {
+      "id": "vision",
+      "source": "docs/vision.md",
+      "slug": "images",
+      "title": "Images",
+      "description": "Use image inputs and understand supported models, limits, implementation, and measurements.",
+      "nav": {
+        "group": "Using Decider",
+        "order": 2
+      }
+    },
+    {
+      "id": "architecture",
+      "source": "docs/architecture.md",
+      "slug": "architecture",
+      "title": "Architecture",
+      "description": "Understand the pointer-head architecture, question types, training objective, and design decisions.",
+      "nav": {
+        "group": "Concepts",
+        "order": 1
+      }
+    },
+    {
+      "id": "naming",
+      "source": "docs/naming.md",
+      "slug": "model-names",
+      "title": "Model names",
+      "description": "Understand released model identifiers, version fields, and release tag conventions.",
+      "nav": {
+        "group": "Reference",
+        "order": 1
+      }
+    }
+  ]
+}
