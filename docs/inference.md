@@ -212,7 +212,9 @@ Compatibility with the Jev API itself is not verified. `GET /health` returns the
 name, the checkpoint path, the base model, the device and the calibration temperature.
 `GET /ping` and `POST /invocations` are the same as `/health` and `/v1/systemone`: they are
 the paths that SageMaker and Bedrock AgentCore Runtime call
-([../deploy/sagemaker/](../deploy/sagemaker/README.md)).
+([../deploy/sagemaker/](../deploy/sagemaker/README.md)). `/health` and `/ping` answer at once
+even while every worker thread is busy with requests, as a load balancer's health check
+expects (SageMaker allows `/ping` 2 s).
 
 The server binds to `127.0.0.1` by default and has no authentication. Its behaviour under
 concurrent requests is not verified. Use it for local experiments only
