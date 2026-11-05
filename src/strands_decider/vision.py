@@ -43,6 +43,7 @@ from .modeling import (
     load_head_state,
     masked_log_softmax,
     pool_last_token,
+    refuse_token_readout,
 )
 from .prompting import RenderedQuestion, render_question, render_state, to_answer
 from .schema import Answer, Content, Question, SystemOneRequest, SystemOneResponse, Usage
@@ -343,6 +344,7 @@ class VisionDeciderModel(StrandsDeciderModel):
 
         path = checkpoint_dir(path)
         config = StrandsDeciderConfig.from_json(config_path(path))
+        refuse_token_readout(config)
         config.base_revision = base_revision(path, config)
         lora_file = os.path.join(path, "lora", "adapter_model.safetensors")
         if config.use_lora and not os.path.exists(lora_file):

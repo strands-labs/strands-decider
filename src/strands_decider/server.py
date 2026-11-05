@@ -18,7 +18,7 @@ from fastapi.responses import JSONResponse
 
 from . import __version__
 from .infer import EngineConfig, SystemOneEngine, load_mlx
-from .modeling import StrandsDeciderModel
+from .modeling import StrandsDeciderModel, refuse_token_readout
 from .schema import (
     ChoiceQuestion,
     NoulQuestion,
@@ -119,6 +119,7 @@ def create_app(
         model = StrandsDeciderModel.load(
             checkpoint, device_map=device_map, attn_implementation=attn_implementation
         )
+        refuse_token_readout(model.config)
         return SystemOneEngine(model, config)
 
     # Tests inject a stub via `build_engine=...` to skip model loading. Construction

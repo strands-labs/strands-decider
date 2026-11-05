@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- Training can use an opt-in token readout, as the reference v2 decision models do:
+  `head_type: token_readout`, `render: lettered` (the reference decision prompt) and
+  `attention_mode: causal` or `prefix_bidir`, plus `lr_floor` for the end of the cosine
+  schedule ([docs/architecture.md](docs/architecture.md#opt-in-the-token-readout)). The serving
+  engines refuse a token readout checkpoint. The pointer readout stays the default, and its
+  outputs do not change.
+
 ## Model names (2026-10)
 
 Model names now use the pattern `strands-decider-<size>-<base>-v<N>-<YYMM>`:
