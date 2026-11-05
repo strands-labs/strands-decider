@@ -13,6 +13,7 @@ import threading
 import time
 from collections.abc import AsyncIterator, Callable
 
+import anyio
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 
@@ -91,11 +92,14 @@ def create_app(
     device_map: str | None = None,
     warmup: bool = True,
     build_engine: Callable[[], SystemOneEngine] | None = None,
+    max_concurrency: int | None = None,
 ) -> FastAPI:
     if device_map and (vision or not device.startswith("cuda")):
         raise ValueError("--device-map splits the text torso across CUDA GPUs: use it with cuda")
     if vision and device == "mlx":
         raise ValueError("--vision runs on torch devices (cuda, mps, cpu), not mlx")
+    if max_concurrency is not None and max_concurrency < 1:
+        raise ValueError("--max-concurrency must be at least 1")
 
     # Identify the response's `model` by the checkpoint served, so multiple servers
     # on the same host cannot be confused. HF repo ids ("org/name") collapse to `name`.
@@ -129,6 +133,8 @@ def create_app(
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         engine = build()
         app.state.engine = engine
+        # None: requests share anyio's default worker pool (40 threads), as sync handlers do.
+        app.state.limiter = anyio.CapacityLimiter(max_concurrency) if max_concurrency else None
         try:
             # Listener binds only after lifespan startup returns, so /health (/ping)
             # fails until this is done.
@@ -177,15 +183,22 @@ def create_app(
             "vision": vision,
         }
 
+    def evaluate(eng: SystemOneEngine, request: SystemOneRequest) -> SystemOneResponse:
+        with guard:
+            return eng.evaluate(request)
+
+    # The engine runs in a worker thread. With --max-concurrency N, at most N requests run at
+    # once and the rest wait on the event loop, holding no thread and no GPU memory.
     @app.post("/v1/systemone", response_model=SystemOneResponse)
     @app.post("/invocations", response_model=SystemOneResponse)
-    def systemone(
-        request: SystemOneRequest, eng: SystemOneEngine = Depends(get_engine)
+    async def systemone(
+        request: SystemOneRequest, http: Request, eng: SystemOneEngine = Depends(get_engine)
     ) -> JSONResponse:
         started = time.perf_counter()
         try:
-            with guard:
-                response = eng.evaluate(request)
+            response = await anyio.to_thread.run_sync(
+                evaluate, eng, request, limiter=http.app.state.limiter
+            )
         except ValueError as exc:
             # Malformed permutation, etc. -- caller error.
             raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -210,6 +223,7 @@ def serve(
     max_batch_tokens: int | None = None,
     device_map: str | None = None,
     warmup: bool = True,
+    max_concurrency: int | None = None,
 ) -> None:
     import uvicorn
 
@@ -223,6 +237,7 @@ def serve(
         max_batch_tokens=max_batch_tokens,
         device_map=device_map,
         warmup=warmup,
+        max_concurrency=max_concurrency,
     )
     # Single worker: the model owns the GPU, and forking more would just duplicate it.
     uvicorn.run(app, host=host, port=port, workers=1)

@@ -263,6 +263,8 @@ requests run in chunks of at most that many), and with `--vision` one image requ
 and `/ping` fail until it is done, so
 startup and health-check timeouts must allow for it. `--no-warmup` skips it.
 
+`--max-concurrency N` runs at most N requests on the model at once; the others wait, holding no worker thread and no GPU memory, and run as earlier ones finish. Without it, up to 40 requests (the worker thread pool) run at once, and a burst of large requests can run the GPU out of memory. A request's questions are already batched on the GPU, so a small N (a few) keeps most of the throughput.
+
 ## Gemma 4 models
 
 The four Gemma 4 models serve with the same commands as the Qwen3.5 model. They need the code on

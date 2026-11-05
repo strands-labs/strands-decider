@@ -90,6 +90,13 @@ def serve_cmd(
         help="Split the model across the visible GPUs (a transformers device_map, such as auto), "
         "for a model larger than one GPU.",
     ),
+    max_concurrency: int | None = typer.Option(
+        None,
+        "--max-concurrency",
+        min=1,
+        help="Run at most N requests on the model at once; the rest wait without a thread or GPU "
+        "memory. Default: no cap beyond the 40-thread worker pool.",
+    ),
     warmup: bool = typer.Option(
         True,
         "--warmup/--no-warmup",
@@ -112,6 +119,7 @@ def serve_cmd(
         vision=vision,
         max_batch_tokens=max_batch_tokens,
         device_map=device_map,
+        max_concurrency=max_concurrency,
         warmup=warmup,
     )
 
