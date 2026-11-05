@@ -96,7 +96,8 @@ def test_the_server_builds_the_mlx_engine_for_device_mlx(monkeypatch):
     )
     # No warm-up: the stub engine only answers /health.
     app = server.create_app("org/hobson", device="mlx", max_batch=7, warmup=False)
-    assert TestClient(app).get("/health").json()["device"] == "mlx"
+    with TestClient(app) as client:
+        assert client.get("/health").json()["device"] == "mlx"
     [(checkpoint, config)] = calls
     assert checkpoint == "org/hobson"
     assert (config.device, config.use_prefix_cache, config.model_name) == ("mlx", True, "hobson")
