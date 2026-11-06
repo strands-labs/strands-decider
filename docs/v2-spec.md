@@ -154,6 +154,8 @@ This is what Gemma 4's `chat_template.jinja` renders for `messages=[{"role": "us
 
 The chat templates of the larger Gemma 4 sizes differ in one place. With thinking off, the templates of 12B, 26B-A4B and 31B append an empty thought channel, `<|channel>thought\n<channel|>`, after `<|turn>model\n`; those of E2B and E4B do not. `strands-v2-chat` leaves the empty channel out for every size, so that one prompt string serves every checkpoint and the readout always reads the same token. `tests/test_v2_prompt.py` pins each known template, by sha256, to one of the two forms. A checkpoint trained with the empty channel needs its own prompt name.
 
+The chat template is where `strands-v2-chat` comes from, not how it is rendered. A runtime must not render v2 prompts with Hugging Face's `apply_chat_template`, or with any chat template, for either variant, and a v2 checkpoint ships no template (section 9). Gemma 4's templates do not give v2 prompts: the 12B, 26B-A4B and 31B templates add the empty thought channel; a template only wraps the body, which section 3 defines; `strands-v2-plain` has no chat turn at all; and `apply_chat_template(tokenize=True)` encodes the rendered string in one call with special-token matching on, so special-token strings in request text become control tokens, which section 3.6 forbids. Runtimes render by this spec, with `strands_decider.v2.render` or an implementation that reproduces the render goldens of section 10.
+
 ### 3.6 From text to token ids
 
 A prompt is a sequence of control tokens and text runs. Control tokens come only from the template and are emitted by id:
@@ -389,14 +391,15 @@ A v2 checkpoint is a directory that holds:
 | --- | --- |
 | `config.json` | the decoder's configuration, for the decoder's loader: `architectures: ["Gemma4TextModel"]`, `model_type: gemma4_text`. Its `final_logit_softcapping` equals `decision_config.json`'s; a runtime takes the soft-cap from `decision_config.json` and refuses a checkpoint whose two values differ |
 | `model.safetensors` or `model-*-of-*.safetensors` with `model.safetensors.index.json` | the Gemma 4 text decoder in bf16, any fine-tuning merged in: no adapter, no vision or audio tower, no language-model head |
-| `tokenizer.json`, `tokenizer_config.json` | Gemma 4's tokenizer, unchanged |
-| `chat_template.jinja` | Gemma 4's chat template, for reference; runtimes render by this spec, not by the template |
+| `tokenizer.json`, `tokenizer_config.json` | Gemma 4's tokenizer, unchanged; `tokenizer_config.json` carries no `chat_template` key |
 | `readout.safetensors` | one tensor, `weight`, shape [255, hidden], bf16 or f32 |
 | `decision_config.json` | section 8 |
 | `golden_vectors.jsonl` | the model goldens of section 10 |
 | `LICENSE`, `NOTICE`, `README.md` | the terms and the model card |
 
 A checkpoint carries no code. Runtimes implement this spec; they do not import code shipped inside a checkpoint.
+
+A checkpoint carries no chat template either: no `chat_template.jinja`, unlike the Gemma 4 base models, and no `chat_template` in `tokenizer_config.json`. A template beside the weights would be applied by tools that look for one, such as a chat-completions endpoint or a GGUF converter that embeds it, and section 3.5 explains why no template gives v2's prompts. Shipping a v2 template that renders `strands-v2-chat` for every size was considered and not chosen: it would still leave the body, the plain variant and the encoding of special-token strings to the spec, and invite the one-call tokenization that gets the last wrong.
 
 A converted artifact for another runtime, such as an MLX model or a GGUF file, carries the decoder in that runtime's format and the same `readout.safetensors` and `decision_config.json`, unchanged, beside it. The readout stays in safetensors, outside the converted decoder, so that every format reads the same rows. The artifact needs no `config.json`: everything the readout needs beyond its weight, the soft-cap included, is in `decision_config.json`. `strands_decider.v2.Readout.load` reads the weight and the soft-cap from those two files.
 

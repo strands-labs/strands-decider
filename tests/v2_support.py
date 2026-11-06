@@ -8,8 +8,10 @@ need only text, numbers or a toy tokenizer always run.
 
     STRANDS_DECIDER_GEMMA4_TOKENIZER=/path/to/tokenizer.json pytest tests/test_v2_*.py
 
-STRANDS_DECIDER_GEMMA4_TEMPLATES lists chat_template.jinja files (os.pathsep between
-them) for the chat-template conformance test, which also needs jinja2.
+STRANDS_DECIDER_GEMMA4_TEMPLATES lists the Gemma 4 base models' chat_template.jinja files
+(os.pathsep between them) for the tests that compare strands-v2-chat with them, which also
+need jinja2 (and transformers, for the apply_chat_template comparison). A v2 checkpoint
+ships no chat template; v2 prompts are never rendered with one.
 """
 
 from __future__ import annotations
