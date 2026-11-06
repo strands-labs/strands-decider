@@ -77,6 +77,10 @@ class StrandsDeciderConfig:
     # attention, "causal" (the torso's own) or "prefix_bidir" (prefix_bidir_masks).
     render: str = "numbered"
     attention_mode: str = "causal"
+    # Token readout only: the cap on its logits, cap * tanh(x / cap) (0.0: none). Recorded from
+    # the base model's final_logit_softcapping when training starts, then read from here, so a
+    # checkpoint keeps the cap it trained with whatever the base model's config says later.
+    readout_softcap: float | None = None
     # Populated after `python -m training.evaluate calibrate` runs; 1.0 is a no-op. `temperature` is the
     # fallback; `temperature_by_kind` overrides it per primitive where fitted.
     # One global scalar cannot serve all three: noul/choice/score sit at very
@@ -122,7 +126,11 @@ class StrandsDeciderConfig:
     def to_json(self) -> str:
         d = asdict(self)
         # A pointer config's JSON stays the one earlier versions wrote and read.
-        for key, default in (("render", "numbered"), ("attention_mode", "causal")):
+        for key, default in (
+            ("render", "numbered"),
+            ("attention_mode", "causal"),
+            ("readout_softcap", None),
+        ):
             if d[key] == default:
                 del d[key]
         return json.dumps(d, indent=2)
@@ -262,7 +270,8 @@ class TokenReadoutHead(nn.Module):
     Row k scores the option listed under code k (prompting.option_codes); the row is seeded
     from the LM head's row of that code's token (lm_head_rows), so the untrained readout gives
     the base model's own distribution over the codes. A torso whose LM head caps its logits
-    (Gemma 4: final_logit_softcapping) has these capped the same way: cap * tanh(x / cap).
+    (Gemma 4: final_logit_softcapping) has these capped the same way: cap * tanh(x / cap). The
+    cap is StrandsDeciderConfig.readout_softcap, saved with the checkpoint.
     """
 
     def __init__(self, hidden_size: int, dropout: float = 0.0, softcap: float | None = None):
@@ -284,17 +293,19 @@ class TokenReadoutHead(nn.Module):
 HEAD_TYPES = ("pointer", "token_readout")
 
 
-def build_head(
-    config: StrandsDeciderConfig, hidden_size: int, softcap: float | None = None
-) -> nn.Module:
-    """The readout `config.head_type` names, in fp32 (`softcap`: the token readout's cap).
+def build_head(config: StrandsDeciderConfig, hidden_size: int) -> nn.Module:
+    """The readout `config.head_type` names, in fp32.
 
     The head trains in fp32 even when the torso is bf16: it is tiny, and a
     low-precision classifier is a needless source of calibration error.
     """
     head: nn.Module
     if config.head_type == "token_readout":
-        head = TokenReadoutHead(hidden_size, dropout=config.head_dropout, softcap=softcap)
+        if config.readout_softcap is None:
+            raise ValueError("a token readout config needs readout_softcap (0.0 for no cap)")
+        head = TokenReadoutHead(
+            hidden_size, dropout=config.head_dropout, softcap=config.readout_softcap or None
+        )
     else:
         head = PointerHead(hidden_size, dim=config.pointer_dim, dropout=config.head_dropout)
     return head.to(torch.float32)
@@ -335,8 +346,11 @@ def prefix_bidir_masks(
 
     Each row splits at prefix_end, its first question token. A state token attends to the
     whole state, both ways, and never to the question; a question token attends to the state
-    and to its own question, both ways. Full-attention and sliding-window layers (Gemma 4, with
-    no window) take this mask; linear-attention layers (Qwen3.5) keep the padding mask.
+    and to its own question, both ways. Full-attention layers take this mask. So do
+    sliding-window layers, without their window: under prefix_bidir no layer is cut to its
+    window, as the reference v2 models train (Gemma 4: 512 tokens on E2B and E4B, 1,024 on 12B).
+    Linear-attention layers (Qwen3.5) keep the padding mask and stay causal. Any other layer
+    type is refused.
     """
     impl = getattr(torso_config, "_attn_implementation", None) or "sdpa"
     if impl not in ("sdpa", "eager"):
@@ -351,6 +365,9 @@ def prefix_bidir_masks(
         mask = torch.zeros(allowed.shape, dtype=dtype, device=allowed.device)
         mask = mask.masked_fill(~allowed, torch.finfo(dtype).min)
     types = set(getattr(torso_config, "layer_types", None) or ["full_attention"])
+    unknown = types - {"full_attention", "sliding_attention", "linear_attention"}
+    if unknown:
+        raise ValueError(f"attention_mode prefix_bidir does not know layer types {sorted(unknown)}")
     return {t: attention_mask if t == "linear_attention" else mask for t in types}
 
 
@@ -429,7 +446,9 @@ class StrandsDeciderModel(nn.Module):
         self.config = config
         self.torso = torso
         self.tokenizer = tokenizer
-        self.head = build_head(config, self.hidden_size(torso), logit_softcap(torso))
+        if config.head_type == "token_readout" and config.readout_softcap is None:
+            config.readout_softcap = logit_softcap(torso) or 0.0
+        self.head = build_head(config, self.hidden_size(torso))
 
     @staticmethod
     def hidden_size(torso: nn.Module) -> int:
@@ -687,7 +706,7 @@ class StrandsDeciderModel(nn.Module):
         obj.config = config
         obj.torso = torso
         obj.tokenizer = tok
-        obj.head = build_head(config, cls.hidden_size(torso), logit_softcap(torso))
+        obj.head = build_head(config, cls.hidden_size(torso))
         obj.head.load_state_dict(head_state)
         obj.head.to(torch.float32)
         return obj
