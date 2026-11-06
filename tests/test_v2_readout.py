@@ -1,7 +1,9 @@
 """The v2 readout (docs/v2-spec.md, The readout) on small arrays, and the runtime glue.
 
 Torch-free: numpy and tokenizers. Nothing here needs Gemma 4's tokenizer; the end-to-end
-test uses a toy one.
+test uses a toy one. The precision regime (a bf16 GEMM, then float32) is checked against an
+independent reimplementation of the vLLM plugin's `compute_logits`, which rounds by
+arithmetic where the core rounds by bits.
 """
 
 from __future__ import annotations
@@ -15,8 +17,14 @@ import pytest
 from v2_support import decision_config_fixture, toy_tokenizer
 
 from strands_decider.v2 import (
+    CAPPED_LOGITS,
     CODES,
+    FINAL_LOGITS,
+    HIDDEN,
     PLAIN,
+    PROBABILITIES,
+    RAW_LOGITS,
+    STAGES,
     DecisionConfig,
     Readout,
     RenderedQuestion,
@@ -26,29 +34,118 @@ from strands_decider.v2 import (
     code_probabilities,
     evaluate,
     load_safetensors,
+    question_probabilities,
     read,
+    readout_logits,
     render,
+    round_to_bf16,
     softcap,
 )
 
 C = 30.0  # Gemma 4's final_logit_softcapping
 
 
+def _f32(x: float) -> float:
+    """`x` rounded to float32 (to nearest, ties to even), as a Python float. A float32
+    operation done in float64 and rounded so is the float32 operation exactly: float64 has
+    more than twice float32's precision."""
+    return float(struct.unpack("<f", struct.pack("<f", x))[0])
+
+
+def _bf16(x: float) -> float:
+    """`x` rounded to bf16 by arithmetic, not by bits: x = m 2^e with 0.5 <= |m| < 1, and bf16
+    keeps 8 significant bits, so the result is round(m 2^8) 2^(e - 8), Python's round taking
+    a tie to the even integer. (For normal numbers; the tests use no others.)"""
+    if x == 0.0 or not math.isfinite(x):
+        return x
+    m, e = math.frexp(x)
+    return math.ldexp(round(m * 256), e - 8)
+
+
+def _after_the_gemm(z: float, c: float | None, t: float) -> float:
+    """The plugin's float32 steps on one bf16 logit: `tanh(z / c) * c`, then `z / T`."""
+    if c is not None:
+        z = _f32(_f32(math.tanh(_f32(z / _f32(c)))) * _f32(c))
+    return _f32(z / _f32(t)) if t != 1.0 else z
+
+
+def _softmax64(s) -> list[float]:
+    m = max(s)
+    e = [math.exp(x - m) for x in s]
+    return [x / sum(e) for x in e]
+
+
+def _manual(z, k, c, t) -> list[float]:
+    """Section 7 from raw logits, one rounding at a time: bf16, the float32 cap and
+    temperature, then the softmax (in float64 here; the core's float32 softmax is within
+    1e-6 of it)."""
+    return _softmax64([_after_the_gemm(_bf16(_f32(x)), c, t) for x in z[:k]])
+
+
+# ---- bf16 and the precision regime -------------------------------------------------------
+
+
+def test_round_to_bf16_rounds_to_nearest_ties_to_even():
+    step = 2.0**-7  # bf16's spacing in [1, 2)
+    cases = {
+        1.0: 1.0,
+        1 + step / 2: 1.0,  # a tie: to the even neighbour, 1.0
+        1 + 3 * step / 2: 1 + 2 * step,  # a tie: to the even neighbour, 1 + 2 steps
+        1 + step / 2 + 2**-23: 1 + step,  # just past the tie
+        1 + step / 2 - 2**-23: 1.0,  # just short of it
+        -(1 + 3 * step / 2): -(1 + 2 * step),
+        16.0625: 16.0,  # between 16 and 32 the spacing is 0.125: a tie, to 16.0
+        16.1875: 16.25,  # a tie, to 16.25
+        24.06: 24.0,
+        31.95: 32.0,
+        3.3895313892515355e38: 3.3895313892515355e38,  # bf16's largest finite
+        3.39e38: 3.3895313892515355e38,
+        3.4e38: math.inf,  # past the midpoint to the next step: inf, as torch and CUDA give
+        -3.4e38: -math.inf,
+        0.0: 0.0,
+        math.inf: math.inf,
+        -math.inf: -math.inf,
+    }
+    got = round_to_bf16(np.array(list(cases), np.float32))
+    assert got.dtype == np.float32
+    assert got.tolist() == list(cases.values())
+    assert math.copysign(1.0, float(round_to_bf16(-0.0))) == -1.0
+    assert np.isnan(round_to_bf16(np.float32("nan")))
+    assert round_to_bf16(np.float32(1 + step / 2)).shape == ()
+
+
+def test_round_to_bf16_agrees_with_rounding_by_arithmetic():
+    rng = np.random.default_rng(7)
+    x = np.concatenate(
+        [
+            rng.normal(0, 1, 20000),
+            rng.normal(0, 30, 20000),
+            np.exp(rng.uniform(-80, 80, 20000)) * rng.choice([-1, 1], 20000),
+        ]
+    ).astype(np.float32)
+    got = round_to_bf16(x)
+    assert got.tolist() == [_bf16(v) for v in x.tolist()]
+    assert np.array_equal(round_to_bf16(got), got)  # bf16 values are left as they are
+    bits = got.view(np.uint32)
+    assert np.all(bits & 0xFFFF == 0)
+
+
 def test_softcap():
     z = np.array([-1e6, -90.0, -1.0, 0.0, 1e-3, 1.0, 30.0, 90.0, 1e6])
     out = softcap(z, C)
-    assert np.allclose(out, C * np.tanh(z / C))
-    assert np.all(np.abs(out) < C + 1e-12) and out[3] == 0.0
-    assert np.all(np.diff(out) > 0) or np.all(np.diff(out) >= 0)  # monotone
-    assert out[-1] == pytest.approx(C) and out[0] == pytest.approx(-C)
-    assert out[4] == pytest.approx(1e-3, rel=1e-6)  # near 0 the cap is the identity
-    assert np.array_equal(softcap(z, None), z) and np.array_equal(softcap(z, 0.0), z)
-
-
-def _manual(z, k, c, t):
-    capped = [c * math.tanh(x / c) if c else x for x in z[:k]]
-    e = [math.exp(x / t) for x in capped]
-    return [x / sum(e) for x in e]
+    assert out.dtype == np.float32
+    want = [_after_the_gemm(x, C, 1.0) for x in z.astype(np.float32).tolist()]
+    assert np.allclose(out, want, rtol=0, atol=8e-6)
+    assert np.all(np.diff(out) > 0)  # strictly increasing over these points
+    assert out[0] == -C and out[-1] == C  # float32 saturates exactly at the cap
+    assert np.all(np.abs(softcap(np.linspace(-1e4, 1e4, 20001), C)) <= C)
+    assert out[3] == 0.0 and out[4] == pytest.approx(1e-3, rel=1e-6)  # near 0, the identity
+    mid = softcap(np.linspace(-60, 60, 12001), C)
+    assert np.all(np.diff(mid) > 0)  # strictly increasing where float32 resolves it
+    assert np.array_equal(softcap(z, None), z.astype(np.float32))
+    for bad in (0.0, -30.0, math.inf, math.nan, 1e300):
+        with pytest.raises(ValueError, match="soft-cap"):
+            softcap(z, bad)
 
 
 @pytest.mark.parametrize("c", [None, C, 2.0])
@@ -57,38 +154,183 @@ def _manual(z, k, c, t):
 def test_code_probabilities_match_the_formula(c, t, k):
     rng = np.random.default_rng(k)
     z = rng.normal(0, 8, size=255)
-    p = code_probabilities(z, k, softcap_c=c, temperature=t)
-    assert p.shape == (k,) and p.sum() == pytest.approx(1.0)
-    assert np.allclose(p, _manual(z.tolist(), k, c, t))
+    p = code_probabilities(z, k, inputs=RAW_LOGITS, softcap_c=c, temperature=t)
+    assert p.shape == (k,) and p.dtype == np.float32 and p.sum() == pytest.approx(1.0)
+    assert np.allclose(p, _manual(z.tolist(), k, c, t), rtol=0, atol=1e-6)
 
 
 def test_only_the_questions_own_codes_enter_the_softmax():
     rng = np.random.default_rng(0)
     z = rng.normal(0, 3, size=255)
-    p = code_probabilities(z, 3, softcap_c=C, temperature=1.0)
-    z2 = z.copy()
-    z2[3:] = 1e4  # any value on the other codes
-    assert np.array_equal(code_probabilities(z2, 3, softcap_c=C, temperature=1.0), p)
+    for c in (None, C):
+        p = code_probabilities(z, 3, inputs=RAW_LOGITS, softcap_c=c, temperature=1.0)
+        z2 = z.copy()
+        z2[3:] = 1e4  # any value on the other codes
+        p2 = code_probabilities(z2, 3, inputs=RAW_LOGITS, softcap_c=c, temperature=1.0)
+        assert np.array_equal(p2, p)
+        assert np.array_equal(
+            code_probabilities(z[:3], 3, inputs=RAW_LOGITS, softcap_c=c, temperature=1.0), p
+        )
 
 
 def test_temperature_and_cap_order():
-    z = np.array([40.0, 0.0])
-    # Cap first (40 -> 30 tanh(4/3)), then divide by T: not the other way round.
-    want = _manual([40.0, 0.0], 2, C, 2.0)
-    assert np.allclose(code_probabilities(z, 2, softcap_c=C, temperature=2.0), want)
-    assert not np.allclose(want, _manual([20.0, 0.0], 2, C, 1.0))
-    hot = code_probabilities(z, 2, softcap_c=C, temperature=10.0)
-    cold = code_probabilities(z, 2, softcap_c=C, temperature=0.1)
-    assert hot[0] < code_probabilities(z, 2, softcap_c=C, temperature=1.0)[0] < cold[0]
+    z = np.array([40.0, 30.0])
+    # Cap first (40 -> 30 tanh(4/3), 30 -> 30 tanh(1)), then divide by T; dividing first
+    # (20 and 15, then the cap) would give 0.97 for the first code, not 0.84.
+    want = _manual([40.0, 30.0], 2, C, 2.0)
+    got = code_probabilities(z, 2, inputs=RAW_LOGITS, softcap_c=C, temperature=2.0)
+    assert np.allclose(got, want, rtol=0, atol=1e-6)
+    assert got[0] == pytest.approx(0.8358, abs=1e-4)
+    assert _manual([20.0, 15.0], 2, C, 1.0)[0] == pytest.approx(0.9739, abs=1e-4)
+
+    def p0(t: float) -> float:
+        return float(code_probabilities(z, 2, inputs=RAW_LOGITS, softcap_c=C, temperature=t)[0])
+
+    assert p0(10.0) < p0(1.0) < p0(0.1)
 
 
-def test_large_logits_are_stable():
-    z = np.array([1e300, -1e300, 0.0])
-    for c in (None, C):
-        p = code_probabilities(z, 3, softcap_c=c, temperature=1e-3)
-        assert np.all(np.isfinite(p)) and p.sum() == pytest.approx(1.0)
-    with pytest.raises(ValueError):
-        code_probabilities(np.zeros(2), 3, softcap_c=C, temperature=1.0)
+def test_large_logits_and_overflow():
+    # Finite in float32 and stable: the softmax subtracts the maximum, and a gap past
+    # float32's range gives exactly 0, never NaN.
+    big = [3e38, -3e38, 0.0]
+    p = code_probabilities(big, 3, inputs=RAW_LOGITS, softcap_c=None, temperature=1)
+    assert p.tolist() == [1.0, 0.0, 0.0]
+    p = code_probabilities(big, 3, inputs=RAW_LOGITS, softcap_c=C, temperature=1)
+    assert np.allclose(p, _softmax64([C, -C, 0.0]), rtol=1e-6, atol=0)  # capped to +-30
+    p = code_probabilities([1e30, -1e30, 0.0], 3, inputs=RAW_LOGITS, softcap_c=C, temperature=1e-3)
+    assert p.tolist() == [1.0, 0.0, 0.0]  # capped to +-30, then 3e4 apart: one-hot
+    # Without a cap nothing bounds the logits. Past float32's range they are refused...
+    with pytest.raises(ValueError, match="finite in float32"):
+        code_probabilities([1e300, 0.0], 2, inputs=RAW_LOGITS, softcap_c=None, temperature=1.0)
+    for bad in (math.inf, -math.inf, math.nan):
+        for c in (None, C):
+            with pytest.raises(ValueError, match="finite in float32"):
+                code_probabilities([bad, 0.0], 2, inputs=RAW_LOGITS, softcap_c=c, temperature=1)
+    # ...and so is a temperature that divides them past it.
+    with pytest.raises(ValueError, match="overflow"):
+        code_probabilities([1e38, 0.0], 2, inputs=RAW_LOGITS, softcap_c=None, temperature=1e-3)
+    # With the cap, only c / T past float32's range overflows.
+    with pytest.raises(ValueError, match="overflow"):
+        code_probabilities([40.0, 0.0], 2, inputs=RAW_LOGITS, softcap_c=C, temperature=1.2e-38)
+    with pytest.raises(ValueError, match="need a vector"):
+        code_probabilities(np.zeros(2), 3, inputs=RAW_LOGITS, softcap_c=C, temperature=1.0)
+
+
+@pytest.mark.parametrize("t", [0, -1.0, math.nan, math.inf, 1e39, 1e300, 1e-39, True, "1"])
+def test_bad_temperatures_raise(t):
+    with pytest.raises(ValueError, match="temperature"):
+        code_probabilities(np.zeros(3), 2, inputs=RAW_LOGITS, softcap_c=C, temperature=t)
+
+
+def test_code_probabilities_needs_a_named_stage():
+    with pytest.raises(TypeError):
+        code_probabilities(np.zeros(3), 2, softcap_c=C, temperature=1.0)  # type: ignore[call-arg]
+    for bad in (HIDDEN, "logits", "probs", None):
+        with pytest.raises(ValueError, match="inputs must be"):
+            code_probabilities(np.zeros(3), 2, inputs=bad, softcap_c=C, temperature=1.0)
+
+
+def test_stages_past_the_cap_say_so():
+    z = np.array([25.0, -3.0, 0.0])
+    capped = softcap(z, C)
+    final = capped / np.float32(0.5)
+    p = code_probabilities(z, 3, inputs=RAW_LOGITS, softcap_c=C, temperature=0.5)
+    for stage, row in ((CAPPED_LOGITS, capped), (FINAL_LOGITS, final)):
+        got = code_probabilities(row, 3, inputs=stage, softcap_c=C, temperature=0.5)
+        assert np.array_equal(got, p), stage
+    # Raw logits handed over as capped (or capped as final at T < 1) exceed what the stage
+    # allows: refused rather than capped, or divided, a second time.
+    with pytest.raises(ValueError, match="were they capped"):
+        code_probabilities([31.0, 0.0], 2, inputs=CAPPED_LOGITS, softcap_c=C, temperature=1)
+    with pytest.raises(ValueError, match="were they capped"):
+        code_probabilities([61.0, 0.0], 2, inputs=FINAL_LOGITS, softcap_c=C, temperature=0.5)
+    # Probabilities over all 255 codes renormalise to the question's k; over k, they stay.
+    p255 = code_probabilities(
+        np.arange(255.0) / 50, 255, inputs=RAW_LOGITS, softcap_c=C, temperature=1
+    )
+    p3 = code_probabilities(p255, 3, inputs=PROBABILITIES, softcap_c=C, temperature=1.0)
+    want = code_probabilities(np.arange(3.0) / 50, 3, inputs=RAW_LOGITS, softcap_c=C, temperature=1)
+    assert np.allclose(p3, want, rtol=0, atol=1e-6)
+    for bad in ([-0.1, 0.5], [0.0, 0.0], [math.nan, 0.5], [1.5, 0.1]):
+        with pytest.raises(ValueError, match=r"probabilities|finite"):
+            code_probabilities(bad, 2, inputs=PROBABILITIES, softcap_c=C, temperature=1.0)
+
+
+def _plugin_compute_logits(w: list[list[float]], h: list[float], c: float, t: float) -> list[float]:
+    """An independent reimplementation of the vLLM plugin's `compute_logits` at the codes'
+    ids, one IEEE operation at a time:
+
+        codes = self.readout(hidden_states.to(bf16)).float()   # a bf16 GEMM
+        codes = torch.tanh(codes / self.softcap) * self.softcap  # float32
+        codes = codes / self.temperature                         # float32, when T != 1
+
+    The GEMM's products of bf16 numbers are exact in float64 and math.fsum adds them
+    exactly; the sum is rounded to float32, as the accumulator holds it, then to bf16 by
+    `_bf16`'s arithmetic."""
+    return [
+        _after_the_gemm(_bf16(_f32(math.fsum(a * b for a, b in zip(row, h, strict=True)))), c, t)
+        for row in w
+    ]
+
+
+@pytest.mark.parametrize("t", [1.0, 0.7, 1.9])
+@pytest.mark.parametrize("seed", [0, 1, 2])
+def test_read_matches_the_vllm_plugins_arithmetic(seed, t):
+    """Random bf16 weights and hidden states, scaled so that many logits fall between 16
+    and 32 (where bf16's spacing is 0.125) and some past the cap. The core's z is the
+    plugin's bit for bit; its probabilities, from every stage, are the plugin's softmax."""
+    rng = np.random.default_rng(seed)
+    bf16 = np.vectorize(_bf16, otypes=[np.float64])
+    hidden = 64
+    h = bf16(rng.normal(0, 1, hidden))
+    scale = np.array([0.25, 0.5, 1.0, 2.0, 4.0])[np.arange(255) % 5, None]
+    w = bf16(rng.normal(0, 1, (255, hidden)) * scale)
+    z_plugin = [
+        _bf16(_f32(math.fsum(a * b for a, b in zip(r, h.tolist(), strict=True))))
+        for r in w.tolist()
+    ]
+    za = np.abs(np.array(z_plugin))
+    assert np.sum((za >= 16) & (za < 32)) >= 20 and np.sum(za >= 32) >= 5, "cover the band"
+
+    # The GEMM: bit for bit (float32 holds bf16 exactly).
+    z = readout_logits(w, h)
+    assert z.dtype == np.float32 and z.tolist() == z_plugin
+    assert readout_logits(w, np.stack([h, h])).tolist() == [z_plugin, z_plugin]
+
+    # The float32 cap and temperature: within a few float32 steps (numpy's float32 tanh
+    # and the correctly rounded one may differ in the last bits).
+    final_plugin = np.array(_plugin_compute_logits(w.tolist(), h.tolist(), C, t))
+    capped = softcap(z, C)
+    final = capped / np.float32(t) if t != 1.0 else capped
+    assert np.allclose(final, final_plugin, rtol=0, atol=2e-5)
+
+    # read() from every stage, for questions of 2, 7, 40 and 255 options.
+    ks = (2, 7, 40, 255)
+    rendered = _request(*[_rq("choice", [f"o{i}" for i in range(k)], name=f"k{k}") for k in ks])
+    cfg = _config(temperature=t)
+    p255 = _softmax64(final_plugin.tolist())  # what vLLM returns for logprobs: 255
+    rows = {
+        HIDDEN: [h] * len(ks),
+        RAW_LOGITS: [np.array(z_plugin)] * len(ks),
+        CAPPED_LOGITS: [capped] * len(ks),
+        FINAL_LOGITS: [final_plugin[:k] for k in ks],  # the question's own codes only
+        PROBABILITIES: [np.array(p255)] * len(ks),
+    }
+    for stage in STAGES:
+        got = question_probabilities(rows[stage], Readout(w, C), cfg, rendered, inputs=stage)
+        for k in ks:
+            want = _softmax64(final_plugin[:k].tolist())
+            assert np.allclose(got[f"k{k}"], want, rtol=0, atol=1e-5), (stage, k)
+
+    # The regime matters: skipping the bf16 rounding (a float64 readout) moves these
+    # probabilities by ten times the tolerance above, or more.
+    z64 = w @ h
+    loose = [_softmax64((C * np.tanh(z64[:k] / C) / t).tolist()) for k in ks]
+    gap = max(
+        np.max(np.abs(np.array(lo) - _softmax64(final_plugin[:k].tolist())))
+        for lo, k in zip(loose, ks, strict=True)
+    )
+    assert gap > 1e-4
 
 
 # ---- safetensors and the readout file ---------------------------------------------------
@@ -283,42 +525,96 @@ def _request(*rqs: RenderedQuestion) -> RenderedRequest:
     return RenderedRequest(variant=PLAIN, model="m", questions={q.name: q for q in rqs})
 
 
-def test_read_hidden_equals_read_logits():
+def test_every_stage_gives_the_same_answers():
     rng = np.random.default_rng(1)
-    w = rng.normal(0, 0.1, size=(255, 16)).astype(np.float32)
-    h = rng.normal(0, 1, size=(2, 16))
+    w = round_to_bf16(rng.normal(0, 0.5, size=(255, 16)))
+    h = round_to_bf16(rng.normal(0, 1, size=(2, 16)))
     rendered = _request(
         _rq("noul", ["false", "true"], name="n"), _rq("choice", ["x", "y", "z"], name="c")
     )
-    cfg = _config(temperature=1.3)
-    by_hidden = read(h, Readout(w, C), cfg, rendered)
-    by_logits = read(h @ w.T.astype(np.float64), Readout(None, C), cfg, rendered, inputs="logits")
-    by_name = read({"c": h[1], "n": h[0]}, Readout(w, C), cfg, rendered)
-    assert by_hidden == by_logits == by_name
-    z = w.astype(np.float64) @ h[1]
-    want = _manual(z.tolist(), 3, C, 1.3)
+    t = 1.3
+    cfg = _config(temperature=t)
+    z = readout_logits(w, h)
+    capped = softcap(z, C)
+    final = capped / np.float32(t)
+    by_hidden = read(h, Readout(w, C), cfg, rendered, inputs=HIDDEN)
+    assert by_hidden == read({"c": h[1], "n": h[0]}, Readout(w, C), cfg, rendered, inputs=HIDDEN)
+    for stage, rows in (
+        (RAW_LOGITS, z),
+        (CAPPED_LOGITS, capped),
+        (FINAL_LOGITS, final),
+        (FINAL_LOGITS, [final[0][:2], final[1][:3]]),  # each question's own codes only
+    ):
+        assert read(rows, None, cfg, rendered, inputs=stage) == by_hidden, stage
+        assert read(rows, Readout(None, C), cfg, rendered, inputs=stage) == by_hidden, stage
+    want = _manual(z[1].tolist(), 3, C, t)
     assert by_hidden["c"]["probabilities"] == {
         o: round(p, 4) for o, p in zip("xyz", want, strict=True)
     }
+    # Probabilities, ragged (k per question) as vLLM returns them, or over all 255 codes.
+    by_p = question_probabilities(
+        [_manual(z[0].tolist(), 2, C, t), _manual(z[1].tolist(), 255, C, t)],
+        None,
+        cfg,
+        rendered,
+        inputs=PROBABILITIES,
+    )
+    ref = question_probabilities(h, Readout(w, C), cfg, rendered, inputs=HIDDEN)
+    for n in ref:
+        assert np.allclose(by_p[n], ref[n], rtol=0, atol=1e-6), n
 
 
 def test_read_refuses_a_mismatch():
     w = np.zeros((255, 4), np.float32)
     rendered = _request(_rq("noul", ["false", "true"]))
+    with pytest.raises(TypeError):
+        read(np.zeros((1, 4)), Readout(w, C), _config(), rendered)  # type: ignore[call-arg]
+    for bad in ("logits", "probs", None):
+        with pytest.raises(ValueError, match="inputs must be"):
+            read(np.zeros((1, 4)), Readout(w, C), _config(), rendered, inputs=bad)
     with pytest.raises(ValueError, match="rendered for"):
-        read(np.zeros((1, 4)), Readout(w, C), _config(prompt="strands-v2-chat"), rendered)
+        read(
+            np.zeros((1, 4)),
+            Readout(w, C),
+            _config(prompt="strands-v2-chat"),
+            rendered,
+            inputs=HIDDEN,
+        )
     bad_ids = list(decision_config_fixture()["token_ids"])
     bad_ids[0], bad_ids[1] = bad_ids[1], bad_ids[0]
     with pytest.raises(ValueError, match="token_ids"):
-        read(np.zeros((1, 4)), Readout(w, C), _config(token_ids=bad_ids), rendered)
+        read(np.zeros((1, 4)), Readout(w, C), _config(token_ids=bad_ids), rendered, inputs=HIDDEN)
     with pytest.raises(ValueError, match="one per question"):
-        read(np.zeros((2, 4)), Readout(w, C), _config(), rendered)
-    with pytest.raises(ValueError, match="rows"):
-        read(np.zeros((1, 4)), Readout(np.zeros((254, 4)), C), _config(), rendered)
+        read(np.zeros((2, 4)), Readout(w, C), _config(), rendered, inputs=HIDDEN)
+    with pytest.raises(ValueError, match="no row"):
+        read({"other": np.zeros(4)}, Readout(w, C), _config(), rendered, inputs=HIDDEN)
+    with pytest.raises(ValueError, match="rows for 255 codes"):
+        read(np.zeros((1, 4)), Readout(np.zeros((254, 4)), C), _config(), rendered, inputs=HIDDEN)
+    with pytest.raises(ValueError, match="hidden state of 4"):
+        read(np.zeros((1, 5)), Readout(w, C), _config(), rendered, inputs=HIDDEN)
     with pytest.raises(ValueError, match="readout weight"):
-        read(np.zeros((1, 4)), Readout(None, C), _config(), rendered)
-    with pytest.raises(ValueError, match="inputs"):
-        read(np.zeros((1, 4)), Readout(w, C), _config(), rendered, inputs="probs")
+        read(np.zeros((1, 4)), Readout(None, C), _config(), rendered, inputs=HIDDEN)
+    with pytest.raises(ValueError, match="readout weight"):
+        read(np.zeros((1, 4)), None, _config(), rendered, inputs=HIDDEN)
+    with pytest.raises(ValueError, match="255 values"):
+        read(np.zeros((1, 100)), None, _config(), rendered, inputs=RAW_LOGITS)
+    with pytest.raises(ValueError, match="a vector"):
+        read([np.zeros((2, 2))], None, _config(), rendered, inputs=RAW_LOGITS)
+    # The readout's cap must be the checkpoint's: one source for c.
+    with pytest.raises(ValueError, match="soft-cap"):
+        read(np.zeros((1, 4)), Readout(w, 20.0), _config(), rendered, inputs=HIDDEN)
+    with pytest.raises(ValueError, match="soft-cap"):
+        read(np.zeros((1, 4)), Readout(w, None), _config(), rendered, inputs=HIDDEN)
+
+
+def test_the_readout_holds_its_weight_in_bf16():
+    w = np.full((255, 2), 1 + 2.0**-8 + 2.0**-20, np.float32)  # just past a bf16 tie
+    r = Readout(w, C)
+    assert r.weight is not None and np.all(r.weight == 1 + 2.0**-7)
+    with pytest.raises(ValueError, match=r"\[codes, hidden\]"):
+        Readout(np.zeros(4), C)
+    with pytest.raises(ValueError, match="softcap"):
+        Readout(w, 0.0)
 
 
 # ---- the runtime -------------------------------------------------------------------------
@@ -341,24 +637,41 @@ def test_attention_mask():
         attention_mask(0, 5)
 
 
-class _FakeBackend:
-    """Returns, for each question, a hidden state that points at one code; with the
-    identity as readout, row i of `W h` is large on that code's index only."""
+T = 0.8  # a checkpoint temperature other than 1, so that applying it twice would show
 
-    def __init__(self, picks: dict[tuple[int, ...], int]):
-        self.picks, self.calls = picks, []
+
+class _FakeBackend:
+    """Returns, for each question, the stage `outputs` of a decoder whose hidden state
+    points at one code: with the identity as readout, `W h` is 50 on that code only."""
+
+    def __init__(self, picks: dict[tuple[int, ...], int], outputs: str = HIDDEN):
+        self.picks, self.outputs, self.calls = picks, outputs, []
 
     def forward(self, state, questions):
         self.calls.append((state, questions))
         rows = np.zeros((len(questions), 255))
         for i, q in enumerate(questions):
             rows[i, self.picks[tuple(q)]] = 50.0
-        return rows
+        if self.outputs in (HIDDEN, RAW_LOGITS):
+            return rows
+        capped = softcap(rows, C)
+        if self.outputs == CAPPED_LOGITS:
+            return capped
+        final = capped / np.float32(T)
+        if self.outputs == FINAL_LOGITS:
+            return final
+        # Probabilities over each question's own codes, ragged, as vLLM's logprobs give.
+        ks = [2, 3]
+        return [
+            code_probabilities(r[:k], k, inputs=FINAL_LOGITS, softcap_c=C, temperature=T)
+            for r, k in zip(final, ks, strict=True)
+        ]
 
 
-def test_evaluate_end_to_end_with_a_toy_tokenizer():
+@pytest.mark.parametrize("outputs", STAGES)
+def test_evaluate_end_to_end_with_a_toy_tokenizer(outputs):
     tok = toy_tokenizer()
-    cfg = _config(token_ids=[tok.token_to_id(c) for c in CODES])
+    cfg = _config(token_ids=[tok.token_to_id(c) for c in CODES], temperature=T)
     req = {
         "state": "a short state",
         "questions": {
@@ -372,22 +685,37 @@ def test_evaluate_end_to_end_with_a_toy_tokenizer():
     }
     rendered = render(req, tok, PLAIN)
     ids = {n: q.question_ids for n, q in rendered.questions.items()}
-    backend = _FakeBackend({ids["n"]: 1, ids["c"]: 2})  # n -> B (true), c -> C (z)
-    resp = evaluate(
-        req, tok, Readout(np.eye(255, dtype=np.float32), C), cfg, backend, model_name="t"
-    )
+    backend = _FakeBackend({ids["n"]: 1, ids["c"]: 2}, outputs)  # n -> B (true), c -> C (z)
+    readout = Readout(np.eye(255, dtype=np.float32), C) if outputs == HIDDEN else None
+    resp = evaluate(req, tok, readout, cfg, backend, model_name="t")
     ((state, questions),) = backend.calls
     assert state == list(rendered.state_ids)
     assert questions == [list(q.question_ids) for q in rendered.questions.values()]
     assert resp["model"] == "t" and list(resp["answers"]) == ["n", "c"]
-    assert resp["answers"]["n"]["noul"] > 0.99
+    # Every stage gives the reference's numbers: the cap and T applied once each.
+    want = _manual([0.0, 50.0], 2, C, T)[1]
+    assert resp["answers"]["n"]["noul"] == pytest.approx(want, abs=1e-4)
     assert resp["answers"]["c"]["choice"] == "z"
     assert resp["usage"] == {"input_tokens": rendered.input_tokens, "output_tokens": 2}
     with pytest.raises(ValueError, match="exceeds the limit"):
         evaluate(
             req,
             tok,
-            Readout(np.eye(255), C),
-            _config(token_ids=list(cfg.token_ids), max_length_validated=5),
+            readout,
+            _config(token_ids=list(cfg.token_ids), max_length_validated=5, temperature=T),
             backend,
         )
+
+
+def test_evaluate_needs_the_backend_to_name_its_stage():
+    tok = toy_tokenizer()
+    cfg = _config(token_ids=[tok.token_to_id(c) for c in CODES])
+    req = {"state": "s", "questions": {"n": {"type": "noul", "instructions": "x"}}}
+
+    class Unnamed:
+        def forward(self, state, questions):
+            return np.zeros((len(questions), 255))
+
+    for backend in (Unnamed(), _FakeBackend({}, outputs="logits")):
+        with pytest.raises(ValueError, match="must say what forward returns"):
+            evaluate(req, tok, Readout(np.eye(255), C), cfg, backend)  # type: ignore[arg-type]

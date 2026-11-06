@@ -14,21 +14,33 @@ import numpy as np
 
 from .config import DecisionConfig
 from .prompt import render
-from .readout import Readout, read
+from .readout import STAGES, Readout, read
 
 if TYPE_CHECKING:
     from tokenizers import Tokenizer
 
 
 class Backend(Protocol):
-    def forward(self, state: list[int], questions: list[list[int]]) -> np.ndarray:
+    """A decoder. `outputs` says which stage `forward` returns (`readout.STAGES`), and the
+    core applies the rest, so the soft-cap and the temperature are each applied once:
+
+        "hidden"         the final-norm hidden state at the last token, [hidden]
+        "raw_logits"     z = W h, the readout applied: [255], or the question's [k]
+        "capped_logits"  tanh(z / c) * c, the soft-cap applied, not the temperature
+        "final_logits"   tanh(z / c) * c / T, both applied (the vLLM plugin's compute_logits)
+        "probabilities"  the codes' probabilities: the question's k, or all 255
+    """
+
+    outputs: str
+
+    def forward(
+        self, state: list[int], questions: list[list[int]]
+    ) -> np.ndarray | Sequence[np.ndarray]:
         """Run each question as a continuation of the state, under the prefix_bidir mask,
         seeing no other question: positions 0..S-1 for the state, S.. for the question.
-        Return the final-norm hidden state at each question's last token, an array
-        [len(questions), hidden], in the order of `questions`.
-
-        A backend that computes the readout itself instead returns the raw readout logits
-        `W h`, [len(questions), 255], and says so with `outputs = "logits"`."""
+        Return one row per question, in the order of `questions`, of the stage `outputs`
+        names: an array [len(questions), width], or a sequence of rows (whose widths may
+        differ, as each question's k does)."""
         ...
 
 
@@ -47,7 +59,7 @@ def attention_mask(state_len: int, total_len: int) -> np.ndarray:
 def evaluate(
     request: Any,
     tokenizer: Tokenizer,
-    readout: Readout,
+    readout: Readout | None,
     config: DecisionConfig,
     backend: Backend,
     *,
@@ -59,13 +71,19 @@ def evaluate(
 
     The prompt is the checkpoint's (`config.prompt`). Prompts longer than
     `config.max_length_validated` are refused unless `max_length` raises the limit.
+    `readout` may be None for a backend that applies the readout itself.
     """
+    inputs = getattr(backend, "outputs", None)
+    if inputs not in STAGES:
+        raise ValueError(
+            f"the backend must say what forward returns: `outputs` is {inputs!r}, not one "
+            f"of {STAGES}"
+        )
     rendered = render(
         request, tokenizer, config.prompt, max_length=max_length or config.max_length_validated
     )
-    questions: Sequence[list[int]] = [list(q.question_ids) for q in rendered.questions.values()]
-    out = np.asarray(backend.forward(list(rendered.state_ids), list(questions)))
-    inputs = getattr(backend, "outputs", "hidden")
+    questions = [list(q.question_ids) for q in rendered.questions.values()]
+    out = backend.forward(list(rendered.state_ids), questions)
     answers = read(
         out, readout, config, rendered, inputs=inputs, ordinal_smoothing=ordinal_smoothing
     )

@@ -3,11 +3,13 @@
 docs/v2-spec.md defines the interface; this package implements its torch-free half with
 `tokenizers`, numpy and the standard library:
 
-    render(request, tokenizer, variant)          -> RenderedRequest: ids, S, codes per question
-    read(hidden_or_logits, readout, config, rendered) -> answers in v1's response schema
-    DecisionConfig.load(checkpoint)              -> decision_config.json, validated
-    Readout.load(checkpoint)                     -> readout.safetensors, and the soft-cap
-                                                    from decision_config.json
+    render(request, tokenizer, variant)    -> RenderedRequest: ids, S, codes per question
+    read(rows, readout, config, rendered, inputs=stage)
+                                           -> answers in v1's response schema, from the
+                                              stage a runtime returns (readout.STAGES)
+    DecisionConfig.load(checkpoint)        -> decision_config.json, validated
+    Readout.load(checkpoint)               -> readout.safetensors, and the soft-cap from
+                                              decision_config.json
 
 A runtime supplies the decoder (`Backend`); `evaluate` joins the three. v1's engines are
 untouched: v2 sits beside them.
@@ -27,17 +29,39 @@ from .prompt import (
     render_content,
     render_text,
 )
-from .readout import Readout, answer, code_probabilities, load_safetensors, read, softcap
+from .readout import (
+    CAPPED_LOGITS,
+    FINAL_LOGITS,
+    HIDDEN,
+    PROBABILITIES,
+    RAW_LOGITS,
+    STAGES,
+    Readout,
+    answer,
+    code_probabilities,
+    load_safetensors,
+    question_probabilities,
+    read,
+    readout_logits,
+    round_to_bf16,
+    softcap,
+)
 from .request import parse_request
 from .runtime import Backend, attention_mask, evaluate
 
 __all__ = [
+    "CAPPED_LOGITS",
     "CHAT",
     "CODES",
+    "FINAL_LOGITS",
     "FORMAT_VERSION",
+    "HIDDEN",
     "INTERFACE",
     "MAX_CODES",
     "PLAIN",
+    "PROBABILITIES",
+    "RAW_LOGITS",
+    "STAGES",
     "VARIANTS",
     "Backend",
     "DecisionConfig",
@@ -52,9 +76,12 @@ __all__ = [
     "evaluate",
     "load_safetensors",
     "parse_request",
+    "question_probabilities",
     "read",
+    "readout_logits",
     "render",
     "render_content",
     "render_text",
+    "round_to_bf16",
     "softcap",
 ]
