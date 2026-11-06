@@ -10,6 +10,7 @@ Regenerate the goldens after an intended template change, and review the diff:
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import os
 import random
@@ -310,9 +311,16 @@ def test_unknown_variants_are_refused(variant):
 
 
 def test_images_are_refused():
+    from strands_decider.v2.request import NO_VISION
+
     req = {**CASES["support_ticket"], "images": ["aGk="]}
-    with pytest.raises(ValueError, match="text only"):
+    with pytest.raises(ValueError, match="no vision tower") as e:
         render_text(req, PLAIN)
+    assert str(e.value) == NO_VISION
+    for bad in (None, "", 0, {}, "aGk=", [1], [None]):
+        with pytest.raises(ValueError, match="list of strings"):
+            render_text({**CASES["support_ticket"], "images": bad}, PLAIN)
+    assert render_text({**CASES["support_ticket"], "images": []}, PLAIN)
 
 
 def test_max_length_refuses_and_never_truncates():
@@ -615,28 +623,41 @@ def test_request_parsing_matches_v1():
         {"type": "score", "instructions": "x", "criteria": ["lo", 3]},
         {"type": "noul", "instructions": "x", "extra": 1},
     ]
+    one = {"q": {"instructions": "x"}}
+    images = [None, "", 0, {}, [], ["aGk="], [""], [1], [None], "aGk=", ["a", 2], False]
     requests = [{"state": "s", "questions": {"q": q}} for q in questions] + [
-        {"state": None, "questions": {"q": {"instructions": "x"}}},
-        {"state": 5, "questions": {"q": {"instructions": "x"}}},
+        {"state": None, "questions": one},
+        {"state": 5, "questions": one},
         {"state": "", "questions": {}},
-        {"questions": {"q": {"instructions": "x"}}},
-        {"state": {"a": [1]}, "questions": {"q": {"instructions": "x"}}, "unknown": 1},
+        {"questions": one},
+        {"state": {"a": [1]}, "questions": one, "unknown": 1},
+        {"state": "s", "questions": one, "model": None},
+        {"state": "s", "questions": one, "model": 5},
+        *({"state": "s", "questions": one, "images": i} for i in images),
     ]
+    # v1's text-only engine refuses a request that validates with images, with this message.
+    from strands_decider import hidden_engine
+    from strands_decider.v2.request import NO_VISION
+
+    assert NO_VISION in inspect.getsource(hidden_engine.HiddenStateEngine.evaluate)
     for req in requests:
         try:
             v1 = SystemOneRequest.model_validate(req)
-        except Exception:
-            v1 = None
+            v1_error = NO_VISION if v1.images else None
+        except Exception as e:
+            v1, v1_error = None, str(e)
         try:
-            v2 = parse_request(req)
-        except ValueError:
-            v2 = None
-        assert (v1 is None) == (v2 is None), req
-        if v1 is not None and v2 is not None:
+            v2, v2_error = parse_request(req), None
+        except ValueError as e:
+            v2, v2_error = None, str(e)
+        assert (v1_error is None) == (v2_error is None), req
+        if v1_error is None:
+            assert v1 is not None and v2 is not None
             assert [q.type for q in v1.questions.values()] == [
                 q.kind for q in v2.questions.values()
             ], req
-            assert v2.questions["q"].kind == v1.questions["q"].type
+        elif v1 is not None:  # the schema accepts it and the engine refuses its images
+            assert v2_error == v1_error, req
     assert parse_request(SystemOneRequest.model_validate(CASES["support_ticket"])).questions
 
 

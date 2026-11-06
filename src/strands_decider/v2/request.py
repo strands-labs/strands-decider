@@ -26,6 +26,8 @@ NOUL_DEFAULT_CRITERIA = {
 }
 
 KINDS = ("noul", "choice", "score")
+# v1's text-only engine refuses images with this message (hidden_engine.HiddenStateEngine).
+NO_VISION = "this engine has no vision tower; images are not supported"
 
 
 @dataclass(frozen=True)
@@ -117,8 +119,11 @@ def parse_question(name: str, q: Any) -> Question:
 
 def parse_request(request: Any) -> Request:
     """A request from its JSON object, or from a v1 `SystemOneRequest` (anything with
-    `model_dump`). Unknown fields are ignored, as v1 ignores them. Images are refused: the
-    v2 core renders text only."""
+    `model_dump`). Unknown fields are ignored, as v1 ignores them.
+
+    `images`, as in v1, is optional and must be a list of strings; null or any other type is
+    refused. A non-empty list is refused with v1's text-only error: the v2 core renders text
+    only."""
     if hasattr(request, "model_dump"):
         request = request.model_dump()
     if not isinstance(request, Mapping):
@@ -131,8 +136,12 @@ def parse_request(request: Any) -> Request:
     questions = request.get("questions")
     if not isinstance(questions, Mapping) or not questions:
         raise ValueError("a request needs at least one question")
-    if request.get("images"):
-        raise ValueError("the v2 core renders text only; images are not supported")
+    if "images" in request:
+        images = request["images"]
+        if not isinstance(images, list) or not all(isinstance(i, str) for i in images):
+            raise ValueError("images must be a list of strings (base64 or data: URIs)")
+        if images:
+            raise ValueError(NO_VISION)
     model = request.get("model", "strands-decider-latest")
     if not isinstance(model, str):
         raise ValueError("model must be a string")

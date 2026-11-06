@@ -17,7 +17,7 @@ POST /v1/systemone
 {"state": ..., "model": "strands-decider-latest", "questions": {"<name>": {...}, ...}}
 ```
 
-`state` is required. It is a string, a JSON object or a JSON array, and it may be empty when the questions carry the whole task. `questions` maps a name to a question and holds at least one. `model` is an optional string. `images` is an optional list; a text-only runtime refuses a request that has any. Other fields are ignored, as v1 ignores them.
+`state` is required. It is a string, a JSON object or a JSON array, and it may be empty when the questions carry the whole task. `questions` maps a name to a question and holds at least one. `model` is an optional string. `images` is optional and, as in v1, a list of strings (base64 or `data:` URIs); null or any other type is an error. A text-only runtime refuses a non-empty list with v1's error, `this engine has no vision tower; images are not supported`. Other fields are ignored, as v1 ignores them.
 
 A question has a `type`, `instructions` (a string, object or array) and `criteria`:
 
