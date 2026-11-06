@@ -117,13 +117,20 @@ Answer with the code of one option.
 
 ### 3.4 Option lines
 
-Option line i, for the option bound to code c, is
+Option line i, for the option bound to code c, is built from three parts, in order:
 
-```
-{c}. {name} — {description}
-```
+1. `{c}.`, always;
+2. ` {name}`, a space and the name, if the name is not empty;
+3. ` — {description}`, a space, U+2014 EM DASH, a space and the description, if the description is not empty. The separator is v1's.
 
-The separator between the name and the description is a space, U+2014 EM DASH and a space (v1's). Name and description each have every run of whitespace, newlines included, replaced by one space, and leading and trailing whitespace removed, so that an option is always one line. When the description is empty the line is `{c}. {name}`; when the name is also empty it is `{c}.`.
+Name and description each have every run of whitespace, newlines included, replaced by one space, and leading and trailing whitespace removed, before the test for emptiness, so that an option is always one line and a name of only whitespace counts as empty. The four forms are therefore:
+
+| name | description | line |
+| --- | --- | --- |
+| not empty | not empty | `{c}. {name} — {description}` |
+| not empty | empty | `{c}. {name}` |
+| empty | not empty | `{c}. — {description}` |
+| empty | empty | `{c}.` |
 
 The name is the noul label (`false`, `true`), the choice option's name, or the score level's index (`0`, `1`, ...). The description is the noul's criterion (or its default), the choice option's description, or the score level's rubric text, rendered by section 3.1. A structured description therefore becomes JSON flattened to one line: `{"from": "e1"}` gives `{ "from": "e1" }`.
 
@@ -157,7 +164,15 @@ A prompt is a sequence of control tokens and text runs. Control tokens come only
 | `<\|turn>` | 105 |
 | `<turn\|>` | 106 |
 
-Each text run is encoded on its own by the tokenizer as plain text: special-token matching off (in Hugging Face `tokenizers`, `encode_special_tokens = True`) and `add_special_tokens=False`. Gemma 4's tokenizer adds no tokens of its own; its post-processor adds no BOS, which is why the template emits `<bos>` itself. Text from the request therefore never produces a control token: a state containing the characters `<turn|>` encodes them as text.
+Each text run is encoded on its own by the tokenizer as plain text: special-token matching off (in Hugging Face `tokenizers`, `encode_special_tokens = True`) and `add_special_tokens=False`. Gemma 4's tokenizer adds no tokens of its own; its post-processor adds no BOS, which is why the template emits `<bos>` itself. Text from the request therefore never produces any of the tokenizer's 24 special tokens, its added tokens, all marked special:
+
+```
+<pad> <eos> <bos> <unk> <mask> <|tool> <tool|> <|tool_call> <tool_call|> <|tool_response>
+<tool_response|> <|"|> <|think|> <|channel> <channel|> <|turn> <turn|> <|image> <|audio>
+<|image|> <|audio|> <image|> <audio|> <|video|>
+```
+
+A state containing the characters `<turn|>`, or any other of the 24 strings, encodes them as text. The only special tokens in a prompt are the template's. `strands_decider.v2.render` encodes with a private copy of the tokenizer whose settings never change, so this holds when several threads render with one tokenizer, or use it for other things, at the same time.
 
 The pieces of each variant, with S marking the state boundary of section 4:
 
@@ -166,7 +181,7 @@ plain:  [<bos>] "<state>\n...</state>\n" S "<question ...>...</question>\n<answe
 chat:   [<bos>] [<|turn>] "user\n<state>\n...</state>\n" S "<question ...>...</question>" [<turn|>] "\n" [<|turn>] "model\n"
 ```
 
-For a request whose text contains no control-token string, the ids equal what one call on the whole rendered string gives with special-token matching on, which is how Hugging Face's `apply_chat_template(tokenize=True)` encodes. `tests/test_v2_prompt.py` checks this on the goldens and on randomly generated requests.
+For a request whose text contains none of the 24 special-token strings, the ids equal what one call on the whole rendered string gives with special-token matching on, which is how Hugging Face's `apply_chat_template(tokenize=True)` encodes. `tests/test_v2_prompt.py` checks this on the goldens and on randomly generated requests, and, where transformers is installed, against `apply_chat_template(tokenize=True)` itself with each Gemma 4 template given. It also checks that requests holding all 24 strings, in every place text can go, produce none of them.
 
 ### 3.7 Examples
 
@@ -244,7 +259,7 @@ question ids [25, 99): the plain variant's first 69 question ids (through `</que
 code token ids:      A 236776, B 236799, C 236780 (billing, technical, sales)
 ```
 
-The goldens hold every question type in both variants, with structured content, an empty state, 28 options (codes to `AB`), control-token strings in the state and a ten-level score.
+The goldens hold every question type in both variants, with structured content, an empty state, 28 options (codes to `AB`), special-token strings in the state, a ten-level score, and choice options with empty names, one with a description (`A. — no preference yet`) and one without (`B.`).
 
 ## 4. The state boundary S
 
@@ -258,7 +273,7 @@ For Gemma 4's tokenizer the rule costs nothing: the separate encodings equal the
 2. The normalizer replaces each space with U+2581 and does nothing else; it maps characters one to one and sees no context. The pre-tokenizer splits on spaces, which no longer exist after normalization (and a split could only add boundaries). The post-processor adds no tokens, and BPE runs without dropout.
 3. So no merge across S is ever possible. BPE applies merges in rank order, and merges on one side of S never create or remove a candidate pair on the other, so each side ends with the merges it makes alone.
 
-`tests/test_v2_prompt.py` proves this in two ways. `test_tokenizer_cannot_merge_across_a_line_end` checks the premises of steps 1 and 2 against the tokenizer file itself. `test_s_is_a_token_boundary` encodes 120 random requests in both variants with the two text runs at S joined into one, including requests full of control-token strings, line ends, tabs, non-ASCII text and option-like text, and gets the same ids as the rule. `test_ids_match_one_call_encoding` checks that a token starts at exactly S's character offset in the one-call encoding. A future tokenizer that fails these premises keeps the rule well defined (separate encoding), but its ids may then differ from those a text-only tool produces, so this spec would need a new seam for it.
+`tests/test_v2_prompt.py` proves this in two ways. `test_tokenizer_cannot_merge_across_a_line_end` checks the premises of steps 1 and 2 against the tokenizer file itself. `test_s_is_a_token_boundary` encodes 120 random requests in both variants with the two text runs at S joined into one, including requests full of special-token strings, line ends, tabs, non-ASCII text and option-like text, and gets the same ids as the rule. A rendered prompt always has `</state>\n` before S and `<question` after it, so the test also varies the characters next to S directly: 1,200 random pairs of a run ending in one to three line feeds after any character and a run starting with any character but a line feed, special-token strings included, encode the same joined as apart. `test_ids_match_one_call_encoding` checks that a token starts at exactly S's character offset in the one-call encoding. A future tokenizer that fails these premises keeps the rule well defined (separate encoding), but its ids may then differ from those a text-only tool produces, so this spec would need a new seam for it.
 
 ## 5. Where the answer is read
 
