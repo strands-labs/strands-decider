@@ -48,7 +48,11 @@ def attention_mask(state_len: int, total_len: int) -> np.ndarray:
     """The prefix_bidir mask of one prompt, as booleans [L, L]: `mask[i, j]` is True when
     token i attends to token j. State tokens (i < S) see the state, both ways, and never
     the question; question tokens see the whole prompt, both ways. Every layer uses it,
-    sliding-window layers included, with no window."""
+    sliding-window layers included, with no window.
+
+    An illustration of the rule, for tests and small examples, not for serving: the array
+    is dense, O(L^2) in memory (64 MB at L = 8,192). A runtime gives its attention kernel
+    the rule in the form that kernel takes, such as S and each question's span."""
     if not 0 < state_len <= total_len:
         raise ValueError(f"need 0 < S <= L, not S={state_len}, L={total_len}")
     m = np.ones((total_len, total_len), dtype=bool)

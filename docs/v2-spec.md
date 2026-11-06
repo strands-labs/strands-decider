@@ -1,6 +1,6 @@
 # Strands Decider v2: the decision interface
 
-This document defines the Strands Decider v2 decision interface. It specifies how a request becomes token ids, how the decoder attends over them, how its output becomes answers, which files a checkpoint carries, and what a runtime must do to conform. Any runtime that follows it, in any language, gives the same answers for the same checkpoint: PyTorch, vLLM, MLX, llama.cpp, or numpy behind a remote decoder.
+This document defines the Strands Decider v2 decision interface. It specifies how a request becomes token ids, how the decoder attends over them, how its output becomes answers, which files a checkpoint carries, and what a runtime must do to conform. Any runtime that follows it, in any language, gives answers within section 10's bounds of the reference's for the same checkpoint: PyTorch, vLLM, MLX, llama.cpp, or numpy behind a remote decoder.
 
 The reference implementation of the torch-free half is `strands_decider.v2` (`src/strands_decider/v2/`). It needs only `tokenizers`, numpy and the Python standard library. The `strands-decider` distribution declares both, but it also requires torch and transformers for v1's engines, so installing it installs torch. A torch-free install, for AWS Lambda for one, needs a separate distribution or an extra without torch; which one is not yet decided (section 12). Its tests are `tests/test_v2_prompt.py`, `tests/test_v2_readout.py` and `tests/test_v2_config.py`, and the render goldens are `tests/fixtures/v2/render_goldens.json`. v2 sits beside v1: the v1 engines (`infer.py`, `hidden_engine.py`, `mlx_engine.py`) and their checkpoints are unchanged.
 
@@ -290,7 +290,7 @@ i < S:   j < S        (the state sees the state, in both directions, and never a
 i >= S:  j < L        (a question sees the whole prompt, in both directions)
 ```
 
-The mask applies on every layer, sliding-window layers included, and replaces their window: no layer limits attention by distance. Positions are the token indices, 0 to L - 1, so every question's first token sits at position S. Each question is its own sequence over the shared state; no question sees another. Because the state never attends to a question, its keys and values are the same for every question and can be computed once. `strands_decider.v2.attention_mask(S, L)` gives the mask as booleans, row i for token i.
+The mask applies on every layer, sliding-window layers included, and replaces their window: no layer limits attention by distance. Positions are the token indices, 0 to L - 1, so every question's first token sits at position S. Each question is its own sequence over the shared state; no question sees another. Because the state never attends to a question, its keys and values are the same for every question and can be computed once. `strands_decider.v2.attention_mask(S, L)` gives the mask as booleans, row i for token i. It is an illustration of the rule, for tests and small examples: a dense L × L array, O(L²) in memory (64 MB at L = 8,192). A runtime builds the form its attention kernel takes, such as the state's length and each question's span.
 
 ## 7. The readout
 
@@ -316,7 +316,7 @@ The arithmetic above is the training reference's, and the vLLM plugin's (`comput
 
 `strands_decider.v2.read` is the reference implementation of this regime in numpy, which has no bf16. It sums the GEMM's products in float64, rounds each sum to float32, and rounds that to bf16 through the float32's bits (`round_to_bf16`: add 0x7FFF, plus 1 if the lowest kept bit is set, and clear the low 16 bits). A GPU's float32 accumulator sums in another order, so where a sum falls next to a bf16 rounding boundary its `z` can differ by one bf16 step; section 10's bounds absorb this. `tests/test_v2_readout.py` checks `read` against an independent reimplementation of the plugin's arithmetic on random bf16 inputs, logits between 16 and 32 included: `z` agrees bit for bit, and the probabilities to 1e-5.
 
-The temperature, like the soft-cap, is applied exactly once. A runtime that applies part of the readout itself returns a named stage (section 11), and the client applies only what the stage has not. On vLLM the plugin's `compute_logits` applies the soft-cap and the checkpoint temperature, so the client sends `temperature` 1.0 in its request: with `--logprobs-mode processed_logprobs`, vLLM divides by the request's temperature again before it takes the log-softmax.
+The temperature, like the soft-cap, is applied exactly once. A runtime that applies part of the readout itself returns a named stage (section 11), and the client applies only what the stage has not. On vLLM the plugin's `compute_logits` applies the soft-cap and the checkpoint temperature, so the client sends `temperature` 1.0 in its request. Under `--logprobs-mode processed_logprobs` vLLM divides the logits by the request's temperature before it takes the log-softmax, so any other value would apply a temperature a second time.
 
 The answer fields are v1's response schema (`schema.py`, `NoulAnswer`, `ChoiceAnswer`, `ScoreAnswer`), rounded to four decimal places as v1 rounds:
 
@@ -392,7 +392,7 @@ A v2 checkpoint is a directory that holds:
 | `config.json` | the decoder's configuration, for the decoder's loader: `architectures: ["Gemma4TextModel"]`, `model_type: gemma4_text`. Its `final_logit_softcapping` equals `decision_config.json`'s; a runtime takes the soft-cap from `decision_config.json` and refuses a checkpoint whose two values differ |
 | `model.safetensors` or `model-*-of-*.safetensors` with `model.safetensors.index.json` | the Gemma 4 text decoder in bf16, any fine-tuning merged in: no adapter, no vision or audio tower, no language-model head |
 | `tokenizer.json`, `tokenizer_config.json` | Gemma 4's tokenizer, unchanged; `tokenizer_config.json` carries no `chat_template` key |
-| `readout.safetensors` | one tensor, `weight`, shape [255, hidden], bf16 or f32 |
+| `readout.safetensors` | one tensor, `weight`, shape [255, hidden], bf16; a runtime that reads an f32 or f16 tensor rounds it to bf16 (section 7.1) |
 | `decision_config.json` | section 8 |
 | `golden_vectors.jsonl` | the model goldens of section 10 |
 | `LICENSE`, `NOTICE`, `README.md` | the terms and the model card |
