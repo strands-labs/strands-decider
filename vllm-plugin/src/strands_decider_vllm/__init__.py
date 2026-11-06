@@ -1,15 +1,16 @@
-"""strands-decider-v2-vllm: serve Strands Decider v2 checkpoints on stock vLLM 0.33.
+"""strands-decider-vllm: serve Strands Decider checkpoints on stock vLLM 0.33.
 
-A v2 checkpoint is a merged bf16 Gemma 4 text decoder (``Gemma4TextModel``, bare ``layers.*`` keys), a trained
+A checkpoint is a merged bf16 Gemma 4 text decoder (``Gemma4TextModel``, bare ``layers.*`` keys), a trained
 readout ``readout.safetensors`` ([255, hidden]) and ``decision_config.json`` (``attention_mode: prefix_bidir``,
-``pooling: last``, the 255 code token ids, the temperature). The v2 decision specification reads a decision at the last
-prompt token: the readout applied to the final-norm hidden state, soft-capped, divided by the temperature, then a
-softmax over the question's own codes, with the prefix_bidir attention mask described below on every layer.
+``pooling: last``, the 255 code token ids, the temperature). The decision specification (``docs/spec.md``) reads a
+decision at the last prompt token: the readout applied to the final-norm hidden state, soft-capped, divided by the
+temperature, then a softmax over the question's own codes, with the prefix_bidir attention mask described below on
+every layer.
 
 What this plugin adds to vLLM, and nothing else:
 
-- ``StrandsDeciderV2ForCausalLM``: vLLM's Gemma 4 text decoder whose logits are the readout's 255 values (soft-capped
-  as the v2 specification defines, divided by the temperature) at the codes' token ids and -inf elsewhere, so a
+- ``StrandsDeciderForCausalLM``: vLLM's Gemma 4 text decoder whose logits are the readout's 255 values (soft-capped
+  as the specification defines, divided by the temperature) at the codes' token ids and -inf elsewhere, so a
   completion's logprobs are exactly the codes' log-softmax. The client renormalizes over a question's own codes.
 - ``prefix_bidir`` attention on every layer: a request sends its state boundary S as ``vllm_xargs.prefix_end``; state
   tokens [0, S) attend to each other in both directions and never to the question, and question tokens [S, L) attend
@@ -19,8 +20,8 @@ What this plugin adds to vLLM, and nothing else:
 - Prefix-cache keys that stay correct under the mask: block 0 carries a digest of the state x[0:S), and every block
   that ends past S carries a digest of the question x[S:L). A different question on the same state reuses the state's
   full blocks; nothing else is shared.
-- Per-request checks in the engine core: a request to a v2 model that the workers could not serve as a v2 decision
-  gets HTTP 400 before it is scheduled (:mod:`strands_decider_v2_vllm.validation`).
+- Per-request checks in the engine core: a request to a Strands Decider model that the workers could not serve as a
+  decision gets HTTP 400 before it is scheduled (:mod:`strands_decider_vllm.validation`).
 
 ``register`` is the ``vllm.general_plugins`` entry point; vLLM calls it in every process. On a vLLM release other than
 0.33.x it logs a warning and registers nothing, so the environment's other models are unaffected.
@@ -32,14 +33,14 @@ import logging
 import re
 
 __version__ = "0.2.1"
-ARCH = "StrandsDeciderV2ForCausalLM"
+ARCH = "StrandsDeciderForCausalLM"
 PREFIX_END_KEY = "prefix_end"
 SUPPORTED_VLLM = ">=0.33.0,<0.34"
 #: vLLM 0.33.x only: the plugin uses vLLM internals that are not a public API and may change in any minor release.
 _SUPPORTED_MINORS = ((0, 33),)
 
 #: A child of vLLM's logger, so the plugin's lines get vLLM's handler and format in every process.
-logger = logging.getLogger("vllm.strands_decider_v2")
+logger = logging.getLogger("vllm.strands_decider")
 
 
 def vllm_version_supported(version: str) -> bool:
@@ -51,7 +52,7 @@ def vllm_version_supported(version: str) -> bool:
 
 def unsupported_vllm_message(version: str) -> str:
     return (
-        f"strands-decider-v2-vllm {__version__} requires vLLM 0.33.x ({SUPPORTED_VLLM}); the installed vLLM is "
+        f"strands-decider-vllm {__version__} requires vLLM 0.33.x ({SUPPORTED_VLLM}); the installed vLLM is "
         f"{version!r}. Other releases, 0.32.x included, are not supported, because the plugin relies on vLLM "
         "0.33 internals. Install a supported vLLM with: pip install 'vllm>=0.33.0,<0.34'"
     )
@@ -78,16 +79,14 @@ def register() -> None:
     from vllm import ModelRegistry
 
     if ARCH not in ModelRegistry.get_supported_archs():
-        ModelRegistry.register_model(
-            ARCH, "strands_decider_v2_vllm.model:StrandsDeciderV2ForCausalLM"
-        )
+        ModelRegistry.register_model(ARCH, "strands_decider_vllm.model:StrandsDeciderForCausalLM")
     # FLASH_ATTN with an implementation that also runs the prefix_bidir split; it is vLLM's own for any metadata
     # without a split, which only this package's model state attaches.
     from vllm.v1.attention.backends.registry import AttentionBackendEnum, register_backend
 
     register_backend(
         AttentionBackendEnum.FLASH_ATTN,
-        "strands_decider_v2_vllm.attention.SplitFlashAttentionBackend",
+        "strands_decider_vllm.attention.SplitFlashAttentionBackend",
     )
     # Gemma 4's config hook (FA4 for both head sizes on Hopper) is looked up by architecture name.
     from vllm.model_executor.models.config import MODELS_CONFIG_MAP

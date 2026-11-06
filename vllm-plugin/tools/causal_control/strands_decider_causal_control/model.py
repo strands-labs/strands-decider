@@ -1,5 +1,5 @@
-"""``StrandsDeciderV2CausalControlForCausalLM``: Gemma 4's own layers (causal, with their sliding windows) under the
-v2 checkpoint loading, readout and logits of :class:`strands_decider_v2_vllm.model.StrandsDeciderV2ForCausalLM`."""
+"""``StrandsDeciderCausalControlForCausalLM``: Gemma 4's own layers (causal, with their sliding windows) under the
+checkpoint loading, readout and logits of :class:`strands_decider_vllm.model.StrandsDeciderForCausalLM`."""
 
 from __future__ import annotations
 
@@ -10,10 +10,10 @@ from vllm.config import VllmConfig
 from vllm.model_executor.models.gemma4 import Gemma4ForCausalLM
 from vllm.v1.worker.gpu.model_states.default import DefaultModelState
 
-from strands_decider_v2_vllm import PREFIX_END_KEY
-from strands_decider_v2_vllm.model import StrandsDeciderV2ForCausalLM, check_config
+from strands_decider_vllm import PREFIX_END_KEY
+from strands_decider_vllm.model import StrandsDeciderForCausalLM, check_config
 
-logger = logging.getLogger("strands_decider_v2_causal_control")
+logger = logging.getLogger("strands_decider_causal_control")
 
 
 class CausalControlModelState(DefaultModelState):
@@ -28,16 +28,16 @@ class CausalControlModelState(DefaultModelState):
             self._warned = True
             logger.warning(
                 "causal control: vllm_xargs.prefix_end is ignored; this server applies Gemma 4's causal, "
-                "sliding-window attention, not the v2 mask"
+                "sliding-window attention, not the prefix_bidir mask"
             )
 
 
-class StrandsDeciderV2CausalControlForCausalLM(StrandsDeciderV2ForCausalLM):
+class StrandsDeciderCausalControlForCausalLM(StrandsDeciderForCausalLM):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         check_config(vllm_config)
         logger.warning(
-            "causal control: Gemma 4's causal, sliding-window attention with the v2 readout; a diagnostic, "
-            "not a v2 server"
+            "causal control: Gemma 4's causal, sliding-window attention with the trained readout; a diagnostic, "
+            "not a Strands Decider server"
         )
         Gemma4ForCausalLM.__init__(
             self, vllm_config=vllm_config, prefix=prefix

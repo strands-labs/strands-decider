@@ -1,10 +1,10 @@
-"""Per-request checks for Strands Decider v2, run in the engine core before a request is scheduled.
+"""Per-request checks for Strands Decider, run in the engine core before a request is scheduled.
 
-A v2 request is one decision: a prompt of L token ids, its state boundary S in ``vllm_xargs.prefix_end`` and one
+A decision request is one decision: a prompt of L token ids, its state boundary S in ``vllm_xargs.prefix_end`` and one
 sampled token whose processed logprobs are the codes' log-softmax. :func:`check_request` refuses every request that the
 workers could not serve as that decision, or that would silently change its answer. The engine core turns a refusal into
 vLLM's ``VLLMValidationError``, which the OpenAI server returns as HTTP 400 for that request alone
-(:mod:`strands_decider_v2_vllm.engine`). Nothing here imports vLLM or torch.
+(:mod:`strands_decider_vllm.engine`). Nothing here imports vLLM or torch.
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ from typing import Any
 
 from . import PREFIX_END_KEY
 
-#: The number of answer codes of every v2 checkpoint: the readout's rows.
+#: The number of answer codes of every checkpoint: the readout's rows.
 N_CODES = 255
 
 
@@ -22,7 +22,7 @@ class RequestRefused(ValueError):
     """A request the plugin will not serve. ``parameter`` and ``value`` name what was refused."""
 
     def __init__(self, message: str, *, parameter: str | None = None, value: Any = None) -> None:
-        super().__init__(f"strands-decider-v2: {message}")
+        super().__init__(f"strands-decider: {message}")
         self.parameter = parameter
         self.value = value
 
@@ -42,7 +42,7 @@ def check_prefix_end(extra_args: dict[str, Any] | None, prompt_len: int) -> int:
     parameter = f"vllm_xargs.{PREFIX_END_KEY}"
     if not extra_args or PREFIX_END_KEY not in extra_args:
         raise _refuse(
-            f"{parameter} is required: every request to a Strands Decider v2 model must send its state boundary S "
+            f"{parameter} is required: every request to a Strands Decider model must send its state boundary S "
             "(the number of tokens in the prompt's state part)",
             parameter,
         )
@@ -62,12 +62,12 @@ def check_prefix_end(extra_args: dict[str, Any] | None, prompt_len: int) -> int:
 
 
 def check_sampling(sp: Any) -> None:
-    """Refuse sampling parameters under which the returned logprobs are not the v2 decision.
+    """Refuse sampling parameters under which the returned logprobs are not the decision's.
 
     The model's logits already are the readout divided by the checkpoint temperature, so the request's temperature
     must be 1.0; truncation (top-k, top-p, min-p), penalties, logit biases, bad words and structured outputs would drop
-    or move codes. One decision is one sampled token, so ``max_tokens`` must be 1; this also means a v2 request is
-    never resumed with output tokens after a preemption.
+    or move codes. One decision is one sampled token, so ``max_tokens`` must be 1; this also means a request is never
+    resumed with output tokens after a preemption.
     """
     if sp.max_tokens != 1:
         raise _refuse(

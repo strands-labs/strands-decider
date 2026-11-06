@@ -1,4 +1,4 @@
-"""What the plugin reads from a checkpoint's ``decision_config.json``, validated (v2 specification, section 8).
+"""What the plugin reads from a checkpoint's ``decision_config.json``, validated (specification, section 8).
 
 :func:`read_decision_config` takes the parsed file and the decoder config's ``final_logit_softcapping`` and returns the
 readout's code token ids, temperature and soft-cap, or raises :class:`DecisionConfigError` at startup. Nothing here
@@ -13,7 +13,7 @@ from typing import Any
 
 from .validation import N_CODES
 
-INTERFACE = "strands-decider-v2"
+INTERFACE = "strands-decider"
 _FLOAT32_MAX = 3.4028234663852886e38
 _FLOAT32_TINY = 1.1754943508222875e-38
 
@@ -22,7 +22,7 @@ class DecisionConfigError(ValueError):
     """A ``decision_config.json`` (or decoder config) the plugin refuses to serve."""
 
     def __init__(self, message: str) -> None:
-        super().__init__(f"strands-decider-v2: decision_config.json: {message}")
+        super().__init__(f"strands-decider: decision_config.json: {message}")
 
 
 @dataclass(frozen=True)
@@ -50,7 +50,7 @@ def read_decision_config(
 ) -> ReadoutSpec:
     """Validate ``dc`` (the parsed ``decision_config.json``) for serving.
 
-    - ``interface``: when present it must be ``"strands-decider-v2"``. Intermediate checkpoints predate the field; they
+    - ``interface``: when present it must be ``"strands-decider"``. Intermediate checkpoints predate the field; they
       load with a warning (``interface_optional``).
     - ``format_version`` 1, ``attention_mode: prefix_bidir``, ``pooling: last``.
     - ``token_ids``: 255 distinct integers in ``[0, vocab_size)``.
@@ -65,7 +65,7 @@ def read_decision_config(
     if "interface" in dc:
         if dc["interface"] != INTERFACE:
             raise DecisionConfigError(
-                f'interface must be "{INTERFACE}", got {dc["interface"]!r}; this is not a Strands Decider v2 '
+                f'interface must be "{INTERFACE}", got {dc["interface"]!r}; this is not a Strands Decider '
                 "checkpoint"
             )
     elif interface_optional:
@@ -118,7 +118,7 @@ def read_decision_config(
         softcap = text
     else:
         raise DecisionConfigError(
-            "final_logit_softcapping is missing from both decision_config.json and the decoder config; the v2 "
+            "final_logit_softcapping is missing from both decision_config.json and the decoder config; the "
             "readout is soft-capped, and the plugin does not serve it without the cap"
         )
     return ReadoutSpec(tuple(ids), temperature, softcap, tuple(warnings))

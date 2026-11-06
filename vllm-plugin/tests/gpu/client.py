@@ -1,7 +1,7 @@
-"""GPU integration checks for strands-decider-v2-vllm against a running server. Python standard library only.
+"""GPU integration checks for strands-decider-vllm against a running server. Python standard library only.
 
 Each scenario asserts what it checks and exits non-zero on the first failure; ``--out`` receives a JSON summary.
-``--rows`` is a JSON Lines file of rendered v2 requests: ``token_ids``, ``prefix_end`` (S) and ``label_token_ids`` (the
+``--rows`` is a JSON Lines file of rendered requests: ``token_ids``, ``prefix_end`` (S) and ``label_token_ids`` (the
 question's code ids), optionally ``probabilities`` (a reference's) and ``n_tokens``.
 
 - ``requests``: every malformed request gets HTTP 400 with the server healthy afterwards and the next valid request
@@ -175,7 +175,7 @@ def run_malformed(srv, row, p0, cases):
     for name, payload, expected, plugin_message in cases:
         st, r = srv.post("/v1/completions", payload)
         text = r if isinstance(r, str) else json.dumps(r)
-        ok = st == expected and (not plugin_message or "strands-decider-v2" in text)
+        ok = st == expected and (not plugin_message or "strands-decider: " in text)
         check(ok, f"{name}: HTTP {st} (want {expected}) {text[:160] if st != 200 else ''}")
         check(srv.health() == 200, f"{name}: server healthy afterwards")
         st2, _, p = ask(srv, row)
@@ -194,7 +194,7 @@ def scenario_requests(srv, rows, a):
     out = {}
     row = base_row(rows)
     st, _, p0 = ask(srv, row, cache_salt="baseline")
-    if not check(st == 200, f"baseline v2 request: HTTP {st}"):
+    if not check(st == 200, f"baseline decision request: HTTP {st}"):
         return out
     run_malformed(srv, row, p0, malformed_cases(row))
 
@@ -236,7 +236,7 @@ def scenario_requests(srv, rows, a):
         f"further question: {cached(rf)} of S = {further['prefix_end']} tokens cached, max|dp| vs cold {dmax(pf, pfc):.4f}",
     )
 
-    # Mixed batches: v2 requests of different lengths at once, each against its own answer alone.
+    # Mixed batches: decision requests of different lengths at once, each against its own answer alone.
     group = rows[1:9]
     solo = [ask(srv, x, cache_salt=f"solo{i}")[2] for i, x in enumerate(group)]
     res = {}
@@ -301,7 +301,7 @@ def scenario_compare(srv, rows, a):
     expect = json.load(open(a.expect))["answers"]
     row = base_row(rows)
     st, _, p0 = ask(srv, row, cache_salt="baseline")
-    check(st == 200, f"baseline v2 request: HTTP {st}")
+    check(st == 200, f"baseline decision request: HTTP {st}")
     run_malformed(
         srv,
         row,
@@ -348,7 +348,7 @@ def scenario_preempt(srv, rows, a):
     statuses = [st for st, _, _ in res]
     check(
         statuses == [200] * len(group),
-        f"{len(group)} concurrent v2 requests, max_tokens 1: statuses {statuses}",
+        f"{len(group)} concurrent decision requests, max_tokens 1: statuses {statuses}",
     )
     st, r, _ = ask(srv, group[0], max_tokens=300)
     check(st == 400 and "max_tokens" in str(r), f"max_tokens 300: HTTP {st}")
@@ -365,7 +365,7 @@ def scenario_resume(srv, rows, a):
     preempted = (srv.metric("vllm:num_preemptions_total") or 0) - p0
     check(
         statuses == [200] * len(group),
-        f"{len(group)} concurrent v2 generations of 300 tokens: statuses {statuses}",
+        f"{len(group)} concurrent decision generations of 300 tokens: statuses {statuses}",
     )
     check(
         preempted > 0,

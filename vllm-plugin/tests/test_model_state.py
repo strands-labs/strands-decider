@@ -11,10 +11,10 @@ import pytest
 
 np = pytest.importorskip("numpy")
 torch = pytest.importorskip("torch")
-model_state = pytest.importorskip("strands_decider_v2_vllm.model_state")
+model_state = pytest.importorskip("strands_decider_vllm.model_state")
 from vllm.config.compilation import CUDAGraphMode  # noqa: E402
 
-from strands_decider_v2_vllm.attention import SPLIT_ATTR  # noqa: E402
+from strands_decider_vllm.attention import SPLIT_ATTR  # noqa: E402
 
 plan_segments = model_state.plan_segments
 State = model_state.PrefixBidirModelState
@@ -160,7 +160,7 @@ def test_add_request_keeps_the_boundary_and_the_prompt_length(state):
 
 @pytest.mark.parametrize("value", ["9", False, True, 0, 20, 9.5, [9], None])
 def test_add_request_never_raises_for_request_data(state, caplog, value):
-    with caplog.at_level(logging.ERROR, logger="vllm.strands_decider_v2"):
+    with caplog.at_level(logging.ERROR, logger="vllm.strands_decider"):
         state.add_request(0, new_request("a", 20, {"prefix_end": value}))
     assert state._bounds == {} and "should have refused it" in caplog.text
 
@@ -189,7 +189,7 @@ def prepare(state, input_batch, mode=CUDAGraphMode.PIECEWISE, for_capture=False)
     return getattr(md, SPLIT_ATTR, None)
 
 
-def test_prepare_attn_splits_a_v2_prefill(state):
+def test_prepare_attn_splits_a_prefix_bidir_prefill(state):
     state._bounds = {"a": (5, 12)}
     assert prepare(state, batch(["a"], [True], [0, 12], [12])) is not None
 
@@ -201,7 +201,7 @@ def test_prepare_attn_leaves_captures_decodes_and_lone_last_tokens_alone(state):
     # An exact repeat computes only the last prompt token, even under a FULL graph: no split, no error.
     assert prepare(state, batch(["a"], [True], [0, 1], [12]), mode=CUDAGraphMode.FULL) is None
     state._bounds = {}
-    assert prepare(state, batch(["x"], [True], [0, 12], [12])) is None, "no v2 request"
+    assert prepare(state, batch(["x"], [True], [0, 12], [12])) is None, "no prefix_bidir request"
 
 
 def test_prepare_attn_refuses_a_split_under_a_full_graph(state):
@@ -213,7 +213,7 @@ def test_prepare_attn_refuses_a_split_under_a_full_graph(state):
 
 def test_prepare_attn_logs_a_prompt_scheduled_in_parts_once(state, caplog):
     state._bounds = {"a": (5, 12)}
-    with caplog.at_level(logging.ERROR, logger="vllm.strands_decider_v2"):
+    with caplog.at_level(logging.ERROR, logger="vllm.strands_decider"):
         split = prepare(state, batch(["a"], [True], [0, 8], [8]))
         prepare(state, batch(["a"], [True], [0, 8], [8]))
     assert split is not None and caplog.text.count("scheduled in parts") == 1

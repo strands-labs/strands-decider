@@ -10,8 +10,8 @@ from pathlib import Path
 
 import pytest
 
-import strands_decider_v2_vllm as plugin
-from strands_decider_v2_vllm import check_vllm_version, vllm_version_supported
+import strands_decider_vllm as plugin
+from strands_decider_vllm import check_vllm_version, vllm_version_supported
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -66,9 +66,9 @@ def test_register_on_another_vllm_warns_and_registers_nothing(monkeypatch, caplo
     fake = types.ModuleType("vllm")
     fake.__version__ = version  # no ModelRegistry: register must not touch vLLM beyond the version
     monkeypatch.setitem(sys.modules, "vllm", fake)
-    with caplog.at_level(logging.WARNING, logger="vllm.strands_decider_v2"):
+    with caplog.at_level(logging.WARNING, logger="vllm.strands_decider"):
         plugin.register()
-    (record,) = [r for r in caplog.records if r.name == "vllm.strands_decider_v2"]
+    (record,) = [r for r in caplog.records if r.name == "vllm.strands_decider"]
     assert record.levelno == logging.WARNING
     message = record.getMessage()
     assert repr(version) in message and "registered nothing" in message and plugin.ARCH in message
@@ -88,5 +88,5 @@ def test_pyproject_agrees_with_package():
     assert project["version"] == plugin.__version__
     assert project["dependencies"] == [f"vllm{plugin.SUPPORTED_VLLM}"]
     assert project["entry-points"]["vllm.general_plugins"] == {
-        "strands_decider_v2": "strands_decider_v2_vllm:register"
+        "strands_decider": "strands_decider_vllm:register"
     }

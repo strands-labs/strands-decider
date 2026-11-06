@@ -1,4 +1,4 @@
-"""Per-request checks (engine core, before scheduling): every request a v2 worker could not serve as a v2 decision, or
+"""Per-request checks (engine core, before scheduling): every request a worker could not serve as a decision, or
 whose answer its parameters would change, is refused. No vLLM or torch needed."""
 
 from __future__ import annotations
@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from strands_decider_v2_vllm.validation import (
+from strands_decider_vllm.validation import (
     N_CODES,
     RequestRefused,
     check_prefix_end,
@@ -173,7 +173,7 @@ def test_sampling_that_changes_the_answer_is_refused(overrides, parameter):
     with pytest.raises(RequestRefused) as err:
         check(sampling(**overrides))
     assert err.value.parameter == parameter
-    assert str(err.value).startswith("strands-decider-v2: ")
+    assert str(err.value).startswith("strands-decider: ")
 
 
 def test_the_boundary_is_checked_before_sampling():
