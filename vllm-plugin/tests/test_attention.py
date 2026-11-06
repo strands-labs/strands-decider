@@ -128,3 +128,19 @@ def test_windowed_layer_refuses_a_split(calls):
     with pytest.raises(RuntimeError, match="windowed layer"):
         run(make_impl(sliding_window=(511, 0)), torch.randn(2, 1, 4), md)
     assert not calls
+
+
+def test_flash_attention_writes_the_kv_cache_outside_forward():
+    # The split calls FlashAttentionImpl.forward twice per layer on the same paged KV cache. That is only correct
+    # because vLLM writes a step's keys and values in a separate op before attention (do_kv_cache_update), so forward
+    # only reads the cache; Model Runner V2 reads this flag to decide that.
+    import inspect
+
+    from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
+
+    assert FlashAttentionBackend.forward_includes_kv_cache_update is False
+    assert attention.SplitFlashAttentionBackend.forward_includes_kv_cache_update is False
+    assert issubclass(attention.SplitFlashAttentionBackend, FlashAttentionBackend)
+    assert attention.SplitFlashAttentionBackend.get_impl_cls() is attention.SplitFlashAttentionImpl
+    assert "reshape_and_cache" not in inspect.getsource(attention.FlashAttentionImpl.forward)
+    assert "reshape_and_cache" in inspect.getsource(attention.FlashAttentionImpl.do_kv_cache_update)

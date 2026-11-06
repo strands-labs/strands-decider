@@ -1,22 +1,26 @@
 """Model Runner V2 state for prefix_bidir: each request's state boundary, turned into split attention metadata.
 
-A request sends its boundary S (the index of the first token of the question block in the v2 prompt format) in
-``vllm_xargs.prefix_end``. In a step that computes any of its prompt tokens, its scheduled tokens ``[c, L)`` (c being
-its prefix-cache hit, L its prompt length; chunked prefill is off, so a prompt is always scheduled to its end) become
-up to two non-causal segments:
+A request sends its boundary S (the number of tokens in the prompt's state part) in ``vllm_xargs.prefix_end``; the
+engine core has validated it (:mod:`strands_decider_v2_vllm.engine`). In a step that computes any of its prompt tokens,
+its scheduled tokens ``[c, e)`` (c being what is already computed or cached, e the step's end) become up to two
+non-causal segments over the prompt and one causal tail:
 
-- state queries ``[c, S)`` over keys ``[0, S)`` (absent when the cache hit reaches S);
-- question queries ``[max(c, S), L)`` over keys ``[0, L)``.
+- state queries ``[c, S)`` over keys ``[0, S)`` (absent when c reaches S);
+- question queries ``[max(c, S), L)`` over keys ``[0, L)``;
+- rows from L on, which only a request resumed after a preemption with output tokens has, causal as in a decode.
+
+The plugin's startup checks make a prompt run to its end in one step (e >= L): chunked prefill is off, and the settings
+that can still split a prompt are refused. Should a prompt nevertheless be scheduled in parts, its rows attend only to
+keys already computed and the step is logged as an error; a worker never raises because of a request.
 
 Every attention layer of the model gets this split (the model class builds every layer without a sliding window), through
-:class:`~strands_decider_v2_vllm.attention.SplitFlashAttentionImpl`. Requests without a boundary and decode rows stay
-causal. Cached keys are valid because the block hashes of a prefix_bidir request carry digests of its state and
-question (:mod:`strands_decider_v2_vllm.hashing`).
+:class:`~strands_decider_v2_vllm.attention.SplitFlashAttentionImpl`. Decode rows and requests of other kinds stay
+causal. Cached keys are valid because the block hashes of a v2 request carry digests of its state and question
+(:mod:`strands_decider_v2_vllm.hashing`).
 """
 
 from __future__ import annotations
 
-import logging
 from typing import Any
 
 import numpy as np
@@ -24,66 +28,11 @@ import torch
 from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.worker.gpu.model_states.default import DefaultModelState
 
-from . import PREFIX_END_KEY
+from . import PREFIX_END_KEY, logger
 from .attention import SPLIT_ATTR, Split, SplitFlashAttentionImpl
+from .planning import plan_segments, prefix_end_of
 
-logger = logging.getLogger("strands_decider_v2_vllm")
-
-
-def prefix_end_of(extra_args: dict | None, prompt_len: int) -> int | None:
-    """The request's boundary from ``vllm_xargs``, validated; None if it sent none."""
-    if not extra_args or PREFIX_END_KEY not in extra_args:
-        return None
-    s = extra_args[PREFIX_END_KEY]
-    if isinstance(s, float) and s.is_integer():
-        s = int(s)
-    if not isinstance(s, int) or isinstance(s, bool) or not 0 < s < prompt_len:
-        raise ValueError(
-            f"strands-decider-v2: prefix_end must be an integer in (0, {prompt_len}), got {s!r}"
-        )
-    return s
-
-
-def plan_segments(
-    bounds: dict[int, tuple[int, int]],
-    query_start_loc: np.ndarray,
-    seq_lens: np.ndarray,
-    num_reqs: int,
-) -> tuple[list, list] | None:
-    """Segments of a step. ``bounds`` maps batch rows that are prefilling prefix_bidir requests to (S, L).
-
-    Returns ``(bidir, rest)``, each a list of ``(row, q_start, q_end, n_keys)`` in token rows of the step; n_keys -1
-    means the row's own sequence length (causal). None when no row computes prefix_bidir tokens.
-    """
-    bidir: list[tuple[int, int, int, int]] = []
-    rest: list[tuple[int, int, int, int]] = []
-    for row in range(num_reqs):
-        q0, q1 = int(query_start_loc[row]), int(query_start_loc[row + 1])
-        if q1 == q0:
-            continue
-        if row not in bounds:
-            rest.append((row, q0, q1, -1))
-            continue
-        s, length = bounds[row]
-        end = int(seq_lens[row])
-        start = end - (q1 - q0)
-        if end != length:
-            raise RuntimeError(
-                f"strands-decider-v2: a prefix_bidir prompt of {length} tokens was scheduled to {end}; "
-                "it must be computed to its end in one step (chunked prefill off)"
-            )
-        if start < s:
-            bidir.append((row, q0, q0 + (s - start), s))
-        qs = max(start, s)
-        if q1 - (q0 + (qs - start)) == 1:
-            # Only the prompt's last token (a full cache hit, as on an exact repeat): it already attends to every key
-            # [0, L) under the causal mask, so it needs no split. Such steps can run as FULL CUDA graphs.
-            rest.append((row, q1 - 1, q1, -1))
-        else:
-            bidir.append((row, q0 + (qs - start), q1, length))
-    if not bidir:
-        return None
-    return bidir, rest
+__all__ = ["PrefixBidirModelState", "plan_segments", "prefix_end_of"]
 
 
 def _rows(segments: list, device: torch.device) -> tuple[torch.Tensor | slice, np.ndarray]:
@@ -106,6 +55,7 @@ class PrefixBidirModelState(DefaultModelState):
         super().__init__(vllm_config, model, encoder_cache, device)
         self._bounds: dict[str, tuple[int, int]] = {}
         self._warned_causal = False
+        self._warned_partial = False
         layers = {
             n: layer
             for n, layer in vllm_config.compilation_config.static_forward_context.items()
@@ -145,14 +95,26 @@ class PrefixBidirModelState(DefaultModelState):
         rid = new_req_data.req_id
         self._bounds.pop(rid, None)
         sp = new_req_data.sampling_params
+        # The original prompt, also for a request resumed after a preemption (whose prefill_token_ids add its outputs).
         length = len(new_req_data.prompt_token_ids or ())
-        s = prefix_end_of(sp.extra_args if sp is not None else None, length)
+        extra = sp.extra_args if sp is not None else None
+        s = prefix_end_of(extra, length)
         if s is None:
-            if not self._warned_causal:
+            if extra and PREFIX_END_KEY in extra:
+                logger.error(
+                    "strands-decider-v2: request %s reached the worker with an invalid prefix_end %r for a "
+                    "%d-token prompt; serving it causally (the engine core should have refused it)",
+                    rid,
+                    extra[PREFIX_END_KEY],
+                    length,
+                )
+            elif not self._warned_causal:
+                # vLLM's own startup warm-up adds dummy requests without a boundary in the worker; client requests
+                # without one are refused in the engine core. Either way such a request is served causally.
                 self._warned_causal = True
-                logger.warning(
-                    "strands-decider-v2: a request without vllm_xargs.prefix_end is served causally; v2 "
-                    "decisions need the boundary"
+                logger.debug(
+                    "strands-decider-v2: a request without vllm_xargs.prefix_end (vLLM's warm-up) is served "
+                    "causally"
                 )
             return
         self._bounds[rid] = (s, length)
@@ -197,10 +159,22 @@ class PrefixBidirModelState(DefaultModelState):
             return metadata
         qsl = input_batch.query_start_loc_np[: n + 1]
         seq = input_batch.seq_lens_cpu_upper_bound[:n].numpy()
+        if not self._warned_partial and any(
+            int(seq[i]) < length for i, (_, length) in bounds.items()
+        ):
+            self._warned_partial = True
+            logger.error(
+                "strands-decider-v2: a prefix_bidir prompt was scheduled in parts, so its rows attend only to the "
+                "keys computed so far and its answer is not the v2 decision. The plugin refuses the settings known "
+                "to split a prompt; please report this configuration. (Logged once.)"
+            )
         plan = plan_segments(bounds, qsl, seq, n)
         if plan is None:
             return metadata
         if cudagraph_mode == CUDAGraphMode.FULL:
+            # Unreachable: check_config refuses cudagraph_mode FULL, and under the other modes only uniform
+            # one-token batches run as FULL graphs, which plan_segments never splits. A graph would replay its
+            # captured attention and ignore the split, so refusing to run is the only safe answer.
             raise RuntimeError(
                 "strands-decider-v2: a step with prefix_bidir prompt tokens was scheduled as a FULL "
                 "CUDA graph"
@@ -209,52 +183,60 @@ class PrefixBidirModelState(DefaultModelState):
         return metadata
 
     def _attach(self, metadata: dict[str, Any], plan: tuple[list, list]) -> None:
+        """Attach the plan's :class:`Split` to every distinct FlashAttention metadata object of the step (one per
+        KV-cache group). The rows and the plan's index tensors are built once per device; only the block tables and
+        sequence lengths, which are per group, are gathered per metadata object."""
         bidir, rest = plan
+        nb, nr = len(bidir), len(rest)
+        b_len = np.array([b - a for _, a, b, _ in bidir], np.int64)
+        r_len = np.array([b - a for _, a, b, _ in rest], np.int64)
+        host = np.concatenate(
+            [
+                np.concatenate([[0], np.cumsum(b_len)]),  # cu_bidir
+                [k for *_, k in bidir],  # keys per bidir segment
+                [r for r, *_ in bidir],  # source rows of the bidir segments
+                np.concatenate([[0], np.cumsum(r_len)]) if nr else np.zeros(0, np.int64),  # cu_rest
+                [r for r, *_ in rest],  # source rows of the causal segments
+            ]
+        ).astype(np.int64)
+        max_keys = int(max(k for *_, k in bidir))
+        per_device: dict[torch.device, tuple] = {}
         done: set[int] = set()
         for md in metadata.values():
             if md is None or id(md) in done or not hasattr(md, "block_table"):
                 continue
             done.add(id(md))
             dev = md.query_start_loc.device
-            b_rows, _ = _rows(bidir, dev)
-            b_len = np.array([b - a for _, a, b, _ in bidir], np.int64)
-            host = np.concatenate(
-                [
-                    np.concatenate([[0], np.cumsum(b_len)]),  # cu_bidir
-                    [k for *_, k in bidir],  # keys
-                    [r for r, *_ in bidir],
-                ]
-            ).astype(np.int64)  # src rows
-            g = torch.from_numpy(host).to(dev, non_blocking=True)
-            nb = len(bidir)
-            cu_b = g[: nb + 1].to(torch.int32)
-            keys_b = g[nb + 1 : 2 * nb + 1].to(torch.int32)
-            src_b = g[2 * nb + 1 :]
+            if dev not in per_device:
+                g = torch.from_numpy(host).to(dev, non_blocking=True)
+                o = 2 * nb + 1
+                per_device[dev] = (
+                    _rows(bidir, dev)[0],
+                    _rows(rest, dev)[0] if nr else None,
+                    g[: nb + 1].to(torch.int32),  # cu_bidir
+                    g[nb + 1 : o].to(torch.int32),  # keys
+                    g[o : o + nb],  # bidir source rows
+                    g[o + nb : o + nb + nr + 1].to(torch.int32) if nr else None,  # cu_rest
+                    g[o + nb + nr + 1 :] if nr else None,  # rest source rows
+                )
+            b_rows, r_rows, cu_b, keys_b, src_b, cu_r, src_r = per_device[dev]
             bidir_md = _restrict(
                 md,
                 num_actual_tokens=int(b_len.sum()),
                 max_query_len=int(b_len.max()),
                 query_start_loc=cu_b,
-                max_seq_len=int(max(k for *_, k in bidir)),
+                max_seq_len=max_keys,
                 seq_lens=keys_b,
                 block_table=md.block_table.index_select(0, src_b),
                 causal=False,
             )
-            rest_md, r_rows = None, None
-            if rest:
-                r_rows, _ = _rows(rest, dev)
-                r_len = np.array([b - a for _, a, b, _ in rest], np.int64)
-                host = np.concatenate(
-                    [np.concatenate([[0], np.cumsum(r_len)]), [r for r, *_ in rest]]
-                ).astype(np.int64)
-                g = torch.from_numpy(host).to(dev, non_blocking=True)
-                nr = len(rest)
-                src_r = g[nr + 1 :]
+            rest_md = None
+            if nr:
                 rest_md = _restrict(
                     md,
                     num_actual_tokens=int(r_len.sum()),
                     max_query_len=int(r_len.max()),
-                    query_start_loc=g[: nr + 1].to(torch.int32),
+                    query_start_loc=cu_r,
                     max_seq_len=md.max_seq_len,
                     seq_lens=md.seq_lens.index_select(0, src_r),
                     block_table=md.block_table.index_select(0, src_r),

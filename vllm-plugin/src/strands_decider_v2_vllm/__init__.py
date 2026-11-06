@@ -19,41 +19,62 @@ What this plugin adds to vLLM, and nothing else:
 - Prefix-cache keys that stay correct under the mask: block 0 carries a digest of the state x[0:S), and every block
   that ends past S carries a digest of the question x[S:L). A different question on the same state reuses the state's
   full blocks; nothing else is shared.
+- Per-request checks in the engine core: a request to a v2 model that the workers could not serve as a v2 decision
+  gets HTTP 400 before it is scheduled (:mod:`strands_decider_v2_vllm.validation`).
 
-``register`` is the ``vllm.general_plugins`` entry point; vLLM calls it in every process.
+``register`` is the ``vllm.general_plugins`` entry point; vLLM calls it in every process. On a vLLM release other than
+0.33.x it logs a warning and registers nothing, so the environment's other models are unaffected.
 """
 
 from __future__ import annotations
 
+import logging
 import re
 
-__version__ = "0.2.0"
+__version__ = "0.2.1"
 ARCH = "StrandsDeciderV2ForCausalLM"
 PREFIX_END_KEY = "prefix_end"
 SUPPORTED_VLLM = ">=0.33.0,<0.34"
 #: vLLM 0.33.x only: the plugin uses vLLM internals that are not a public API and may change in any minor release.
 _SUPPORTED_MINORS = ((0, 33),)
 
+#: A child of vLLM's logger, so the plugin's lines get vLLM's handler and format in every process.
+logger = logging.getLogger("vllm.strands_decider_v2")
+
+
+def vllm_version_supported(version: str) -> bool:
+    """True for vLLM 0.33.<patch> releases, optionally with a local suffix such as ``+cu130``. Pre-, post- and dev
+    releases and every other minor release are not supported."""
+    m = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)(\+[\w.]+)?", version.strip())
+    return m is not None and (int(m[1]), int(m[2])) in _SUPPORTED_MINORS
+
+
+def unsupported_vllm_message(version: str) -> str:
+    return (
+        f"strands-decider-v2-vllm {__version__} requires vLLM 0.33.x ({SUPPORTED_VLLM}); the installed vLLM is "
+        f"{version!r}. Other releases, 0.32.x included, are not supported, because the plugin relies on vLLM "
+        "0.33 internals. Install a supported vLLM with: pip install 'vllm>=0.33.0,<0.34'"
+    )
+
 
 def check_vllm_version(version: str) -> None:
-    """Raise ``RuntimeError`` unless ``version`` is a vLLM 0.33.x release.
-
-    Only ``0.33.<patch>`` releases pass, optionally with a local suffix such as ``+cu130``. Pre-, post- and dev
-    releases and every other minor release are refused.
-    """
-    m = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)(\+[\w.]+)?", version.strip())
-    if m is None or (int(m[1]), int(m[2])) not in _SUPPORTED_MINORS:
-        raise RuntimeError(
-            f"strands-decider-v2-vllm {__version__} requires vLLM 0.33.x ({SUPPORTED_VLLM}); the installed vLLM is "
-            f"{version!r}. Other releases, 0.32.x included, are not supported, because the plugin relies on vLLM "
-            "0.33 internals. Install a supported vLLM with: pip install 'vllm>=0.33.0,<0.34'"
-        )
+    """Raise ``RuntimeError`` unless ``version`` is a vLLM 0.33.x release (see :func:`vllm_version_supported`)."""
+    if not vllm_version_supported(version):
+        raise RuntimeError(unsupported_vllm_message(version))
 
 
 def register() -> None:
     import vllm
 
-    check_vllm_version(vllm.__version__)
+    version = vllm.__version__
+    if not vllm_version_supported(version):
+        # vLLM does not catch a plugin's exception, so raising here would stop every model in the environment.
+        logger.warning(
+            "%s The plugin registered nothing: other models are unaffected, and %s cannot be served.",
+            unsupported_vllm_message(version),
+            ARCH,
+        )
+        return
     from vllm import ModelRegistry
 
     if ARCH not in ModelRegistry.get_supported_archs():
@@ -72,6 +93,8 @@ def register() -> None:
     from vllm.model_executor.models.config import MODELS_CONFIG_MAP
 
     MODELS_CONFIG_MAP.setdefault(ARCH, MODELS_CONFIG_MAP["Gemma4ForCausalLM"])
+    from .engine import install_request_validation
     from .hashing import install_block_hash_keys
 
     install_block_hash_keys()
+    install_request_validation()
