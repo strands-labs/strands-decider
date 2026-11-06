@@ -7,7 +7,11 @@ drift in field names or types would break that without failing any model test.
 
 from __future__ import annotations
 
+import contextlib
+import json
 import threading
+import time
+import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
@@ -434,3 +438,113 @@ def test_ping_answers_while_every_worker_thread_is_busy():
         srv.should_exit = True
         srv_thread.join(timeout=10)
         sock.close()
+
+
+@contextlib.contextmanager
+def _serving(app):
+    """Serve `app` with uvicorn on a free local port, yield its URL, and stop it."""
+    import socket
+    import threading
+
+    import uvicorn
+
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))  # handed to uvicorn, so no other process can take the port
+    srv = uvicorn.Server(uvicorn.Config(app, log_level="error"))
+    thread = threading.Thread(target=srv.run, kwargs={"sockets": [sock]}, daemon=True)
+    thread.start()
+    deadline = time.monotonic() + 10
+    while not srv.started:
+        assert time.monotonic() < deadline, "server did not start"
+        time.sleep(0.05)
+    try:
+        yield f"http://127.0.0.1:{sock.getsockname()[1]}"
+    finally:
+        srv.should_exit = True
+        thread.join(timeout=10)
+        sock.close()
+
+
+def _invoke(url: str) -> int:
+    body = json.dumps({"state": "x", "questions": {"q": {"type": "noul", "instructions": "y"}}})
+    req = urllib.request.Request(
+        f"{url}/invocations", body.encode(), {"content-type": "application/json"}
+    )
+    with urllib.request.urlopen(req, timeout=60) as r:
+        return r.status
+
+
+def test_max_concurrency_caps_the_requests_on_the_engine():
+    import threading
+
+    lock = threading.Lock()
+    running = peak = 0
+
+    class _CountingEngine(_StubEngine):
+        def evaluate(self, request):
+            nonlocal running, peak
+            with lock:
+                running += 1
+                peak = max(peak, running)
+            time.sleep(0.2)
+            with lock:
+                running -= 1
+            return super().evaluate(request)
+
+    app = server.create_app(
+        "checkpoints/strands-decider-test",
+        device="cpu",
+        warmup=False,
+        build_engine=_CountingEngine,
+        max_concurrency=2,
+    )
+    statuses = []
+    with _serving(app) as url:
+        callers = [
+            threading.Thread(target=lambda: statuses.append(_invoke(url))) for _ in range(10)
+        ]
+        for t in callers:
+            t.start()
+        for t in callers:
+            t.join(timeout=30)
+    assert statuses == [200] * 10
+    assert peak == 2
+
+
+def test_requests_queued_by_max_concurrency_leave_ping_responsive():
+    import threading
+
+    release = threading.Event()
+    started = threading.Semaphore(0)
+
+    class _BlockingEngine(_StubEngine):
+        def evaluate(self, request):
+            started.release()
+            release.wait(timeout=30)
+            return super().evaluate(request)
+
+    app = server.create_app(
+        "checkpoints/strands-decider-test",
+        device="cpu",
+        warmup=False,
+        build_engine=_BlockingEngine,
+        max_concurrency=1,
+    )
+    with _serving(app) as url:
+        callers = [threading.Thread(target=_invoke, args=(url,)) for _ in range(50)]
+        try:
+            for t in callers:
+                t.start()
+            assert started.acquire(timeout=10)  # one request runs, 49 wait behind the cap
+            time.sleep(0.5)
+            with urllib.request.urlopen(f"{url}/ping", timeout=2) as r:
+                assert r.status == 200
+        finally:
+            release.set()
+            for t in callers:
+                t.join(timeout=30)
+
+
+def test_max_concurrency_must_be_positive():
+    with pytest.raises(ValueError, match="max-concurrency"):
+        server.create_app("checkpoints/strands-decider-test", device="cpu", max_concurrency=0)
