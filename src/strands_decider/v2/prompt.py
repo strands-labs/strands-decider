@@ -12,16 +12,22 @@ Two variants, `strands-v2-plain` and `strands-v2-chat`, share one body:
     chat:   <bos><|turn>user\\n     + body + "<turn|>\\n<|turn>model\\n"
 
 A prompt is a sequence of control tokens, emitted by id, and text runs, each encoded on
-its own as plain text: a control-token string inside the request (say `<turn|>` in a
+its own as plain text: a special-token string inside the request (say `<turn|>` in a
 state) is text, never a control token. The state part and the question part are encoded
 separately, so no token can straddle S. With Gemma 4's tokenizer the result is also what
-encoding the whole prompt in one call gives, for any request without control-token
+encoding the whole prompt in one call gives, for any request without special-token
 strings; tests/test_v2_prompt.py proves both.
+
+Rendering never changes the caller's tokenizer: text is encoded by a private copy whose
+settings are fixed once, so renders on several threads, and other users of the same
+tokenizer, cannot change how request text is encoded.
 """
 
 from __future__ import annotations
 
 import json
+import threading
+import weakref
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -202,26 +208,38 @@ def _text(pieces: Sequence[Piece]) -> str:
     return "".join(s for _, s in pieces)
 
 
-class _Encoder:
-    """Encodes pieces with special-token matching off, restoring the tokenizer after.
+_PLAIN_TEXT: weakref.WeakKeyDictionary[Tokenizer, Tokenizer] = weakref.WeakKeyDictionary()
+_PLAIN_TEXT_LOCK = threading.Lock()
 
-    Like v1's `prompting.fit_window`, this turns the tokenizer's padding and truncation
-    off, so it must not run on one tokenizer from two threads at once.
+
+def _plain_text_copy(tok: Tokenizer) -> Tokenizer:
+    """A private copy of `tok` that encodes all text as plain text: special-token matching,
+    padding and truncation off, set once and never changed, so it is safe to share across
+    threads. One copy per tokenizer object, made on first use (Gemma 4's takes about 0.3 s
+    and 170 MB) and dropped with the tokenizer. A tokenizer changed after its first render
+    keeps its first copy: pass the changed one as a new object."""
+    with _PLAIN_TEXT_LOCK:
+        copy = _PLAIN_TEXT.get(tok)
+        if copy is None:
+            copy = type(tok).from_str(tok.to_str())
+            copy.no_padding()
+            copy.no_truncation()
+            copy.encode_special_tokens = True
+            _PLAIN_TEXT[tok] = copy
+        return copy
+
+
+class _Encoder:
+    """Encodes pieces as v2 does: control tokens by id, text runs as plain text.
+
+    It reads the caller's tokenizer once, to copy it, and never changes it. Text goes
+    through the private copy of `_plain_text_copy`, whose special-token matching is off
+    for good, so request text can never become a control token, whatever another thread
+    does to the caller's tokenizer meanwhile, and renders may run on any number of threads.
     """
 
     def __init__(self, tok: Tokenizer):
-        self.tok = tok
-        self._was = False
-
-    def __enter__(self) -> _Encoder:
-        self.tok.no_padding()
-        self.tok.no_truncation()
-        self._was = bool(self.tok.encode_special_tokens)
-        self.tok.encode_special_tokens = True
-        return self
-
-    def __exit__(self, *exc: object) -> None:
-        self.tok.encode_special_tokens = self._was
+        self.tok = _plain_text_copy(tok)
 
     def control(self, s: str) -> int:
         i = self.tok.token_to_id(s)
@@ -299,7 +317,8 @@ def render(
     """Render every question of `request` for `variant`.
 
     `request` is the JSON object of `POST /v1/systemone` (or a v1 `SystemOneRequest`).
-    `tokenizer` is a `tokenizers.Tokenizer`, Gemma 4's. `option_orders` maps a question
+    `tokenizer` is a `tokenizers.Tokenizer`, Gemma 4's; render never changes it and may run
+    on several threads at once with the same one. `option_orders` maps a question
     name to a permutation of its options (training augmentation). A prompt longer than
     `max_length` tokens is refused, never truncated.
     """
@@ -307,9 +326,9 @@ def render(
     names = list(prep.blocks)
     kmax = max(len(b.codes) for b in prep.blocks.values())
 
-    with _Encoder(tokenizer) as enc:
-        encoded = enc.pieces([prep.state_pieces, *(prep.question_pieces[n] for n in names)])
-        code_ids = enc.codes(codes_for(kmax))
+    enc = _Encoder(tokenizer)
+    encoded = enc.pieces([prep.state_pieces, *(prep.question_pieces[n] for n in names)])
+    code_ids = enc.codes(codes_for(kmax))
 
     state_ids = tuple(encoded[0])
     state_text = _text(prep.state_pieces)
