@@ -1,5 +1,5 @@
-"""The engine-core wrapper: a v2 engine refuses invalid requests with vLLM's per-request validation error before they are
-scheduled, with prefix caching on or off; any other engine is untouched."""
+"""The engine-core wrapper: an engine serving the plugin's model refuses invalid requests with vLLM's per-request
+validation error before they are scheduled, with prefix caching on or off; any other engine is untouched."""
 
 from __future__ import annotations
 
@@ -7,8 +7,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from strands_decider_v2_vllm import ARCH, hashing
-from strands_decider_v2_vllm.engine import serves_v2, wrap_preprocess_add_request
+from strands_decider_vllm import ARCH, hashing
+from strands_decider_vllm.engine import serves_decider, wrap_preprocess_add_request
 
 
 class ValidationError(Exception):
@@ -85,7 +85,7 @@ def wrapped():
         ({"max_tokens": 300}, "max_tokens"),
     ],
 )
-def test_a_v2_engine_refuses_before_vllm_builds_the_request(
+def test_a_decider_engine_refuses_before_vllm_builds_the_request(
     wrapped, caching, request_overrides, parameter
 ):
     core = FakeEngineCore([ARCH], caching=caching)
@@ -124,20 +124,20 @@ def test_a_failing_vllm_preprocess_leaves_nothing_pending(wrapped):
 
 
 @pytest.mark.parametrize(
-    "architectures", [["Gemma4ForCausalLM"], ["StrandsDeciderV2CausalControlForCausalLM"]]
+    "architectures", [["Gemma4ForCausalLM"], ["StrandsDeciderCausalControlForCausalLM"]]
 )
 def test_other_engines_are_untouched(wrapped, architectures):
     core = FakeEngineCore(architectures)
-    # Even a request the v2 checks would refuse passes straight to vLLM, and gets no digests.
+    # Even a request the plugin's checks would refuse passes straight to vLLM, and gets no digests.
     req, _ = wrapped(core, engine_request(prefix_end="9", max_tokens=300))
     assert core.calls == 1 and req.digests_seen is None and getattr(req, hashing._ATTR) == ()
 
 
-def test_serves_v2_is_computed_once():
+def test_serves_decider_is_computed_once():
     core = FakeEngineCore([ARCH])
-    assert serves_v2(core)
+    assert serves_decider(core)
     core.vllm_config = None  # not read again
-    assert serves_v2(core)
+    assert serves_decider(core)
 
 
 # --- against vLLM (skipped without it) ------------------------------------------------------------------------------
@@ -145,13 +145,13 @@ def test_serves_v2_is_computed_once():
 
 def test_install_wraps_vllms_engine_core_once():
     core = pytest.importorskip("vllm.v1.engine.core")
-    from strands_decider_v2_vllm.engine import install_request_validation
+    from strands_decider_vllm.engine import install_request_validation
 
     install_request_validation()
     wrapped_fn = core.EngineCore.preprocess_add_request
     install_request_validation()
     assert core.EngineCore.preprocess_add_request is wrapped_fn
-    assert wrapped_fn._strands_decider_v2
+    assert wrapped_fn._strands_decider
     # The engine core's input thread calls it on every ADD and turns VLLMValidationError into a per-request error.
     import inspect
 
@@ -164,7 +164,7 @@ def test_install_wraps_vllms_engine_core_once():
 def test_vllm_maps_the_refusal_to_a_validation_error_output():
     exceptions = pytest.importorskip("vllm.exceptions")
     outputs = pytest.importorskip("vllm.outputs")
-    from strands_decider_v2_vllm.validation import RequestRefused
+    from strands_decider_vllm.validation import RequestRefused
 
     refused = RequestRefused("x", parameter="max_tokens", value=300)
     err = exceptions.VLLMValidationError(
@@ -174,4 +174,4 @@ def test_vllm_maps_the_refusal_to_a_validation_error_output():
     # raises as VLLMValidationError (HTTP 400).
     back = outputs.RequestError(code="validation_error", message=str(err)).to_exception()
     assert isinstance(back, exceptions.VLLMValidationError)
-    assert "strands-decider-v2: x" in str(back) and "parameter=max_tokens" in str(back)
+    assert "strands-decider: x" in str(back) and "parameter=max_tokens" in str(back)

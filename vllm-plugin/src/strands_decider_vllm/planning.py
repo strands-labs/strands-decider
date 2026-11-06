@@ -1,6 +1,6 @@
 """The per-step plan of the prefix_bidir split: which scheduled rows attend to which keys. Needs numpy only.
 
-A v2 request's scheduled tokens ``[c, e)`` (c being what is already computed or cached, e the step's end) become up to
+A request's scheduled tokens ``[c, e)`` (c being what is already computed or cached, e the step's end) become up to
 two non-causal segments over the prompt and one causal tail:
 
 - state queries ``[c, S)`` over keys ``[0, S)`` (absent when c reaches S);

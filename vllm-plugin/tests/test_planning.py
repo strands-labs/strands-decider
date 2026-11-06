@@ -1,4 +1,4 @@
-"""The worker's boundary parsing and the per-step segment plan, checked against the v2 mask. Needs numpy only."""
+"""The worker's boundary parsing and the per-step segment plan, checked against the mask. Needs numpy only."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import math
 import pytest
 
 np = pytest.importorskip("numpy")
-from strands_decider_v2_vllm.planning import plan_segments, prefix_end_of  # noqa: E402
+from strands_decider_vllm.planning import plan_segments, prefix_end_of  # noqa: E402
 
 # --- prefix_end_of: the worker never raises -------------------------------------------------------------------------
 
@@ -33,7 +33,7 @@ def test_invalid_boundary_is_none_not_an_exception(value):
 
 
 def spec_keys(p: int, s: int, length: int) -> range:
-    """Keys the v2 mask lets prompt position p see: the state [0, S) for a state token, the prompt [0, L) otherwise.
+    """Keys the mask lets prompt position p see: the state [0, S) for a state token, the prompt [0, L) otherwise.
     A position at or after L is an output token, causal: [0, p]."""
     if p >= length:
         return range(p + 1)

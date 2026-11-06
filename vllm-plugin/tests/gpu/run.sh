@@ -1,9 +1,9 @@
 #!/bin/bash
-# GPU integration check for strands-decider-v2-vllm: the crash scenarios of the 0.2.0 review, on one node.
+# GPU integration check for strands-decider-vllm: the crash scenarios of the 0.2.0 review, on one node.
 #
 # usage: tests/gpu/run.sh MODEL_DIR ROWS_JSONL OUT_DIR
-#   MODEL_DIR   a v2 checkpoint directory (E2B is enough)
-#   ROWS_JSONL  rendered v2 requests for that checkpoint (token_ids, prefix_end, label_token_ids; optionally
+#   MODEL_DIR   a Strands Decider checkpoint directory (E2B is enough)
+#   ROWS_JSONL  rendered decision requests for that checkpoint (token_ids, prefix_end, label_token_ids; optionally
 #               probabilities from a reference, which gates top-1 agreement), prompts of about 1K tokens
 #   OUT_DIR     logs and JSON summaries, one directory per server
 # env: GPUS (default "0 1 2 3 4 5 6 7"; at least 6), PORT_BASE (8100), MAX_MODEL_LEN (8192), READY_S (1500)
@@ -16,7 +16,7 @@
 #   nocache   --no-enable-prefix-caching: the same refusals, the same answers as main
 #   hub       the checkpoint as a Hugging Face Hub repo id, from a local HF cache, offline: the same answers as main
 #   preempt   a 600-block KV cache: concurrent requests succeed
-#   resume    the same small cache, max_tokens check bypassed (tests/gpu/bypass_max_tokens): v2 requests preempted
+#   resume    the same small cache, max_tokens check bypassed (tests/gpu/bypass_max_tokens): requests preempted
 #             mid-generation and resumed, without stopping the engine
 #   refusals  each unsafe flag in turn: the server must stop at startup with the plugin's message
 set -u
@@ -29,7 +29,7 @@ mkdir -p "$OUT"; OUT=$(cd "$OUT" && pwd)
 export VLLM_HOST_IP=127.0.0.1 GLOO_SOCKET_IFNAME=lo NCCL_SOCKET_IFNAME=lo VLLM_USE_V2_MODEL_RUNNER=1
 export VLLM_NO_USAGE_STATS=1 DO_NOT_TRACK=1
 FLAGS=(--served-model-name m --dtype bfloat16 --seed 0
-  --hf-overrides '{"architectures": ["StrandsDeciderV2ForCausalLM"], "use_bidirectional_attention": null}'
+  --hf-overrides '{"architectures": ["StrandsDeciderForCausalLM"], "use_bidirectional_attention": null}'
   --max-model-len "$MAXLEN" --max-num-batched-tokens "$MAXLEN" --no-enable-chunked-prefill
   --enable-prefix-caching --enable-prompt-tokens-details --prefix-cache-retention-interval None
   --generation-config vllm --logprobs-mode processed_logprobs --max-logprobs 255 --gpu-memory-utilization 0.85)
@@ -76,10 +76,10 @@ audit() {  # every listening TCP socket of this user's processes must be on loop
 }
 
 # A Hub repo id served from a local HF cache: snapshot links to the checkpoint's files.
-HUB=$OUT/hub; REPO=example/strands-decider-v2-test; COMMIT=0123456789abcdef0123456789abcdef01234567
-SNAP=$HUB/models--example--strands-decider-v2-test/snapshots/$COMMIT
-mkdir -p "$SNAP" "$HUB/models--example--strands-decider-v2-test/refs"
-echo -n $COMMIT > "$HUB/models--example--strands-decider-v2-test/refs/main"
+HUB=$OUT/hub; REPO=example/strands-decider-test; COMMIT=0123456789abcdef0123456789abcdef01234567
+SNAP=$HUB/models--example--strands-decider-test/snapshots/$COMMIT
+mkdir -p "$SNAP" "$HUB/models--example--strands-decider-test/refs"
+echo -n $COMMIT > "$HUB/models--example--strands-decider-test/refs/main"
 for f in "$MODEL"/*; do ln -sfn "$f" "$SNAP/$(basename "$f")"; done
 
 P=$PORT_BASE
@@ -114,7 +114,7 @@ refuse_on() {  # GPU PORT, then refusal specs; each must exit at startup with it
     for _ in $(seq 900); do kill -0 "$pid" 2>/dev/null || break; curl -sf -m 2 "http://127.0.0.1:$port/health" > /dev/null && break; sleep 1; done
     if kill -0 "$pid" 2>/dev/null; then
       echo "FAIL  refuse-$name: the server started"; stop "$pid"; echo "refuse-$name" >> "$OUT/refusals_failed.txt"
-    elif grep -q "strands-decider-v2 cannot serve with this configuration" "$log" && grep -qF -- "$want" "$log"; then
+    elif grep -q "strands-decider cannot serve with this configuration" "$log" && grep -qF -- "$want" "$log"; then
       echo "ok    refuse-$name: refused at startup ($want)"
     else
       echo "FAIL  refuse-$name: exited without the expected message"; tail -5 "$log"; echo "refuse-$name" >> "$OUT/refusals_failed.txt"

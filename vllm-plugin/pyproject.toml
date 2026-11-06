@@ -3,9 +3,9 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "strands-decider-v2-vllm"
+name = "strands-decider-vllm"
 version = "0.2.1"
-description = "Serve Strands Decider v2 (Gemma 4 text decoder, prefix_bidir attention, trained 255-code readout) on stock vLLM 0.33"
+description = "Serve Strands Decider (Gemma 4 text decoder, prefix_bidir attention, trained 255-code readout) on stock vLLM 0.33"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = ["vllm>=0.33.0,<0.34"]
@@ -14,7 +14,7 @@ dependencies = ["vllm>=0.33.0,<0.34"]
 test = ["pytest"]
 
 [project.entry-points."vllm.general_plugins"]
-strands_decider_v2 = "strands_decider_v2_vllm:register"
+strands_decider = "strands_decider_vllm:register"
 
 [tool.setuptools.packages.find]
 where = ["src"]

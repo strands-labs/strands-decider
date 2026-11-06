@@ -1,13 +1,13 @@
 """FlashAttention for prefix_bidir: a layer's step as one non-causal call over each request's two segments.
 
-In a step that computes prefix_bidir tokens, :class:`~strands_decider_v2_vllm.model_state.PrefixBidirModelState`
+In a step that computes prefix_bidir tokens, :class:`~strands_decider_vllm.model_state.PrefixBidirModelState`
 attaches a :class:`Split` to the step's attention metadata. Every attention layer then runs:
 
 - the scheduled tokens of each prefix_bidir request as up to two non-causal FlashAttention sequences on the paged KV
   cache: its state queries over keys ``[0, S)`` and its question queries over keys ``[0, L)``;
 - every other token (requests without a boundary, decode rows), causal over its own request's keys, as vLLM would.
 
-That is the v2 prefix_bidir mask, with no mask function: state tokens attend bidirectionally to the state [0, S) and
+That is the prefix_bidir mask, with no mask function: state tokens attend bidirectionally to the state [0, S) and
 never to the question; question tokens attend bidirectionally to the whole prompt [0, L). Metadata without a split
 takes vLLM's path unchanged.
 """
@@ -21,7 +21,7 @@ import torch
 from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend, FlashAttentionImpl
 
 #: Attribute under which the model state attaches a :class:`Split` to a FlashAttentionMetadata.
-SPLIT_ATTR = "strands_decider_v2_split"
+SPLIT_ATTR = "strands_decider_split"
 
 
 @dataclass
@@ -76,7 +76,7 @@ class SplitFlashAttentionImpl(FlashAttentionImpl):
             )
         if self.sliding_window not in (None, (-1, -1)):
             raise RuntimeError(
-                "strands-decider-v2: a windowed layer received prefix_bidir metadata; the model class builds "
+                "strands-decider: a windowed layer received prefix_bidir metadata; the model class builds "
                 "every layer without one"
             )
         q = _take(query, split.bidir_rows)

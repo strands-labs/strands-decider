@@ -2,21 +2,21 @@
 
 vLLM keys a cached KV block by a hash chain over the request's tokens up to the end of that block, plus per-block extra
 keys. Under prefix_bidir a state token's keys and values depend on the whole state x[0:S), and a question token's on the
-whole prompt x[0:L). This module adds two extra keys to every block hash of a v2 request:
+whole prompt x[0:L). This module adds two extra keys to every block hash of a prefix_bidir request:
 
-- block 0: ``("sdv2_state", sha256(x[0:S)))``, so every block of the chain is keyed on the whole state;
-- every block that ends past S: ``("sdv2_question", sha256(x[S:L)))``, so a block holding question tokens is keyed on
+- block 0: ``("decider_state", sha256(x[0:S)))``, so every block of the chain is keyed on the whole state;
+- every block that ends past S: ``("decider_question", sha256(x[S:L)))``, so a block holding question tokens is keyed on
   the whole question as well.
 
 A request therefore reuses a cached block only if it has the same state (same S, same tokens) and, for blocks that reach
 into the question, the same question, which is exactly when the block's keys and values are the same. A further
 question on a cached state reuses the state up to its last full block; requests without the digests never share
-blocks with v2 requests, whose block 0 differs.
+blocks with prefix_bidir requests, whose block 0 differs.
 
 The digests are computed in the engine core, from the request's own token ids and the boundary S that
-:mod:`strands_decider_v2_vllm.engine` has validated, just before vLLM builds the request and hashes its blocks
-(:func:`expect`). Only requests to a v2 model get them: the wrapper adds nothing to any other request, so other models
-served from the same environment keep vLLM's own keys.
+:mod:`strands_decider_vllm.engine` has validated, just before vLLM builds the request and hashes its blocks
+(:func:`expect`). Only requests to a Strands Decider model get them: the wrapper adds nothing to any other request, so
+other models served from the same environment keep vLLM's own keys.
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ import hashlib
 from array import array
 from typing import Any
 
-_ATTR = "_strands_decider_v2_digests"
+_ATTR = "_strands_decider_digests"
 #: request id -> (S, state digest, question digest), from validation until vLLM has built the request.
 _PENDING: dict[str, tuple[int, bytes, bytes]] = {}
 
@@ -40,13 +40,13 @@ def digests(prompt: list[int], s: int) -> tuple[int, bytes, bytes]:
     """(S, sha256 of the state x[0:S), sha256 of the question x[S:L)), each in its own domain."""
     return (
         s,
-        _digest(prompt, 0, s, b"strands-decider-v2/state\0"),
-        _digest(prompt, s, len(prompt), b"strands-decider-v2/question\0"),
+        _digest(prompt, 0, s, b"strands-decider/state\0"),
+        _digest(prompt, s, len(prompt), b"strands-decider/question\0"),
     )
 
 
 def expect(request_id: str, prompt: list[int], s: int) -> None:
-    """Register a validated v2 request's digests before vLLM builds its ``Request`` (which hashes its blocks)."""
+    """Register a validated request's digests before vLLM builds its ``Request`` (which hashes its blocks)."""
     _PENDING[request_id] = digests(prompt, s)
 
 
@@ -75,7 +75,7 @@ def install_block_hash_keys() -> None:
     the function up in its module at call time, so the wrapper applies to every hash the engine core computes."""
     import vllm.v1.core.kv_cache_utils as kcu
 
-    if getattr(kcu.generate_block_hash_extra_keys, "_strands_decider_v2", False):
+    if getattr(kcu.generate_block_hash_extra_keys, "_strands_decider", False):
         return
     original = kcu.generate_block_hash_extra_keys
 
@@ -87,12 +87,12 @@ def install_block_hash_keys() -> None:
         s, state, question = d
         extra = []
         if start_token_idx == 0:
-            extra.append(("sdv2_state", state))
+            extra.append(("decider_state", state))
         if end_token_idx > s:
-            extra.append(("sdv2_question", question))
+            extra.append(("decider_question", question))
         if not extra:
             return keys, next_mm_idx
         return (tuple(keys) if keys else ()) + tuple(extra), next_mm_idx
 
-    generate_block_hash_extra_keys._strands_decider_v2 = True
+    generate_block_hash_extra_keys._strands_decider = True
     kcu.generate_block_hash_extra_keys = generate_block_hash_extra_keys

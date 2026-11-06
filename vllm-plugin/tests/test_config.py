@@ -1,10 +1,11 @@
 """Startup checks on real vLLM configs: engine settings under which prefix_bidir would be served incorrectly, or under
 which one request could stop the engine, are refused.
 
-The configs are built by vLLM's own ``EngineArgs.create_engine_config`` from a v2 checkpoint directory (only its
+The configs are built by vLLM's own ``EngineArgs.create_engine_config`` from a checkpoint directory (only its
 config.json and tokenizer are read), so ``check_config`` reads the attributes vLLM really sets: a renamed attribute
-fails here. Set ``SDV2_TEST_CHECKPOINT`` to a checkpoint directory to run them; settings that ``EngineArgs`` cannot
-express on one machine (data parallelism, a quantized checkpoint, speculative decoding) are set on the built config.
+fails here. Set ``STRANDS_DECIDER_TEST_CHECKPOINT`` to a checkpoint directory to run them; settings that
+``EngineArgs`` cannot express on one machine (data parallelism, a quantized checkpoint, speculative decoding) are set
+on the built config.
 """
 
 from __future__ import annotations
@@ -13,11 +14,11 @@ import os
 
 import pytest
 
-model = pytest.importorskip("strands_decider_v2_vllm.model")
-from strands_decider_v2_vllm import ARCH  # noqa: E402
+model = pytest.importorskip("strands_decider_vllm.model")
+from strands_decider_vllm import ARCH  # noqa: E402
 
-CHECKPOINT = os.environ.get("SDV2_TEST_CHECKPOINT")
-pytestmark = pytest.mark.skipif(not CHECKPOINT, reason="SDV2_TEST_CHECKPOINT is not set")
+CHECKPOINT = os.environ.get("STRANDS_DECIDER_TEST_CHECKPOINT")
+pytestmark = pytest.mark.skipif(not CHECKPOINT, reason="STRANDS_DECIDER_TEST_CHECKPOINT is not set")
 
 #: The README's serving flags, at an 8,192-token context.
 BASE = dict(
@@ -35,7 +36,7 @@ BASE = dict(
 
 
 @pytest.fixture(autouse=True)
-def _v2_runner(monkeypatch):
+def _model_runner_v2(monkeypatch):
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
 
 

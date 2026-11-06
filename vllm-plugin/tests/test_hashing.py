@@ -11,10 +11,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from strands_decider_v2_vllm import hashing
+from strands_decider_vllm import hashing
 
-STATE_DOMAIN = b"strands-decider-v2/state\0"
-QUESTION_DOMAIN = b"strands-decider-v2/question\0"
+STATE_DOMAIN = b"strands-decider/state\0"
+QUESTION_DOMAIN = b"strands-decider/question\0"
 _ids = itertools.count()
 
 
@@ -25,7 +25,7 @@ def _no_pending():
 
 
 def make_request(tokens, prefix_end=None, base_keys=None):
-    """A request as the hasher sees it; with ``prefix_end`` it is a v2 request the engine core has validated."""
+    """A request as the hasher sees it; with ``prefix_end`` it is a request the engine core has validated."""
     rid = f"req-{next(_ids)}"
     if prefix_end is not None:
         hashing.expect(rid, list(tokens), prefix_end)
@@ -63,7 +63,7 @@ def test_settle_attaches_digests_no_block_has_asked_for_yet():
     assert getattr(r, hashing._ATTR) == hashing.digests(list(range(8)), 3)
 
 
-def test_a_request_no_v2_engine_validated_has_no_digests():
+def test_a_request_no_decider_engine_validated_has_no_digests():
     r = make_request(range(8))
     assert hashing._digests(r) is None
     assert getattr(r, hashing._ATTR) == (), "the negative result is cached too"
@@ -121,9 +121,9 @@ def test_keys_per_block(kcu):
     r = make_request(tokens, prefix_end=6)
     state, question = sha(STATE_DOMAIN, tokens[:6]), sha(QUESTION_DOMAIN, tokens[6:])
     f = kcu.generate_block_hash_extra_keys
-    assert f(r, 0, 4, 0) == ((("sdv2_state", state),), 1)  # block 0: the whole state
-    assert f(r, 4, 8, 0) == ((("sdv2_question", question),), 1)  # ends past S: the whole question
-    assert f(r, 8, 12, 5) == ((("sdv2_question", question),), 6)
+    assert f(r, 0, 4, 0) == ((("decider_state", state),), 1)  # block 0: the whole state
+    assert f(r, 4, 8, 0) == ((("decider_question", question),), 1)  # past S: the whole question
+    assert f(r, 8, 12, 5) == ((("decider_question", question),), 6)
 
 
 def test_block_0_past_the_boundary_gets_both_keys_after_vllm_keys(kcu):
@@ -133,8 +133,8 @@ def test_block_0_past_the_boundary_gets_both_keys_after_vllm_keys(kcu):
     assert keys == (
         "lora",
         "salt",
-        ("sdv2_state", sha(STATE_DOMAIN, tokens[:2])),
-        ("sdv2_question", sha(QUESTION_DOMAIN, tokens[2:])),
+        ("decider_state", sha(STATE_DOMAIN, tokens[:2])),
+        ("decider_question", sha(QUESTION_DOMAIN, tokens[2:])),
     )
 
 
@@ -230,7 +230,7 @@ def vllm_hasher():
     hasher = kcu.get_request_block_hasher(16, sha256)
 
     def build(tokens, s=None, cache_salt=None):
-        """Request.from_engine_core_request's path for a request the v2 engine core validated (s) or not."""
+        """Request.from_engine_core_request's path for a request the plugin's engine core validated (s) or not."""
         rid = f"real-{next(_ids)}"
         sp = SamplingParams(max_tokens=1, extra_args=None if s is None else {"prefix_end": s})
         if s is not None:
@@ -262,20 +262,20 @@ def test_vllms_hasher_with_the_wrapper(vllm_hasher):
     assert shared_blocks(a, build(state + qa, s=39).block_hashes) == 0, "other S"
     plain = build(state + qa)
     assert shared_blocks(a, plain.block_hashes) == 0, (
-        "a causal request shares nothing with a v2 request"
+        "a causal request shares nothing with a prefix_bidir request"
     )
-    # A request no v2 engine validated keeps vLLM's own hashes, exactly.
+    # A request no decider engine validated keeps vLLM's own hashes, exactly.
     parent, own = None, []
     for i in range(4):
         parent = kcu.hash_block_tokens(sha256, parent, (state + qa)[16 * i : 16 * i + 16], None)
         own.append(parent)
     assert plain.block_hashes == own
-    # A cache salt still separates v2 requests with the same tokens and S.
+    # A cache salt still separates prefix_bidir requests with the same tokens and S.
     assert shared_blocks(a, build(state + qa, s=40, cache_salt="x").block_hashes) == 0
     assert not hashing._PENDING
 
 
-def test_vllms_hasher_extends_a_v2_requests_hashes_with_the_digests(vllm_hasher):
+def test_vllms_hasher_extends_a_prefix_bidir_requests_hashes_with_the_digests(vllm_hasher):
     kcu, sha256, build = vllm_hasher
     prompt = list(range(10))
     r = build(prompt, s=4)  # shorter than one block: nothing hashed at construction
@@ -287,6 +287,6 @@ def test_vllms_hasher_extends_a_v2_requests_hashes_with_the_digests(vllm_hasher)
         sha256,
         None,
         prompt + list(range(500, 506)),
-        (("sdv2_state", state), ("sdv2_question", question)),
+        (("decider_state", state), ("decider_question", question)),
     )
     assert r.block_hashes == [expected], "block 0 carries the prompt's digests after the fact too"

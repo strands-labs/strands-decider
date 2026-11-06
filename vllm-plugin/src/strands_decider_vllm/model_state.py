@@ -1,7 +1,7 @@
 """Model Runner V2 state for prefix_bidir: each request's state boundary, turned into split attention metadata.
 
 A request sends its boundary S (the number of tokens in the prompt's state part) in ``vllm_xargs.prefix_end``; the
-engine core has validated it (:mod:`strands_decider_v2_vllm.engine`). In a step that computes any of its prompt tokens,
+engine core has validated it (:mod:`strands_decider_vllm.engine`). In a step that computes any of its prompt tokens,
 its scheduled tokens ``[c, e)`` (c being what is already computed or cached, e the step's end) become up to two
 non-causal segments over the prompt and one causal tail:
 
@@ -14,9 +14,9 @@ that can still split a prompt are refused. Should a prompt nevertheless be sched
 keys already computed and the step is logged as an error; a worker never raises because of a request.
 
 Every attention layer of the model gets this split (the model class builds every layer without a sliding window), through
-:class:`~strands_decider_v2_vllm.attention.SplitFlashAttentionImpl`. Decode rows and requests of other kinds stay
-causal. Cached keys are valid because the block hashes of a v2 request carry digests of its state and question
-(:mod:`strands_decider_v2_vllm.hashing`).
+:class:`~strands_decider_vllm.attention.SplitFlashAttentionImpl`. Decode rows and requests of other kinds stay
+causal. Cached keys are valid because the block hashes of a prefix_bidir request carry digests of its state and question
+(:mod:`strands_decider_vllm.hashing`).
 """
 
 from __future__ import annotations
@@ -68,7 +68,7 @@ class PrefixBidirModelState(DefaultModelState):
         )
         if bad:
             raise ValueError(
-                f"strands-decider-v2: attention layers not on the plugin's FlashAttention: {bad[:4]}... "
+                f"strands-decider: attention layers not on the plugin's FlashAttention: {bad[:4]}... "
                 "(use the default or FLASH_ATTN backend)"
             )
         windowed = sorted(
@@ -82,11 +82,11 @@ class PrefixBidirModelState(DefaultModelState):
         )
         if windowed:
             raise ValueError(
-                f"strands-decider-v2: {len(windowed)} layers keep a sliding window ({windowed[0]}, ...); "
-                "prefix_bidir needs every window off (StrandsDeciderV2ForCausalLM builds its layers without one)"
+                f"strands-decider: {len(windowed)} layers keep a sliding window ({windowed[0]}, ...); "
+                "prefix_bidir needs every window off (StrandsDeciderForCausalLM builds its layers without one)"
             )
         logger.info(
-            "strands-decider-v2: prefix_bidir on %d attention layers (no sliding windows)",
+            "strands-decider: prefix_bidir on %d attention layers (no sliding windows)",
             len(layers),
         )
 
@@ -102,7 +102,7 @@ class PrefixBidirModelState(DefaultModelState):
         if s is None:
             if extra and PREFIX_END_KEY in extra:
                 logger.error(
-                    "strands-decider-v2: request %s reached the worker with an invalid prefix_end %r for a "
+                    "strands-decider: request %s reached the worker with an invalid prefix_end %r for a "
                     "%d-token prompt; serving it causally (the engine core should have refused it)",
                     rid,
                     extra[PREFIX_END_KEY],
@@ -113,7 +113,7 @@ class PrefixBidirModelState(DefaultModelState):
                 # without one are refused in the engine core. Either way such a request is served causally.
                 self._warned_causal = True
                 logger.debug(
-                    "strands-decider-v2: a request without vllm_xargs.prefix_end (vLLM's warm-up) is served "
+                    "strands-decider: a request without vllm_xargs.prefix_end (vLLM's warm-up) is served "
                     "causally"
                 )
             return
@@ -164,8 +164,8 @@ class PrefixBidirModelState(DefaultModelState):
         ):
             self._warned_partial = True
             logger.error(
-                "strands-decider-v2: a prefix_bidir prompt was scheduled in parts, so its rows attend only to the "
-                "keys computed so far and its answer is not the v2 decision. The plugin refuses the settings known "
+                "strands-decider: a prefix_bidir prompt was scheduled in parts, so its rows attend only to the "
+                "keys computed so far and its answer is wrong. The plugin refuses the settings known "
                 "to split a prompt; please report this configuration. (Logged once.)"
             )
         plan = plan_segments(bounds, qsl, seq, n)
@@ -176,7 +176,7 @@ class PrefixBidirModelState(DefaultModelState):
             # one-token batches run as FULL graphs, which plan_segments never splits. A graph would replay its
             # captured attention and ignore the split, so refusing to run is the only safe answer.
             raise RuntimeError(
-                "strands-decider-v2: a step with prefix_bidir prompt tokens was scheduled as a FULL "
+                "strands-decider: a step with prefix_bidir prompt tokens was scheduled as a FULL "
                 "CUDA graph"
             )
         self._attach(metadata, plan)

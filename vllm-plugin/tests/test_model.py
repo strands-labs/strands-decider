@@ -10,12 +10,12 @@ from types import SimpleNamespace
 import pytest
 
 torch = pytest.importorskip("torch")
-model = pytest.importorskip("strands_decider_v2_vllm.model")
+model = pytest.importorskip("strands_decider_vllm.model")
 from torch import nn  # noqa: E402
 
-from strands_decider_v2_vllm.decision_config import DecisionConfigError  # noqa: E402
+from strands_decider_vllm.decision_config import DecisionConfigError  # noqa: E402
 
-Cls = model.StrandsDeciderV2ForCausalLM
+Cls = model.StrandsDeciderForCausalLM
 IDS = list(range(1000, 1255))
 
 
@@ -169,7 +169,7 @@ def init_readout(model_dir, softcap=30.0, revision=None):
 
 def test_init_readout_reads_a_checkpoint_directory(tmp_path, caplog):
     (tmp_path / "decision_config.json").write_text(json.dumps(decision_config(temperature=1.5)))
-    with caplog.at_level(logging.WARNING, logger="vllm.strands_decider_v2"):
+    with caplog.at_level(logging.WARNING, logger="vllm.strands_decider"):
         m = init_readout(tmp_path)
     assert m.code_ids.tolist() == IDS and m.temperature == 1.5 and m.softcap == 30.0
     assert m.readout.weight.shape == (255, 8) and m.readout.weight.dtype == torch.bfloat16
@@ -207,18 +207,19 @@ def test_init_readout_refuses_a_directory_without_decision_config(tmp_path):
 def test_init_readout_resolves_a_hub_repo_id_through_the_hf_cache(tmp_path, monkeypatch):
     hf_constants = pytest.importorskip("huggingface_hub.constants")
     commit = "0123456789abcdef0123456789abcdef01234567"
-    repo = tmp_path / "hub" / "models--example--sdv2-test"
+    repo = tmp_path / "hub" / "models--example--strands-decider-test"
     (repo / "refs").mkdir(parents=True)
     (repo / "refs" / "main").write_text(commit)
     snapshot = repo / "snapshots" / commit
     snapshot.mkdir(parents=True)
     (snapshot / "decision_config.json").write_text(
-        json.dumps(decision_config(interface="strands-decider-v2", final_logit_softcapping=30.0))
+        json.dumps(decision_config(interface="strands-decider", final_logit_softcapping=30.0))
     )
     monkeypatch.setattr(hf_constants, "HF_HUB_CACHE", str(tmp_path / "hub"))
     monkeypatch.setattr(hf_constants, "HF_HUB_OFFLINE", True)
-    monkeypatch.chdir(tmp_path)  # so "example/sdv2-test" is not a local path
-    m = init_readout("example/sdv2-test")
+    monkeypatch.chdir(tmp_path)  # so "example/strands-decider-test" is not a local path
+    m = init_readout("example/strands-decider-test")
     assert (
-        m.code_ids.tolist() == IDS and m.secondary_weights[0].model_or_path == "example/sdv2-test"
+        m.code_ids.tolist() == IDS
+        and m.secondary_weights[0].model_or_path == "example/strands-decider-test"
     )

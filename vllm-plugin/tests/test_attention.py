@@ -7,7 +7,7 @@ from dataclasses import dataclass
 import pytest
 
 torch = pytest.importorskip("torch")
-attention = pytest.importorskip("strands_decider_v2_vllm.attention")
+attention = pytest.importorskip("strands_decider_vllm.attention")
 SPLIT_ATTR, Split = attention.SPLIT_ATTR, attention.Split
 
 

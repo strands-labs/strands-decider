@@ -1,5 +1,5 @@
-"""decision_config.json at startup: the interface, the code token ids, the temperature and the soft-cap (v2
-specification, sections 8 and 9). No vLLM or torch needed."""
+"""decision_config.json at startup: the interface, the code token ids, the temperature and the soft-cap
+(specification, sections 8 and 9). No vLLM or torch needed."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import math
 
 import pytest
 
-from strands_decider_v2_vllm.decision_config import (
+from strands_decider_vllm.decision_config import (
     DecisionConfigError,
     read_decision_config,
 )
@@ -42,7 +42,7 @@ def test_an_intermediate_checkpoint_loads_with_one_warning():
 
 
 def test_a_released_checkpoint_loads_without_warnings():
-    spec = read(dc(interface="strands-decider-v2", final_logit_softcapping=30.0))
+    spec = read(dc(interface="strands-decider", final_logit_softcapping=30.0))
     assert spec.warnings == () and spec.softcap == 30.0
 
 

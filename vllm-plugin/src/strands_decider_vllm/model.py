@@ -1,16 +1,16 @@
-"""``StrandsDeciderV2ForCausalLM``: vLLM's Gemma 4 text decoder with the v2 readout and prefix_bidir.
+"""``StrandsDeciderForCausalLM``: vLLM's Gemma 4 text decoder with the trained readout and prefix_bidir.
 
 The checkpoint is a bare ``Gemma4TextModel`` (keys ``embed_tokens.*``, ``layers.*``, ``norm.*``, and the per-layer
 embedding tensors of E2B and E4B), ``readout.safetensors`` with one tensor ``weight`` [255, hidden] and
 ``decision_config.json``. The model may be a local directory or a Hugging Face Hub repo id: ``decision_config.json`` is
 read the way vLLM reads a model's other config files, and the readout is a second weight source of vLLM's default
-loader. Serve it with ``--hf-overrides '{"architectures": ["StrandsDeciderV2ForCausalLM"],
+loader. Serve it with ``--hf-overrides '{"architectures": ["StrandsDeciderForCausalLM"],
 "use_bidirectional_attention": null}'`` (the second key turns off vLLM's image PrefixLM mode, which the 12B, 26B-A4B
-and 31B configs would otherwise switch on; v2 is text-only); every attention layer is built without a sliding window
-(see ``__init__``).
+and 31B configs would otherwise switch on; Strands Decider is text-only); every attention layer is built without a
+sliding window (see ``__init__``).
 
 ``compute_logits`` returns, for each sampled position (the last prompt token), the readout's 255 values at the codes'
-token ids and -inf at every other id, as the v2 decision specification defines them: a bf16 linear on the final-norm
+token ids and -inf at every other id, as the decision specification defines them: a bf16 linear on the final-norm
 hidden state, then in float32 ``cap * tanh(z / cap)`` with the checkpoint's ``final_logit_softcapping``, divided by the
 checkpoint temperature. A completion with ``logprobs: 255`` therefore returns the log-softmax over the 255 codes;
 renormalizing over a question's first ``n`` codes gives the specification's probabilities, a softmax in which the codes
@@ -91,9 +91,11 @@ def check_config(vllm_config: VllmConfig) -> None:
             f"--logprobs-mode {mc.logprobs_mode}: the codes' probabilities are the processed logprobs, taken "
             "after allowed_token_ids; pass --logprobs-mode processed_logprobs"
         )
-    # The v2 readout is defined in bf16 (specification, section 7.1); the checkpoints are bf16.
+    # The readout is defined in bf16 (specification, section 7.1); the checkpoints are bf16.
     if mc.dtype != torch.bfloat16:
-        problems.append(f"--dtype {mc.dtype}: v2 is served in bfloat16; pass --dtype bfloat16")
+        problems.append(
+            f"--dtype {mc.dtype}: the plugin serves bfloat16 only; pass --dtype bfloat16"
+        )
     if mc.quantization is not None:
         problems.append(f"--quantization {mc.quantization} is not supported (bf16 weights only)")
     if cc.cache_dtype not in ("auto", "bfloat16"):
@@ -101,7 +103,7 @@ def check_config(vllm_config: VllmConfig) -> None:
             f"--kv-cache-dtype {cc.cache_dtype}: only a bf16 KV cache is supported (auto or bfloat16)"
         )
     if mc.enable_prompt_embeds:
-        problems.append("--enable-prompt-embeds is not supported; v2 requests are token ids")
+        problems.append("--enable-prompt-embeds is not supported; decision requests are token ids")
     if cc.enable_prefix_caching and not str(cc.prefix_caching_hash_algo).startswith("sha256"):
         problems.append("--prefix-caching-hash-algo must be sha256 or sha256_cbor")
     if vllm_config.speculative_config is not None:
@@ -119,7 +121,7 @@ def check_config(vllm_config: VllmConfig) -> None:
             problems.append(f"{name} > 1 is not supported")
     if problems:
         raise ValueError(
-            "strands-decider-v2 cannot serve with this configuration:\n"
+            "strands-decider cannot serve with this configuration:\n"
             + "\n".join(f"  - {p}" for p in problems)
         )
 
@@ -132,21 +134,21 @@ def load_decision_config(model: str, revision: str | None) -> dict:
     dc = get_hf_file_to_dict(DECISION_CONFIG_FILE, model, revision)
     if dc is None:
         raise DecisionConfigError(
-            f"not found for model {model!r} (revision {revision!r}); the model must be a Strands Decider v2 "
+            f"not found for model {model!r} (revision {revision!r}); the model must be a Strands Decider "
             "checkpoint: a local directory or a Hugging Face Hub repo id that holds decision_config.json and "
             "readout.safetensors"
         )
     return dc
 
 
-class StrandsDeciderV2ForCausalLM(Gemma4ForCausalLM):
+class StrandsDeciderForCausalLM(Gemma4ForCausalLM):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         import vllm
 
         check_vllm_version(vllm.__version__)
         check_config(vllm_config)
-        # v2 applies the prefix_bidir mask on the sliding-window layers too, with no window cut (the v2 reference
-        # implementation gives both layer types the same mask). Each sliding layer is built with a window of
+        # The specification applies the prefix_bidir mask on the sliding-window layers too, with no window cut (the
+        # reference implementation gives both layer types the same mask). Each sliding layer is built with a window of
         # max_model_len tokens, which cuts nothing: its KV cache group keeps every token of a request (a
         # sliding-window group whose window covers the whole context), and vLLM's hybrid KV-cache manager keeps one
         # group per layer shape, as for stock Gemma 4.
@@ -174,12 +176,12 @@ class StrandsDeciderV2ForCausalLM(Gemma4ForCausalLM):
             if impl is not None and getattr(module, "sliding_window", None) is not None:
                 if module.sliding_window < no_cut:
                     raise ValueError(
-                        f"strands-decider-v2: {module.layer_name} kept window {module.sliding_window}"
+                        f"strands-decider: {module.layer_name} kept window {module.sliding_window}"
                     )
                 impl.sliding_window = (-1, -1)
                 n += 1
         logger.info(
-            "strands-decider-v2: %d sliding-window layers built with a %d-token window (no cut)",
+            "strands-decider: %d sliding-window layers built with a %d-token window (no cut)",
             n,
             no_cut,
         )
@@ -193,7 +195,7 @@ class StrandsDeciderV2ForCausalLM(Gemma4ForCausalLM):
             vocab_size=self.config.vocab_size,
         )
         for w in spec.warnings:
-            logger.warning("strands-decider-v2: %s", w)
+            logger.warning("strands-decider: %s", w)
         self.temperature = spec.temperature
         self.softcap = spec.softcap
         self.register_buffer(
@@ -212,7 +214,7 @@ class StrandsDeciderV2ForCausalLM(Gemma4ForCausalLM):
             )
         ]
         logger.info(
-            "strands-decider-v2: readout over %d codes, softcap %s, temperature %s",
+            "strands-decider: readout over %d codes, softcap %s, temperature %s",
             N_CODES,
             self.softcap,
             self.temperature,
@@ -253,14 +255,14 @@ class StrandsDeciderV2ForCausalLM(Gemma4ForCausalLM):
         loaded = super().load_weights(decoder_weights())
         if len(readout) != 1:
             raise ValueError(
-                f"strands-decider-v2: {READOUT_FILE} was not loaded ({len(readout)} readout tensors received); "
+                f"strands-decider: {READOUT_FILE} was not loaded ({len(readout)} readout tensors received); "
                 "serve with vLLM's default loader (--load-format auto or safetensors), which reads the readout "
                 "as a second weight source"
             )
         w = readout[0]
         if tuple(w.shape) != tuple(self.readout.weight.shape):
             raise ValueError(
-                f"strands-decider-v2: readout {tuple(w.shape)} != {tuple(self.readout.weight.shape)}"
+                f"strands-decider: readout {tuple(w.shape)} != {tuple(self.readout.weight.shape)}"
             )
         with torch.no_grad():
             # A float32 or float16 readout is rounded to bf16 here (specification, 7.1).
