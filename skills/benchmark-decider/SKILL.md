@@ -19,7 +19,8 @@ Read the benchmark README before changing or running the suite. Read:
 - [references/pitfalls.md](references/pitfalls.md) before running a benchmark;
 - [references/analysis.md](references/analysis.md) when interpreting or comparing results;
 - [references/figures.md](references/figures.md) when working with artifacts or graphs;
-- [references/aws.md](references/aws.md) before configuring or running a SageMaker benchmark.
+- [references/aws.md](references/aws.md) before making a same-region latency claim or when setting
+  up a client that is not driven by `scripts/run_on_ec2.py`.
 
 Do not restore or use `evaluation/decider_bench.py`; the current entry point is
 `python -m benchmark.runner`.
@@ -169,6 +170,46 @@ uv run --extra benchmark python -m benchmark.runner compare \
 
 Compatibility requires the same environment fingerprint, model, workload, measurement preset,
 and baseline lineage. Do not work around a compatibility failure by manually copying artifacts.
+
+## Run benchmarks in-region
+
+A SageMaker `sagemaker.region` or a Lambda `aws_sigv4.region` selects the AWS API region but does
+not relocate the benchmark process. A laptop run records the laptop-to-AWS round trip. For a
+same-region latency claim, run the client in the endpoint's region.
+
+**You MUST use `scripts/run_on_ec2.py` for any SageMaker or Lambda benchmark.** This applies to
+smoke runs as well as standard runs, and to one-off exploratory invocations the moment they
+produce numbers you might report. Do not:
+
+- run `benchmark.runner` against a SageMaker endpoint or a Lambda Function URL from a laptop,
+  CI runner, or any machine outside the endpoint's region;
+- hand-provision an EC2 client, IAM role, or security group for a benchmark run — the script
+  owns the scoped IAM role, the Function URL `lambda:AddPermission` grant (and its revocation),
+  the no-ingress security group, the temporary private S3 bucket, and all cleanup;
+- bypass the script because it "looks slow" or "the user is in a hurry": the setup it does is
+  what makes the numbers reportable and the resources safe to leave behind.
+
+The only sanctioned alternative is an existing in-region EC2 that already satisfies every
+prerequisite in [references/aws.md](references/aws.md); if any item is unclear, use the script.
+
+Validate first with `--dry-run`, confirm the scope and cost with the user, then re-run with
+`--yes`:
+
+```bash
+uv run --project benchmark python skills/benchmark-decider/scripts/run_on_ec2.py \
+  ENVIRONMENT MODEL \
+  --account ACCOUNT_ID \
+  --region us-west-2 \
+  --smoke \
+  --dry-run
+```
+
+Replace `--dry-run` with `--yes` to actually run. Drop `MODEL` and `--smoke` to run every
+configured model with the standard preset. After the SSM command starts, pass the user the status
+and live-progress commands the script prints; do not wait to be asked.
+
+For the manual client setup (minimum IAM, network, tokenizer prerequisites) and interpretation
+rules, read [references/aws.md](references/aws.md).
 
 ## Reporting
 
