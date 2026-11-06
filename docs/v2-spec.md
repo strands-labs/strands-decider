@@ -280,14 +280,26 @@ The mask applies on every layer, sliding-window layers included, and replaces th
 For each question with k options:
 
 ```
-h  = the final-norm hidden state at position L - 1                  [hidden]
-z  = W h        W = readout.safetensors `weight`                    [255]
-z  = c * tanh(z / c)     c = decision_config.json `final_logit_softcapping`  (30.0 for every Gemma 4 size)
-z  = z / temperature     decision_config.json `temperature`
-p  = softmax(z[0:k])     over the question's own k codes only
+h  = the final-norm hidden state at position L - 1, as the decoder returns it    [hidden]
+z  = bf16(W h)          a bf16 GEMM; W = readout.safetensors `weight`, in bf16    [255]
+z  = tanh(z / c) * c    float32; c = decision_config.json `final_logit_softcapping` (30.0 for every Gemma 4 size)
+z  = z / T              float32; T = decision_config.json `temperature`
+p  = softmax(z[0:k])    float32, over the question's own k codes only
 ```
 
-`W` has one row per code, in code order. The other 255 - k codes do not enter the softmax. `p[i]` is the probability of the option bound to code i, and maps back to the request's terms by section 2. Arithmetic in the reference is float64.
+`W` has one row per code, in code order. The other 255 - k codes do not enter the softmax. `p[i]` is the probability of the option bound to code i, and maps back to the request's terms by section 2.
+
+### 7.1 The precision regime
+
+The arithmetic above is the training reference's, and the vLLM plugin's (`compute_logits`). A runtime follows it step by step:
+
+1. `W h` is a bf16 GEMM. `W` is bf16; a runtime that reads an f32 or f16 tensor rounds it to bf16 first. `h` is used as the decoder returns it: a bf16 decoder returns bf16 values, which float32 holds exactly. The products are accumulated in float32 or wider, and the result `z` is rounded to bf16, to nearest with ties to even. The rounding is part of the regime, not noise to be avoided: between 16 and 32 bf16's values are 0.125 apart, so it moves a logit there by up to 0.0625, more than any float32 error.
+2. The soft-cap is computed in float32 as `tanh(z / c) * c`, each operation rounded to float32, and the temperature divides the result in float32.
+3. The softmax over the question's k codes is taken in float32.
+
+`strands_decider.v2.read` is the reference implementation of this regime in numpy, which has no bf16. It sums the GEMM's products in float64, rounds each sum to float32, and rounds that to bf16 through the float32's bits (`round_to_bf16`: add 0x7FFF, plus 1 if the lowest kept bit is set, and clear the low 16 bits). A GPU's float32 accumulator sums in another order, so where a sum falls next to a bf16 rounding boundary its `z` can differ by one bf16 step; section 10's bounds absorb this. `tests/test_v2_readout.py` checks `read` against an independent reimplementation of the plugin's arithmetic on random bf16 inputs, logits between 16 and 32 included: `z` agrees bit for bit, and the probabilities to 1e-5.
+
+The temperature, like the soft-cap, is applied exactly once. A runtime that applies part of the readout itself returns a named stage (section 11), and the client applies only what the stage has not. On vLLM the plugin's `compute_logits` applies the soft-cap and the checkpoint temperature, so the client sends `temperature` 1.0 in its request: with `--logprobs-mode processed_logprobs`, vLLM divides by the request's temperature again before it takes the log-softmax.
 
 The answer fields are v1's response schema (`schema.py`, `NoulAnswer`, `ChoiceAnswer`, `ScoreAnswer`), rounded to four decimal places as v1 rounds:
 
@@ -371,7 +383,7 @@ Two kinds of golden data pin the interface.
 
 Render goldens fix the prompt. `tests/fixtures/v2/render_goldens.json` holds, for each case and variant, the request, the state text, S, the state ids, and for each question its text, ids, codes, code token ids and bound options. They depend only on the tokenizer. A conforming runtime reproduces them exactly: the same ids, the same S, the same codes. There is no tolerance.
 
-Model goldens fix the answers of one checkpoint. Each checkpoint release publishes `golden_vectors.jsonl` in its directory. Each line holds a request, its rendered ids per question, and the reference code probabilities per question, computed by the reference runtime with the checkpoint's bf16 weights and float32 activations. The reference runtime is the PyTorch decoder with the `prefix_bidir` mask behind `strands_decider.v2.evaluate`; it is not part of this torch-free core. The set covers every question type, both short and long states up to `max_length_validated`, and choices with many options.
+Model goldens fix the answers of one checkpoint. Each checkpoint release publishes `golden_vectors.jsonl` in its directory. Each line holds a request, its rendered ids per question, and the reference code probabilities per question, computed by the reference runtime: the decoder in bf16, weights and activations, one prompt per forward pass under the `prefix_bidir` mask, then the readout in section 7.1's precision regime. The reference runtime is the PyTorch decoder with the `prefix_bidir` mask behind `strands_decider.v2.evaluate`; it is not part of this torch-free core. The set covers every question type, both short and long states up to `max_length_validated`, and choices with many options.
 
 A runtime conforms for a checkpoint when, on that checkpoint's model goldens:
 
@@ -388,18 +400,32 @@ A quantized artifact whose format has no recorded bound makes no conformance cla
 
 ## 11. The runtime interface
 
-A runtime runs the decoder. Given the state ids (positions [0, S)) and the question ids of each question, it runs every question as a continuation of the state under the `prefix_bidir` mask, seeing no other question, and returns the final-norm hidden state at each question's last token: an array [questions, hidden], in the order of the questions. A runtime may instead apply the readout itself and return the raw readout logits `W h`, [questions, 255], before the soft-cap; or go further and return each question's code probabilities over its own k codes.
+A runtime runs the decoder. Given the state ids (positions [0, S)) and the question ids of each question, it runs every question as a continuation of the state under the `prefix_bidir` mask, seeing no other question, and returns one row per question, in the order of the questions. The row is one of five stages of section 7, and the runtime names which, so that nothing is applied twice:
+
+| stage (`outputs`) | a row holds | what the core still applies |
+| --- | --- | --- |
+| `hidden` | h, the final-norm hidden state at the question's last token, [hidden] | the bf16 GEMM, the soft-cap, the temperature, the softmax |
+| `raw_logits` | `z = W h`, before the soft-cap: the 255 codes, or the question's first k | the rounding to bf16 (which leaves a bf16 GEMM's output unchanged), the soft-cap, the temperature, the softmax |
+| `capped_logits` | `tanh(z / c) * c`: the soft-cap applied, the temperature not | the temperature, the softmax |
+| `final_logits` | `tanh(z / c) * c / T`: both applied, as the vLLM plugin's `compute_logits` returns them at the code ids | the softmax |
+| `probabilities` | the codes' probabilities: the question's k, or all 255 | renormalisation over the question's k codes |
+
+A row of logits or probabilities holds the codes in code order, either all 255 or only the question's first k, so rows may differ in width. The core refuses capped logits beyond ±c and final logits beyond ±c / T: such a row cannot be what its stage says, which is how raw logits passed as capped usually show.
+
+The vLLM plugin is a `probabilities` runtime. A completion with `allowed_token_ids` set to the question's k code ids, `logprobs` k and `temperature` 1.0, under `--logprobs-mode processed_logprobs`, returns the log-softmax of the plugin's final logits over exactly those k codes; their exponentials are the row. A completion with `logprobs` 255 and no `allowed_token_ids` returns the softmax over all 255 codes, which renormalises to the same row.
 
 This is v1's `hidden_engine.Backend` narrowed to v2. v1's backend returns several rows per question, one per option and one for `<answer>`, for the pointer head; v2 needs only the last token. `strands_decider.v2.Backend` states the contract:
 
 ```python
 class Backend(Protocol):
-    def forward(self, state: list[int], questions: list[list[int]]) -> np.ndarray:
-        """[len(questions), hidden]: each question's final-norm hidden state at its last
-        token, under prefix_bidir, after the shared state."""
+    outputs: str  # the stage forward returns: hidden, raw_logits, capped_logits, final_logits or probabilities
+
+    def forward(self, state: list[int], questions: list[list[int]]) -> np.ndarray | Sequence[np.ndarray]:
+        """One row per question, in order, of the stage `outputs` names: each question run
+        under prefix_bidir after the shared state, read at its last token."""
 ```
 
-`strands_decider.v2.evaluate(request, tokenizer, readout, config, backend)` joins the pieces. It renders the request with the checkpoint's prompt, calls `forward` once with the shared state and every question, reads the answers, and returns a `SystemOneResponse` as JSON. `read(..., inputs="logits")` takes logits in place of hidden states, and `answer(rendered_question, probabilities)` takes probabilities. As with v1's backend, a runtime may batch, cache the state's keys and values, or split the work across devices, provided each question's result is what it would be alone.
+`strands_decider.v2.evaluate(request, tokenizer, readout, config, backend)` joins the pieces. It refuses a backend that does not name its stage, renders the request with the checkpoint's prompt, calls `forward` once with the shared state and every question, reads the answers from the stage the backend names, and returns a `SystemOneResponse` as JSON. Its parts are public: `read(rows, readout, config, rendered, inputs=stage)` gives the answers and `question_probabilities` the code probabilities, from rows of any stage, where `inputs` is required; `readout_logits` is the bf16 GEMM; `answer(rendered_question, probabilities)` formats one answer. As with v1's backend, a runtime may batch, cache the state's keys and values, or split the work across devices, provided each question's result is what it would be alone.
 
 ## 12. Open questions
 
