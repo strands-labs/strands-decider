@@ -1,7 +1,7 @@
 """`decision_config.json`: what a runtime needs, beyond the weights, to serve a checkpoint.
 
-The schema is docs/v2-spec.md's (The decision_config.json schema). Validation is strict: a
-file without `"interface": "strands-decider-v2"`, a missing required field, an unknown
+The schema is docs/spec.md's (The decision_config.json schema). Validation is strict: a
+file without `"interface": "strands-decider"`, a missing required field, an unknown
 field, a value of the wrong type, and a prompt this runtime does not implement are all
 errors. The file carries the soft-cap, so a converted decoder (GGUF, MLX) needs no
 `config.json` beside it.
@@ -20,9 +20,10 @@ from .codes import CODES
 from .prompt import VARIANTS
 
 FILENAME = "decision_config.json"
-# Tells a v2 decision config from other formats that use the same file names (llama.cpp's
-# pplx-decider loader claims any directory with decision_config.json and readout.safetensors).
-INTERFACE = "strands-decider-v2"
+# Tells this interface's decision config from other formats that use the same file names
+# (llama.cpp's pplx-decider loader claims any directory with decision_config.json and
+# readout.safetensors).
+INTERFACE = "strands-decider"
 FORMAT_VERSION = 1
 ATTENTION_MODES = ("prefix_bidir",)
 POOLINGS = ("last",)
@@ -41,7 +42,7 @@ REQUIRED = (
 )
 OPTIONAL = ("provenance",)
 
-# The readout's soft-cap and temperature act in float32 (docs/v2-spec.md, The readout), so
+# The readout's soft-cap and temperature act in float32 (docs/spec.md, The readout), so
 # each must be a normal float32: a value past these bounds would become inf or lose precision.
 F32_MAX = 3.4028234663852886e38
 F32_MIN_NORMAL = 1.1754943508222875e-38
@@ -69,9 +70,9 @@ def _is_int(v: Any) -> bool:
     return isinstance(v, int) and not isinstance(v, bool)
 
 
-def _not_v2(interface: Any) -> str:
+def _wrong_interface(interface: Any) -> str:
     return (
-        f"not a Strands Decider v2 decision config: {FILENAME} needs "
+        f"not a Strands Decider decision config: {FILENAME} needs "
         f'"interface": "{INTERFACE}", and has {interface!r}'
     )
 
@@ -136,7 +137,7 @@ class DecisionConfig:
 
     def __post_init__(self) -> None:
         if self.interface != INTERFACE:
-            raise ValueError(_not_v2(self.interface))
+            raise ValueError(_wrong_interface(self.interface))
         if not _is_int(self.format_version) or self.format_version != FORMAT_VERSION:
             raise ValueError(
                 f"format_version {self.format_version!r} is not supported; this runtime "
@@ -147,7 +148,9 @@ class DecisionConfig:
                 f"prompt {self.prompt!r} is not implemented; this runtime implements {VARIANTS}"
             )
         if tuple(self.codes) != CODES:
-            raise ValueError("codes must be the 255 v2 codes, A through IV without GZ, in order")
+            raise ValueError(
+                "codes must be the 255 answer codes, A through IV without GZ, in order"
+            )
         ids = tuple(self.token_ids)
         if len(ids) != len(CODES) or not all(_is_int(i) and i >= 0 for i in ids):
             raise ValueError(f"token_ids must be {len(CODES)} non-negative integers")
@@ -172,7 +175,7 @@ class DecisionConfig:
             raise ValueError(f"{FILENAME} must hold a JSON object")
         # First, so that another format's file gets this message, not a list of fields.
         if d.get("interface") != INTERFACE:
-            raise ValueError(_not_v2(d.get("interface", "<missing>")))
+            raise ValueError(_wrong_interface(d.get("interface", "<missing>")))
         missing = [k for k in REQUIRED if k not in d]
         if missing:
             raise ValueError(f"{FILENAME} is missing required fields {missing}")

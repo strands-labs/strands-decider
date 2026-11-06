@@ -1,6 +1,6 @@
-"""The Strands Decider v2 core: the decision interface without torch.
+"""The Strands Decider core: the decision interface without torch.
 
-docs/v2-spec.md defines the interface; this package implements its torch-free half with
+docs/spec.md defines the interface; this package implements its torch-free half with
 `tokenizers`, numpy and the standard library:
 
     render(request, tokenizer, variant)    -> RenderedRequest: ids, S, codes per question
@@ -12,7 +12,7 @@ docs/v2-spec.md defines the interface; this package implements its torch-free ha
                                               decision_config.json
 
 A runtime supplies the decoder (`Backend`); `evaluate` joins the three. v1's engines are
-untouched: v2 sits beside them.
+untouched: the core sits beside them.
 """
 
 from __future__ import annotations

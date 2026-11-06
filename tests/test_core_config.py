@@ -1,4 +1,4 @@
-"""`decision_config.json` (docs/v2-spec.md, The decision_config.json schema): strict, with
+"""`decision_config.json` (docs/spec.md, The decision_config.json schema): strict, with
 an `interface` discriminator, and a provenance check that catches common leaks of internal
 locations (not a guarantee). Torch-free; the fixture is the E2B checkpoint's file reduced to
 the schema's fields."""
@@ -9,9 +9,9 @@ import copy
 import json
 
 import pytest
-from v2_support import FIXTURES, decision_config_fixture
+from core_support import FIXTURES, decision_config_fixture
 
-from strands_decider.v2 import (
+from strands_decider.core import (
     CODES,
     FORMAT_VERSION,
     INTERFACE,
@@ -19,7 +19,7 @@ from strands_decider.v2 import (
     DecisionConfig,
     Provenance,
 )
-from strands_decider.v2.config import REQUIRED
+from strands_decider.core.config import REQUIRED
 
 
 def _with(**kw) -> dict:
@@ -30,7 +30,7 @@ def test_fixture_loads_from_file_and_directory():
     a = DecisionConfig.load(FIXTURES / "decision_config.json")
     b = DecisionConfig.load(FIXTURES)
     assert a == b
-    assert a.interface == INTERFACE == "strands-decider-v2"
+    assert a.interface == INTERFACE == "strands-decider"
     assert a.format_version == FORMAT_VERSION and a.prompt in VARIANTS
     assert a.final_logit_softcapping == 30.0
     assert a.codes == CODES and len(a.token_ids) == 255
@@ -62,22 +62,22 @@ def test_missing_required_fields_are_errors(field):
 
 @pytest.mark.parametrize(
     "interface",
-    ["<missing>", None, "", "strands-decider-v1", "Strands-Decider-v2", "pplx-decider", 2],
+    ["<missing>", None, "", "strands-decider-v1", "Strands-Decider", "pplx-decider", 2],
 )
 def test_the_interface_field_is_required_and_exact(interface):
     d = _with(interface=interface)
     if interface == "<missing>":
         del d["interface"]
-    with pytest.raises(ValueError, match="not a Strands Decider v2 decision config"):
+    with pytest.raises(ValueError, match="not a Strands Decider decision config"):
         DecisionConfig.from_dict(d)
     good = DecisionConfig.load(FIXTURES)
-    with pytest.raises(ValueError, match="not a Strands Decider v2 decision config"):
+    with pytest.raises(ValueError, match="not a Strands Decider decision config"):
         DecisionConfig(**{**good.__dict__, "interface": interface})
 
 
 def test_another_formats_file_is_refused_by_its_interface():
     """A decision_config.json of another format, here shaped like the training side's
-    (synthetic values), is named as not v2 before any field is checked."""
+    (synthetic values), is refused by its interface before any field is checked."""
     other = {
         "format_version": 1,
         "base_model": "google/gemma-4-E2B-it",
@@ -88,7 +88,7 @@ def test_another_formats_file_is_refused_by_its_interface():
         "pooling": "last",
         "finetune": {"lr": 1e-4},
     }
-    with pytest.raises(ValueError, match="not a Strands Decider v2 decision config"):
+    with pytest.raises(ValueError, match="not a Strands Decider decision config"):
         DecisionConfig.from_dict(other)
 
 
@@ -101,7 +101,7 @@ def test_another_formats_file_is_refused_by_its_interface():
         {"base_model": "google/gemma-4-E2B-it"},
         {"revision": "3e22461f65e89153144f8adb70e3b8c2cc9845a7"},
         {"temperature_by_kind": {"score": 1.2}},
-        {"Prompt": "strands-v2-plain"},
+        {"Prompt": "strands-plain"},
     ],
     ids=lambda e: next(iter(e)),
 )
@@ -110,7 +110,7 @@ def test_unknown_fields_are_errors(extra):
         DecisionConfig.from_dict(_with(**extra))
 
 
-@pytest.mark.parametrize("prompt", ["strands-v2-xml", "strands-v1", "", None, 1])
+@pytest.mark.parametrize("prompt", ["strands-xml", "strands-v1", "", None, 1])
 def test_unimplemented_prompts_are_refused(prompt):
     with pytest.raises(ValueError, match="not implemented"):
         DecisionConfig.from_dict(_with(prompt=prompt))
@@ -133,9 +133,9 @@ def test_scales_within_float32_load(value):
         ("format_version", 2, "format_version"),
         ("format_version", "1", "format_version"),
         ("format_version", True, "format_version"),
-        ("codes", list(CODES[:-1]), "255 v2 codes"),
-        ("codes", list(reversed(CODES)), "255 v2 codes"),
-        ("codes", [*CODES[:-1], "GZ"], "255 v2 codes"),
+        ("codes", list(CODES[:-1]), "255 answer codes"),
+        ("codes", list(reversed(CODES)), "255 answer codes"),
+        ("codes", [*CODES[:-1], "GZ"], "255 answer codes"),
         ("codes", "ABC", "must be a list"),
         ("token_ids", list(range(254)), "255 non-negative"),
         ("token_ids", [-1, *range(1, 255)], "255 non-negative"),
@@ -221,4 +221,4 @@ def test_the_fixture_holds_no_internal_value():
 def test_constructing_directly_validates_too():
     good = DecisionConfig.load(FIXTURES)
     with pytest.raises(ValueError, match="not implemented"):
-        DecisionConfig(**{**good.__dict__, "prompt": "strands-v2-xml"})
+        DecisionConfig(**{**good.__dict__, "prompt": "strands-xml"})

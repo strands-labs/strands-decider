@@ -1,8 +1,8 @@
 """The System One request, parsed without pydantic.
 
-The v2 request is v1's (`strands_decider.schema.SystemOneRequest`): a state and named
+The request is v1's (`strands_decider.schema.SystemOneRequest`): a state and named
 questions of type noul, choice or score. This module accepts and refuses what v1's pydantic
-models accept and refuse (tests/test_v2_prompt.py checks it against them when pydantic is
+models accept and refuse (tests/test_core_prompt.py checks it against them when pydantic is
 installed), so that the torch-free core needs only the standard library to read a request.
 """
 
@@ -122,8 +122,7 @@ def parse_request(request: Any) -> Request:
     `model_dump`). Unknown fields are ignored, as v1 ignores them.
 
     `images`, as in v1, is optional and must be a list of strings; null or any other type is
-    refused. A non-empty list is refused with v1's text-only error: the v2 core renders text
-    only."""
+    refused. A non-empty list is refused with v1's text-only error: the core renders text only."""
     if hasattr(request, "model_dump"):
         request = request.model_dump()
     if not isinstance(request, Mapping):

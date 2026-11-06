@@ -1,7 +1,7 @@
 """The confidence formulas of the System One response, without dependencies.
 
-They live here, not in schema.py, so that code that cannot import pydantic (the torch-free v2
-core, `strands_decider.v2`) computes confidence with the same functions as the v1 engines.
+They live here, not in schema.py, so that code that cannot import pydantic (the torch-free
+core, `strands_decider.core`) computes confidence with the same functions as the v1 engines.
 schema.py re-exports both names.
 """
 

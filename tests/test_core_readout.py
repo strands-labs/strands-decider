@@ -1,4 +1,4 @@
-"""The v2 readout (docs/v2-spec.md, The readout) on small arrays, and the runtime glue.
+"""The readout (docs/spec.md, The readout) on small arrays, and the runtime glue.
 
 Torch-free: numpy and tokenizers. Nothing here needs Gemma 4's tokenizer; the end-to-end
 test uses a toy one. The precision regime (a bf16 GEMM, then float32) is checked against an
@@ -14,9 +14,9 @@ import struct
 
 import numpy as np
 import pytest
-from v2_support import decision_config_fixture, toy_tokenizer
+from core_support import decision_config_fixture, toy_tokenizer
 
-from strands_decider.v2 import (
+from strands_decider.core import (
     CAPPED_LOGITS,
     CODES,
     FINAL_LOGITS,
@@ -431,7 +431,7 @@ def test_readout_load_refuses_a_bad_readout_or_config(tmp_path):
     with pytest.raises(ValueError, match="255 codes"):
         Readout.load(ckpt)
     (ckpt / "decision_config.json").write_text(json.dumps({"format_version": 1}))
-    with pytest.raises(ValueError, match="not a Strands Decider v2"):
+    with pytest.raises(ValueError, match="not a Strands Decider decision config"):
         Readout.load(ckpt)
     (ckpt / "decision_config.json").unlink()
     with pytest.raises(FileNotFoundError):
@@ -508,10 +508,10 @@ def test_answers_match_v1():
     for q, options, kind in cases:
         for _ in range(20):
             p = rng.dirichlet(np.ones(len(options))).tolist()
-            v1 = to_answer(render_question(q), p, ordinal_smoothing=0.1).model_dump()
+            want = to_answer(render_question(q), p, ordinal_smoothing=0.1).model_dump()
             desc = list(q.criteria) if kind == "score" else None
-            v2 = answer(_rq(kind, options, descriptions=desc), p, ordinal_smoothing=0.1)
-            assert v2 == v1
+            got = answer(_rq(kind, options, descriptions=desc), p, ordinal_smoothing=0.1)
+            assert got == want
 
 
 # ---- read ------------------------------------------------------------------------------
@@ -576,7 +576,7 @@ def test_read_refuses_a_mismatch():
         read(
             np.zeros((1, 4)),
             Readout(w, C),
-            _config(prompt="strands-v2-chat"),
+            _config(prompt="strands-chat"),
             rendered,
             inputs=HIDDEN,
         )

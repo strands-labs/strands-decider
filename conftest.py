@@ -20,7 +20,7 @@ os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 def _deterministic():
     try:
         import torch
-    except ModuleNotFoundError:  # the torch-free tests (tests/test_v2_*.py) run without it
+    except ModuleNotFoundError:  # the torch-free tests (tests/test_core_*.py) run without it
         yield
         return
     torch.manual_seed(0)
