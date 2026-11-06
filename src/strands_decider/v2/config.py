@@ -65,6 +65,14 @@ _RELEASE = re.compile(r"^([A-Za-z0-9][\w.-]*/)?[A-Za-z0-9][\w.-]*$")
 _COMMIT = re.compile(r"^[0-9a-f]{40}$")
 _URI_SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
 _WINDOWS_PATH = re.compile(r"^[A-Za-z]:[\\/]")
+# Matched against the lowercased value, anywhere in it: the internal checks of `_internal`.
+_INTERNAL_HOST = re.compile(
+    r"(?:^|[^a-z0-9-])(?:[a-z0-9-]+\.)*(?:amazon\.com|amazon\.dev|a2z\.com|aws\.dev)(?:$|[^a-z0-9-])"
+)
+_S3_HOST = re.compile(
+    r"(?:^|[^a-z0-9-])(?:[a-z0-9.-]+\.)?s3(?:[.-][a-z0-9-]+)*\.amazonaws\.com(?:$|[^a-z0-9-])"
+)
+_USER_PATH = re.compile(r"(?:^|/)(?:fsx|efs|home|users|local/home|workplace|apollo/env)/[^/]")
 
 
 def _is_int(v: Any) -> bool:
@@ -80,19 +88,30 @@ def _not_v2(interface: Any) -> str:
 
 def _internal(s: str) -> str | None:
     """Why `s` looks like a private location, or None. A public config names Hub ids and
-    https URLs, never a path on a training host or a bucket."""
+    https URLs, never a path on a training host, an internal host or a bucket.
+
+    This catches common leaks, not every one: a value that passes may still be private,
+    and a release reviews its provenance by hand.
+    """
+    low = s.lower()
     if s.startswith(("/", "~", "./", "../")) or "\\" in s or _WINDOWS_PATH.match(s):
         return "a filesystem path"
-    if "/fsx/" in s or s.startswith("fsx/"):
-        return "a filesystem path"
+    if _USER_PATH.search(low):
+        return "an internal user path (/fsx/, /home/<user>/ and the like)"
     if _URI_SCHEME.match(s) and not s.startswith("https://"):
         return "a non-https URI"
+    if _INTERNAL_HOST.search(low):
+        return "an internal host (amazon.com, amazon.dev, a2z.com or aws.dev)"
+    if _S3_HOST.search(low):
+        return "an S3 bucket URL"
     return None
 
 
 @dataclass(frozen=True)
 class Provenance:
-    """Where a checkpoint came from, in public terms. Every field is optional.
+    """Where a checkpoint came from, in public terms. Every field is optional, and none
+    may name an obviously internal location (`_internal`); that check catches common leaks
+    and is not a guarantee.
 
     base_model: the Hub id of the base model, such as `google/gemma-4-E2B-it`.
     base_revision: the base model's 40-character commit on the Hub.
@@ -113,7 +132,9 @@ class Provenance:
                 raise ValueError(f"provenance.{name} must be a non-empty string")
             why = _internal(value)
             if why:
-                raise ValueError(f"provenance.{name} is {why} ({value!r}); provenance is public")
+                raise ValueError(
+                    f"provenance.{name} is {why} ({value!r}); provenance must be public"
+                )
         if self.base_model is not None and not _HUB_ID.match(self.base_model):
             raise ValueError(f"provenance.base_model must be a Hub id, not {self.base_model!r}")
         if self.base_revision is not None and not _COMMIT.match(self.base_revision):
@@ -202,6 +223,8 @@ class DecisionConfig:
         for k in ("codes", "token_ids"):
             if not isinstance(d[k], list):
                 raise ValueError(f"{k} must be a list")
+        if "provenance" in d and d["provenance"] is None:
+            raise ValueError("provenance must be an object; leave the field out instead of null")
         prov = d.get("provenance")
         return cls(
             interface=d["interface"],

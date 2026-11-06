@@ -327,9 +327,17 @@ Confidence uses v1's formulas, which v2 keeps unchanged and shares as code (`src
 | `attention_mode` | string, `prefix_bidir` | the mask of section 6 |
 | `pooling` | string, `last` | the readout position of section 5 |
 | `max_length_validated` | positive integer | the longest prompt, in tokens (S plus the question's tokens), at which the checkpoint was validated |
-| `provenance` | object, optional | public origin of the checkpoint; fields below |
+| `provenance` | object, optional (absent, never null) | public origin of the checkpoint; fields below |
 
-`provenance` has four optional string fields and no others: `base_model`, a Hub id such as `google/gemma-4-E2B-it`; `base_revision`, the base model's 40-character commit; `release`, the released model's name or Hub id; and `source`, an https URL of the public code and recipe that trained it. No provenance value may be a filesystem path (absolute, home-relative, relative with `./` or `../`, a Windows path, or a path under `/fsx`), or a URI with any scheme but https.
+`provenance` has four optional string fields and no others: `base_model`, a Hub id such as `google/gemma-4-E2B-it`; `base_revision`, the base model's 40-character commit; `release`, the released model's name or Hub id; and `source`, an https URL of the public code and recipe that trained it. A checkpoint without provenance leaves the field out; `"provenance": null` is an error. `DecisionConfig` refuses provenance values that are obviously internal:
+
+- a filesystem path: absolute, home-relative, relative with `./` or `../`, or a Windows path;
+- a known internal user path anywhere in the value, such as `/fsx/`, `/efs/`, `/home/<user>/`, `/Users/<user>/`, `/local/home/<user>/`, `/workplace/<user>/` or `/apollo/env/`;
+- a URI with any scheme but https (so `s3://` and `file://` among them);
+- a host under `amazon.com` (`code.amazon.com` and `corp.amazon.com` included), `amazon.dev`, `a2z.com` or `aws.dev`, in a URL or bare;
+- an S3 bucket URL on `amazonaws.com`, virtual-hosted or path-style.
+
+The check catches common leaks; it is not a guarantee that a value is public. A release still reviews its provenance by hand.
 
 `interface` is the discriminator. Other formats use the same file names: llama.cpp's pplx-decider loader, for one, claims any directory that holds `decision_config.json` and `readout.safetensors`. A runtime or converter therefore identifies a v2 checkpoint by `"interface": "strands-decider-v2"`, never by its file names, and a v2 runtime refuses a `decision_config.json` without it before it reads any other field.
 
