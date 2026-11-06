@@ -297,6 +297,11 @@ def scenario_requests(srv, rows, a):
     return out
 
 
+# Two separately started servers differ by bf16 numerics from run to run: up to 0.023 max|dp| on
+# one question between two starts of identical code. Same-server checks keep 0.01.
+CROSS_SERVER_MAX_DP = 0.03
+
+
 def scenario_compare(srv, rows, a):
     expect = json.load(open(a.expect))["answers"]
     row = base_row(rows)
@@ -322,7 +327,7 @@ def scenario_compare(srv, rows, a):
         worst = max(worst, dmax(p, expect[i]))
         flips += argmax(p) != argmax(expect[i])
     check(
-        flips == 0 and worst <= 0.01,
+        flips == 0 and worst <= CROSS_SERVER_MAX_DP,
         f"{len(expect)} rows vs the other server: {flips} top-1 flips, worst max|dp| {worst:.4f}",
     )
     check(srv.health() == 200, "server healthy at the end")
