@@ -705,9 +705,11 @@ def test_every_code_is_one_token_matching_token_ids():
 
 # ---- conformance with Gemma 4's chat templates, and with v1 ---------------------------------
 
-# sha256 of each Gemma 4 chat_template.jinja seen, and what its generation prompt adds after
-# `<|turn>model\n` with thinking off: E2B and E4B nothing; 12B, 26B-A4B and 31B an empty
-# thought channel, which strands-v2-chat leaves out (docs/v2-spec.md, strands-v2-chat).
+# sha256 of each Gemma 4 base model's chat_template.jinja seen, and what its generation prompt
+# adds after `<|turn>model\n` with thinking off: E2B and E4B nothing; 12B, 26B-A4B and 31B an
+# empty thought channel, which strands-v2-chat leaves out (docs/v2-spec.md, strands-v2-chat).
+# The templates show where strands-v2-chat comes from; v2 never renders with them, and a v2
+# checkpoint ships none.
 EMPTY_THOUGHT = "<|channel>thought\n<channel|>"
 TEMPLATES = {
     "0a2c8073c878ab1da004bee933a998606537bbb62016310352c7285c3f01c5b5": "",  # E2B, E4B
@@ -763,9 +765,10 @@ def test_chat_ids_match_hugging_face_apply_chat_template():
     """Where transformers is installed: the chat variant's ids are what Hugging Face's
     `apply_chat_template(..., tokenize=True)` gives for the body as one user turn, with
     each template given, for requests without special-token strings. (With them HF's one
-    call matches them as control tokens, which v2 forbids.) With the 12B, 26B-A4B and 31B
-    templates, HF's ids end with the empty thought channel, which strands-v2-chat leaves
-    out."""
+    call matches them as control tokens, which v2 forbids. A runtime must not render v2
+    prompts with a chat template in any case, and a v2 checkpoint ships none: docs/v2-spec.md
+    sections 3.5 and 9.) With the 12B, 26B-A4B and 31B templates, HF's ids end with the
+    empty thought channel, which strands-v2-chat leaves out."""
     pytest.importorskip("jinja2")
     transformers = pytest.importorskip("transformers")
     templates = _templates()
