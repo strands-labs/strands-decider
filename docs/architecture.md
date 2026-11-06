@@ -182,7 +182,8 @@ reference v2 decision models. Three keys select it:
   hidden state of the last prompt token. Output k scores the option listed under code k. Each
   output starts as the base model's LM head row of that code's token, so before training the
   head gives the base model's own preference among the codes. On Gemma 4 its logits get the
-  same cap as the LM head's (`final_logit_softcapping`). The outputs past the question's option
+  same cap as the LM head's (`final_logit_softcapping`), saved with the checkpoint as
+  `readout_softcap`. The outputs past the question's option
   count are masked.
 - `render: lettered` (required with the token readout). The prompt goes through the
   tokenizer's chat template, with thinking off: a system line, then `State:`, `Question:` and
@@ -192,8 +193,10 @@ reference v2 decision models. Three keys select it:
 - `attention_mode: causal` (the default) or `prefix_bidir`. With `prefix_bidir` the prompt
   splits where the state ends. A state token sees all of the state, in both directions, and
   never the question. A question token sees the state and all of its own question. The
-  full-attention and sliding-window layers (Qwen3.5, Gemma 4) take this mask; the
-  linear-attention layers of Qwen3.5 stay causal. It needs SDPA or eager attention.
+  full-attention layers take this mask. The sliding-window layers of Gemma 4 take it too,
+  without their window (512 or 1,024 tokens), as the reference v2 models train. The
+  linear-attention layers of Qwen3.5 stay causal. Other layer types are refused. It needs SDPA
+  or eager attention.
 
 `lr_floor` sets where the cosine learning-rate schedule ends (the reference recipe uses 0.1).
 `python -m training.train`, `training.soup` and `training.evaluate calibrate` work with a token

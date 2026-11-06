@@ -4,6 +4,7 @@ and that the pointer path stays what origin/main computes."""
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import shutil
 from types import SimpleNamespace
@@ -351,3 +352,95 @@ def test_the_engines_refuse_a_token_readout_checkpoint(corpus, tmp_path, monkeyp
     (tmp_path / "strands_decider_config.json").write_text(model.config.to_json())
     with pytest.raises(ValueError, match="separate inference stack"):
         VisionDeciderModel.load(str(tmp_path))
+
+
+# ---------------------------------------------------------------- review guards
+
+
+def _ck_dir(tmp_path, model):
+    d = tmp_path / "ck"
+    d.mkdir()
+    (d / "strands_decider_config.json").write_text(model.config.to_json())
+    return str(d)
+
+
+def _kl_cfg(corpus, tmp_path, **kw):
+    return T.TrainConfig(
+        train_files=[str(corpus / "a.jsonl")],
+        val_files=[str(corpus / "val.jsonl")],
+        base_model="tiny",
+        kl_frozen_weight=0.3,
+        precompute_frozen_kl=True,
+        group_by_length=True,
+        micro_batch_size=4,
+        grad_accum=1,
+        max_steps=1,
+        eval_every=0,
+        output_dir=str(tmp_path / "run"),
+        **kw,
+    )
+
+
+def test_init_from_a_token_readout_with_a_kl_reference_is_refused(corpus, tmp_path, monkeypatch):
+    # _init_from sets head_type from the checkpoint; the refusal must come after it.
+    model = _readout(corpus)
+    ck = _ck_dir(tmp_path, model)
+    monkeypatch.setattr(StrandsDeciderModel, "load", lambda *a, **k: model)
+    with pytest.raises(ValueError, match="frozen-KL reference yet"):
+        T.train(_kl_cfg(corpus, tmp_path, init_from=ck, kl_frozen_reference=ck))
+
+
+def test_a_kl_reference_of_another_head_type_is_refused(corpus, tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        StrandsDeciderModel,
+        "from_pretrained_base",
+        staticmethod(_tiny_model_factory(str(corpus / "tokenizer.json"))),
+    )
+    reference = _readout(corpus)
+    monkeypatch.setattr(StrandsDeciderModel, "load", lambda *a, **k: reference)
+    with pytest.raises(ValueError, match="has head_type 'token_readout'"):
+        T.train(_kl_cfg(corpus, tmp_path, kl_frozen_reference="ref", pointer_dim=16))
+
+
+def test_fits_measures_the_lettered_prompt_with_every_phrasing(corpus):
+    from training.data.multistep import fits
+
+    tok = _tok(corpus)
+    frame = chat_frame(tok)
+    rows = load_examples([str(corpus / "a.jsonl")])[:6]
+
+    def lettered(e, i):
+        return len(
+            tok(
+                "".join(lettered_prompt(e.state, e.to_question(i), frame)), add_special_tokens=False
+            )["input_ids"]
+        )
+
+    numbered = max(len(tok(build_prompt(e.state, e.to_question())[0])["input_ids"]) for e in rows)
+    longest = max(lettered(e, i) for e in rows for i in e.all_instructions())
+    assert longest > numbered  # the chat template and system line make it longer
+    assert len(fits(rows, tok, numbered)) == len(rows)
+    assert fits(rows, tok, numbered, frame) == [
+        e for e in rows if max(lettered(e, i) for i in e.all_instructions()) <= numbered
+    ]
+    assert fits(rows, tok, longest, frame) == rows
+
+
+def test_the_readout_cap_is_saved_with_the_checkpoint(corpus, monkeypatch):
+    from strands_decider import modeling
+
+    monkeypatch.setattr(modeling, "logit_softcap", lambda torso: 30.0)
+    model = _readout(corpus)
+    assert model.config.readout_softcap == 30.0 and model.head.softcap == 30.0
+    saved = StrandsDeciderConfig(**json.loads(model.config.to_json()))
+    monkeypatch.setattr(modeling, "logit_softcap", lambda torso: None)  # another base config
+    assert modeling.build_head(saved, 32).softcap == 30.0
+    plain = StrandsDeciderConfig(base_model="tiny", head_type="token_readout", render="lettered")
+    with pytest.raises(ValueError, match="readout_softcap"):
+        modeling.build_head(plain, 32)  # never guessed from the base model at load
+
+
+def test_prefix_bidir_refuses_an_unknown_layer_type():
+    cfg = SimpleNamespace(_attn_implementation="sdpa", layer_types=["chunked_attention"])
+    with pytest.raises(ValueError, match="chunked_attention"):
+        prefix_bidir_masks(cfg, torch.ones(1, 3), torch.tensor([1]), torch.float32)

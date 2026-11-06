@@ -33,10 +33,12 @@ from strands_decider.modeling import (
     checkpoint_dir,
     config_path,
 )
+from strands_decider.prompting import chat_frame
 
 from . import distributed
 from .data.collate import CollatorConfig, SystemOneCollator
 from .data.format import Example, load_examples, split_examples
+from .data.multistep import fits
 from .data.sampling import LengthGroupedBatchSampler, example_length, padding_fraction
 
 
@@ -470,8 +472,6 @@ def train(cfg: TrainConfig) -> str:
         raise ValueError("kl_frozen_weight > 0 needs kl_frozen_reference (a trained checkpoint)")
     if cfg.kl_frozen_reference and not (cfg.precompute_frozen_kl and cfg.kl_frozen_weight > 0):
         raise ValueError("kl_frozen_reference needs kl_frozen_weight > 0 and precompute_frozen_kl")
-    if cfg.head_type == "token_readout" and cfg.kl_frozen_weight > 0:
-        raise ValueError("head_type token_readout does not train with a frozen-KL reference yet")
     if cfg.host_embeddings and world > 1:  # DDP refuses a module with parameters on the CPU
         raise ValueError("host_embeddings is for one GPU; under torchrun keep the table on the GPU")
     torch.manual_seed(cfg.seed)
@@ -506,6 +506,9 @@ def train(cfg: TrainConfig) -> str:
         )
         if cfg.freeze_torso:
             model.freeze_torso()
+    # After _init_from, which sets head_type from the checkpoint.
+    if cfg.head_type == "token_readout" and cfg.kl_frozen_weight > 0:
+        raise ValueError("head_type token_readout does not train with a frozen-KL reference yet")
     # Checkpointing needs a grad-requiring input; a frozen torso has none, and it
     # buys nothing anyway since no backward pass traverses it.
     if cfg.gradient_checkpointing and not cfg.freeze_torso:
@@ -563,6 +566,17 @@ def train(cfg: TrainConfig) -> str:
         train_examples = train_examples + kl_rows
         random.Random(cfg.seed).shuffle(train_examples)
         print(f"[strands-decider] +{len(kl_rows):,} KL-only rows (weight {cfg.kl_only_weight})")
+    if cfg.render == "lettered":
+        # The data builds measure the numbered prompt; the lettered one is longer (chat
+        # template, system line). Drop what does not fit rather than stop on it mid-run.
+        frame = chat_frame(model.tokenizer)
+        sizes = len(train_examples), len(val_examples)
+        train_examples = fits(train_examples, model.tokenizer, cfg.max_length, frame)
+        val_examples = fits(val_examples, model.tokenizer, cfg.max_length, frame)
+        print(
+            f"[strands-decider] lettered prompts over max_length {cfg.max_length}: dropped "
+            f"{sizes[0] - len(train_examples):,} train and {sizes[1] - len(val_examples):,} val rows"
+        )
     print(f"[strands-decider] train={len(train_examples):,} val={len(val_examples):,}")
     if not train_examples:
         raise SystemExit("no training examples; run `python -m training.data build` first")
@@ -647,6 +661,12 @@ def train(cfg: TrainConfig) -> str:
         ref_model = StrandsDeciderModel.load(
             cfg.kl_frozen_reference, attn_implementation=cfg.attn_implementation
         )
+        if ref_model.config.head_type != cfg.head_type:
+            # The KL targets are read as the student's head reads its options.
+            raise ValueError(
+                f"kl_frozen_reference {cfg.kl_frozen_reference} has head_type "
+                f"{ref_model.config.head_type!r}; the student's is {cfg.head_type!r}"
+            )
         ref_model.to(device).eval()
         own = ref_model.tokenizer.get_vocab() == model.tokenizer.get_vocab()
         print(
