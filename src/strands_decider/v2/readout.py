@@ -21,7 +21,7 @@ from typing import Any
 import numpy as np
 
 from ..confidence import derive_confidence, derive_score_confidence
-from .config import DecisionConfig
+from .config import FILENAME, DecisionConfig
 from .prompt import RenderedQuestion, RenderedRequest
 
 READOUT_FILE = "readout.safetensors"
@@ -68,13 +68,16 @@ def load_safetensors(path: str | os.PathLike[str]) -> dict[str, np.ndarray]:
     return out
 
 
-def _softcap_from(model_config: Mapping[str, Any]) -> float | None:
-    """`final_logit_softcapping`, top level (Gemma4TextModel) or under `text_config`."""
+_ABSENT = object()
+
+
+def _softcap_from(model_config: Mapping[str, Any]) -> Any:
+    """`final_logit_softcapping`, top level (Gemma4TextModel) or under `text_config`, or
+    _ABSENT."""
     for d in (model_config, model_config.get("text_config") or {}):
         if "final_logit_softcapping" in d:
-            c = d["final_logit_softcapping"]
-            return None if c is None else float(c)
-    raise ValueError("the model config has no final_logit_softcapping")
+            return d["final_logit_softcapping"]
+    return _ABSENT
 
 
 @dataclass(frozen=True)
@@ -88,19 +91,35 @@ class Readout:
     softcap: float | None
 
     @classmethod
-    def load(cls, checkpoint: str | os.PathLike[str]) -> Readout:
-        """From a checkpoint directory: readout.safetensors and config.json."""
+    def load(
+        cls, checkpoint: str | os.PathLike[str], config: DecisionConfig | None = None
+    ) -> Readout:
+        """From a checkpoint directory: `weight` from readout.safetensors, and the soft-cap
+        from decision_config.json's `final_logit_softcapping` (`config`, if given, else the
+        directory's file). A converted artifact needs no config.json; if the directory has
+        one that names a different soft-cap, the checkpoint is inconsistent and refused."""
         d = os.fspath(checkpoint)
+        cfg = config if config is not None else DecisionConfig.load(d)
         tensors = load_safetensors(os.path.join(d, READOUT_FILE))
         if set(tensors) != {"weight"}:
             raise ValueError(
                 f"{READOUT_FILE} must hold one tensor, `weight`; has {sorted(tensors)}"
             )
         w = tensors["weight"]
-        if w.ndim != 2:
-            raise ValueError(f"readout weight must be [codes, hidden], not {w.shape}")
-        with open(os.path.join(d, MODEL_CONFIG_FILE), encoding="utf-8") as f:
-            softcap = _softcap_from(json.load(f))
+        if w.ndim != 2 or w.shape[0] != len(cfg.codes):
+            raise ValueError(
+                f"readout weight must be [{len(cfg.codes)} codes, hidden], not {w.shape}"
+            )
+        softcap = cfg.final_logit_softcapping
+        model_config = os.path.join(d, MODEL_CONFIG_FILE)
+        if os.path.exists(model_config):
+            with open(model_config, encoding="utf-8") as f:
+                theirs = _softcap_from(json.load(f))
+            if theirs is not _ABSENT and theirs != softcap:
+                raise ValueError(
+                    f"{MODEL_CONFIG_FILE} has final_logit_softcapping {theirs!r} and "
+                    f"{FILENAME} has {softcap!r}; the checkpoint is inconsistent"
+                )
         return cls(weight=w, softcap=softcap)
 
 

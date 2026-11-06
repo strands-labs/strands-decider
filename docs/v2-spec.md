@@ -282,7 +282,7 @@ For each question with k options:
 ```
 h  = the final-norm hidden state at position L - 1                  [hidden]
 z  = W h        W = readout.safetensors `weight`                    [255]
-z  = c * tanh(z / c)     c = config.json `final_logit_softcapping`  (30.0 for every Gemma 4 size)
+z  = c * tanh(z / c)     c = decision_config.json `final_logit_softcapping`  (30.0 for every Gemma 4 size)
 z  = z / temperature     decision_config.json `temperature`
 p  = softmax(z[0:k])     over the question's own k codes only
 ```
@@ -305,11 +305,13 @@ Confidence uses v1's formulas, which v2 keeps unchanged and shares as code (`src
 
 | field | type | meaning |
 | --- | --- | --- |
+| `interface` | string, `strands-decider-v2` | names the file as this interface's; any other value, or none, is an error |
 | `format_version` | integer, 1 | this layout |
 | `prompt` | string | the template the checkpoint was trained with: `strands-v2-plain` or `strands-v2-chat` |
 | `codes` | array of 255 strings | the codes of section 2, in order; anything else is an error |
 | `token_ids` | array of 255 distinct non-negative integers | each code's token id, in code order |
 | `temperature` | number, finite and above 0 | the divisor of section 7 |
+| `final_logit_softcapping` | number, finite and above 0 | the soft-cap c of section 7: the decoder's `final_logit_softcapping`, 30.0 for every Gemma 4 size |
 | `attention_mode` | string, `prefix_bidir` | the mask of section 6 |
 | `pooling` | string, `last` | the readout position of section 5 |
 | `max_length_validated` | positive integer | the longest prompt, in tokens (S plus the question's tokens), at which the checkpoint was validated |
@@ -317,17 +319,23 @@ Confidence uses v1's formulas, which v2 keeps unchanged and shares as code (`src
 
 `provenance` has four optional string fields and no others: `base_model`, a Hub id such as `google/gemma-4-E2B-it`; `base_revision`, the base model's 40-character commit; `release`, the released model's name or Hub id; and `source`, an https URL of the public code and recipe that trained it. No provenance value may be a filesystem path (absolute, home-relative, relative with `./` or `../`, a Windows path, or a path under `/fsx`), or a URI with any scheme but https.
 
+`interface` is the discriminator. Other formats use the same file names: llama.cpp's pplx-decider loader, for one, claims any directory that holds `decision_config.json` and `readout.safetensors`. A runtime or converter therefore identifies a v2 checkpoint by `"interface": "strands-decider-v2"`, never by its file names, and a v2 runtime refuses a `decision_config.json` without it before it reads any other field.
+
+`temperature` and `final_logit_softcapping` divide the readout's logits in float32 (section 7), so each must also lie in float32's normal range, about 1.2e-38 to 3.4e38; a value outside it is an error.
+
 Validation is strict. A missing required field, an unknown field at any level, and a value of the wrong type are errors, and a runtime refuses the checkpoint. A runtime must refuse a `prompt` it does not implement, rather than fall back to another; a later variant gets a new name. A runtime refuses a prompt longer than `max_length_validated` tokens unless its operator raises the limit explicitly, and it refuses rather than truncates. Training-side records, such as data paths, hyperparameters and the inputs to a weight average, do not belong in this file.
 
 An example (codes and token ids shortened):
 
 ```json
 {
+  "interface": "strands-decider-v2",
   "format_version": 1,
   "prompt": "strands-v2-chat",
   "codes": ["A", "B", "C", "...", "IV"],
   "token_ids": [236776, 236799, 236780, "...", 3767],
   "temperature": 1.0,
+  "final_logit_softcapping": 30.0,
   "attention_mode": "prefix_bidir",
   "pooling": "last",
   "max_length_validated": 8192,
@@ -344,7 +352,7 @@ A v2 checkpoint is a directory that holds:
 
 | file | contents |
 | --- | --- |
-| `config.json` | the decoder's configuration: `architectures: ["Gemma4TextModel"]`, `model_type: gemma4_text`, `final_logit_softcapping` |
+| `config.json` | the decoder's configuration, for the decoder's loader: `architectures: ["Gemma4TextModel"]`, `model_type: gemma4_text`. Its `final_logit_softcapping` equals `decision_config.json`'s; a runtime takes the soft-cap from `decision_config.json` and refuses a checkpoint whose two values differ |
 | `model.safetensors` or `model-*-of-*.safetensors` with `model.safetensors.index.json` | the Gemma 4 text decoder in bf16, any fine-tuning merged in: no adapter, no vision or audio tower, no language-model head |
 | `tokenizer.json`, `tokenizer_config.json` | Gemma 4's tokenizer, unchanged |
 | `chat_template.jinja` | Gemma 4's chat template, for reference; runtimes render by this spec, not by the template |
@@ -355,7 +363,7 @@ A v2 checkpoint is a directory that holds:
 
 A checkpoint carries no code. Runtimes implement this spec; they do not import code shipped inside a checkpoint.
 
-A converted artifact for another runtime, such as an MLX model or a GGUF file, carries the decoder in that runtime's format and the same `readout.safetensors` and `decision_config.json`, unchanged, beside it. The readout stays in safetensors, outside the converted decoder, so that every format reads the same rows.
+A converted artifact for another runtime, such as an MLX model or a GGUF file, carries the decoder in that runtime's format and the same `readout.safetensors` and `decision_config.json`, unchanged, beside it. The readout stays in safetensors, outside the converted decoder, so that every format reads the same rows. The artifact needs no `config.json`: everything the readout needs beyond its weight, the soft-cap included, is in `decision_config.json`. `strands_decider.v2.Readout.load` reads the weight and the soft-cap from those two files.
 
 ## 10. Golden vectors and conformance
 
