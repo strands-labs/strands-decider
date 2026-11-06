@@ -1,4 +1,4 @@
-"""From the hidden state at a question's last token to its answer (docs/v2-spec.md, The readout).
+"""From the hidden state at a question's last token to its answer (docs/spec.md, The readout).
 
     z = bf16(W h)              W: readout.safetensors `weight` in bf16; a bf16 GEMM
     z = tanh(z / c) * c        float32; c: decision_config.json `final_logit_softcapping`
@@ -338,7 +338,7 @@ def question_probabilities(
     inputs: str,
 ) -> dict[str, np.ndarray]:
     """Each question's code probabilities, in code order ([k] per question), keyed by
-    question name: section 7 of docs/v2-spec.md from the stage `inputs` on.
+    question name: section 7 of docs/spec.md from the stage `inputs` on.
 
     `values` holds one row per question, in `rendered.questions` order or keyed by question
     name. `inputs` names what a row is (`STAGES`) and is required, so that nothing is applied

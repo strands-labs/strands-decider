@@ -1,4 +1,4 @@
-"""A v2 request as token ids: the prompt template of docs/v2-spec.md.
+"""A request as token ids: the prompt template of docs/spec.md.
 
 Each question becomes one prompt, `state part + question part`. The state part is
 identical for every question of a request and ends at S, its token count; a runtime
@@ -6,7 +6,7 @@ encodes it once and shares it. The question part holds the question and its opti
 each option labelled with its code (`A. billing — payments`), and the prompt's last token
 is where the readout reads the answer.
 
-Two variants, `strands-v2-plain` and `strands-v2-chat`, share one body:
+Two variants, `strands-plain` and `strands-chat`, share one body:
 
     plain:  <bos>                 + body + "\\n<answer>"
     chat:   <bos><|turn>user\\n     + body + "<turn|>\\n<|turn>model\\n"
@@ -16,7 +16,7 @@ its own as plain text: a special-token string inside the request (say `<turn|>` 
 state) is text, never a control token. The state part and the question part are encoded
 separately, so no token can straddle S. With Gemma 4's tokenizer the result is also what
 encoding the whole prompt in one call gives, for any request without special-token
-strings; tests/test_v2_prompt.py proves both.
+strings; tests/test_core_prompt.py proves both.
 
 Rendering never changes the caller's tokenizer: text is encoded by a private copy whose
 settings are fixed once, so renders on several threads, and other users of the same
@@ -38,8 +38,8 @@ from .request import Question, Request, parse_request
 if TYPE_CHECKING:
     from tokenizers import Tokenizer
 
-PLAIN = "strands-v2-plain"
-CHAT = "strands-v2-chat"
+PLAIN = "strands-plain"
+CHAT = "strands-chat"
 VARIANTS = (PLAIN, CHAT)
 
 # Gemma 4's control tokens, by their strings.
@@ -230,7 +230,7 @@ def _plain_text_copy(tok: Tokenizer) -> Tokenizer:
 
 
 class _Encoder:
-    """Encodes pieces as v2 does: control tokens by id, text runs as plain text.
+    """Encodes pieces as the spec says: control tokens by id, text runs as plain text.
 
     It reads the caller's tokenizer once, to copy it, and never changes it. Text goes
     through the private copy of `_plain_text_copy`, whose special-token matching is off
@@ -244,7 +244,7 @@ class _Encoder:
     def control(self, s: str) -> int:
         i = self.tok.token_to_id(s)
         if i is None:
-            raise ValueError(f"the tokenizer has no {s} token; the v2 prompts need Gemma 4's")
+            raise ValueError(f"the tokenizer has no {s} token; these prompts need Gemma 4's")
         return int(i)
 
     def texts(self, texts: list[str]) -> list[list[int]]:

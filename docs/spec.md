@@ -1,10 +1,10 @@
-# Strands Decider v2: the decision interface
+# The Strands Decider decision interface
 
-This document defines the Strands Decider v2 decision interface. It specifies how a request becomes token ids, how the decoder attends over them, how its output becomes answers, which files a checkpoint carries, and what a runtime must do to conform. Any runtime that follows it, in any language, gives answers within section 10's bounds of the reference's for the same checkpoint: PyTorch, vLLM, MLX, llama.cpp, or numpy behind a remote decoder.
+This document defines the Strands Decider decision interface, which the Strands Decider v2 models use. It specifies how a request becomes token ids, how the decoder attends over them, how its output becomes answers, which files a checkpoint carries, and what a runtime must do to conform. Any runtime that follows it, in any language, gives answers within section 10's bounds of the reference's for the same checkpoint: PyTorch, vLLM, MLX, llama.cpp, or numpy behind a remote decoder.
 
-The reference implementation of the torch-free half is `strands_decider.v2` (`src/strands_decider/v2/`). It needs only `tokenizers`, numpy and the Python standard library. The `strands-decider` distribution declares both, but it also requires torch and transformers for v1's engines, so installing it installs torch. A torch-free install, for AWS Lambda for one, needs a separate distribution or an extra without torch; which one is not yet decided (section 12). Its tests are `tests/test_v2_prompt.py`, `tests/test_v2_readout.py` and `tests/test_v2_config.py`, and the render goldens are `tests/fixtures/v2/render_goldens.json`. v2 sits beside v1: the v1 engines (`infer.py`, `hidden_engine.py`, `mlx_engine.py`) and their checkpoints are unchanged.
+The reference implementation of the torch-free half is `strands_decider.core` (`src/strands_decider/core/`). It needs only `tokenizers`, numpy and the Python standard library. The `strands-decider` distribution declares both, but it also requires torch and transformers for v1's engines, so installing it installs torch. A torch-free install, for AWS Lambda for one, needs a separate distribution or an extra without torch; which one is not yet decided (section 12). Its tests are `tests/test_core_prompt.py`, `tests/test_core_readout.py` and `tests/test_core_config.py`, and the render goldens are `tests/fixtures/core/render_goldens.json`. The core sits beside the v1 engines (`infer.py`, `hidden_engine.py`, `mlx_engine.py`); they and their checkpoints are unchanged.
 
-v2 keeps v1's request and response: the same `POST /v1/systemone` body, the same three question types and limits, and the same answer fields and confidence formulas. Three things change. Options are labelled with letter codes instead of numbers, and the readout scores the codes from the hidden state at the prompt's last token, where v1's pointer head compared the answer position with each option's last token. The state is encoded bidirectionally, and each question sees the whole prompt bidirectionally (the `prefix_bidir` mask). The decoder is Gemma 4, merged to one set of bf16 weights.
+The interface keeps v1's request and response: the same `POST /v1/systemone` body, the same three question types and limits, and the same answer fields and confidence formulas. Three things change. Options are labelled with letter codes instead of numbers, and the readout scores the codes from the hidden state at the prompt's last token, where v1's pointer head compared the answer position with each option's last token. The state is encoded bidirectionally, and each question sees the whole prompt bidirectionally (the `prefix_bidir` mask). The decoder is Gemma 4, merged to one set of bf16 weights.
 
 Paths are relative to the repository root. Token ids are those of Gemma 4's tokenizer, which every Gemma 4 size ships unchanged: `tokenizer.json` with sha256 `cc8d3a0ce36466ccc1278bf987df5f71db1719b9ca6b4118264f45cb627bfe0f`, as in `google/gemma-4-E2B-it` at revision `3e22461f65e89153144f8adb70e3b8c2cc9845a7`.
 
@@ -27,11 +27,11 @@ A question has a `type`, `instructions` (a string, object or array) and `criteri
 | `choice` | object of option name to description (string, object, array or null) | 2 to 255, in the object's order |
 | `score` | array of 2 to 10 level descriptions (strings), lowest level first | one per level, named `0` to `L-1` |
 
-A noul's criteria replace its default descriptions. A key that is absent keeps its default (`false`: "the statement does not hold for this state"; `true`: "the statement holds for this state"). A key given as null renders as a bare label. As in v1, a question may omit `type`: it is a noul when its criteria are absent or an object whose keys are a subset of `true` and `false`, a choice when they are any other object, and a score when they are an array. `strands_decider.v2.parse_request` accepts and refuses exactly what v1's pydantic models accept and refuse, and `tests/test_v2_prompt.py` checks it against them.
+A noul's criteria replace its default descriptions. A key that is absent keeps its default (`false`: "the statement does not hold for this state"; `true`: "the statement holds for this state"). A key given as null renders as a bare label. As in v1, a question may omit `type`: it is a noul when its criteria are absent or an object whose keys are a subset of `true` and `false`, a choice when they are any other object, and a score when they are an array. `strands_decider.core.parse_request` accepts and refuses exactly what v1's pydantic models accept and refuse, and `tests/test_core_prompt.py` checks it against them.
 
 ## 2. The codes
 
-A question with k options binds them, in rendered order, to the first k of 255 answer codes. The codes are the spreadsheet column names `A` through `Z`, then `AA` through `IV`, without `GZ`: 256 names less one. Gemma 4's tokenizer encodes `GZ` as two tokens (`G`, `Z`), and every other name as exactly one, so every code is a single token. The list is `strands_decider.v2.CODES`.
+A question with k options binds them, in rendered order, to the first k of 255 answer codes. The codes are the spreadsheet column names `A` through `Z`, then `AA` through `IV`, without `GZ`: 256 names less one. Gemma 4's tokenizer encodes `GZ` as two tokens (`G`, `Z`), and every other name as exactly one, so every code is a single token. The list is `strands_decider.core.CODES`.
 
 | question | codes |
 | --- | --- |
@@ -41,7 +41,7 @@ A question with k options binds them, in rendered order, to the first k of 255 a
 
 Training may permute a question's options before they take codes (`render(..., option_orders=...)`). The rendered question records the binding that results, and answers are always reported in the request's terms, so serving never permutes.
 
-The code token ids, from the checkpoints' `decision_config.json` and checked against the tokenizer by `tests/test_v2_prompt.py`:
+The code token ids, from the checkpoints' `decision_config.json` and checked against the tokenizer by `tests/test_core_prompt.py`:
 
 ```
 A=236776 B=236799 C=236780 D=236796 E=236788 F=236811 G=236823 H=236814 I=236777 J=236863
@@ -113,7 +113,7 @@ Answer with the code of one option.
 | choice | `Select exactly one option.` |
 | score | `Rate the state against the ordered levels below (lowest first).` |
 
-`{instructions}` is the question's instructions rendered by section 3.1. A multi-line rendering, such as JSON, stays multi-line. When the instructions render empty, their line is left out, with no blank line in its place. The line `Answer with the code of one option.` is new in v2. It makes a code the natural next token after the prompt, which matters for the chat variant of an instruction-tuned base.
+`{instructions}` is the question's instructions rendered by section 3.1. A multi-line rendering, such as JSON, stays multi-line. When the instructions render empty, their line is left out, with no blank line in its place. The line `Answer with the code of one option.` is not in v1's prompt. It makes a code the natural next token after the prompt, which matters for the chat variant of an instruction-tuned base.
 
 ### 3.4 Option lines
 
@@ -138,23 +138,23 @@ The name is the noul label (`false`, `true`), the choice option's name, or the s
 
 Both variants share one body: the state block followed by the question block. They differ in what surrounds it. A training A/B chooses between them, and `decision_config.json` names the one a checkpoint was trained with.
 
-`strands-v2-plain` is the body as text, with no chat template:
+`strands-plain` is the body as text, with no chat template:
 
 ```
 <bos>{state block}{question block}\n<answer>
 ```
 
-`strands-v2-chat` is the body as the single user turn of Gemma 4's chat template, followed by the generation prompt, with thinking off and no system turn:
+`strands-chat` is the body as the single user turn of Gemma 4's chat template, followed by the generation prompt, with thinking off and no system turn:
 
 ```
 <bos><|turn>user\n{state block}{question block}<turn|>\n<|turn>model\n
 ```
 
-This is what Gemma 4's `chat_template.jinja` renders for `messages=[{"role": "user", "content": body}]` with `add_generation_prompt=True` and `enable_thinking` false or absent. The template strips the content of leading and trailing whitespace; the body starts with `<state>` and ends with `</question>`, so stripping leaves it unchanged. With thinking off the template emits no system turn, and v2 adds none: the state and question are the whole instruction, and a fixed system turn would add tokens to every state without new information. Section 12 lists this as a question for the A/B.
+This is what Gemma 4's `chat_template.jinja` renders for `messages=[{"role": "user", "content": body}]` with `add_generation_prompt=True` and `enable_thinking` false or absent. The template strips the content of leading and trailing whitespace; the body starts with `<state>` and ends with `</question>`, so stripping leaves it unchanged. With thinking off the template emits no system turn, and this interface adds none: the state and question are the whole instruction, and a fixed system turn would add tokens to every state without new information. Section 12 lists this as a question for the A/B.
 
-The chat templates of the larger Gemma 4 sizes differ in one place. With thinking off, the templates of 12B, 26B-A4B and 31B append an empty thought channel, `<|channel>thought\n<channel|>`, after `<|turn>model\n`; those of E2B and E4B do not. `strands-v2-chat` leaves the empty channel out for every size, so that one prompt string serves every checkpoint and the readout always reads the same token. `tests/test_v2_prompt.py` pins each known template, by sha256, to one of the two forms. A checkpoint trained with the empty channel needs its own prompt name.
+The chat templates of the larger Gemma 4 sizes differ in one place. With thinking off, the templates of 12B, 26B-A4B and 31B append an empty thought channel, `<|channel>thought\n<channel|>`, after `<|turn>model\n`; those of E2B and E4B do not. `strands-chat` leaves the empty channel out for every size, so that one prompt string serves every checkpoint and the readout always reads the same token. `tests/test_core_prompt.py` pins each known template, by sha256, to one of the two forms. A checkpoint trained with the empty channel needs its own prompt name.
 
-The chat template is where `strands-v2-chat` comes from, not how it is rendered. A runtime must not render v2 prompts with Hugging Face's `apply_chat_template`, or with any chat template, for either variant, and a v2 checkpoint ships no template (section 9). Gemma 4's templates do not give v2 prompts: the 12B, 26B-A4B and 31B templates add the empty thought channel; a template only wraps the body, which section 3 defines; `strands-v2-plain` has no chat turn at all; and `apply_chat_template(tokenize=True)` encodes the rendered string in one call with special-token matching on, so special-token strings in request text become control tokens, which section 3.6 forbids. Runtimes render by this spec, with `strands_decider.v2.render` or an implementation that reproduces the render goldens of section 10.
+The chat template is where `strands-chat` comes from, not how it is rendered. A runtime must not render these prompts with Hugging Face's `apply_chat_template`, or with any chat template, for either variant, and a decision checkpoint ships no template (section 9). Gemma 4's templates do not give these prompts: the 12B, 26B-A4B and 31B templates add the empty thought channel; a template only wraps the body, which section 3 defines; `strands-plain` has no chat turn at all; and `apply_chat_template(tokenize=True)` encodes the rendered string in one call with special-token matching on, so special-token strings in request text become control tokens, which section 3.6 forbids. Runtimes render by this spec, with `strands_decider.core.render` or an implementation that reproduces the render goldens of section 10.
 
 ### 3.6 From text to token ids
 
@@ -174,7 +174,7 @@ Each text run is encoded on its own by the tokenizer as plain text: special-toke
 <|image|> <|audio|> <image|> <audio|> <|video|>
 ```
 
-A state containing the characters `<turn|>`, or any other of the 24 strings, encodes them as text. The only special tokens in a prompt are the template's. `strands_decider.v2.render` encodes with a private copy of the tokenizer whose settings never change, so this holds when several threads render with one tokenizer, or use it for other things, at the same time.
+A state containing the characters `<turn|>`, or any other of the 24 strings, encodes them as text. The only special tokens in a prompt are the template's. `strands_decider.core.render` encodes with a private copy of the tokenizer whose settings never change, so this holds when several threads render with one tokenizer, or use it for other things, at the same time.
 
 The pieces of each variant, with S marking the state boundary of section 4:
 
@@ -183,7 +183,7 @@ plain:  [<bos>] "<state>\n...</state>\n" S "<question ...>...</question>\n<answe
 chat:   [<bos>] [<|turn>] "user\n<state>\n...</state>\n" S "<question ...>...</question>" [<turn|>] "\n" [<|turn>] "model\n"
 ```
 
-For a request whose text contains none of the 24 special-token strings, the ids equal what one call on the whole rendered string gives with special-token matching on, which is how Hugging Face's `apply_chat_template(tokenize=True)` encodes. `tests/test_v2_prompt.py` checks this on the goldens and on randomly generated requests, and, where transformers is installed, against `apply_chat_template(tokenize=True)` itself with each Gemma 4 template given. It also checks that requests holding all 24 strings, in every place text can go, produce none of them.
+For a request whose text contains none of the 24 special-token strings, the ids equal what one call on the whole rendered string gives with special-token matching on, which is how Hugging Face's `apply_chat_template(tokenize=True)` encodes. `tests/test_core_prompt.py` checks this on the goldens and on randomly generated requests, and, where transformers is installed, against `apply_chat_template(tokenize=True)` itself with each Gemma 4 template given. It also checks that requests holding all 24 strings, in every place text can go, produce none of them.
 
 ### 3.7 Examples
 
@@ -201,7 +201,7 @@ The request (`support_ticket` in the goldens):
                    "criteria": ["Calm", "Frustrated", "Very angry"]}}}
 ```
 
-The `department` question in `strands-v2-plain`, 95 tokens, S = 22:
+The `department` question in `strands-plain`, 95 tokens, S = 22:
 
 ```
 <bos><state>
@@ -232,7 +232,7 @@ question ids [22, 95): 236820 15884 1722 718 17005 905 107 11323 7121 886 5086 2
 code token ids:      A 236776, B 236799, C 236780 (billing, technical, sales)
 ```
 
-The same question in `strands-v2-chat`, 99 tokens, S = 25. The text ends with a newline after `model`:
+The same question in `strands-chat`, 99 tokens, S = 25. The text ends with a newline after `model`:
 
 ```
 <bos><|turn>user
@@ -275,11 +275,11 @@ For Gemma 4's tokenizer the rule costs nothing: the separate encodings equal the
 2. The normalizer replaces each space with U+2581 and does nothing else; it maps characters one to one and sees no context. The pre-tokenizer splits on spaces, which no longer exist after normalization (and a split could only add boundaries). The post-processor adds no tokens, and BPE runs without dropout.
 3. So no merge across S is ever possible. BPE applies merges in rank order, and merges on one side of S never create or remove a candidate pair on the other, so each side ends with the merges it makes alone.
 
-`tests/test_v2_prompt.py` proves this in two ways. `test_tokenizer_cannot_merge_across_a_line_end` checks the premises of steps 1 and 2 against the tokenizer file itself. `test_s_is_a_token_boundary` encodes 120 random requests in both variants with the two text runs at S joined into one, including requests full of special-token strings, line ends, tabs, non-ASCII text and option-like text, and gets the same ids as the rule. A rendered prompt always has `</state>\n` before S and `<question` after it, so the test also varies the characters next to S directly: 1,200 random pairs of a run ending in one to three line feeds after any character and a run starting with any character but a line feed, special-token strings included, encode the same joined as apart. `test_ids_match_one_call_encoding` checks that a token starts at exactly S's character offset in the one-call encoding. A future tokenizer that fails these premises keeps the rule well defined (separate encoding), but its ids may then differ from those a text-only tool produces, so this spec would need a new seam for it.
+`tests/test_core_prompt.py` proves this in two ways. `test_tokenizer_cannot_merge_across_a_line_end` checks the premises of steps 1 and 2 against the tokenizer file itself. `test_s_is_a_token_boundary` encodes 120 random requests in both variants with the two text runs at S joined into one, including requests full of special-token strings, line ends, tabs, non-ASCII text and option-like text, and gets the same ids as the rule. A rendered prompt always has `</state>\n` before S and `<question` after it, so the test also varies the characters next to S directly: 1,200 random pairs of a run ending in one to three line feeds after any character and a run starting with any character but a line feed, special-token strings included, encode the same joined as apart. `test_ids_match_one_call_encoding` checks that a token starts at exactly S's character offset in the one-call encoding. A future tokenizer that fails these premises keeps the rule well defined (separate encoding), but its ids may then differ from those a text-only tool produces, so this spec would need a new seam for it.
 
 ## 5. Where the answer is read
 
-The answer is read from the hidden state at the prompt's last token, position L - 1 (`pooling: "last"`). In `strands-v2-plain` that token is `>` (id 236813), the end of `<answer>`. In `strands-v2-chat` it is the line feed (id 107) after `<|turn>model`. Every question of a variant ends with the same tokens: plain with `\n<answer>` (107 236820 14433 236813), chat with `<turn|>\n<|turn>model\n` (106 107 105 4368 107).
+The answer is read from the hidden state at the prompt's last token, position L - 1 (`pooling: "last"`). In `strands-plain` that token is `>` (id 236813), the end of `<answer>`. In `strands-chat` it is the line feed (id 107) after `<|turn>model`. Every question of a variant ends with the same tokens: plain with `\n<answer>` (107 236820 14433 236813), chat with `<turn|>\n<|turn>model\n` (106 107 105 4368 107).
 
 ## 6. The attention mask: `prefix_bidir`
 
@@ -290,7 +290,7 @@ i < S:   j < S        (the state sees the state, in both directions, and never a
 i >= S:  j < L        (a question sees the whole prompt, in both directions)
 ```
 
-The mask applies on every layer, sliding-window layers included, and replaces their window: no layer limits attention by distance. Positions are the token indices, 0 to L - 1, so every question's first token sits at position S. Each question is its own sequence over the shared state; no question sees another. Because the state never attends to a question, its keys and values are the same for every question and can be computed once. `strands_decider.v2.attention_mask(S, L)` gives the mask as booleans, row i for token i. It is an illustration of the rule, for tests and small examples: a dense L × L array, O(L²) in memory (64 MB at L = 8,192). A runtime builds the form its attention kernel takes, such as the state's length and each question's span.
+The mask applies on every layer, sliding-window layers included, and replaces their window: no layer limits attention by distance. Positions are the token indices, 0 to L - 1, so every question's first token sits at position S. Each question is its own sequence over the shared state; no question sees another. Because the state never attends to a question, its keys and values are the same for every question and can be computed once. `strands_decider.core.attention_mask(S, L)` gives the mask as booleans, row i for token i. It is an illustration of the rule, for tests and small examples: a dense L × L array, O(L²) in memory (64 MB at L = 8,192). A runtime builds the form its attention kernel takes, such as the state's length and each question's span.
 
 ## 7. The readout
 
@@ -314,7 +314,7 @@ The arithmetic above is the training reference's, and the vLLM plugin's (`comput
 2. The soft-cap is computed in float32 as `tanh(z / c) * c`, each operation rounded to float32, and the temperature divides the result in float32.
 3. The softmax over the question's k codes is taken in float32.
 
-`strands_decider.v2.read` is the reference implementation of this regime in numpy, which has no bf16. It sums the GEMM's products in float64, rounds each sum to float32, and rounds that to bf16 through the float32's bits (`round_to_bf16`: add 0x7FFF, plus 1 if the lowest kept bit is set, and clear the low 16 bits). A GPU's float32 accumulator sums in another order, so where a sum falls next to a bf16 rounding boundary its `z` can differ by one bf16 step; section 10's bounds absorb this. `tests/test_v2_readout.py` checks `read` against an independent reimplementation of the plugin's arithmetic on random bf16 inputs, logits between 16 and 32 included: `z` agrees bit for bit, and the probabilities to 1e-5.
+`strands_decider.core.read` is the reference implementation of this regime in numpy, which has no bf16. It sums the GEMM's products in float64, rounds each sum to float32, and rounds that to bf16 through the float32's bits (`round_to_bf16`: add 0x7FFF, plus 1 if the lowest kept bit is set, and clear the low 16 bits). A GPU's float32 accumulator sums in another order, so where a sum falls next to a bf16 rounding boundary its `z` can differ by one bf16 step; section 10's bounds absorb this. `tests/test_core_readout.py` checks `read` against an independent reimplementation of the plugin's arithmetic on random bf16 inputs, logits between 16 and 32 included: `z` agrees bit for bit, and the probabilities to 1e-5.
 
 The temperature, like the soft-cap, is applied exactly once. A runtime that applies part of the readout itself returns a named stage (section 11), and the client applies only what the stage has not. On vLLM the plugin's `compute_logits` applies the soft-cap and the checkpoint temperature, so the client sends `temperature` 1.0 in its request. Under `--logprobs-mode processed_logprobs` vLLM divides the logits by the request's temperature before it takes the log-softmax, so any other value would apply a temperature a second time.
 
@@ -326,7 +326,7 @@ The answer fields are v1's response schema (`schema.py`, `NoulAnswer`, `ChoiceAn
 | choice | `choice`: the option with the highest probability (the first in request order on a tie); `probabilities`: option name to probability, in request order; `confidence` |
 | score | `score`: the expected level, sum of i times p_i; `legend`: level to rubric text (stripped), ascending; `probabilities`: level to probability, ascending; `confidence` |
 
-Confidence uses v1's formulas, which v2 keeps unchanged and shares as code (`src/strands_decider/confidence.py`). A choice's confidence is the normalised top probability, (k p_max - 1) / (k - 1): 0 for a uniform distribution, 1 for a certain one, whatever k is. A score's is one minus the normalised standard deviation over the levels, with the optional floor correction for ordinal smoothing (`ordinal_smoothing`, 0 by default). A noul has no confidence field, because its probability already is its uncertainty. A response is v1's `SystemOneResponse`: `model`, `answers` keyed by question name, and `usage` with `input_tokens` (the state once, then each question) and `output_tokens` (the number of questions).
+Confidence uses v1's formulas, unchanged and shared as code (`src/strands_decider/confidence.py`). A choice's confidence is the normalised top probability, (k p_max - 1) / (k - 1): 0 for a uniform distribution, 1 for a certain one, whatever k is. A score's is one minus the normalised standard deviation over the levels, with the optional floor correction for ordinal smoothing (`ordinal_smoothing`, 0 by default). A noul has no confidence field, because its probability already is its uncertainty. A response is v1's `SystemOneResponse`: `model`, `answers` keyed by question name, and `usage` with `input_tokens` (the state once, then each question) and `output_tokens` (the number of questions).
 
 ## 8. The `decision_config.json` schema
 
@@ -334,9 +334,9 @@ Confidence uses v1's formulas, which v2 keeps unchanged and shares as code (`src
 
 | field | type | meaning |
 | --- | --- | --- |
-| `interface` | string, `strands-decider-v2` | names the file as this interface's; any other value, or none, is an error |
+| `interface` | string, `strands-decider` | names the file as this interface's; any other value, or none, is an error |
 | `format_version` | integer, 1 | this layout |
-| `prompt` | string | the template the checkpoint was trained with: `strands-v2-plain` or `strands-v2-chat` |
+| `prompt` | string | the template the checkpoint was trained with: `strands-plain` or `strands-chat` |
 | `codes` | array of 255 strings | the codes of section 2, in order; anything else is an error |
 | `token_ids` | array of 255 distinct non-negative integers | each code's token id, in code order |
 | `temperature` | number, finite and above 0 | the divisor of section 7 |
@@ -348,7 +348,7 @@ Confidence uses v1's formulas, which v2 keeps unchanged and shares as code (`src
 
 `provenance` has four optional string fields and no others: `base_model`, a Hub id such as `google/gemma-4-E2B-it`; `base_revision`, the base model's 40-character commit; `release`, the released model's name or Hub id; and `source`, an https URL of the public code and recipe that trained it. A checkpoint without provenance leaves the field out; `"provenance": null` is an error. `DecisionConfig` checks only these formats. Keeping private paths and hosts out of a released checkpoint is the job of the release's export checks, not of this file's loader.
 
-`interface` is the discriminator. Other formats use the same file names: llama.cpp's pplx-decider loader, for one, claims any directory that holds `decision_config.json` and `readout.safetensors`. A runtime or converter therefore identifies a v2 checkpoint by `"interface": "strands-decider-v2"`, never by its file names, and a v2 runtime refuses a `decision_config.json` without it before it reads any other field.
+`interface` is the discriminator. Other formats use the same file names: llama.cpp's pplx-decider loader, for one, claims any directory that holds `decision_config.json` and `readout.safetensors`. A runtime or converter therefore identifies a decision checkpoint by `"interface": "strands-decider"`, never by its file names, and a runtime refuses a `decision_config.json` without it before it reads any other field.
 
 `temperature` and `final_logit_softcapping` divide the readout's logits in float32 (section 7), so each must also lie in float32's normal range, about 1.2e-38 to 3.4e38; a value outside it is an error.
 
@@ -358,9 +358,9 @@ An example (codes and token ids shortened):
 
 ```json
 {
-  "interface": "strands-decider-v2",
+  "interface": "strands-decider",
   "format_version": 1,
-  "prompt": "strands-v2-chat",
+  "prompt": "strands-chat",
   "codes": ["A", "B", "C", "...", "IV"],
   "token_ids": [236776, 236799, 236780, "...", 3767],
   "temperature": 1.0,
@@ -373,11 +373,11 @@ An example (codes and token ids shortened):
 }
 ```
 
-`strands_decider.v2.DecisionConfig.load` reads and validates the file; `tests/test_v2_config.py` lists the cases it refuses.
+`strands_decider.core.DecisionConfig.load` reads and validates the file; `tests/test_core_config.py` lists the cases it refuses.
 
 ## 9. The checkpoint layout
 
-A v2 checkpoint is a directory that holds:
+A decision checkpoint is a directory that holds:
 
 | file | contents |
 | --- | --- |
@@ -391,17 +391,17 @@ A v2 checkpoint is a directory that holds:
 
 A checkpoint carries no code. Runtimes implement this spec; they do not import code shipped inside a checkpoint.
 
-A checkpoint carries no chat template either: no `chat_template.jinja`, unlike the Gemma 4 base models, and no `chat_template` in `tokenizer_config.json`. A template beside the weights would be applied by tools that look for one, such as a chat-completions endpoint or a GGUF converter that embeds it, and section 3.5 explains why no template gives v2's prompts. Shipping a v2 template that renders `strands-v2-chat` for every size was considered and not chosen: it would still leave the body, the plain variant and the encoding of special-token strings to the spec, and invite the one-call tokenization that gets the last wrong.
+A checkpoint carries no chat template either: no `chat_template.jinja`, unlike the Gemma 4 base models, and no `chat_template` in `tokenizer_config.json`. A template beside the weights would be applied by tools that look for one, such as a chat-completions endpoint or a GGUF converter that embeds it, and section 3.5 explains why no template gives these prompts. Shipping a Strands template that renders `strands-chat` for every size was considered and not chosen: it would still leave the body, the plain variant and the encoding of special-token strings to the spec, and invite the one-call tokenization that gets the last wrong.
 
-A converted artifact for another runtime, such as an MLX model or a GGUF file, carries the decoder in that runtime's format and the same `readout.safetensors` and `decision_config.json`, unchanged, beside it. The readout stays in safetensors, outside the converted decoder, so that every format reads the same rows. The artifact needs no `config.json`: everything the readout needs beyond its weight, the soft-cap included, is in `decision_config.json`. `strands_decider.v2.Readout.load` reads the weight and the soft-cap from those two files.
+A converted artifact for another runtime, such as an MLX model or a GGUF file, carries the decoder in that runtime's format and the same `readout.safetensors` and `decision_config.json`, unchanged, beside it. The readout stays in safetensors, outside the converted decoder, so that every format reads the same rows. The artifact needs no `config.json`: everything the readout needs beyond its weight, the soft-cap included, is in `decision_config.json`. `strands_decider.core.Readout.load` reads the weight and the soft-cap from those two files.
 
 ## 10. Golden vectors and conformance
 
 Two kinds of golden data pin the interface.
 
-Render goldens fix the prompt. `tests/fixtures/v2/render_goldens.json` holds, for each case and variant, the request, the state text, S, the state ids, and for each question its text, ids, codes, code token ids and bound options. They depend only on the tokenizer. A conforming runtime reproduces them exactly: the same ids, the same S, the same codes. There is no tolerance.
+Render goldens fix the prompt. `tests/fixtures/core/render_goldens.json` holds, for each case and variant, the request, the state text, S, the state ids, and for each question its text, ids, codes, code token ids and bound options. They depend only on the tokenizer. A conforming runtime reproduces them exactly: the same ids, the same S, the same codes. There is no tolerance.
 
-Model goldens fix the answers of one checkpoint. Each checkpoint release publishes `golden_vectors.jsonl` in its directory. Each line holds a request, its rendered ids per question, and the reference code probabilities per question, computed by the reference runtime: the decoder in bf16, weights and activations, one prompt per forward pass under the `prefix_bidir` mask, then the readout in section 7.1's precision regime. The reference runtime is the PyTorch decoder with the `prefix_bidir` mask behind `strands_decider.v2.evaluate`; it is not part of this torch-free core. The set covers every question type, both short and long states up to `max_length_validated`, and choices with many options.
+Model goldens fix the answers of one checkpoint. Each checkpoint release publishes `golden_vectors.jsonl` in its directory. Each line holds a request, its rendered ids per question, and the reference code probabilities per question, computed by the reference runtime: the decoder in bf16, weights and activations, one prompt per forward pass under the `prefix_bidir` mask, then the readout in section 7.1's precision regime. The reference runtime is the PyTorch decoder with the `prefix_bidir` mask behind `strands_decider.core.evaluate`; it is not part of this torch-free core. The set covers every question type, both short and long states up to `max_length_validated`, and choices with many options.
 
 A runtime conforms for a checkpoint when, on that checkpoint's model goldens:
 
@@ -432,7 +432,7 @@ A row of logits or probabilities holds the codes in code order, either all 255 o
 
 The vLLM plugin is a `probabilities` runtime. A completion with `allowed_token_ids` set to the question's k code ids, `logprobs` k and `temperature` 1.0, under `--logprobs-mode processed_logprobs`, returns the log-softmax of the plugin's final logits over exactly those k codes; their exponentials are the row. A completion with `logprobs` 255 and no `allowed_token_ids` returns the softmax over all 255 codes, which renormalises to the same row.
 
-This is v1's `hidden_engine.Backend` narrowed to v2. v1's backend returns several rows per question, one per option and one for `<answer>`, for the pointer head; v2 needs only the last token. `strands_decider.v2.Backend` states the contract:
+This is v1's `hidden_engine.Backend`, narrowed. v1's backend returns several rows per question, one per option and one for `<answer>`, for the pointer head; the code readout needs only the row at the last token. `strands_decider.core.Backend` states the contract:
 
 ```python
 class Backend(Protocol):
@@ -446,14 +446,14 @@ class Backend(Protocol):
         under prefix_bidir after the shared state, read at its last token."""
 ```
 
-`strands_decider.v2.evaluate(request, tokenizer, readout, config, backend)` joins the pieces. It refuses a backend that does not name its stage, renders the request with the checkpoint's prompt, calls `forward` once with the shared state and every question, reads the answers from the stage the backend names, and returns a `SystemOneResponse` as JSON. Its parts are public: `read(rows, readout, config, rendered, inputs=stage)` gives the answers and `question_probabilities` the code probabilities, from rows of any stage, where `inputs` is required; `readout_logits` is the bf16 GEMM; `answer(rendered_question, probabilities)` formats one answer. As with v1's backend, a runtime may batch, cache the state's keys and values, or split the work across devices, provided each question's result is what it would be alone.
+`strands_decider.core.evaluate(request, tokenizer, readout, config, backend)` joins the pieces. It refuses a backend that does not name its stage, renders the request with the checkpoint's prompt, calls `forward` once with the shared state and every question, reads the answers from the stage the backend names, and returns a `SystemOneResponse` as JSON. Its parts are public: `read(rows, readout, config, rendered, inputs=stage)` gives the answers and `question_probabilities` the code probabilities, from rows of any stage, where `inputs` is required; `readout_logits` is the bf16 GEMM; `answer(rendered_question, probabilities)` formats one answer. As with v1's backend, a runtime may batch, cache the state's keys and values, or split the work across devices, provided each question's result is what it would be alone.
 
 ## 12. Open questions
 
 These are not yet decided, and the training A/B or the first release should settle them.
 
-1. Whether a system turn helps `strands-v2-chat`. It would sit before S, so it would cost tokens once per state, not per question.
-2. Whether `strands-v2-chat` should include the empty thought channel that the 12B, 26B-A4B and 31B templates add with thinking off (section 3.5). If those sizes train better with it, they need a third prompt name.
+1. Whether a system turn helps `strands-chat`. It would sit before S, so it would cost tokens once per state, not per question.
+2. Whether `strands-chat` should include the empty thought channel that the 12B, 26B-A4B and 31B templates add with thinking off (section 3.5). If those sizes train better with it, they need a third prompt name.
 3. The noul's code assignment: `false` is `A` and `true` is `B`, following v1's slot order. If letter position biases the base model, training with random swaps (as for choices) removes the bias from the weights either way.
 4. Whether the line `Answer with the code of one option.` earns its tokens once the readout is trained.
 5. Whether `ordinal_smoothing`, which v1 kept in its head configuration, belongs in `decision_config.json`.

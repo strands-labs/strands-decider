@@ -1,4 +1,4 @@
-"""Shared by the torch-free v2 tests (tests/test_v2_*.py).
+"""Shared by the torch-free core's tests (tests/test_core_*.py).
 
 The render goldens and properties run against Gemma 4's real tokenizer. It is 32 MB, so it
 is not committed: point STRANDS_DECIDER_GEMMA4_TOKENIZER at a copy of `tokenizer.json`
@@ -6,15 +6,15 @@ is not committed: point STRANDS_DECIDER_GEMMA4_TOKENIZER at a copy of `tokenizer
 tests check its sha256 before they trust it. Without it those tests skip; the tests that
 need only text, numbers or a toy tokenizer always run.
 
-    STRANDS_DECIDER_GEMMA4_TOKENIZER=/path/to/tokenizer.json pytest tests/test_v2_*.py
+    STRANDS_DECIDER_GEMMA4_TOKENIZER=/path/to/tokenizer.json pytest tests/test_core_*.py
 
-CI's `v2 tokenizer (gemma 4)` job (.github/workflows/tests.yml) fetches that file and the E2B
-chat template at GEMMA4_REVISION, checks both sha256s, and runs these tests without torch.
+CI's `core tokenizer (gemma 4)` job (.github/workflows/tests.yml) fetches that file and the
+E2B chat template at GEMMA4_REVISION, checks both sha256s, and runs these tests without torch.
 
 STRANDS_DECIDER_GEMMA4_TEMPLATES lists the Gemma 4 base models' chat_template.jinja files
-(os.pathsep between them) for the tests that compare strands-v2-chat with them, which also
-need jinja2 (and transformers, for the apply_chat_template comparison). A v2 checkpoint
-ships no chat template; v2 prompts are never rendered with one.
+(os.pathsep between them) for the tests that compare strands-chat with them, which also
+need jinja2 (and transformers, for the apply_chat_template comparison). A decision checkpoint
+ships no chat template, and its prompts are never rendered with one.
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ from pathlib import Path
 
 import pytest
 
-FIXTURES = Path(__file__).parent / "fixtures" / "v2"
+FIXTURES = Path(__file__).parent / "fixtures" / "core"
 GEMMA4_REPO = "google/gemma-4-E2B-it"
 GEMMA4_REVISION = "3e22461f65e89153144f8adb70e3b8c2cc9845a7"
 GEMMA4_TOKENIZER_SHA256 = "cc8d3a0ce36466ccc1278bf987df5f71db1719b9ca6b4118264f45cb627bfe0f"
@@ -46,7 +46,7 @@ def _gemma4_path() -> str | None:
         digest = hashlib.sha256(f.read()).hexdigest()
     if digest != GEMMA4_TOKENIZER_SHA256:
         raise AssertionError(
-            f"{p} has sha256 {digest}; the v2 goldens are for {GEMMA4_REPO}@{GEMMA4_REVISION} "
+            f"{p} has sha256 {digest}; the render goldens are for {GEMMA4_REPO}@{GEMMA4_REVISION} "
             f"({GEMMA4_TOKENIZER_SHA256})"
         )
     return p
@@ -82,7 +82,7 @@ def toy_tokenizer():
     enough to drive render and evaluate where the real tokenizer is not available."""
     from tokenizers import AddedToken, Regex, Tokenizer, models, pre_tokenizers
 
-    from strands_decider.v2 import CODES
+    from strands_decider.core import CODES
 
     words = ["<unk>", "\n", " ", ".", "<", ">", "/", '"', "=", "—", "answer", "model", "user"]
     vocab = {w: i for i, w in enumerate(dict.fromkeys(words + list(CODES)))}

@@ -234,7 +234,7 @@ src/strands_decider/              -- published package (inference only)
   hf_export.py    a checkpoint as a Hugging Face model folder (safetensors, card, manifest)
   naming.py       release naming helpers (used by hf_export and release scripts)
   vision.py       Qwen3.5 vision-tower engine (`serve --vision`, `ask --image`)
-  v2/             the v2 decision interface without torch (docs/v2-spec.md): prompt
+  core/           the decision interface without torch (docs/spec.md): prompt
                   rendering, the code readout, decision_config.json, the runtime contract
 
 training/                         -- not published; run as `python -m training.<module>`
@@ -316,12 +316,11 @@ tests/            pytest only: test_core (no GPU), test_server (stubbed), test_g
                   test_cli_build, test_data_identity, test_configs, test_run_recipe,
                   test_llm_client, test_cli_exit,
                   test_ddp (`-m distributed` for the multi-GPU runs);
-                  test_v2_prompt, test_v2_readout, test_v2_config (torch-free, v2)
+                  test_core_prompt, test_core_readout, test_core_config (the torch-free core)
 docs/             architecture.md -- this document; inference.md -- serving a checkpoint:
-                  install, ask, serve, the HTTP API, a Mac; v2-spec.md -- the v2 decision
-                  interface
-.github/          workflows/tests.yml -- the CPU tests, and the torch-free v2 tests against the
-                  pinned Gemma 4 tokenizer; workflows/generators-live-test.yml
+                  install, ask, serve, the HTTP API, a Mac; spec.md -- the decision interface
+.github/          workflows/tests.yml -- the CPU tests, and the torch-free core's tests against
+                  the pinned Gemma 4 tokenizer; workflows/generators-live-test.yml
                   and .github/scripts/check_generator_rows.py -- one live batch per generator backend
 ```
 

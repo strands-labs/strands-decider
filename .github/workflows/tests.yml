@@ -96,19 +96,20 @@ jobs:
           flags: mac
           fail_ci_if_error: false
 
-  v2-tokenizer:
-    # The v2 render goldens and properties against Gemma 4's real tokenizer, which is not
-    # committed (32 MB), so the cpu job skips them. Torch-free, which also shows the v2 core
-    # runs without torch. The files at the pinned revision are not gated today; HF_TOKEN is
-    # sent when the repository has it, and if Hugging Face ever gates them, a run without
-    # the secret (a fork's pull request, say) skips the tests with a warning.
-    name: v2 tokenizer (gemma 4)
+  core-tokenizer:
+    # The core's render goldens and properties against Gemma 4's real tokenizer, which is
+    # not committed (32 MB), so the cpu job skips them. Torch-free, which also shows the core
+    # (strands_decider.core) runs without torch. The files at the pinned revision are not
+    # gated today; HF_TOKEN is sent when the repository has it, and if Hugging Face ever
+    # gates them, a run without the secret (a fork's pull request, say) skips the tests
+    # with a warning.
+    name: core tokenizer (gemma 4)
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
       GEMMA4_REPO: google/gemma-4-E2B-it
       GEMMA4_REVISION: 3e22461f65e89153144f8adb70e3b8c2cc9845a7
-      # tests/v2_support.py (GEMMA4_TOKENIZER_SHA256) and tests/test_v2_prompt.py (TEMPLATES).
+      # tests/core_support.py (GEMMA4_TOKENIZER_SHA256) and tests/test_core_prompt.py (TEMPLATES).
       GEMMA4_TOKENIZER_SHA256: cc8d3a0ce36466ccc1278bf987df5f71db1719b9ca6b4118264f45cb627bfe0f
       GEMMA4_TEMPLATE_SHA256: 0a2c8073c878ab1da004bee933a998606537bbb62016310352c7285c3f01c5b5
     steps:
@@ -133,7 +134,7 @@ jobs:
               "https://huggingface.co/$GEMMA4_REPO/resolve/$GEMMA4_REVISION/$f")
             if [ "$code" = 401 ] || [ "$code" = 403 ]; then
               if [ -z "${HF_TOKEN:-}" ]; then
-                echo "::warning::$GEMMA4_REPO is gated and HF_TOKEN is not set; skipping the v2 tokenizer tests"
+                echo "::warning::$GEMMA4_REPO is gated and HF_TOKEN is not set; skipping the core tokenizer tests"
                 echo "available=false" >> "$GITHUB_OUTPUT"
                 exit 0
               fi
@@ -162,7 +163,7 @@ jobs:
           STRANDS_DECIDER_GEMMA4_TEMPLATES: ${{ steps.fetch.outputs.dir }}/chat_template.jinja
         run: |
           python -c "import importlib.util as u, sys; sys.exit(u.find_spec('torch') is not None)"
-          python -m pytest -q -rs tests/test_v2_prompt.py tests/test_v2_readout.py tests/test_v2_config.py
+          python -m pytest -q -rs tests/test_core_prompt.py tests/test_core_readout.py tests/test_core_config.py
 
   lint:
     name: lint

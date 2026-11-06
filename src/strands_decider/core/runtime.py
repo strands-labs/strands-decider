@@ -1,8 +1,8 @@
-"""What a v2 runtime provides, and the glue around it (docs/v2-spec.md, The runtime interface).
+"""What a runtime provides, and the glue around it (docs/spec.md, The runtime interface).
 
 A runtime runs the decoder. This core does the rest: it renders the request, hands the
 runtime one state and its questions as token ids, and reads the answers. The contract is
-v1's `hidden_engine.Backend` narrowed to v2: one row per question, at its last token.
+v1's `hidden_engine.Backend`, narrowed to one row per question at its last token.
 """
 
 from __future__ import annotations
