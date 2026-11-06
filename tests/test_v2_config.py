@@ -10,7 +10,14 @@ import json
 import pytest
 from v2_support import FIXTURES, decision_config_fixture
 
-from strands_decider.v2 import CODES, FORMAT_VERSION, VARIANTS, DecisionConfig, Provenance
+from strands_decider.v2 import (
+    CODES,
+    FORMAT_VERSION,
+    INTERFACE,
+    VARIANTS,
+    DecisionConfig,
+    Provenance,
+)
 from strands_decider.v2.config import REQUIRED
 
 
@@ -22,7 +29,9 @@ def test_fixture_loads_from_file_and_directory():
     a = DecisionConfig.load(FIXTURES / "decision_config.json")
     b = DecisionConfig.load(FIXTURES)
     assert a == b
+    assert a.interface == INTERFACE == "strands-decider-v2"
     assert a.format_version == FORMAT_VERSION and a.prompt in VARIANTS
+    assert a.final_logit_softcapping == 30.0
     assert a.codes == CODES and len(a.token_ids) == 255
     assert a.attention_mode == "prefix_bidir" and a.pooling == "last"
     assert a.provenance == Provenance(
@@ -40,12 +49,44 @@ def test_provenance_is_optional():
     assert "provenance" not in DecisionConfig.from_dict(d).to_dict()
 
 
-@pytest.mark.parametrize("field", REQUIRED)
+@pytest.mark.parametrize("field", [f for f in REQUIRED if f != "interface"])
 def test_missing_required_fields_are_errors(field):
     d = _with()
     del d[field]
     with pytest.raises(ValueError, match=f"missing required fields \\['{field}'\\]"):
         DecisionConfig.from_dict(d)
+
+
+@pytest.mark.parametrize(
+    "interface",
+    ["<missing>", None, "", "strands-decider-v1", "Strands-Decider-v2", "pplx-decider", 2],
+)
+def test_the_interface_field_is_required_and_exact(interface):
+    d = _with(interface=interface)
+    if interface == "<missing>":
+        del d["interface"]
+    with pytest.raises(ValueError, match="not a Strands Decider v2 decision config"):
+        DecisionConfig.from_dict(d)
+    good = DecisionConfig.load(FIXTURES)
+    with pytest.raises(ValueError, match="not a Strands Decider v2 decision config"):
+        DecisionConfig(**{**good.__dict__, "interface": interface})
+
+
+def test_another_formats_file_is_refused_by_its_interface():
+    """A decision_config.json of another format, here shaped like the training side's
+    (synthetic values), is named as not v2 before any field is checked."""
+    other = {
+        "format_version": 1,
+        "base_model": "google/gemma-4-E2B-it",
+        "codes": 255,
+        "token_ids": list(range(255)),
+        "temperature": 1.0,
+        "attention_mode": "prefix_bidir",
+        "pooling": "last",
+        "finetune": {"lr": 1e-4},
+    }
+    with pytest.raises(ValueError, match="not a Strands Decider v2 decision config"):
+        DecisionConfig.from_dict(other)
 
 
 @pytest.mark.parametrize(
@@ -77,6 +118,12 @@ def test_both_variants_load(prompt):
     assert DecisionConfig.from_dict(_with(prompt=prompt)).prompt == prompt
 
 
+@pytest.mark.parametrize("value", [1e-3, 0.7, 1, 2.5, 1e3, 3.4e38, 1.2e-38])
+def test_scales_within_float32_load(value):
+    cfg = DecisionConfig.from_dict(_with(temperature=value, final_logit_softcapping=value))
+    assert cfg.temperature == value and cfg.final_logit_softcapping == value
+
+
 @pytest.mark.parametrize(
     ("field", "value", "match"),
     [
@@ -98,6 +145,20 @@ def test_both_variants_load(prompt):
         ("temperature", float("inf"), "temperature"),
         ("temperature", "1.0", "temperature"),
         ("temperature", True, "temperature"),
+        ("temperature", None, "temperature"),
+        # Past float32's normal range: the readout divides by it in float32.
+        ("temperature", 1e39, "temperature"),
+        ("temperature", 1e300, "temperature"),
+        ("temperature", 1e-39, "temperature"),
+        ("temperature", 5e-324, "temperature"),
+        ("final_logit_softcapping", 0, "final_logit_softcapping"),
+        ("final_logit_softcapping", -30.0, "final_logit_softcapping"),
+        ("final_logit_softcapping", None, "final_logit_softcapping"),
+        ("final_logit_softcapping", "30.0", "final_logit_softcapping"),
+        ("final_logit_softcapping", True, "final_logit_softcapping"),
+        ("final_logit_softcapping", float("nan"), "final_logit_softcapping"),
+        ("final_logit_softcapping", float("inf"), "final_logit_softcapping"),
+        ("final_logit_softcapping", 1e300, "final_logit_softcapping"),
         ("attention_mode", "causal", "attention_mode"),
         ("pooling", "mean", "pooling"),
         ("max_length_validated", 0, "max_length_validated"),

@@ -1,9 +1,10 @@
 """`decision_config.json`: what a runtime needs, beyond the weights, to serve a checkpoint.
 
 The schema is docs/v2-spec.md's (The decision_config.json schema). Validation is strict: a
-missing required field, an unknown field, a value of the wrong type, and a prompt this
-runtime does not implement are all errors. The optional `provenance` block is public by
-construction: its fields are fixed, and none may hold a filesystem path or a non-https URI.
+file without `"interface": "strands-decider-v2"`, a missing required field, an unknown
+field, a value of the wrong type, and a prompt this runtime does not implement are all
+errors. The file carries the soft-cap, so a converted decoder (GGUF, MLX) needs no
+`config.json` beside it.
 """
 
 from __future__ import annotations
@@ -19,21 +20,45 @@ from .codes import CODES
 from .prompt import VARIANTS
 
 FILENAME = "decision_config.json"
+# Tells a v2 decision config from other formats that use the same file names (llama.cpp's
+# pplx-decider loader claims any directory with decision_config.json and readout.safetensors).
+INTERFACE = "strands-decider-v2"
 FORMAT_VERSION = 1
 ATTENTION_MODES = ("prefix_bidir",)
 POOLINGS = ("last",)
 
 REQUIRED = (
+    "interface",
     "format_version",
     "prompt",
     "codes",
     "token_ids",
     "temperature",
+    "final_logit_softcapping",
     "attention_mode",
     "pooling",
     "max_length_validated",
 )
 OPTIONAL = ("provenance",)
+
+# The readout's soft-cap and temperature act in float32 (docs/v2-spec.md, The readout), so
+# each must be a normal float32: a value past these bounds would become inf or lose precision.
+F32_MAX = 3.4028234663852886e38
+F32_MIN_NORMAL = 1.1754943508222875e-38
+
+
+def check_float32_scale(name: str, v: Any) -> float:
+    """`v` as a float, if it is a finite number above 0 that float32 holds as a normal
+    number (about 1.2e-38 to 3.4e38); otherwise ValueError. For the soft-cap and the
+    temperature, which divide the readout logits in float32."""
+    ok = isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+    if not ok or not F32_MIN_NORMAL <= v <= F32_MAX:
+        raise ValueError(
+            f"{name} must be a finite number above 0 within float32's normal range "
+            f"({F32_MIN_NORMAL:.3g} to {F32_MAX:.3g}), not {v!r}"
+        )
+    return float(v)
+
 
 _HUB_ID = re.compile(r"^[A-Za-z0-9][\w.-]*/[\w.-]+$")
 _RELEASE = re.compile(r"^([A-Za-z0-9][\w.-]*/)?[A-Za-z0-9][\w.-]*$")
@@ -44,6 +69,13 @@ _WINDOWS_PATH = re.compile(r"^[A-Za-z]:[\\/]")
 
 def _is_int(v: Any) -> bool:
     return isinstance(v, int) and not isinstance(v, bool)
+
+
+def _not_v2(interface: Any) -> str:
+    return (
+        f"not a Strands Decider v2 decision config: {FILENAME} needs "
+        f'"interface": "{INTERFACE}", and has {interface!r}'
+    )
 
 
 def _internal(s: str) -> str | None:
@@ -107,17 +139,21 @@ class Provenance:
 
 @dataclass(frozen=True)
 class DecisionConfig:
+    interface: str
     format_version: int
     prompt: str
     codes: tuple[str, ...]
     token_ids: tuple[int, ...]
     temperature: float
+    final_logit_softcapping: float
     attention_mode: str
     pooling: str
     max_length_validated: int
     provenance: Provenance | None = None
 
     def __post_init__(self) -> None:
+        if self.interface != INTERFACE:
+            raise ValueError(_not_v2(self.interface))
         if not _is_int(self.format_version) or self.format_version != FORMAT_VERSION:
             raise ValueError(
                 f"format_version {self.format_version!r} is not supported; this runtime "
@@ -134,9 +170,8 @@ class DecisionConfig:
             raise ValueError(f"token_ids must be {len(CODES)} non-negative integers")
         if len(set(ids)) != len(ids):
             raise ValueError("token_ids must be distinct: one token per code")
-        t = self.temperature
-        if not isinstance(t, (int, float)) or isinstance(t, bool) or not math.isfinite(t) or t <= 0:
-            raise ValueError(f"temperature must be a finite number above 0, not {t!r}")
+        check_float32_scale("temperature", self.temperature)
+        check_float32_scale("final_logit_softcapping", self.final_logit_softcapping)
         if self.attention_mode not in ATTENTION_MODES:
             raise ValueError(
                 f"attention_mode {self.attention_mode!r} is not supported; expected {ATTENTION_MODES}"
@@ -152,6 +187,9 @@ class DecisionConfig:
     def from_dict(cls, d: Any) -> DecisionConfig:
         if not isinstance(d, dict):
             raise ValueError(f"{FILENAME} must hold a JSON object")
+        # First, so that another format's file gets this message, not a list of fields.
+        if d.get("interface") != INTERFACE:
+            raise ValueError(_not_v2(d.get("interface", "<missing>")))
         missing = [k for k in REQUIRED if k not in d]
         if missing:
             raise ValueError(f"{FILENAME} is missing required fields {missing}")
@@ -166,11 +204,13 @@ class DecisionConfig:
                 raise ValueError(f"{k} must be a list")
         prov = d.get("provenance")
         return cls(
+            interface=d["interface"],
             format_version=d["format_version"],
             prompt=d["prompt"],
             codes=tuple(d["codes"]),
             token_ids=tuple(d["token_ids"]),
             temperature=d["temperature"],
+            final_logit_softcapping=d["final_logit_softcapping"],
             attention_mode=d["attention_mode"],
             pooling=d["pooling"],
             max_length_validated=d["max_length_validated"],
@@ -188,11 +228,13 @@ class DecisionConfig:
 
     def to_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {
+            "interface": self.interface,
             "format_version": self.format_version,
             "prompt": self.prompt,
             "codes": list(self.codes),
             "token_ids": list(self.token_ids),
             "temperature": self.temperature,
+            "final_logit_softcapping": self.final_logit_softcapping,
             "attention_mode": self.attention_mode,
             "pooling": self.pooling,
             "max_length_validated": self.max_length_validated,

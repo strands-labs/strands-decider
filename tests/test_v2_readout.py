@@ -130,27 +130,70 @@ def test_load_safetensors_refuses_other_dtypes(tmp_path):
         load_safetensors(p)
 
 
+def _checkpoint(tmp_path, *, model_config=None, weight=None, **config):
+    """A checkpoint directory with readout.safetensors and decision_config.json, and a
+    config.json only if `model_config` is given (a converted artifact has none)."""
+    w = np.ones((255, 8), np.float32) if weight is None else weight
+    _write_safetensors(tmp_path / "readout.safetensors", {"weight": ("BF16", w)})
+    (tmp_path / "decision_config.json").write_text(
+        json.dumps({**decision_config_fixture(), **config})
+    )
+    if model_config is not None:
+        (tmp_path / "config.json").write_text(json.dumps(model_config))
+    return tmp_path
+
+
+def test_readout_load_needs_no_model_config(tmp_path):
+    """The soft-cap comes from decision_config.json, so a GGUF or MLX decoder beside
+    readout.safetensors and decision_config.json loads without config.json."""
+    r = Readout.load(_checkpoint(tmp_path, final_logit_softcapping=25.0))
+    assert r.softcap == 25.0 and r.weight is not None and r.weight.shape == (255, 8)
+    cfg = DecisionConfig.load(tmp_path)
+    assert Readout.load(tmp_path, cfg).softcap == 25.0
+
+
 @pytest.mark.parametrize(
     "model_config",
-    [{"final_logit_softcapping": 30.0}, {"text_config": {"final_logit_softcapping": 30.0}}],
-    ids=["text-model", "multimodal-wrapper"],
+    [
+        {"final_logit_softcapping": 30.0},
+        {"text_config": {"final_logit_softcapping": 30.0}},
+        {},
+        {"model_type": "gemma4_text"},
+    ],
+    ids=["text-model", "multimodal-wrapper", "empty", "without-the-key"],
 )
-def test_readout_load(tmp_path, model_config):
-    w = np.ones((255, 8), np.float32)
-    _write_safetensors(tmp_path / "readout.safetensors", {"weight": ("BF16", w)})
-    (tmp_path / "config.json").write_text(json.dumps(model_config))
-    r = Readout.load(tmp_path)
-    assert r.softcap == 30.0 and r.weight is not None and r.weight.shape == (255, 8)
+def test_readout_load_accepts_an_agreeing_model_config(tmp_path, model_config):
+    r = Readout.load(_checkpoint(tmp_path, model_config=model_config))
+    assert r.softcap == 30.0
 
 
-def test_readout_load_refuses_a_config_without_the_cap(tmp_path):
-    _write_safetensors(tmp_path / "readout.safetensors", {"weight": ("F32", np.ones((255, 8)))})
-    (tmp_path / "config.json").write_text("{}")
-    with pytest.raises(ValueError, match="final_logit_softcapping"):
-        Readout.load(tmp_path)
-    _write_safetensors(tmp_path / "readout.safetensors", {"w": ("F32", np.ones((255, 8)))})
+@pytest.mark.parametrize(
+    "model_config",
+    [
+        {"final_logit_softcapping": 50.0},
+        {"final_logit_softcapping": None},
+        {"text_config": {"final_logit_softcapping": 20.0}},
+    ],
+)
+def test_readout_load_refuses_a_disagreeing_model_config(tmp_path, model_config):
+    with pytest.raises(ValueError, match="inconsistent"):
+        Readout.load(_checkpoint(tmp_path, model_config=model_config))
+
+
+def test_readout_load_refuses_a_bad_readout_or_config(tmp_path):
+    ckpt = _checkpoint(tmp_path)
+    _write_safetensors(ckpt / "readout.safetensors", {"w": ("F32", np.ones((255, 8)))})
     with pytest.raises(ValueError, match="one tensor"):
-        Readout.load(tmp_path)
+        Readout.load(ckpt)
+    _write_safetensors(ckpt / "readout.safetensors", {"weight": ("F32", np.ones((254, 8)))})
+    with pytest.raises(ValueError, match="255 codes"):
+        Readout.load(ckpt)
+    (ckpt / "decision_config.json").write_text(json.dumps({"format_version": 1}))
+    with pytest.raises(ValueError, match="not a Strands Decider v2"):
+        Readout.load(ckpt)
+    (ckpt / "decision_config.json").unlink()
+    with pytest.raises(FileNotFoundError):
+        Readout.load(ckpt)
 
 
 # ---- answers in v1's schema --------------------------------------------------------------
