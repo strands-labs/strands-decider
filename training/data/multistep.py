@@ -242,15 +242,32 @@ def musique_pairs(rows: Iterable[dict], n_questions: int, seed: int = 0) -> list
     return [r for k in pick for r in by[k]]
 
 
-def fits(examples: list[Example], tokenizer: Any, max_tokens: int) -> list[Example]:
-    """Drop rows whose rendered prompt exceeds the window (truncation would cut options)."""
-    from strands_decider.prompting import build_prompt
+def fits(
+    examples: list[Example], tokenizer: Any, max_tokens: int, frame: Any = None
+) -> list[Example]:
+    """Drop rows whose rendered prompt exceeds the window (truncation would cut options).
 
-    return [
-        e
-        for e in examples
-        if len(tokenizer(build_prompt(e.state, e.to_question())[0])["input_ids"]) <= max_tokens
-    ]
+    With `frame` (prompting.chat_frame), measure the lettered prompt instead, with every
+    phrasing of the question, because the collator samples one and refuses a prompt that is
+    too long.
+    """
+    from strands_decider.prompting import build_prompt, lettered_prompt
+
+    if frame is None:
+        return [
+            e
+            for e in examples
+            if len(tokenizer(build_prompt(e.state, e.to_question())[0])["input_ids"]) <= max_tokens
+        ]
+
+    def longest(e: Example) -> int:
+        texts = [
+            "".join(lettered_prompt(e.state, e.to_question(i), frame)) for i in e.all_instructions()
+        ]
+        ids = tokenizer(texts, add_special_tokens=False)["input_ids"]
+        return max(len(x) for x in ids)
+
+    return [e for e in examples if longest(e) <= max_tokens]
 
 
 def main(argv: list[str] | None = None) -> None:

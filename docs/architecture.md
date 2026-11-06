@@ -173,6 +173,36 @@ genericity is lost. With it, the only strategy that survives gradient descent is
 actually reading the option text. Score questions are the exception — their slots are
 ordinal, so they are only ever *reversed* (rubric and label together), never permuted.
 
+### Opt-in: the token readout
+
+A training config can replace the pointer head with a token readout, the readout of the
+reference v2 decision models. Three keys select it:
+
+- `head_type: token_readout`. The head is one linear map, 255 outputs and no bias, on the
+  hidden state of the last prompt token. Output k scores the option listed under code k. Each
+  output starts as the base model's LM head row of that code's token, so before training the
+  head gives the base model's own preference among the codes. On Gemma 4 its logits get the
+  same cap as the LM head's (`final_logit_softcapping`), saved with the checkpoint as
+  `readout_softcap`. The outputs past the question's option
+  count are masked.
+- `render: lettered` (required with the token readout). The prompt goes through the
+  tokenizer's chat template, with thinking off: a system line, then `State:`, `Question:` and
+  `Options:` in the user turn. The options are listed under letter codes: `A` to `Z`, then
+  `AA`, `AB` and so on, the first 255 that the tokenizer encodes as one token. Training
+  shuffles the options of a choice question only; a yes/no or score question keeps its order.
+- `attention_mode: causal` (the default) or `prefix_bidir`. With `prefix_bidir` the prompt
+  splits where the state ends. A state token sees all of the state, in both directions, and
+  never the question. A question token sees the state and all of its own question. The
+  full-attention layers take this mask. The sliding-window layers of Gemma 4 take it too,
+  without their window (512 or 1,024 tokens), as the reference v2 models train. The
+  linear-attention layers of Qwen3.5 stay causal. Other layer types are refused. It needs SDPA
+  or eager attention.
+
+`lr_floor` sets where the cosine learning-rate schedule ends (the reference recipe uses 0.1).
+`python -m training.train`, `training.soup` and `training.evaluate calibrate` work with a token
+readout checkpoint. Serving does not: the engines in this repository refuse a token readout
+checkpoint, which a separate inference stack serves.
+
 ## Design decisions worth knowing
 
 **Causal attention, read at the right tokens.** The note sketching this architecture likened
