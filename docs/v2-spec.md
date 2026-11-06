@@ -444,9 +444,12 @@ This is v1's `hidden_engine.Backend` narrowed to v2. v1's backend returns severa
 
 ```python
 class Backend(Protocol):
-    outputs: str  # the stage forward returns: hidden, raw_logits, capped_logits, final_logits or probabilities
+    # The stage forward returns: hidden, raw_logits, capped_logits, final_logits or probabilities.
+    outputs: str
 
-    def forward(self, state: list[int], questions: list[list[int]]) -> np.ndarray | Sequence[np.ndarray]:
+    def forward(
+        self, state: list[int], questions: list[list[int]]
+    ) -> np.ndarray | Sequence[np.ndarray]:
         """One row per question, in order, of the stage `outputs` names: each question run
         under prefix_bidir after the shared state, read at its last token."""
 ```
