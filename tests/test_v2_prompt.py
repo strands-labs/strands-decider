@@ -16,6 +16,7 @@ import os
 import random
 import subprocess
 import sys
+import threading
 
 import pytest
 from v2_support import (
@@ -479,6 +480,82 @@ def test_request_text_never_makes_a_control_token(variant):
         for rq in render(req, tok, variant).questions.values():
             got = [tok.id_to_token(i) for i in rq.ids if i in controls]
             assert got == want, rq.text
+
+
+def _tokenizer(which: str):
+    return toy_tokenizer() if which == "toy" else gemma4_tokenizer()
+
+
+def _control_ids(tok) -> set[int]:
+    return {tok.token_to_id(t.content) for t in tok.get_added_tokens_decoder().values()}
+
+
+@pytest.mark.parametrize("interference", ["matching", "padding"])
+@pytest.mark.parametrize("which", ["toy", "gemma4"])
+@pytest.mark.parametrize("variant", VARIANTS)
+def test_concurrent_use_of_the_tokenizer_cannot_make_control_tokens(
+    monkeypatch, which, variant, interference
+):
+    """A render paused inside its encoding, while another thread uses the same tokenizer
+    with special-token matching on (its default) or with padding, gets the ids it gets
+    alone. The pause is forced with events, not left to timing. An encoder that switched
+    matching off on the caller's tokenizer, as this one once did, would resume with it
+    switched back on and encode the state's `<turn|>` as a control token, or pad the text."""
+    from strands_decider.v2 import prompt
+
+    tok = _tokenizer(which)
+    req = CASES["control_strings"]
+    alone = render(req, tok, variant)
+    paused, resume = threading.Event(), threading.Event()
+    texts = prompt._Encoder.texts
+
+    def paused_texts(self, runs):
+        paused.set()
+        assert resume.wait(timeout=30)
+        return texts(self, runs)
+
+    monkeypatch.setattr(prompt._Encoder, "texts", paused_texts)
+    out: dict = {}
+
+    def work():
+        try:
+            out["rendered"] = render(req, tok, variant)
+        except Exception as e:  # reported in the test's own thread, below
+            out["error"] = e
+
+    worker = threading.Thread(target=work)
+    worker.start()
+    try:
+        assert paused.wait(timeout=30)
+        if interference == "matching":
+            tok.encode_special_tokens = False
+            turn = tok.encode("<turn|>", add_special_tokens=False).ids
+            assert turn == [tok.token_to_id("<turn|>")]  # a control token, to this user
+        else:
+            tok.enable_padding(length=64, pad_id=0, pad_token=tok.id_to_token(0))
+    finally:
+        resume.set()
+        worker.join(timeout=30)
+        tok.no_padding()
+        tok.encode_special_tokens = False
+    assert "error" not in out, out.get("error")
+    for name, q in out["rendered"].questions.items():
+        assert q.ids == alone.questions[name].ids, q.text
+        n_controls = sum(i in _control_ids(tok) for i in q.ids)
+        assert n_controls == {PLAIN: 1, CHAT: 4}[variant], q.text
+
+
+def test_render_leaves_the_callers_tokenizer_as_it_was():
+    want = render(CASES["support_ticket"], toy_tokenizer(), PLAIN)
+    tok = toy_tokenizer()
+    tok.enable_truncation(4)
+    tok.enable_padding(length=64, pad_id=0, pad_token="<unk>")
+    tok.encode_special_tokens = False
+    # Neither truncated nor padded by the caller's settings, and the settings stay.
+    assert render(CASES["support_ticket"], tok, PLAIN) == want
+    assert tok.truncation is not None and tok.truncation["max_length"] == 4
+    assert tok.padding is not None and tok.padding["length"] == 64
+    assert tok.encode_special_tokens is False
 
 
 @pytest.mark.parametrize("variant", VARIANTS)
