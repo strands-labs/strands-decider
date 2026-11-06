@@ -24,6 +24,9 @@ dependencies = [
     "uvicorn[standard]>=0.30",
     "numpy>=1.24",
     "safetensors>=0.4",
+    # Imported directly by hidden_engine.py and the v2 core (strands_decider.v2), not only
+    # through transformers.
+    "tokenizers>=0.22",
 ]
 
 [project.optional-dependencies]
@@ -53,6 +56,8 @@ cpu = []
 benchmark = ["boto3>=1.34", "matplotlib>=3.8"]
 dev = [
     "pillow>=10",
+    # The v2 chat-template tests (tests/test_v2_prompt.py) render Gemma 4's templates.
+    "jinja2>=3.1",
     "pytest>=8.0",
     "ruff>=0.6",
     "mypy>=1.15,<3",
