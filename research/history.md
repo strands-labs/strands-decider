@@ -595,7 +595,41 @@ Brier score fell on 147 of 231 tasks. `long_policy` gave back v18's gain.
   over v16, cannot be read without it. (As of v19. For the retrain noise measured later,
   see [Retraining on AWS](../evaluation/results.md#retraining-on-aws).)
 - **`long_policy`.** v18 raised it from 7 to 10 of 19 and v19 gave that back; which
-  training rows carry it is not yet known.
+  training rows carry it is not yet known. The task-level record below shows that this
+  was not one gain disappearing: v19 retained two of v18's four gains, lost two earlier
+  stable tasks, and gained another task v18 missed. It also separates the lineage from
+  the two saved `decider-2b` reference runs. Regenerate the tables from the committed
+  CSVs with `python research/scripts/long_policy.py`; no checkpoint is loaded.
+
+  | task_id | v16 | v17 | v18 | v19 | decider-2b v10 | decider-2b v11 |
+  | --- | --- | --- | --- | --- | --- | --- |
+  | hard-opus-a-long_policy-01 | 1 | 1 | 1 | 0 | 1 | 1 |
+  | hard-opus-a-long_policy-04 | 0 | 0 | 0 | 0 | 0 | 0 |
+  | hard-opus-a-long_policy-08 | 1 | 1 | 1 | 1 | 0 | 1 |
+  | hard-opus-a-long_policy-09 | 0 | 0 | 0 | 0 | 0 | 0 |
+  | hard-opus-a-long_policy-11 | 0 | 0 | 1 | 0 | 0 | 0 |
+  | hard-opus-a-long_policy-13 | 0 | 0 | 0 | 0 | 0 | 0 |
+  | hard-opus-a-long_policy-17 | 1 | 1 | 1 | 0 | 0 | 0 |
+  | hard-opus-a-long_policy-19 | 1 | 0 | 1 | 1 | 0 | 1 |
+  | hard-opus-c-long_policy-02 | 1 | 1 | 1 | 1 | 1 | 0 |
+  | hard-opus-c-long_policy-03 | 0 | 0 | 0 | 0 | 0 | 0 |
+  | hard-opus-c-long_policy-04 | 1 | 1 | 1 | 1 | 1 | 1 |
+  | hard-opus-c-long_policy-05 | 0 | 0 | 0 | 0 | 0 | 0 |
+  | hard-opus-c-long_policy-08 | 0 | 1 | 0 | 0 | 0 | 1 |
+  | hard-opus-c-long_policy-10 | 0 | 0 | 1 | 1 | 0 | 1 |
+  | hard-opus-c-long_policy-11 | 0 | 0 | 0 | 0 | 0 | 1 |
+  | hard-sol-b-long_policy-01 | 0 | 0 | 1 | 0 | 1 | 1 |
+  | hard-sol-b-long_policy-02 | 0 | 0 | 0 | 0 | 0 | 0 |
+  | hard-sol-b-long_policy-05 | 1 | 0 | 0 | 1 | 0 | 0 |
+  | hard-sol-b-long_policy-06 | 1 | 1 | 1 | 1 | 1 | 0 |
+
+  v17 to v18 changed five tasks: four gains (`a-11`, `a-19`, `c-10`, `sol-b-01`)
+  and one loss (`c-08`). v18 to v19 also changed five: one gain (`sol-b-05`) and four
+  losses (`a-01`, `a-11`, `a-17`, `sol-b-01`). The matching totals therefore conceal
+  different task movements. A seed replicate is still needed before attributing any
+  movement to particular training rows. Against the two saved peer runs, `long_policy`
+  is +2 tasks against `decider-2b v10` and -1 against `decider-2b v11`; it is not the
+  family that explains the eight-task overall gap to v11.
 - **Reading the question.** Every model here, v19 included, gives the same answer to a
   changed question about 94% of the time (`evaluation/question_sensitivity.py`). Labelled
   transforms taught their own keywords (v11a); many real tasks, each asked several ways,
@@ -1181,4 +1215,3 @@ unusually wide option list would hit untrained heads. The default build uses
 [3, 24], which both covers every slot and reinforces that N is a property of the
 prompt. Questions wider than `num_slots` are rejected with a clear error rather than
 silently truncated; raise both numbers together and retrain if you need more.
-
