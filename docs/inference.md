@@ -22,16 +22,16 @@ CPU), so they report the numbers serving returns. `--device mlx` is refused.
 - [Asking many questions is nearly free](#asking-many-questions-is-nearly-free): the shared-prefix cache.
 - [Serving on a Mac](#serving-on-a-mac): MPS, and the one kernel that had to be replaced.
 - [Serving on a Mac with MLX](#serving-on-a-mac-with-mlx): `--device mlx`, measured against MPS.
-- [`../deploy/`](../deploy/README.md): hosting the server, for example on an Amazon SageMaker
+- [Deployment guide](../deploy/README.md): hosting the server, for example on an Amazon SageMaker
   real-time endpoint.
-- [`../examples/strands/`](../examples/strands/README.md): an agent built with the Strands
+- [Strands Agents example](../examples/strands/README.md): an agent built with the Strands
   Agents SDK that uses the server, with its client in `_client.py`.
-- [`../evaluation/results.md`](../evaluation/results.md): measured latency and accuracy on an
-  RTX 3090 and on a Mac; [`../evaluation/jevbench.md`](../evaluation/jevbench.md): JevBench,
+- [Evaluation results](../evaluation/results.md): measured latency and accuracy on an
+  RTX 3090 and on a Mac; [JevBench results](../evaluation/jevbench.md): JevBench,
   the external benchmark.
-- [`../docs/architecture.md`](../docs/architecture.md#the-routing-convention): the confidence
+- [Architecture](architecture.md#the-routing-convention): the confidence
   formulas and the routing convention.
-- [`../training/README.md`](../training/README.md): how to train a checkpoint.
+- [Training guide](../training/README.md): how to train a checkpoint.
 
 Paths are relative to the repository root unless they are links. A module path such as
 `mps_kernels.py` is relative to `src/strands_decider/`.
@@ -212,7 +212,7 @@ Compatibility with the Jev API itself is not verified. `GET /health` returns the
 name, the checkpoint path, the base model, the device and the calibration temperature.
 `GET /ping` and `POST /invocations` are the same as `/health` and `/v1/systemone`: they are
 the paths that SageMaker and Bedrock AgentCore Runtime call
-([../deploy/sagemaker/](../deploy/sagemaker/README.md)). `/health` and `/ping` answer at once
+([SageMaker deployment guide](../deploy/sagemaker/README.md)). `/health` and `/ping` answer at once
 even while every worker thread is busy with requests, as a load balancer's health check
 expects (SageMaker allows `/ping` 2 s).
 
