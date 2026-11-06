@@ -8,6 +8,9 @@ need only text, numbers or a toy tokenizer always run.
 
     STRANDS_DECIDER_GEMMA4_TOKENIZER=/path/to/tokenizer.json pytest tests/test_v2_*.py
 
+CI's `v2 tokenizer (gemma 4)` job (.github/workflows/tests.yml) fetches that file and the E2B
+chat template at GEMMA4_REVISION, checks both sha256s, and runs these tests without torch.
+
 STRANDS_DECIDER_GEMMA4_TEMPLATES lists the Gemma 4 base models' chat_template.jinja files
 (os.pathsep between them) for the tests that compare strands-v2-chat with them, which also
 need jinja2 (and transformers, for the apply_chat_template comparison). A v2 checkpoint

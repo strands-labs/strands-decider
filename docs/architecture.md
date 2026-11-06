@@ -320,7 +320,8 @@ tests/            pytest only: test_core (no GPU), test_server (stubbed), test_g
 docs/             architecture.md -- this document; inference.md -- serving a checkpoint:
                   install, ask, serve, the HTTP API, a Mac; v2-spec.md -- the v2 decision
                   interface
-.github/          workflows/tests.yml -- the CPU tests; workflows/generators-live-test.yml
+.github/          workflows/tests.yml -- the CPU tests, and the torch-free v2 tests against the
+                  pinned Gemma 4 tokenizer; workflows/generators-live-test.yml
                   and .github/scripts/check_generator_rows.py -- one live batch per generator backend
 ```
 
