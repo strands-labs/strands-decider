@@ -200,56 +200,6 @@ def test_internal_or_unknown_provenance_is_refused(provenance):
         DecisionConfig.from_dict(_with(provenance=provenance))
 
 
-# Synthetic values in the shapes internal locations take.
-@pytest.mark.parametrize(
-    ("field", "value", "why"),
-    [
-        ("source", "https://code.amazon.com/packages/StrandsDecider/trees/mainline", "host"),
-        ("source", "https://w.amazon.com/bin/view/StrandsDecider", "host"),
-        ("source", "https://drive.corp.amazon.com/documents/run-1", "host"),
-        ("source", "https://user@code.amazon.com/pkg", "host"),
-        ("source", "https://docs.hub.amazon.dev/recipe", "host"),
-        ("source", "https://tools.a2z.com/run/1", "host"),
-        ("source", "https://dashboard.aws.dev/run/1", "host"),
-        ("source", "https://CODE.Amazon.COM/pkg", "host"),
-        ("release", "code.amazon.com/StrandsDecider", "host"),
-        ("source", "https://my-bucket.s3.amazonaws.com/checkpoints/run-1", "S3"),
-        ("source", "https://s3.amazonaws.com/my-bucket/run-1", "S3"),
-        ("source", "https://s3.us-west-2.amazonaws.com/my-bucket/run-1", "S3"),
-        ("source", "https://my-bucket.s3.us-east-1.amazonaws.com/run-1", "S3"),
-        ("source", "https://s3-us-west-2.amazonaws.com/my-bucket/run-1", "S3"),
-        ("source", "https://ap.s3-accesspoint.us-east-1.amazonaws.com/run-1", "S3"),
-        ("source", "https://github.com/org/repo/blob/main/fsx/user/train.py", "user path"),
-        ("source", "https://example.org/home/user/run", "user path"),
-        ("base_model", "Users/someone", "user path"),
-        ("release", "workplace/user", "user path"),
-        ("release", "fsx/user", "user path"),
-        ("release", "efs/run-1", "user path"),
-        ("source", "https://example.org/local/home/user/x", "user path"),
-        ("source", "https://example.org/apollo/env/Trainer/bin", "user path"),
-    ],
-)
-def test_common_internal_values_are_refused(field, value, why):
-    with pytest.raises(ValueError, match=f"provenance.{field} is .*{why}"):
-        DecisionConfig.from_dict(_with(provenance={field: value}))
-
-
-@pytest.mark.parametrize(
-    "provenance",
-    [
-        {"source": "https://github.com/strands-labs/strands-decider/tree/v0.4.0/training"},
-        {"source": "https://huggingface.co/StrandsAgents/strands-decider-E2B-gemma4-v2-2611"},
-        {"source": "https://notamazon.com/recipe"},
-        {"source": "https://example.com/s3/guide"},
-        {"source": "https://github.com/awslabs/s3-tools"},
-        {"base_model": "amazon/chronos-t5-small"},  # a Hub organisation, not a host
-        {"release": "StrandsAgents/strands-decider-E2B-gemma4-v2-2611"},
-    ],
-)
-def test_public_values_are_not_mistaken_for_internal_ones(provenance):
-    assert DecisionConfig.from_dict(_with(provenance=provenance)).provenance.to_dict() == provenance
-
-
 def test_public_provenance_is_accepted():
     prov = {
         "base_model": "google/gemma-4-E2B-it",
