@@ -92,6 +92,12 @@ ran Qwen3-1.7B-Base, all full attention. The architecture is the same either way
 the hybrid changes is serving ([Asking many questions is nearly free](inference.md#asking-many-questions-is-nearly-free)) and the
 training environment ([Setup](../training/README.md#setup)).
 
+The PyTorch torso loader checks that every decoder weight loaded. If any are missing,
+it raises a `ValueError` naming the base model or checkpoint and the first missing keys,
+rather than continuing with randomly initialized weights. Omitted LM-head weights and
+discarded vision or audio encoders do not block loading the decoder. This check does not
+add support for other checkpoint layouts.
+
 ### One mechanism, three primitives
 
 All three question types are the same masked softmax read back differently:
