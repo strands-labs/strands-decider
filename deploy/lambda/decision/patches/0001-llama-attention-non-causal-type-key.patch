@@ -46,12 +46,11 @@ diff --git a/src/llama-model.cpp b/src/llama-model.cpp
 index 72639b155..7f99e4589 100644
 --- a/src/llama-model.cpp
 +++ b/src/llama-model.cpp
-@@ -1651,6 +1651,18 @@ void llama_model_base::load_hparams(llama_model_loader & ml) {
+@@ -1651,6 +1651,17 @@ void llama_model_base::load_hparams(llama_model_loader & ml) {
      // per-arch hparams
      load_arch_hparams(ml);
  
-+    // optional: how llama_set_causal_attn(ctx, false) masks each layer type, overriding the arch default
-+    // (see llama_non_causal_type; e.g. 0 makes every Gemma 4 layer non-causal instead of the SWA layers only)
++    // optional override of the arch default non_causal_type (see llama_non_causal_type)
 +    {
 +        uint32_t non_causal_type = hparams.non_causal_type;
 +        if (ml.get_key(LLM_KV_ATTENTION_NON_CAUSAL_TYPE, non_causal_type, false)) {
