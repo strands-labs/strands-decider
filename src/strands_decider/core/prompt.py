@@ -366,15 +366,53 @@ def plain_text_tokenizer(tokenizer: Tokenizer) -> Tokenizer:
     """Hand `tokenizer` over to the core, so that `render` encodes with it directly and makes
     no private copy of it (Gemma 4's costs about 170 MB, which matters on AWS Lambda). It is
     set in place to encode all text as plain text: special-token matching, padding and
-    truncation off, checked as a copy is. It is then the core's: the caller must not change
-    its settings or its vocabulary, and must not use it to encode text with special-token
-    matching on. `render` refuses it if its settings have changed. Returns the tokenizer."""
+    truncation off, checked as a copy is; if the check fails it is left as it was, and the
+    ValueError raised. Returns the tokenizer.
+
+    Once handed over it is the core's: the caller must not change its settings or its
+    vocabulary, and must not use it to encode text with special-token matching on; `render`
+    refuses it if its settings have changed. The core holds it, by a strong reference, until
+    `release_plain_text_tokenizer` or the end of the process.
+
+    Peak memory: rendering with it makes no copy, but `check_tokenizer` and `load_tokenizer`
+    make a transient one for their check unless they are asked to hand the tokenizer over
+    (`hand_over=True`), when they check it in place and make none."""
     _refuse_plain_added_tokens(tokenizer)
-    _set_plain_text(tokenizer)
+    saved = (tokenizer.encode_special_tokens, tokenizer.padding, tokenizer.truncation)
+    try:
+        _set_plain_text(tokenizer)
+    except BaseException:
+        _restore_settings(tokenizer, *saved)
+        raise
     with _PLAIN_TEXT_LOCK:
         _OWNED[id(tokenizer)] = tokenizer
         _PLAIN_TEXT.pop(id(tokenizer), None)
     return tokenizer
+
+
+def release_plain_text_tokenizer(tokenizer: Tokenizer) -> None:
+    """Take back a tokenizer handed over by `plain_text_tokenizer`: the core drops its
+    reference, and `render` would copy it again. Its settings stay plain text."""
+    with _PLAIN_TEXT_LOCK:
+        if _OWNED.get(id(tokenizer)) is tokenizer:
+            del _OWNED[id(tokenizer)]
+
+
+def _restore_settings(
+    tok: Tokenizer,
+    encode_special_tokens: bool,
+    padding: dict[str, Any] | None,
+    truncation: dict[str, Any] | None,
+) -> None:
+    tok.encode_special_tokens = encode_special_tokens
+    if padding is None:
+        tok.no_padding()
+    else:
+        tok.enable_padding(**padding)
+    if truncation is None:
+        tok.no_truncation()
+    else:
+        tok.enable_truncation(**truncation)
 
 
 def _plain_text_copy(tok: Tokenizer) -> Tokenizer:

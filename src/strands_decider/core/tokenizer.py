@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING
 from .codes import CODES
 from .config import DecisionConfig
 from .images import IMAGE_CLOSE, IMAGE_OPEN, IMAGE_SOFT
-from .prompt import BOS, TURN_CLOSE, TURN_OPEN, _make_plain_text_copy
+from .prompt import BOS, TURN_CLOSE, TURN_OPEN, _make_plain_text_copy, plain_text_tokenizer
 
 if TYPE_CHECKING:
     from tokenizers import Tokenizer
@@ -65,7 +65,9 @@ CODE_TOKEN_IDS: tuple[int, ...] = (
 assert len(CODE_TOKEN_IDS) == len(CODES) == len(set(CODE_TOKEN_IDS))
 
 
-def check_tokenizer(tokenizer: Tokenizer, config: DecisionConfig) -> None:
+def check_tokenizer(
+    tokenizer: Tokenizer, config: DecisionConfig, *, hand_over: bool = False
+) -> None:
     """That `tokenizer` gives the ids the checkpoint `config` describes was trained with:
     each control token at its id (`CONTROL_TOKEN_IDS`), each code exactly one token whose
     id is `config.token_ids`' entry for it, which must be section 2's (`CODE_TOKEN_IDS`),
@@ -73,7 +75,10 @@ def check_tokenizer(tokenizer: Tokenizer, config: DecisionConfig) -> None:
     when it loads the checkpoint (`load_tokenizer` does); `render` does not call it.
 
     The tokenizer is checked as it is now, through a fresh plain-text copy that is then
-    dropped, not through the copy `render` may have cached."""
+    dropped, not through the copy `render` may have cached. The copy is transient but
+    doubles peak memory (about 170 MB more for Gemma 4's); with `hand_over=True` the
+    tokenizer is instead handed over to the core (`plain_text_tokenizer`) and checked in
+    place, with no copy, and `render` then uses it as it is."""
     wrong = {
         s: tokenizer.token_to_id(s)
         for s, i in CONTROL_TOKEN_IDS.items()
@@ -97,7 +102,7 @@ def check_tokenizer(tokenizer: Tokenizer, config: DecisionConfig) -> None:
         )
     # Encoded as request text is: plain text, special-token matching off, by a fresh copy,
     # which also refuses a tokenizer with added tokens that are not special.
-    copy = _make_plain_text_copy(tokenizer)
+    copy = plain_text_tokenizer(tokenizer) if hand_over else _make_plain_text_copy(tokenizer)
     encoded = [list(e.ids) for e in copy.encode_batch(list(CODES), add_special_tokens=False)]
     bad = [
         c for c, ids, want in zip(CODES, encoded, config.token_ids, strict=True) if ids != [want]
@@ -111,14 +116,18 @@ def check_tokenizer(tokenizer: Tokenizer, config: DecisionConfig) -> None:
 
 
 def load_tokenizer(
-    checkpoint: str | os.PathLike[str], config: DecisionConfig | None = None
+    checkpoint: str | os.PathLike[str],
+    config: DecisionConfig | None = None,
+    *,
+    hand_over: bool = False,
 ) -> Tokenizer:
     """The checkpoint's `tokenizer.json`, checked by `check_tokenizer` against `config` (or
-    the directory's decision_config.json)."""
+    the directory's decision_config.json). With `hand_over=True` it is handed over to the
+    core as it is checked, so that neither the check nor `render` makes a copy of it."""
     from tokenizers import Tokenizer
 
     d = os.fspath(checkpoint)
     cfg = config if config is not None else DecisionConfig.load(d)
     tok: Tokenizer = Tokenizer.from_file(os.path.join(d, TOKENIZER_FILE))
-    check_tokenizer(tok, cfg)
+    check_tokenizer(tok, cfg, hand_over=hand_over)
     return tok
