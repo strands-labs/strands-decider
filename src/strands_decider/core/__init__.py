@@ -11,6 +11,8 @@ docs/spec.md defines the interface; this package implements its torch-free half 
     DecisionConfig.load(checkpoint)        -> decision_config.json, validated
     Readout.load(checkpoint)               -> readout.safetensors, and the soft-cap from
                                               decision_config.json
+    load_tokenizer(checkpoint)             -> tokenizer.json, checked against the
+                                              interface's control and code ids
 
 A runtime supplies the decoder (`Backend`), and for images the vision encoder and the
 pixel preprocessing; `evaluate` joins the pieces. Images are checked and counted from their
@@ -61,11 +63,13 @@ from .readout import (
 )
 from .request import parse_request
 from .runtime import Backend, attention_mask, evaluate
+from .tokenizer import CONTROL_TOKEN_IDS, check_tokenizer, load_tokenizer
 
 __all__ = [
     "CAPPED_LOGITS",
     "CHAT",
     "CODES",
+    "CONTROL_TOKEN_IDS",
     "FINAL_LOGITS",
     "FORMAT_VERSION",
     "HIDDEN",
@@ -90,12 +94,14 @@ __all__ = [
     "RenderedRequest",
     "answer",
     "attention_mask",
+    "check_tokenizer",
     "code_probabilities",
     "codes_for",
     "decode_image",
     "evaluate",
     "image_size",
     "load_safetensors",
+    "load_tokenizer",
     "parse_request",
     "question_probabilities",
     "read",

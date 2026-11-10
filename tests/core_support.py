@@ -1,10 +1,12 @@
 """Shared by the torch-free core's tests (tests/test_core_*.py).
 
 The render goldens and properties run against Gemma 4's real tokenizer. It is 32 MB, so it
-is not committed: point STRANDS_DECIDER_GEMMA4_TOKENIZER at a copy of `tokenizer.json`
-(google/gemma-4-E2B-it at GEMMA4_REVISION, the file every Gemma 4 size ships), and the
-tests check its sha256 before they trust it. Without it those tests skip; the tests that
-need only text, numbers or a toy tokenizer always run.
+is not committed: point STRANDS_DECIDER_GEMMA4_TOKENIZER at a copy of `tokenizer.json`, and
+the tests check its sha256 before they trust it. The goldens were made with the pinned file
+(google/gemma-4-E2B-it at GEMMA4_REVISION, which 26B-A4B and 31B also ship) and need it; the
+property tests accept any of the Gemma 4 files docs/spec.md lists (GEMMA4_TOKENIZERS), since
+the E2B, E4B and 12B repositories now ship slightly different ones. Without a tokenizer those
+tests skip; the tests that need only text, numbers or a toy tokenizer always run.
 
     STRANDS_DECIDER_GEMMA4_TOKENIZER=/path/to/tokenizer.json pytest tests/test_core_*.py
 
@@ -41,6 +43,13 @@ FIXTURES = Path(__file__).parent / "fixtures" / "core"
 GEMMA4_REPO = "google/gemma-4-E2B-it"
 GEMMA4_REVISION = "3e22461f65e89153144f8adb70e3b8c2cc9845a7"
 GEMMA4_TOKENIZER_SHA256 = "cc8d3a0ce36466ccc1278bf987df5f71db1719b9ca6b4118264f45cb627bfe0f"
+# Every Gemma 4 tokenizer.json docs/spec.md lists, by sha256: where each is shipped.
+GEMMA4_TOKENIZERS = {
+    GEMMA4_TOKENIZER_SHA256: "google/gemma-4-E2B-it@3e22461f, 26B-A4B@4d7ae498, 31B@842da379",
+    "ab26b2add729e6f645bd869f228f14190a06615538f3be6f7786f33d13d78ad2": "google/gemma-4-E2B-it@4adf1574",
+    "91d9cf86906f78e197021fda88214d448e5c120665d0243a8e776e046986c6bc": "google/gemma-4-E4B-it@4ecc2ba6",
+    "9788bdb6a021b3170357cd3587b5d622b1177561ad3c5bf43d73728fd71aeacb": "google/gemma-4-12B-it@43c9d014",
+}
 TOKENIZER_ENV = "STRANDS_DECIDER_GEMMA4_TOKENIZER"
 TEMPLATES_ENV = "STRANDS_DECIDER_GEMMA4_TEMPLATES"
 REGEN_IMAGES_ENV = "STRANDS_DECIDER_REGEN_IMAGES"
@@ -49,7 +58,8 @@ SOFT_TOKENS = FIXTURES / "image_soft_tokens.json"
 
 
 @lru_cache(maxsize=1)
-def _gemma4_path() -> str | None:
+def _gemma4_path() -> tuple[str, str] | None:
+    """The tokenizer's path and sha256, if it is one of docs/spec.md's Gemma 4 files."""
     p = os.environ.get(TOKENIZER_ENV)
     if not p:
         return None
@@ -57,18 +67,31 @@ def _gemma4_path() -> str | None:
         p = os.path.join(p, "tokenizer.json")
     with open(p, "rb") as f:
         digest = hashlib.sha256(f.read()).hexdigest()
-    if digest != GEMMA4_TOKENIZER_SHA256:
+    if digest not in GEMMA4_TOKENIZERS:
         raise AssertionError(
-            f"{p} has sha256 {digest}; the render goldens are for {GEMMA4_REPO}@{GEMMA4_REVISION} "
-            f"({GEMMA4_TOKENIZER_SHA256})"
+            f"{p} has sha256 {digest}, which is not one of the Gemma 4 tokenizer.json files "
+            f"docs/spec.md lists: {sorted(GEMMA4_TOKENIZERS)}"
         )
-    return p
+    return p, digest
 
 
 def gemma4_tokenizer_path() -> str:
-    p = _gemma4_path()
-    if p is None:
+    found = _gemma4_path()
+    if found is None:
         pytest.skip(f"set {TOKENIZER_ENV} to Gemma 4's tokenizer.json ({GEMMA4_REPO})")
+    return found[0]
+
+
+def pinned_gemma4_tokenizer_path() -> str:
+    """The pinned tokenizer.json, the one the render goldens were made with, or a skip."""
+    p = gemma4_tokenizer_path()
+    found = _gemma4_path()
+    assert found is not None
+    if found[1] != GEMMA4_TOKENIZER_SHA256:
+        pytest.skip(
+            f"the render goldens are for {GEMMA4_REPO}@{GEMMA4_REVISION}'s tokenizer.json "
+            f"({GEMMA4_TOKENIZER_SHA256}); {TOKENIZER_ENV} is {GEMMA4_TOKENIZERS[found[1]]}'s"
+        )
     return p
 
 
@@ -80,8 +103,14 @@ def _load_gemma4(path: str):
 
 
 def gemma4_tokenizer():
-    """Gemma 4's tokenizer, or a skip. One instance per session: it is 262k tokens."""
+    """Gemma 4's tokenizer, any listed file, or a skip. One instance per session: it is 262k
+    tokens."""
     return _load_gemma4(gemma4_tokenizer_path())
+
+
+def pinned_gemma4_tokenizer():
+    """The pinned Gemma 4 tokenizer, the render goldens', or a skip."""
+    return _load_gemma4(pinned_gemma4_tokenizer_path())
 
 
 def gemma4_tokenizer_dir() -> str:

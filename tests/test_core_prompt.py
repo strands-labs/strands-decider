@@ -36,6 +36,7 @@ from core_support import (
     gemma4_tokenizer_path,
     image_b64,
     image_bytes,
+    pinned_gemma4_tokenizer,
     toy_tokenizer,
 )
 
@@ -240,7 +241,7 @@ def _write_goldens(tok) -> None:
 
 def _goldens() -> list[dict]:
     if REGEN:
-        _write_goldens(gemma4_tokenizer())
+        _write_goldens(pinned_gemma4_tokenizer())
     return json.loads(GOLDENS.read_text(encoding="utf-8"))["cases"]
 
 
@@ -274,7 +275,7 @@ def test_golden_text(goldens, key):
 
 @pytest.mark.parametrize("key", GOLDEN_IDS)
 def test_golden_ids(goldens, key):
-    tok = gemma4_tokenizer()
+    tok = pinned_gemma4_tokenizer()
     g = goldens[key]
     assert _golden_case(g["case"], g["variant"], tok) == g
     assert g["S"] == len(g["state_ids"])
@@ -947,6 +948,39 @@ def test_every_code_is_one_token_matching_token_ids():
     for variant in VARIANTS:
         rq = render(big, tok, variant).questions["q"]
         assert rq.codes == CODES and rq.code_token_ids == tuple(cfg["token_ids"])
+
+
+def test_the_checkpoints_tokenizer_is_checked_at_load(tmp_path):
+    """check_tokenizer holds a tokenizer to the ids the interface depends on: each control
+    token at its id, and each code one token with decision_config.json's id for it.
+    load_tokenizer reads a checkpoint's tokenizer.json and checks it."""
+    import shutil
+
+    from strands_decider.core import (
+        CONTROL_TOKEN_IDS,
+        DecisionConfig,
+        check_tokenizer,
+        load_tokenizer,
+    )
+
+    tok = gemma4_tokenizer()
+    cfg = DecisionConfig.from_dict(decision_config_fixture())
+    check_tokenizer(tok, cfg)
+    assert {s: tok.token_to_id(s) for s in CONTROL_TOKEN_IDS} == CONTROL_TOKEN_IDS
+    swapped = list(cfg.token_ids)
+    swapped[26], swapped[27] = swapped[27], swapped[26]  # AA and AB
+    with pytest.raises(ValueError, match=r"codes \['AA', 'AB'\]"):
+        check_tokenizer(
+            tok, DecisionConfig.from_dict({**decision_config_fixture(), "token_ids": swapped})
+        )
+    # The toy tokenizer has the control tokens, but not at Gemma 4's ids.
+    with pytest.raises(ValueError, match="control tokens are not Gemma 4's"):
+        check_tokenizer(toy_tokenizer(), cfg)
+    shutil.copy(FIXTURES / "decision_config.json", tmp_path / "decision_config.json")
+    shutil.copy(gemma4_tokenizer_path(), tmp_path / "tokenizer.json")
+    loaded = load_tokenizer(tmp_path)
+    assert loaded.encode("AB", add_special_tokens=False).ids == [cfg.token_ids[27]]
+    assert load_tokenizer(tmp_path, cfg).get_vocab_size() == tok.get_vocab_size()
 
 
 # ---- conformance with Gemma 4's chat templates, and with v1 ---------------------------------
