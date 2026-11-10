@@ -653,6 +653,35 @@ def test_cuda_bf16_agrees_with_cpu_float32(ckpt, kind):
     _agrees_with_cpu(ckpt, "cuda")
 
 
+# E2B's attention layout: one key/value head shared by 8 query heads, heads of 256 and 512.
+E2B_HEADS = {
+    "hidden_size": 256,
+    "num_attention_heads": 8,
+    "num_key_value_heads": 1,
+    "head_dim": 256,
+    "global_head_dim": 512,
+}
+
+
+@pytest.mark.skipif(not CUDA, reason="needs CUDA")
+def test_cuda_questions_of_64k_plus_1_tokens_over_a_cached_state(tmp_path):
+    """torch 2.7's CUDA SDPA gave wrong attention for E2B's layout in a forward that continues
+    a cached state with 65, 129 or another 64k+1 query tokens (v1 serves E2B with eager
+    attention for it). The question pass over the state is such a forward."""
+    path = decision_checkpoint(
+        tmp_path / "e2b", GEMMA4, text=E2B_HEADS, decision={"inputs": ["text"]}
+    )
+    full = tb.TransformersBackend.load(str(path), device="cuda", reuse_state=False)
+    reuse = tb.TransformersBackend.load(str(path), device="cuda")
+    g = np.random.default_rng(0)
+    vocab = full.checkpoint.tokenizer().get_vocab_size()
+    state = [int(t) for t in g.integers(10, vocab - 10, 300)]
+    for n in (63, 64, 65, 66, 129, 193):
+        q = [int(t) for t in g.integers(10, vocab - 10, n)]
+        a, b = full.forward(state, [q]), reuse.forward(state, [q])
+        assert np.abs(a - b).max() < 0.1 * max(1.0, float(np.abs(a).max())), n
+
+
 # ---- a real checkpoint --------------------------------------------------------------------
 
 REAL = os.environ.get("STRANDS_DECIDER_TEST_CHECKPOINT")

@@ -63,16 +63,16 @@ def _text_kwargs(vocab: int) -> dict:
     }
 
 
-def gemma4_text_config(vocab: int):
+def gemma4_text_config(vocab: int, **overrides):
     return transformers.Gemma4TextConfig(
-        **_text_kwargs(vocab),
+        **{**_text_kwargs(vocab), **overrides},
         hidden_size_per_layer_input=8,
         vocab_size_per_layer_input=vocab,
         num_kv_shared_layers=1,
     )
 
 
-def model_config(kind: str, tok, *, vision: bool = True):
+def model_config(kind: str, tok, *, vision: bool = True, text: dict | None = None):
     ids = {
         "boi_token_id": tok.token_to_id("<|image>"),
         "image_token_id": tok.token_to_id("<|image|>"),
@@ -89,13 +89,13 @@ def model_config(kind: str, tok, *, vision: bool = True):
             head_dim=16,
         )
         return transformers.Gemma4Config(
-            text_config=gemma4_text_config(vocab),
+            text_config=gemma4_text_config(vocab, **(text or {})),
             vision_config=vis if vision else None,
             audio_config=None,
             **ids,
         )
     text = transformers.Gemma4UnifiedTextConfig(
-        **_text_kwargs(vocab), use_bidirectional_attention="vision"
+        **{**_text_kwargs(vocab), **(text or {})}, use_bidirectional_attention="vision"
     )
     vis = transformers.Gemma4UnifiedVisionConfig(mm_embed_dim=32, output_proj_dims=32)
     return transformers.Gemma4UnifiedConfig(
@@ -158,9 +158,11 @@ def decision_checkpoint(
     seed: int = 0,
     decision: dict | None = None,
     processor: dict | None = None,
+    text: dict | None = None,
 ) -> Path:
-    """A tiny decision checkpoint of `kind` at `path`; `decision` and `processor` override
-    fields of decision_config.json and of processor_config.json's image_processor."""
+    """A tiny decision checkpoint of `kind` at `path`; `decision`, `processor` and `text`
+    override fields of decision_config.json, of processor_config.json's image_processor, and
+    of the decoder's configuration."""
     if kind == UNIFIED and not HAS_UNIFIED:
         pytest.skip("this transformers has no Gemma4UnifiedForConditionalGeneration")
     tok = tokenizer()
@@ -170,7 +172,7 @@ def decision_checkpoint(
         if kind == UNIFIED
         else transformers.Gemma4ForConditionalGeneration
     )
-    model = cls(model_config(kind, tok)).to(torch.bfloat16)
+    model = cls(model_config(kind, tok, text=text)).to(torch.bfloat16)
     path.mkdir(parents=True, exist_ok=True)
     model.save_pretrained(str(path))
     tok.save(str(path / "tokenizer.json"))
@@ -180,7 +182,7 @@ def decision_checkpoint(
     (path / "decision_config.json").write_text(
         json.dumps(decision_config(kind, tok, **(decision or {})))
     )
-    _readout(path, HIDDEN, seed)
+    _readout(path, (text or {}).get("hidden_size", HIDDEN), seed)
     return path
 
 
