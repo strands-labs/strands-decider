@@ -11,7 +11,12 @@ requires-python = ">=3.10"
 dependencies = ["vllm>=0.33.0,<0.34"]
 
 [project.optional-dependencies]
+# The server renders requests with the core library (strands_decider.core, PR #129).
+serve = ["strands-decider"]
 test = ["pytest"]
+
+[project.scripts]
+strands-decider-vllm = "strands_decider_vllm.cli:main"
 
 [project.entry-points."vllm.general_plugins"]
 strands_decider = "strands_decider_vllm:register"

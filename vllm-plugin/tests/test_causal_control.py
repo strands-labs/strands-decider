@@ -12,8 +12,12 @@ TOOL = ROOT / "tools" / "causal_control"
 
 
 def test_package_reads_no_environment_switch():
+    # The server sets vLLM's own defaults before vLLM is imported (server.prepare_environment); nothing in the
+    # package reads a switch from the environment.
     for path in sorted((ROOT / "src" / "strands_decider_vllm").glob("*.py")):
         text = path.read_text()
+        if path.name == "server.py":
+            text = text.replace("os.environ.setdefault(", "")
         for needle in ("os.environ", "getenv", "CAUSAL_CONTROL"):
             assert needle not in text, f"{path.name} contains {needle}"
 

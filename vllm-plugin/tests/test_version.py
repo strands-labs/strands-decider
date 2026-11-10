@@ -91,3 +91,4 @@ def test_pyproject_agrees_with_package():
     assert project["entry-points"]["vllm.general_plugins"] == {
         "strands_decider": "strands_decider_vllm:register"
     }
+    assert project["scripts"] == {"strands-decider-vllm": "strands_decider_vllm.cli:main"}
