@@ -373,7 +373,7 @@ A runtime that reuses a state's keys and values beyond one request, in a prefix 
 For each question with k options:
 
 ```
-h  = the final-norm hidden state at position L - 1, as the decoder returns it    [hidden]
+h  = bf16(the final-norm hidden state at position L - 1)                          [hidden]
 z  = bf16(W h)          a bf16 GEMM; W = readout.safetensors `weight`, in bf16    [255]
 z  = tanh(z / c) * c    float32; c = decision_config.json `final_logit_softcapping` (30.0 for every Gemma 4 size)
 z  = z / T              float32; T = decision_config.json `temperature`
@@ -386,15 +386,15 @@ p  = softmax(z[0:k])    float32, over the question's own k codes only
 
 The arithmetic above is the training reference's, and that of `strands-decider-vllm`, the vLLM runtime (strands-decider pull request 130). A runtime follows it step by step:
 
-1. `W h` is a bf16 GEMM. `W` is bf16; a runtime that reads an f32 or f16 tensor rounds it to bf16 first. `h` is used as the decoder returns it: a bf16 decoder returns bf16 values, which float32 holds exactly. The products are accumulated in float32 or wider, and the result `z` is rounded to bf16, to nearest with ties to even. The rounding is part of the regime, not noise to be avoided: between 16 and 32 bf16's values are 0.125 apart, so it moves a logit there by up to 0.0625, more than any float32 error.
+1. `W h` is a bf16 GEMM. `W` is bf16; a runtime that reads an f32 or f16 tensor rounds it to bf16 first. `h` is rounded to bf16 before the GEMM, to nearest with ties to even, as `strands-decider-vllm` rounds it (`hidden_states.to(bf16)`): a bf16 decoder's h is unchanged by it, and a float32 decoder's, such as llama.cpp's or MLX's in float32, is rounded (a wider h is rounded to float32 first). The products are accumulated in float32 or wider, and the result `z` is rounded to bf16, to nearest with ties to even. The rounding is part of the regime, not noise to be avoided: between 16 and 32 bf16's values are 0.125 apart, so it moves a logit there by up to 0.0625, more than any float32 error.
 2. The soft-cap is computed in float32 as `tanh(z / c) * c`, each operation rounded to float32, and the temperature divides the result in float32.
 3. The softmax over the question's k codes is taken in float32.
 
-`strands_decider.core.read` is the reference implementation of this regime in numpy, which has no bf16. It sums the GEMM's products in float64, rounds each sum to float32, and rounds that to bf16 through the float32's bits (`round_to_bf16`: add 0x7FFF, plus 1 if the lowest kept bit is set, and clear the low 16 bits). A GPU's float32 accumulator sums in another order, so where a sum falls next to a bf16 rounding boundary its `z` can differ by one bf16 step; section 10's bounds absorb this. `tests/test_core_readout.py` checks `read` against an independent reimplementation of `strands-decider-vllm`'s arithmetic on random bf16 inputs, logits between 16 and 32 included: `z` agrees bit for bit, and the probabilities to 1e-5.
+`strands_decider.core.read` is the reference implementation of this regime in numpy, which has no bf16. It rounds h to bf16, sums the GEMM's products in float64, rounds each sum to float32, and rounds that to bf16 through the float32's bits (`round_to_bf16`: add 0x7FFF, plus 1 if the lowest kept bit is set, and clear the low 16 bits). A GPU's float32 accumulator sums in another order, so where a sum falls next to a bf16 rounding boundary its `z` can differ by one bf16 step; section 10's bounds absorb this. `tests/test_core_readout.py` checks `read` against an independent reimplementation of `strands-decider-vllm`'s arithmetic on random bf16 inputs, logits between 16 and 32 included: `z` agrees bit for bit, and the probabilities to 1e-5. It also checks that a float32 h gives the z of its bf16 rounding, and not the z of the unrounded h.
 
 The temperature, like the soft-cap, is applied exactly once. A runtime that applies part of the readout itself returns a named stage (section 11), and the client applies only what the stage has not. On vLLM, `strands-decider-vllm` applies the soft-cap and the checkpoint temperature in the model, so the client sends `temperature` 1.0 in its request. Under `--logprobs-mode processed_logprobs` vLLM divides the logits by the request's temperature before it takes the log-softmax, so any other value would apply a temperature a second time.
 
-The answer fields are v1's response schema (`schema.py`, `NoulAnswer`, `ChoiceAnswer`, `ScoreAnswer`), rounded to four decimal places as v1 rounds:
+The answer fields are v1's response schema (`schema.py`, `NoulAnswer`, `ChoiceAnswer`, `ScoreAnswer`), computed from the probabilities in double precision and rounded to four decimal places, as v1 rounds them, by Python's `round(x, 4)`: the decimal with four places nearest to the double's exact value, ties to even. The sums behind `score` and `confidence` can differ in their last bit between Python versions (3.12 and later add floats with compensation) and between languages, so a field can differ from the reference's by 0.0001 where its unrounded value lies at a rounding boundary. Section 10 bounds the probabilities; it does not ask for the fields' last digit.
 
 | type | fields |
 | --- | --- |
@@ -512,15 +512,17 @@ Model goldens fix the answers of one checkpoint. Each checkpoint release publish
 A runtime conforms for a checkpoint when, on that checkpoint's model goldens:
 
 1. its rendered ids equal the goldens' ids for every question;
-2. running the weights in bf16, its top-1 code (the code with the highest probability) agrees with the reference's on at least 98% of the questions;
-3. running quantized weights, it meets the bound recorded for that format in the table below.
+2. running the weights in bf16, its top-1 code (the code with the highest probability) agrees with the reference's on at least 98% of the questions, and its mean |Δp| is at most 0.02;
+3. running quantized weights, it meets the bounds recorded for that format in the table below.
 
-| weight format | top-1 agreement bound |
-| --- | --- |
-| bf16 | 98% |
-| quantized (for example MLX 8-bit or 4-bit, GGUF Q8_0 or Q4_K_M) | set from measurement when the format is first published, and recorded here |
+A question's |Δp| is the largest absolute difference between the runtime's probability and the reference's for any of the question's options; the mean |Δp| is its average over the goldens' questions. The top-1 bound alone cannot see the errors that section 7.1 exists to prevent: the soft-cap and the temperature are both monotone, so a runtime that skips the cap, or applies T twice, keeps every top-1 code and still gets every `noul`, `score`, `probabilities` and `confidence` wrong. The probability bound does see them. Measured against the reference, vLLM (`strands-decider-vllm`) and transformers at all five sizes have a mean |Δp| of 0.0033 to 0.0119.
 
-A quantized artifact whose format has no recorded bound makes no conformance claim.
+| weight format | top-1 agreement | mean \|Δp\| |
+| --- | --- | --- |
+| bf16 | at least 98% | at most 0.02 |
+| quantized (for example MLX 8-bit or 4-bit, GGUF Q8_0 or Q4_K_M) | set from measurement when the format is first published, and recorded here | the same |
+
+A quantized artifact whose format has no recorded bounds makes no conformance claim.
 
 ## 11. The runtime interface
 
