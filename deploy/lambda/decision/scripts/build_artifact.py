@@ -9,11 +9,12 @@ environment's AWS credentials), or a local directory. OUT_DIR gets:
     model.gguf             the decoder: llama.cpp's stock convert_hf_to_gguf.py to BF16 (lossless
                            from the bf16 checkpoint), then llama-quantize to Q8_0
     mmproj.gguf            for a checkpoint whose inputs hold "image": the vision tower and its
-                           projection, convert_hf_to_gguf.py --mmproj, without the audio tower
-                           (vision_only_mmproj.py)
+                           projection, convert_hf_to_gguf.py --mmproj at q8_0 (f16 with
+                           --mmproj-type), without the audio tower (vision_only_mmproj.py)
     readout.safetensors, decision_config.json, tokenizer.json, processor_config.json
                            the checkpoint's own, unchanged
-    artifact.json          the model's name, the checkpoint, the llama.cpp commit and the files' sha256
+    artifact.json          the model's name, the checkpoint, the llama.cpp commit, the files' sha256,
+                           and the byte ranges of model.gguf that llama.cpp reads lazily
 
 The checkpoint is checked before anything is converted, as a runtime checks it: decision_config.json
 must validate (`"interface": "strands-decider"`, the soft-cap among its required fields),
@@ -135,6 +136,23 @@ def gguf_has_audio(llama_cpp: Path, path: Path) -> bool:
     return any(t.name.startswith(("a.", "mm.a.")) for t in gguf.GGUFReader(path).tensors)
 
 
+# The tensors llama.cpp reads lazily, a few rows per batch: Gemma 4 E2B's and E4B's per-layer
+# embedding table, half of E2B's file.
+LAZY_TENSORS = ("per_layer_token_embd.weight",)
+
+
+def lazy_ranges(llama_cpp: Path, path: Path) -> list[list[int]]:
+    """The byte ranges, in the GGUF, of the tensors llama.cpp reads only a few rows of at a time."""
+    sys.path.insert(0, str(llama_cpp / "gguf-py"))
+    import gguf
+
+    return [
+        [int(t.data_offset), int(t.data_offset) + int(t.n_bytes)]
+        for t in gguf.GGUFReader(path).tensors
+        if t.name in LAZY_TENSORS
+    ]
+
+
 def llama_cpp_rev(llama_cpp: Path) -> str | None:
     """The llama.cpp commit: LLAMA_CPP_REV (the image build's), else the tree's git HEAD."""
     if os.environ.get("LLAMA_CPP_REV"):
@@ -158,7 +176,7 @@ def main() -> None:
     ap.add_argument("--name", default=None, help="the model's name; the checkpoint's by default")
     ap.add_argument("--llama-cpp", type=Path, required=True, help="the patched llama.cpp source")
     ap.add_argument("--quantize", type=Path, required=True, help="llama-quantize")
-    ap.add_argument("--mmproj-type", choices=("f16", "q8_0"), default="f16")
+    ap.add_argument("--mmproj-type", choices=("f16", "q8_0"), default="q8_0")
     ap.add_argument("--max-bytes", type=int, default=MAX_BYTES)
     ap.add_argument("--work", type=Path, default=Path("/tmp/decision-build"))
     ap.add_argument(
@@ -214,6 +232,7 @@ def main() -> None:
         "quantization": QUANT,
         "mmproj_type": a.mmproj_type if "mmproj.gguf" in files else None,
         "llama_cpp": llama_cpp_rev(a.llama_cpp),
+        "lazy_ranges": lazy_ranges(a.llama_cpp, a.out / "model.gguf"),
         "sha256": {k: sha256(p) for k, p in files.items()},
     }
     (a.out / "artifact.json").write_text(json.dumps(artifact, indent=2) + "\n")
