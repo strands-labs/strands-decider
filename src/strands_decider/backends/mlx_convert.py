@@ -24,8 +24,8 @@ and everything else is copied byte for byte:
   removes.
 
 A quantized artifact makes no conformance claim unless docs/spec.md section 10 records bounds
-for its format at that size (`mlx_format.RECORDED`: MLX 8-bit, group 64, at E2B), and
-converting to it, or loading it, says so.
+for its format at that size, in the core's `BOUNDS` (MLX 8-bit, group 64, at E2B), and it
+carries this converter's marker. Converting to any other, or loading it, says so.
 """
 
 from __future__ import annotations
