@@ -415,21 +415,32 @@ Confidence uses v1's formulas, unchanged and shared as code (`src/strands_decide
 | `prompt` | string | the template the checkpoint was trained with: `strands-plain` or `strands-chat` |
 | `inputs` | array of distinct strings from `text` and `image`, holding `text` | what a request to the checkpoint may carry: `["text"]`, or `["text", "image"]` for a checkpoint that serves images |
 | `codes` | array of 255 strings | the codes of section 2, in order; anything else is an error |
-| `token_ids` | array of 255 distinct non-negative integers | each code's token id, in code order |
+| `token_ids` | array of 255 distinct integers from 0 to 2^31 − 1 | each code's token id, in code order |
 | `temperature` | number, finite and above 0 | the divisor of section 7 |
 | `final_logit_softcapping` | number, finite and above 0 | the soft-cap c of section 7: the decoder's `final_logit_softcapping`, 30.0 for every Gemma 4 size |
 | `attention_mode` | string, `prefix_bidir` | the mask of section 6 |
 | `pooling` | string, `last` | the readout position of section 5 |
-| `max_length_validated` | positive integer | the longest prompt, in tokens (S, image placeholders included, plus the question's tokens), at which the checkpoint was validated |
+| `max_length_validated` | integer from 1 to 2^31 − 1 | the longest prompt, in tokens (S, image placeholders included, plus the question's tokens), at which the checkpoint was validated |
 | `provenance` | object | public origin of the checkpoint; fields below |
 
 `inputs` names what the checkpoint was validated on beyond text: a checkpoint with `image` in it has image requests among its model goldens (section 10). The array's order carries no meaning. A runtime refuses a request with images unless `image` is in it (section 11); audio would add `audio` (section 12).
 
-`provenance` has four string fields and no others. `base_model`, a Hub id such as `google/gemma-4-E2B-it`, and `base_revision`, the base model's 40-character commit, are required: the checkpoint's `config.json`, `processor_config.json` and tokenizer files are the base's at that revision, and so is every part of the model that was not fine-tuned (section 9). `release`, the released model's name or Hub id, and `source`, an https URL of the public code and recipe that trained it, are optional. `"provenance": null` is an error. `DecisionConfig` checks only these formats. Keeping private paths and hosts out of a released checkpoint is the job of the release's export checks, not of this file's loader.
+`provenance` has four string fields and no others. `base_model`, a Hub id such as `google/gemma-4-E2B-it`, and `base_revision`, the base model's 40-character commit, are required: the checkpoint's `config.json`, `processor_config.json` and tokenizer files are the base's at that revision, and so is every part of the model that was not fine-tuned (section 9). `release`, the released model's name or Hub id, and `source`, an https URL of the public code and recipe that trained it, are optional; an optional field that does not apply is left out. `"provenance": null` is an error, and so is any of its fields given as null. Each field must match its pattern as a whole string, in ASCII:
 
-`interface` is the discriminator. Other decision-model formats use the same file names, and converters, such as llama.cpp's, claim any directory that holds `decision_config.json` and `readout.safetensors`. A runtime or converter therefore identifies a decision checkpoint by `"interface": "strands-decider"`, never by its file names, and a runtime refuses a `decision_config.json` without it before it reads any other field.
+| field | pattern |
+| --- | --- |
+| `base_model` | `[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9_.-]+` |
+| `base_revision` | `[0-9a-f]{40}` |
+| `release` | `([A-Za-z0-9][A-Za-z0-9_.-]*/)?[A-Za-z0-9][A-Za-z0-9_.-]*` |
+| `source` | `https://` and then one or more of the printable ASCII characters `!` to `~` (no space) |
 
-`temperature` and `final_logit_softcapping` divide the readout's logits in float32 (section 7), so each must also lie in float32's normal range, about 1.2e-38 to 3.4e38; a value outside it is an error.
+`DecisionConfig` checks only these formats. Keeping private paths and hosts out of a released checkpoint is the job of the release's export checks, not of this file's loader.
+
+`interface` is the discriminator. Other decision-model formats use the same file names, and converters, such as llama.cpp's, claim any directory that holds `decision_config.json` and `readout.safetensors`. A runtime or converter therefore identifies a decision checkpoint by `"interface": "strands-decider"`, never by its file names, and a runtime refuses a `decision_config.json` without it before it reads any other field. It reads `format_version` next, so that a file of a later layout is refused as that, not for the fields it adds.
+
+`temperature` and `final_logit_softcapping` divide the readout's logits in float32 (section 7), so each must also lie in float32's normal range, about 1.2e-38 to 3.4e38, and `final_logit_softcapping / temperature`, the largest final logit, must be finite in float32; a value outside these is an error.
+
+An integer is a JSON number written without a fraction or an exponent: `8192`, not `8192.0` or `8.192e3`, which are numbers of the wrong type. `format_version` is exactly `1`. Integers past the bounds in the table are errors, so that a runtime that holds them in 32 bits never overflows, and so is a number too large for a double, wherever a number is expected.
 
 Validation is strict. A missing required field, an unknown field at any level, and a value of the wrong type are errors, and a runtime refuses the checkpoint. A runtime must refuse a `prompt` it does not implement, rather than fall back to another; a later variant gets a new name. A runtime refuses a prompt longer than `max_length_validated` tokens unless its operator raises the limit explicitly, and it refuses rather than truncates. Training-side records, such as data paths, hyperparameters and the inputs to a weight average, do not belong in this file.
 

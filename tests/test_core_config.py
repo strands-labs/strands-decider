@@ -9,6 +9,7 @@ from __future__ import annotations
 import copy
 import json
 
+import numpy as np
 import pytest
 from core_support import FIXTURES, decision_config_fixture
 
@@ -21,7 +22,7 @@ from strands_decider.core import (
     DecisionConfig,
     Provenance,
 )
-from strands_decider.core.config import REQUIRED
+from strands_decider.core.config import INT32_MAX, REQUIRED, check_float32_scale
 
 BASE = {
     "base_model": "google/gemma-4-E2B-it",
@@ -192,6 +193,8 @@ def test_scales_within_float32_load(value):
         ("token_ids", [1.0, *range(1, 255)], "255 non-negative"),
         ("token_ids", [True, *range(1, 255)], "255 non-negative"),
         ("token_ids", [0, 0, *range(2, 255)], "distinct"),
+        ("token_ids", [INT32_MAX + 1, *range(1, 255)], "at most"),
+        ("token_ids", [10**400, *range(1, 255)], "at most"),
         ("temperature", 0, "temperature"),
         ("temperature", -1.0, "temperature"),
         ("temperature", float("nan"), "temperature"),
@@ -204,6 +207,11 @@ def test_scales_within_float32_load(value):
         ("temperature", 1e300, "temperature"),
         ("temperature", 1e-39, "temperature"),
         ("temperature", 5e-324, "temperature"),
+        # An integer too large for a double: a ValueError, never an OverflowError.
+        ("temperature", 10**400, "temperature"),
+        ("temperature", -(10**400), "temperature"),
+        # c / T, the largest final logit, past float32's range.
+        ("temperature", 1.2e-38, "overflows float32"),
         ("final_logit_softcapping", 0, "final_logit_softcapping"),
         ("final_logit_softcapping", -30.0, "final_logit_softcapping"),
         ("final_logit_softcapping", None, "final_logit_softcapping"),
@@ -212,16 +220,50 @@ def test_scales_within_float32_load(value):
         ("final_logit_softcapping", float("nan"), "final_logit_softcapping"),
         ("final_logit_softcapping", float("inf"), "final_logit_softcapping"),
         ("final_logit_softcapping", 1e300, "final_logit_softcapping"),
+        ("final_logit_softcapping", 10**400, "final_logit_softcapping"),
         ("attention_mode", "causal", "attention_mode"),
         ("pooling", "mean", "pooling"),
         ("max_length_validated", 0, "max_length_validated"),
         ("max_length_validated", 8192.0, "max_length_validated"),
         ("max_length_validated", None, "max_length_validated"),
+        ("max_length_validated", INT32_MAX + 1, "max_length_validated"),
+        ("max_length_validated", 10**400, "max_length_validated"),
+        ("format_version", 10**400, "format_version"),
     ],
 )
 def test_bad_values_are_errors(field, value, match):
     with pytest.raises(ValueError, match=match):
         DecisionConfig.from_dict(_with(**{field: value}))
+    good = DecisionConfig.load(FIXTURES)
+    with pytest.raises(ValueError):  # constructed directly too: a ValueError, whatever the type
+        DecisionConfig(**{**good.__dict__, field: value})
+
+
+def test_integers_hold_to_their_bounds():
+    ids = [INT32_MAX, *range(1, 255)]
+    cfg = DecisionConfig.from_dict(_with(token_ids=ids, max_length_validated=INT32_MAX))
+    assert cfg.token_ids[0] == INT32_MAX and cfg.max_length_validated == INT32_MAX
+
+
+def test_the_version_is_read_before_the_fields():
+    """A file of a later layout is refused as one, not for the fields it adds or drops."""
+    d = _with(format_version=2, attention="prefix_bidir")
+    del d["pooling"]
+    with pytest.raises(ValueError, match="format_version 2 is not supported"):
+        DecisionConfig.from_dict(d)
+
+
+def test_scales_take_numpy_scalars_and_refuse_bools():
+    assert check_float32_scale("t", np.float32(30.0)) == 30.0
+    assert (
+        check_float32_scale("t", np.float64(0.5)) == 0.5
+        and check_float32_scale("t", np.int64(2)) == 2.0
+    )
+    cfg = DecisionConfig.from_dict(_with(temperature=np.float32(0.5)))
+    assert cfg.temperature == 0.5
+    for bad in (True, np.bool_(True), "1", None, [1.0], 10**400, np.float32("nan")):
+        with pytest.raises(ValueError, match="must be a finite number"):
+            check_float32_scale("t", bad)
 
 
 @pytest.mark.parametrize(
@@ -241,6 +283,19 @@ def test_bad_values_are_errors(field, value, match):
         ({"base_revision": "3e22461"}, "base_revision must be a 40-character"),
         ({"release": ""}, "release must be a non-empty string"),
         ({"release": 3}, "release must be a non-empty string"),
+        # Null is not absent: an optional field that does not apply is left out.
+        ({"release": None}, "provenance.release is null"),
+        ({"source": None}, "provenance.source is null"),
+        # Whole strings, in ASCII.
+        ({"base_revision": "3e22461f65e89153144f8adb70e3b8c2cc9845a7\n"}, "base_revision must be"),
+        ({"base_model": "google/gemma-4-E\uff12B-it"}, "base_model must be a Hub id"),
+        ({"base_model": "google/gemma-4-E2B-it\n"}, "base_model must be a Hub id"),
+        ({"base_model": "\uff47oogle/gemma-4-E2B-it"}, "base_model must be a Hub id"),
+        ({"release": "strands-decider-E2B\n"}, "release must be a model name"),
+        ({"release": "strands-decider-é"}, "release must be a model name"),
+        ({"source": "https://"}, "source must be an https URL"),
+        ({"source": "https://example.com/a b"}, "source must be an https URL"),
+        ({"source": "https://example.com/recipe\n"}, "source must be an https URL"),
         ({"trainer": "train.py"}, "unknown fields"),
         ({"data": "corpus-v1"}, "unknown fields"),
     ],
