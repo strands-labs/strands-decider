@@ -323,9 +323,10 @@ def _make_plain_text_copy(tok: Tokenizer) -> Tokenizer:
     strings = list(added)
     for s, enc in zip(strings, copy.encode_batch(strings, add_special_tokens=False), strict=True):
         if list(enc.ids) == [added[s]]:
-            raise AssertionError(
-                f"the private tokenizer copy still matches {s!r} as a control token; this "
-                "version of tokenizers does not honour encode_special_tokens"
+            raise ValueError(
+                f"request text {s!r} encodes to its control token's id: this version of "
+                "tokenizers does not honour encode_special_tokens, or the vocabulary holds the "
+                "string as an ordinary token"
             )
     return copy
 
