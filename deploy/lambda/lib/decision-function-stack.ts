@@ -102,7 +102,12 @@ export class DecisionFunctionStack extends Stack {
     const digest = String(ctx("checkpoint_digest") ?? "");
     if (digest && !/^[0-9a-f]{64}$/.test(digest)) throw new Error(`checkpoint_digest must be a sha256, not ${digest}`);
     const s3 = parseS3Checkpoint(checkpoint);
-    const maxRequestTokens = Number(ctx("max_request_tokens") ?? DECISION_MAX_REQUEST_TOKENS);
+    // An empty value is a mistake, not "no limit": Number("") is 0, which would lift the limit.
+    const rawMaxRequestTokens = ctx("max_request_tokens") ?? DECISION_MAX_REQUEST_TOKENS;
+    if (String(rawMaxRequestTokens).trim() === "") {
+      throw new Error("max_request_tokens is empty: give a whole number, or 0 for no limit");
+    }
+    const maxRequestTokens = Number(rawMaxRequestTokens);
     if (!Number.isInteger(maxRequestTokens) || maxRequestTokens < 0) {
       throw new Error(`max_request_tokens must be a whole number, 0 for no limit, not ${ctx("max_request_tokens")}`);
     }
