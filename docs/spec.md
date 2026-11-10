@@ -27,18 +27,18 @@ A question has a `type`, `instructions` (a string, object or array) and `criteri
 | `choice` | object of option name to description (string, object, array or null) | 2 to 255, in the object's order |
 | `score` | array of 2 to 10 level descriptions (strings), lowest level first | one per level, named `0` to `L-1` |
 
-A noul's criteria replace its default descriptions. A key that is absent keeps its default (`false`: "the statement does not hold for this state"; `true`: "the statement holds for this state"). A key given as null renders as a bare label. As in v1, a question may omit `type`: it is a noul when its criteria are absent or an object whose keys are a subset of `true` and `false`, a choice when they are any other object, and a score when they are an array. `strands_decider.core.parse_request` accepts and refuses exactly what v1's pydantic models accept and refuse, and `tests/test_core_prompt.py` checks it against them.
+A noul's criteria replace its default descriptions. A key that is absent keeps its default (`false`: "the statement does not hold for this state"; `true`: "the statement holds for this state"). A key given as null renders as a bare label. As in v1, a question may omit `type`: it is a noul when its criteria are absent or an object whose keys are a subset of `true` and `false`, a choice when they are any other object, and a score when they are an array. `strands_decider.core.parse_request` accepts and refuses exactly what v1's pydantic models accept and refuse, except that it refuses a non-empty `audio` field, which v1 ignores; `tests/test_core_prompt.py` checks it against them.
 
 ### 1.1 Images
 
-After the request's types are checked, its images are checked as v1's image engine checks them (`src/strands_decider/vision.py`, `decode_image`), in this order and with v1's messages:
+After the request's types are checked, its images are checked as v1's image engine checks them (`src/strands_decider/vision.py`, `decode_image`), in this order and with v1's messages, except for base64 (step 2):
 
 1. More than 4 images: `{n} images; this server takes at most 4`. The count is checked before any image is decoded.
-2. Each string loses its leading and trailing whitespace (Python's `str.strip`), then a prefix that matches `^data:image/[\w.+-]+;base64,`, whatever subtype it names. The rest must be standard base64 (RFC 4648, section 4) with its padding and nothing else: no whitespace or line break inside, no URL-safe alphabet, no padding at the start and nothing after it. This is what Python's `base64.b64decode(s, validate=True)` accepts on Python 3.11 and later; like Python, a runtime accepts non-zero bits before the padding. Otherwise: `image is not valid base64: {reason}`.
+2. Each string loses its leading and trailing whitespace (Python's `str.strip`), then a prefix that matches `^data:image/[\w.+-]+;base64,`, whatever subtype it names. The rest must be standard base64 (RFC 4648, section 4) and nothing else: only the 64 characters `A`–`Z`, `a`–`z`, `0`–`9`, `+` and `/`, in groups of four, the last group padded with `=` or `==` when it is short, with no whitespace or line break inside and no URL-safe alphabet. Non-zero bits before the padding are accepted. Otherwise: `image is not valid base64: {reason}`, where the reason is `a character that is not ASCII`, `a character outside the standard base64 alphabet` or `its length or padding is wrong`. This rule does not follow Python's `base64.b64decode(s, validate=True)`, which accepts different strings, and gives different messages, on Python 3.10, 3.11, 3.12 and 3.13; it is what 3.12 accepts.
 3. The decoded file is a PNG, JPEG, WebP or GIF file, by its signature, whose header gives its width and height by the rules below. Otherwise: `image could not be read as PNG/JPEG/WEBP/GIF: {reason}`. A width or a height of 0 is an error.
 4. Its width times its height is at most 4096 × 4096 = 16,777,216 pixels. Otherwise: `image is {w}x{h}; at most 16,777,216 pixels are accepted`.
 
-The reasons after the colons are Python's for base64 and the core's own for headers, where v1 passes on Pillow's. The header gives the width and height:
+The reasons after the colons are the core's own, for base64 and for headers, where v1 passes on Python's and Pillow's. The header gives the width and height:
 
 | format | signature | width and height |
 | --- | --- | --- |
