@@ -63,7 +63,12 @@ def serve_cmd(
         help="cuda, mps or cpu (torch), or mlx (Apple silicon, needs the mlx extra). "
         "Auto-detected when omitted: cuda > mps > cpu; mlx only when asked for.",
     ),
-    no_prefix_cache: bool = typer.Option(False, "--no-prefix-cache"),
+    no_prefix_cache: bool = typer.Option(
+        False,
+        "--no-prefix-cache",
+        help="Encode each question with its own copy of the state; for a decision checkpoint, "
+        "one full pass per question, the spec's reference.",
+    ),
     model_name: str | None = typer.Option(
         None,
         "--model-name",
@@ -72,7 +77,8 @@ def serve_cmd(
     vision: bool = typer.Option(
         False,
         "--vision",
-        help="Keep Qwen3.5's vision tower so requests may carry `images` (docs/vision.md).",
+        help="Keep Qwen3.5's vision tower so requests may carry `images` (docs/vision.md). A "
+        "decision checkpoint takes images when its decision_config.json lists them.",
     ),
     max_batch: int = typer.Option(
         32,
@@ -121,7 +127,10 @@ def ask_cmd(
     checkpoint: str = typer.Argument(...),
     state: str = typer.Option(..., "--state", "-s", help="The content to evaluate."),
     image: list[str] | None = typer.Option(
-        None, "--image", help="Image file, part of the state; repeat. Loads the vision tower."
+        None,
+        "--image",
+        help="Image file, part of the state; repeat. Loads the vision tower (v1); a decision "
+        "checkpoint takes images when its decision_config.json lists them.",
     ),
     noul: list[str] | None = typer.Option(None, "--noul", help="Yes/no question; repeat."),
     choice: list[str] | None = typer.Option(
@@ -162,17 +171,23 @@ def ask_cmd(
         raise typer.BadParameter("ask at least one --noul / --choice / --score question")
 
     selected_device = resolve_device(device)
-    if image:
-        import base64
+    from .decision import DECISION, INTERMEDIATE, checkpoint_kind, refuse_intermediate
 
+    kind = checkpoint_kind(checkpoint)
+    if kind == INTERMEDIATE:
+        raise typer.BadParameter(str(refuse_intermediate(checkpoint)))
+    if kind == DECISION:
+        # A decision checkpoint (docs/spec.md): images go in the request, and the checkpoint's
+        # decision_config.json says whether it takes them.
+        from .decision import load_decision_engine
+
+        engine = load_decision_engine(checkpoint, device=selected_device)
+        response = engine.ask(state, questions, _base64_files(image))
+    elif image:
         from .vision import load_vision_engine
 
-        encoded = []
-        for path in image:
-            with open(path, "rb") as fh:
-                encoded.append(base64.b64encode(fh.read()).decode("ascii"))
         response = load_vision_engine(checkpoint, EngineConfig(device=selected_device)).ask_images(
-            state, questions, encoded
+            state, questions, _base64_files(image)
         )
     else:
         response = load_engine(checkpoint, device=selected_device).ask(state, questions)
@@ -184,6 +199,16 @@ def ask_cmd(
     # `ask` is done once its answer is printed; see main().
     global _exit_fast
     _exit_fast = True
+
+
+def _base64_files(paths: list[str] | None) -> list[str]:
+    import base64
+
+    encoded = []
+    for path in paths or []:
+        with open(path, "rb") as fh:
+            encoded.append(base64.b64encode(fh.read()).decode("ascii"))
+    return encoded
 
 
 def _print_answers(response: SystemOneResponse) -> None:
