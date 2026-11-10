@@ -14,7 +14,7 @@ float32 and then to bf16 by the float32's bits, round to nearest, ties to even
 (`round_to_bf16`).
 
 A runtime may hand over any stage between the hidden state and the probabilities. The stage
-is always named (`inputs`, `Backend.outputs`), so neither the soft-cap nor the temperature
+is always named (`stage`, `Backend.outputs`), so neither the soft-cap nor the temperature
 is ever applied twice: `hidden`, `raw_logits` (W h), `capped_logits` (the cap applied),
 `final_logits` (the cap and the temperature applied) or `probabilities`.
 """
@@ -22,8 +22,10 @@ is ever applied twice: `hidden`, `raw_logits` (W h), `capped_logits` (the cap ap
 from __future__ import annotations
 
 import json
+import math
 import os
 import struct
+import warnings
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -52,9 +54,15 @@ _DTYPES: dict[str, np.dtype[Any]] = {
 }
 
 
+def _is_index(v: Any) -> bool:
+    return isinstance(v, int) and not isinstance(v, bool) and v >= 0
+
+
 def load_safetensors(path: str | os.PathLike[str]) -> dict[str, np.ndarray]:
     """Every tensor of a safetensors file as float32: F32, F16 and BF16, without the
-    safetensors package (an 8-byte length, a JSON header, then the raw little-endian data)."""
+    safetensors package (an 8-byte length, a JSON header, then the raw little-endian data).
+    Each tensor's `data_offsets` must lie within the data, in order, and hold exactly its
+    shape's bytes."""
     with open(path, "rb") as f:
         data = f.read()
     if len(data) < 8:
@@ -62,22 +70,39 @@ def load_safetensors(path: str | os.PathLike[str]) -> dict[str, np.ndarray]:
     (n,) = struct.unpack("<Q", data[:8])
     if n > len(data) - 8:
         raise ValueError(f"{path}: header longer than the file")
-    header = json.loads(data[8 : 8 + n])
+    try:
+        header = json.loads(data[8 : 8 + n])
+    except (UnicodeDecodeError, json.JSONDecodeError) as e:
+        raise ValueError(f"{path}: the header is not JSON: {e}") from e
+    if not isinstance(header, dict):
+        raise ValueError(f"{path}: the header is not a JSON object")
     body = memoryview(data)[8 + n :]
     out: dict[str, np.ndarray] = {}
     for name, info in header.items():
         if name == "__metadata__":
             continue
-        dtype = info["dtype"]
+        if not isinstance(info, dict):
+            raise ValueError(f"{path}: tensor {name!r} has no dtype, shape and offsets")
+        dtype = info.get("dtype")
         if dtype not in _DTYPES:
             raise ValueError(
                 f"{path}: tensor {name!r} has dtype {dtype}; expected F32, F16 or BF16"
             )
-        lo, hi = info["data_offsets"]
-        shape = tuple(info["shape"])
-        raw = np.frombuffer(body[lo:hi], dtype=_DTYPES[dtype])
-        if raw.size != int(np.prod(shape)):
+        offsets, shape_ = info.get("data_offsets"), info.get("shape")
+        if not (isinstance(offsets, list) and len(offsets) == 2 and all(map(_is_index, offsets))):
+            raise ValueError(f"{path}: tensor {name!r} has data_offsets {offsets!r}")
+        if not (isinstance(shape_, list) and all(map(_is_index, shape_))):
+            raise ValueError(f"{path}: tensor {name!r} has shape {shape_!r}")
+        lo, hi = offsets
+        shape = tuple(shape_)
+        if not lo <= hi <= len(body):
+            raise ValueError(
+                f"{path}: tensor {name!r} has data_offsets [{lo}, {hi}] outside its "
+                f"{len(body)} bytes of data"
+            )
+        if hi - lo != _DTYPES[dtype].itemsize * math.prod(shape):
             raise ValueError(f"{path}: tensor {name!r} does not match its shape {shape}")
+        raw = np.frombuffer(body[lo:hi], dtype=_DTYPES[dtype])
         if dtype == "BF16":  # the high half of a float32
             arr = (raw.astype(np.uint32) << 16).view(np.float32)
         else:
@@ -152,15 +177,33 @@ def _softmax32(s: np.ndarray) -> np.ndarray:
     return out
 
 
+def _stage_argument(stage: str | None, inputs: str | None, where: str) -> str:
+    """The stage a caller named: `stage`, or `inputs`, its deprecated old name."""
+    if inputs is not None:
+        if stage is not None:
+            raise TypeError(f"{where}() takes `stage`, not both `stage` and `inputs`")
+        warnings.warn(
+            f"{where}(inputs=...) is deprecated: the argument names the rows' stage; pass stage=",
+            DeprecationWarning,
+            stacklevel=3,
+        )
+        return inputs
+    if stage is None:
+        raise TypeError(f"{where}() missing required keyword argument: 'stage'")
+    return stage
+
+
 def code_probabilities(
     values: Any,
     k: int,
     *,
-    inputs: str,
+    stage: str | None = None,
     softcap_c: float | None,
     temperature: float,
+    inputs: str | None = None,
 ) -> np.ndarray:
-    """The probabilities of the first `k` codes, from one row of the stage `inputs`.
+    """The probabilities of the first `k` codes, from one row of the stage `stage`
+    (required; `inputs` is its deprecated old name).
 
     A logit row (`raw_logits`, `capped_logits` or `final_logits`) holds the 255 codes in code
     order, or only the question's first k. `raw_logits` are rounded to bf16 (a bf16 GEMM's
@@ -171,36 +214,39 @@ def code_probabilities(
     refused: they cannot be what their stage says. Returns [k], float32 (float64 for
     `probabilities`).
     """
-    if inputs not in STAGES or inputs == HIDDEN:
+    stage = _stage_argument(stage, inputs, "code_probabilities")
+    if stage not in STAGES or stage == HIDDEN:
         raise ValueError(
-            f"inputs must be one of {STAGES[1:]} here, not {inputs!r} (hidden states need "
+            f"stage must be one of {STAGES[1:]} here, not {stage!r} (hidden states need "
             "readout_logits first)"
         )
     t = np.float32(check_float32_scale("temperature", temperature))
+    c = None if softcap_c is None else check_float32_scale("the soft-cap", softcap_c)
+    dtype: type[np.floating[Any]] = np.float64 if stage == PROBABILITIES else np.float32
     with np.errstate(over="ignore"):  # a float64 value past float32's range becomes inf
-        v = np.asarray(values, dtype=np.float64 if inputs == PROBABILITIES else np.float32)
+        v = np.asarray(values, dtype=dtype)
     if v.ndim != 1 or not 1 <= k <= v.shape[0]:
         raise ValueError(f"need a vector of at least {k} values, not shape {v.shape}")
     v = v[:k]
     if not np.all(np.isfinite(v)):
-        raise ValueError(f"{inputs} must be finite in float32: {v[~np.isfinite(v)][:3]}")
-    if inputs == PROBABILITIES:
+        raise ValueError(f"{stage} must be finite in float32: {v[~np.isfinite(v)][:3]}")
+    if stage == PROBABILITIES:
         if np.any(v < 0) or np.any(v > 1 + 1e-6) or v.sum() <= 0:
             raise ValueError("probabilities must lie in [0, 1], and not all be 0")
         p: np.ndarray = v / v.sum()
         return p
-    if inputs == RAW_LOGITS:
-        s = softcap(round_to_bf16(v), softcap_c)
-    elif softcap_c is not None:
-        bound = np.float32(softcap_c) / (t if inputs == FINAL_LOGITS else np.float32(1))
+    if stage == RAW_LOGITS:
+        s = softcap(round_to_bf16(v), c)
+    elif c is not None:
+        bound = np.float32(c) / (t if stage == FINAL_LOGITS else np.float32(1))
         if np.any(np.abs(v) > bound * np.float32(1 + 1e-6)):
             raise ValueError(
-                f"{inputs} exceed the soft-cap's range (|z| <= {bound:g}); were they capped?"
+                f"{stage} exceed the soft-cap's range (|z| <= {bound:g}); were they capped?"
             )
         s = v
     else:
         s = v
-    if inputs != FINAL_LOGITS:
+    if stage != FINAL_LOGITS:
         with np.errstate(over="ignore"):
             s = s / t
         if not np.all(np.isfinite(s)):
@@ -210,29 +256,32 @@ def code_probabilities(
 
 # ---- the readout file -------------------------------------------------------------------------
 
-_ABSENT = object()
 
-
-def _softcap_from(model_config: Mapping[str, Any]) -> Any:
-    """`final_logit_softcapping`, top level (Gemma4TextModel) or under `text_config`, or
-    _ABSENT."""
-    for d in (model_config, model_config.get("text_config") or {}):
-        if "final_logit_softcapping" in d:
-            return d["final_logit_softcapping"]
-    return _ABSENT
+def _softcaps_in(model_config: Any) -> list[tuple[str, Any]]:
+    """Each `final_logit_softcapping` config.json gives: under `text_config` (the multimodal
+    model's) and at the top level (a text model's), where present."""
+    if not isinstance(model_config, Mapping):
+        raise ValueError(f"{MODEL_CONFIG_FILE} must hold a JSON object")
+    text = model_config.get("text_config")
+    out = []
+    if isinstance(text, Mapping) and "final_logit_softcapping" in text:
+        out.append(("text_config.final_logit_softcapping", text["final_logit_softcapping"]))
+    if "final_logit_softcapping" in model_config:
+        out.append(("final_logit_softcapping", model_config["final_logit_softcapping"]))
+    return out
 
 
 @dataclass(frozen=True, eq=False)
 class Readout:
     """The readout: `weight` [n_codes, hidden], held as float32 values rounded to bf16, and
-    the soft-cap `c` (None: no cap).
+    the soft-cap `c`, the checkpoint's `final_logit_softcapping`, which every checkpoint has.
 
     `weight` may be None for a runtime that applies the readout itself and passes logits or
     probabilities.
     """
 
     weight: np.ndarray | None
-    softcap: float | None
+    softcap: float
 
     def __post_init__(self) -> None:
         if self.weight is not None:
@@ -240,8 +289,7 @@ class Readout:
             if w.ndim != 2:
                 raise ValueError(f"readout weight must be [codes, hidden], not {w.shape}")
             object.__setattr__(self, "weight", w)
-        if self.softcap is not None:
-            object.__setattr__(self, "softcap", check_float32_scale("softcap", self.softcap))
+        object.__setattr__(self, "softcap", check_float32_scale("softcap", self.softcap))
 
     @classmethod
     def load(
@@ -250,7 +298,8 @@ class Readout:
         """From a checkpoint directory: `weight` from readout.safetensors, and the soft-cap
         from decision_config.json's `final_logit_softcapping` (`config`, if given, else the
         directory's file). A converted artifact needs no config.json; if the directory has
-        one that names a different soft-cap, the checkpoint is inconsistent and refused."""
+        one that names a different soft-cap, under `text_config` or at its top level, the
+        checkpoint is inconsistent and refused."""
         d = os.fspath(checkpoint)
         cfg = config if config is not None else DecisionConfig.load(d)
         tensors = load_safetensors(os.path.join(d, READOUT_FILE))
@@ -267,12 +316,13 @@ class Readout:
         model_config = os.path.join(d, MODEL_CONFIG_FILE)
         if os.path.exists(model_config):
             with open(model_config, encoding="utf-8") as f:
-                theirs = _softcap_from(json.load(f))
-            if theirs is not _ABSENT and theirs != softcap:
-                raise ValueError(
-                    f"{MODEL_CONFIG_FILE} has final_logit_softcapping {theirs!r} and "
-                    f"{FILENAME} has {softcap!r}; the checkpoint is inconsistent"
-                )
+                theirs = _softcaps_in(json.load(f))
+            for key, value in theirs:
+                if value != softcap:
+                    raise ValueError(
+                        f"{MODEL_CONFIG_FILE} has {key} {value!r} and {FILENAME} has "
+                        f"final_logit_softcapping {softcap!r}; the checkpoint is inconsistent"
+                    )
         return cls(weight=w, softcap=softcap)
 
 
@@ -338,44 +388,67 @@ def _rows(values: Any, names: list[str]) -> list[np.ndarray]:
     return rows
 
 
-def question_probabilities(
-    values: Any,
-    readout: Readout | None,
-    config: DecisionConfig,
-    rendered: RenderedRequest,
-    *,
-    inputs: str,
-) -> dict[str, np.ndarray]:
-    """Each question's code probabilities, in code order ([k] per question), keyed by
-    question name: section 7 of docs/spec.md from the stage `inputs` on.
-
-    `values` holds one row per question, in `rendered.questions` order or keyed by question
-    name. `inputs` names what a row is (`STAGES`) and is required, so that nothing is applied
-    twice: `hidden` rows need `readout.weight`; the soft-cap is the checkpoint's
-    (`config.final_logit_softcapping`) and the temperature `config.temperature`.
-    """
-    if inputs not in STAGES:
-        raise ValueError(f"inputs must be one of {STAGES}, not {inputs!r}")
-    if config.prompt != rendered.variant:
-        raise ValueError(
-            f"the request was rendered for {rendered.variant!r}, the checkpoint reads {config.prompt!r}"
-        )
+def check_stage(stage: str, readout: Readout | None, config: DecisionConfig) -> None:
+    """What reading rows of `stage` needs, checked before any row exists: a named stage, a
+    readout whose soft-cap is the checkpoint's, and for hidden states a readout weight with a
+    row per code. `evaluate` calls it before the forward pass; ValueError otherwise."""
+    if stage not in STAGES:
+        raise ValueError(f"stage must be one of {STAGES}, not {stage!r}")
     c = config.final_logit_softcapping
     if readout is not None and readout.softcap != c:
         raise ValueError(
             f"the readout's soft-cap {readout.softcap!r} is not the checkpoint's "
             f"final_logit_softcapping {c!r}"
         )
-    names = list(rendered.questions)
-    rows = _rows(values, names)
-    stage = inputs
-    if inputs == HIDDEN:
+    if stage == HIDDEN:
         if readout is None or readout.weight is None:
             raise ValueError("hidden states need the readout weight")
         if readout.weight.shape[0] != len(config.codes):
             raise ValueError(
                 f"readout has {readout.weight.shape[0]} rows for {len(config.codes)} codes"
             )
+
+
+def check_rendered(config: DecisionConfig, rendered: RenderedRequest) -> None:
+    """That `rendered` is what the checkpoint reads: its prompt, and each question's code
+    token ids the checkpoint's `token_ids`. `evaluate` calls it before the forward pass."""
+    if config.prompt != rendered.variant:
+        raise ValueError(
+            f"the request was rendered for {rendered.variant!r}, the checkpoint reads {config.prompt!r}"
+        )
+    for n, rq in rendered.questions.items():
+        if tuple(config.token_ids[: len(rq.codes)]) != rq.code_token_ids:
+            raise ValueError(
+                f"{n!r}: the tokenizer's code tokens do not match the checkpoint's token_ids"
+            )
+
+
+def question_probabilities(
+    values: Any,
+    readout: Readout | None,
+    config: DecisionConfig,
+    rendered: RenderedRequest,
+    *,
+    stage: str | None = None,
+    inputs: str | None = None,
+) -> dict[str, np.ndarray]:
+    """Each question's code probabilities, in code order ([k] per question), keyed by
+    question name: section 7 of docs/spec.md from the stage `stage` on.
+
+    `values` holds one row per question, in `rendered.questions` order or keyed by question
+    name. `stage` names what a row is (`STAGES`) and is required (`inputs` is its deprecated
+    old name), so that nothing is applied twice: `hidden` rows need `readout.weight`; the
+    soft-cap is the checkpoint's (`config.final_logit_softcapping`) and the temperature
+    `config.temperature`.
+    """
+    stage = _stage_argument(stage, inputs, "question_probabilities")
+    check_stage(stage, readout, config)
+    check_rendered(config, rendered)
+    c = config.final_logit_softcapping
+    names = list(rendered.questions)
+    rows = _rows(values, names)
+    if stage == HIDDEN:
+        assert readout is not None and readout.weight is not None  # check_stage
         for n, r in zip(names, rows, strict=True):
             if r.shape != (readout.weight.shape[1],):
                 raise ValueError(
@@ -385,19 +458,14 @@ def question_probabilities(
         stage = RAW_LOGITS
     out: dict[str, np.ndarray] = {}
     for n, row in zip(names, rows, strict=True):
-        rq = rendered.questions[n]
-        k = len(rq.codes)
-        if tuple(config.token_ids[:k]) != rq.code_token_ids:
-            raise ValueError(
-                f"{n!r}: the tokenizer's code tokens do not match the checkpoint's token_ids"
-            )
+        k = len(rendered.questions[n].codes)
         if row.shape not in ((len(config.codes),), (k,)):
             raise ValueError(
                 f"{n!r}: expected {len(config.codes)} values (every code) or {k} (the "
                 f"question's), not shape {row.shape}"
             )
         out[n] = code_probabilities(
-            row, k, inputs=stage, softcap_c=c, temperature=config.temperature
+            row, k, stage=stage, softcap_c=c, temperature=config.temperature
         )
     return out
 
@@ -408,13 +476,16 @@ def read(
     config: DecisionConfig,
     rendered: RenderedRequest,
     *,
-    inputs: str,
+    stage: str | None = None,
     ordinal_smoothing: float = 0.0,
+    inputs: str | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Every question's answer, keyed by question name, in v1's response schema:
-    `question_probabilities`, then `answer`. `inputs` (required) names the stage of the
-    rows: `hidden`, `raw_logits`, `capped_logits`, `final_logits` or `probabilities`."""
-    probs = question_probabilities(values, readout, config, rendered, inputs=inputs)
+    `question_probabilities`, then `answer`. `stage` (required) names the stage of the
+    rows: `hidden`, `raw_logits`, `capped_logits`, `final_logits` or `probabilities`.
+    `inputs` is its deprecated old name, accepted with a DeprecationWarning."""
+    stage = _stage_argument(stage, inputs, "read")
+    probs = question_probabilities(values, readout, config, rendered, stage=stage)
     return {
         n: answer(rendered.questions[n], p.tolist(), ordinal_smoothing=ordinal_smoothing)
         for n, p in probs.items()

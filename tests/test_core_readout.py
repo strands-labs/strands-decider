@@ -154,7 +154,7 @@ def test_softcap():
 def test_code_probabilities_match_the_formula(c, t, k):
     rng = np.random.default_rng(k)
     z = rng.normal(0, 8, size=255)
-    p = code_probabilities(z, k, inputs=RAW_LOGITS, softcap_c=c, temperature=t)
+    p = code_probabilities(z, k, stage=RAW_LOGITS, softcap_c=c, temperature=t)
     assert p.shape == (k,) and p.dtype == np.float32 and p.sum() == pytest.approx(1.0)
     assert np.allclose(p, _manual(z.tolist(), k, c, t), rtol=0, atol=1e-6)
 
@@ -163,13 +163,13 @@ def test_only_the_questions_own_codes_enter_the_softmax():
     rng = np.random.default_rng(0)
     z = rng.normal(0, 3, size=255)
     for c in (None, C):
-        p = code_probabilities(z, 3, inputs=RAW_LOGITS, softcap_c=c, temperature=1.0)
+        p = code_probabilities(z, 3, stage=RAW_LOGITS, softcap_c=c, temperature=1.0)
         z2 = z.copy()
         z2[3:] = 1e4  # any value on the other codes
-        p2 = code_probabilities(z2, 3, inputs=RAW_LOGITS, softcap_c=c, temperature=1.0)
+        p2 = code_probabilities(z2, 3, stage=RAW_LOGITS, softcap_c=c, temperature=1.0)
         assert np.array_equal(p2, p)
         assert np.array_equal(
-            code_probabilities(z[:3], 3, inputs=RAW_LOGITS, softcap_c=c, temperature=1.0), p
+            code_probabilities(z[:3], 3, stage=RAW_LOGITS, softcap_c=c, temperature=1.0), p
         )
 
 
@@ -178,13 +178,13 @@ def test_temperature_and_cap_order():
     # Cap first (40 -> 30 tanh(4/3), 30 -> 30 tanh(1)), then divide by T; dividing first
     # (20 and 15, then the cap) would give 0.97 for the first code, not 0.84.
     want = _manual([40.0, 30.0], 2, C, 2.0)
-    got = code_probabilities(z, 2, inputs=RAW_LOGITS, softcap_c=C, temperature=2.0)
+    got = code_probabilities(z, 2, stage=RAW_LOGITS, softcap_c=C, temperature=2.0)
     assert np.allclose(got, want, rtol=0, atol=1e-6)
     assert got[0] == pytest.approx(0.8358, abs=1e-4)
     assert _manual([20.0, 15.0], 2, C, 1.0)[0] == pytest.approx(0.9739, abs=1e-4)
 
     def p0(t: float) -> float:
-        return float(code_probabilities(z, 2, inputs=RAW_LOGITS, softcap_c=C, temperature=t)[0])
+        return float(code_probabilities(z, 2, stage=RAW_LOGITS, softcap_c=C, temperature=t)[0])
 
     assert p0(10.0) < p0(1.0) < p0(0.1)
 
@@ -193,67 +193,111 @@ def test_large_logits_and_overflow():
     # Finite in float32 and stable: the softmax subtracts the maximum, and a gap past
     # float32's range gives exactly 0, never NaN.
     big = [3e38, -3e38, 0.0]
-    p = code_probabilities(big, 3, inputs=RAW_LOGITS, softcap_c=None, temperature=1)
+    p = code_probabilities(big, 3, stage=RAW_LOGITS, softcap_c=None, temperature=1)
     assert p.tolist() == [1.0, 0.0, 0.0]
-    p = code_probabilities(big, 3, inputs=RAW_LOGITS, softcap_c=C, temperature=1)
+    p = code_probabilities(big, 3, stage=RAW_LOGITS, softcap_c=C, temperature=1)
     assert np.allclose(p, _softmax64([C, -C, 0.0]), rtol=1e-6, atol=0)  # capped to +-30
-    p = code_probabilities([1e30, -1e30, 0.0], 3, inputs=RAW_LOGITS, softcap_c=C, temperature=1e-3)
+    p = code_probabilities([1e30, -1e30, 0.0], 3, stage=RAW_LOGITS, softcap_c=C, temperature=1e-3)
     assert p.tolist() == [1.0, 0.0, 0.0]  # capped to +-30, then 3e4 apart: one-hot
     # Without a cap nothing bounds the logits. Past float32's range they are refused...
     with pytest.raises(ValueError, match="finite in float32"):
-        code_probabilities([1e300, 0.0], 2, inputs=RAW_LOGITS, softcap_c=None, temperature=1.0)
+        code_probabilities([1e300, 0.0], 2, stage=RAW_LOGITS, softcap_c=None, temperature=1.0)
     for bad in (math.inf, -math.inf, math.nan):
         for c in (None, C):
             with pytest.raises(ValueError, match="finite in float32"):
-                code_probabilities([bad, 0.0], 2, inputs=RAW_LOGITS, softcap_c=c, temperature=1)
+                code_probabilities([bad, 0.0], 2, stage=RAW_LOGITS, softcap_c=c, temperature=1)
     # ...and so is a temperature that divides them past it.
     with pytest.raises(ValueError, match="overflow"):
-        code_probabilities([1e38, 0.0], 2, inputs=RAW_LOGITS, softcap_c=None, temperature=1e-3)
+        code_probabilities([1e38, 0.0], 2, stage=RAW_LOGITS, softcap_c=None, temperature=1e-3)
     # With the cap, only c / T past float32's range overflows.
     with pytest.raises(ValueError, match="overflow"):
-        code_probabilities([40.0, 0.0], 2, inputs=RAW_LOGITS, softcap_c=C, temperature=1.2e-38)
+        code_probabilities([40.0, 0.0], 2, stage=RAW_LOGITS, softcap_c=C, temperature=1.2e-38)
     with pytest.raises(ValueError, match="need a vector"):
-        code_probabilities(np.zeros(2), 3, inputs=RAW_LOGITS, softcap_c=C, temperature=1.0)
+        code_probabilities(np.zeros(2), 3, stage=RAW_LOGITS, softcap_c=C, temperature=1.0)
 
 
 @pytest.mark.parametrize("t", [0, -1.0, math.nan, math.inf, 1e39, 1e300, 1e-39, True, "1"])
 def test_bad_temperatures_raise(t):
     with pytest.raises(ValueError, match="temperature"):
-        code_probabilities(np.zeros(3), 2, inputs=RAW_LOGITS, softcap_c=C, temperature=t)
+        code_probabilities(np.zeros(3), 2, stage=RAW_LOGITS, softcap_c=C, temperature=t)
 
 
 def test_code_probabilities_needs_a_named_stage():
-    with pytest.raises(TypeError):
-        code_probabilities(np.zeros(3), 2, softcap_c=C, temperature=1.0)  # type: ignore[call-arg]
-    for bad in (HIDDEN, "logits", "probs", None):
-        with pytest.raises(ValueError, match="inputs must be"):
-            code_probabilities(np.zeros(3), 2, inputs=bad, softcap_c=C, temperature=1.0)
+    with pytest.raises(TypeError, match="stage"):
+        code_probabilities(np.zeros(3), 2, softcap_c=C, temperature=1.0)
+    with pytest.raises(TypeError, match="stage"):
+        code_probabilities(np.zeros(3), 2, stage=None, softcap_c=C, temperature=1.0)
+    for bad in (HIDDEN, "logits", "probs"):
+        with pytest.raises(ValueError, match="stage must be"):
+            code_probabilities(np.zeros(3), 2, stage=bad, softcap_c=C, temperature=1.0)
+
+
+def test_inputs_is_the_stages_deprecated_name():
+    """`inputs=` named the stage before `stage=` did; it still works, with a warning, so that
+    callers written against it keep running until they move."""
+    z = np.random.default_rng(4).normal(0, 5, 255)
+    want = code_probabilities(z, 3, stage=RAW_LOGITS, softcap_c=C, temperature=0.7)
+    with pytest.warns(DeprecationWarning, match="stage="):
+        got = code_probabilities(z, 3, inputs=RAW_LOGITS, softcap_c=C, temperature=0.7)
+    assert np.array_equal(got, want)
+    with pytest.raises(TypeError, match="not both"):
+        code_probabilities(z, 3, stage=RAW_LOGITS, inputs=RAW_LOGITS, softcap_c=C, temperature=1)
+    w = round_to_bf16(np.random.default_rng(5).normal(0, 1, (255, 8)))
+    h = round_to_bf16(np.random.default_rng(6).normal(0, 1, (1, 8)))
+    rendered = _request(_rq("choice", ["a", "b", "c"]))
+    by_stage = read(h, Readout(w, C), _config(), rendered, stage=HIDDEN)
+    with pytest.warns(DeprecationWarning):
+        assert read(h, Readout(w, C), _config(), rendered, inputs=HIDDEN) == by_stage
+    with pytest.warns(DeprecationWarning):
+        old = question_probabilities(h, Readout(w, C), _config(), rendered, inputs=HIDDEN)
+    new = question_probabilities(h, Readout(w, C), _config(), rendered, stage=HIDDEN)
+    assert np.array_equal(old["q"], new["q"])
+    with pytest.raises(TypeError, match="not both"):
+        read(h, Readout(w, C), _config(), rendered, stage=HIDDEN, inputs=HIDDEN)
+
+
+@pytest.mark.parametrize("stage", [RAW_LOGITS, CAPPED_LOGITS, FINAL_LOGITS])
+@pytest.mark.parametrize("bad", [math.nan, math.inf, 0.0, -30.0, "30", True])
+def test_the_soft_cap_is_checked_for_every_logit_stage(stage, bad):
+    """A NaN cap would silently disable the range check of capped and final logits."""
+    with pytest.raises(ValueError, match="soft-cap"):
+        code_probabilities([1.0, 0.0], 2, stage=stage, softcap_c=bad, temperature=1.0)
+    assert code_probabilities(
+        [1.0, 0.0], 2, stage=stage, softcap_c=np.float32(C), temperature=1.0
+    ).shape == (2,)
 
 
 def test_stages_past_the_cap_say_so():
     z = np.array([25.0, -3.0, 0.0])
     capped = softcap(z, C)
     final = capped / np.float32(0.5)
-    p = code_probabilities(z, 3, inputs=RAW_LOGITS, softcap_c=C, temperature=0.5)
+    p = code_probabilities(z, 3, stage=RAW_LOGITS, softcap_c=C, temperature=0.5)
     for stage, row in ((CAPPED_LOGITS, capped), (FINAL_LOGITS, final)):
-        got = code_probabilities(row, 3, inputs=stage, softcap_c=C, temperature=0.5)
+        got = code_probabilities(row, 3, stage=stage, softcap_c=C, temperature=0.5)
         assert np.array_equal(got, p), stage
-    # Raw logits handed over as capped (or capped as final at T < 1) exceed what the stage
-    # allows: refused rather than capped, or divided, a second time.
+    # Raw logits handed over as capped or final, and capped logits handed over as final at
+    # T > 1, can exceed what the stage allows: refused rather than capped, or divided, a
+    # second time. Capped logits handed over as final at T <= 1 lie within the final range
+    # (c / T >= c), so no check of the values can see them; only the stage's name can.
     with pytest.raises(ValueError, match="were they capped"):
-        code_probabilities([31.0, 0.0], 2, inputs=CAPPED_LOGITS, softcap_c=C, temperature=1)
+        code_probabilities([31.0, 0.0], 2, stage=CAPPED_LOGITS, softcap_c=C, temperature=1)
     with pytest.raises(ValueError, match="were they capped"):
-        code_probabilities([61.0, 0.0], 2, inputs=FINAL_LOGITS, softcap_c=C, temperature=0.5)
+        code_probabilities([61.0, 0.0], 2, stage=FINAL_LOGITS, softcap_c=C, temperature=0.5)
+    with pytest.raises(ValueError, match="were they capped"):
+        code_probabilities([29.0, 0.0], 2, stage=FINAL_LOGITS, softcap_c=C, temperature=2.0)
+    assert code_probabilities(
+        [29.0, 0.0], 2, stage=FINAL_LOGITS, softcap_c=C, temperature=0.5
+    ).shape == (2,)
     # Probabilities over all 255 codes renormalise to the question's k; over k, they stay.
     p255 = code_probabilities(
-        np.arange(255.0) / 50, 255, inputs=RAW_LOGITS, softcap_c=C, temperature=1
+        np.arange(255.0) / 50, 255, stage=RAW_LOGITS, softcap_c=C, temperature=1
     )
-    p3 = code_probabilities(p255, 3, inputs=PROBABILITIES, softcap_c=C, temperature=1.0)
-    want = code_probabilities(np.arange(3.0) / 50, 3, inputs=RAW_LOGITS, softcap_c=C, temperature=1)
+    p3 = code_probabilities(p255, 3, stage=PROBABILITIES, softcap_c=C, temperature=1.0)
+    want = code_probabilities(np.arange(3.0) / 50, 3, stage=RAW_LOGITS, softcap_c=C, temperature=1)
     assert np.allclose(p3, want, rtol=0, atol=1e-6)
     for bad in ([-0.1, 0.5], [0.0, 0.0], [math.nan, 0.5], [1.5, 0.1]):
         with pytest.raises(ValueError, match=r"probabilities|finite"):
-            code_probabilities(bad, 2, inputs=PROBABILITIES, softcap_c=C, temperature=1.0)
+            code_probabilities(bad, 2, stage=PROBABILITIES, softcap_c=C, temperature=1.0)
 
 
 def _vllm_logits(w: list[list[float]], h: list[float], c: float, t: float) -> list[float]:
@@ -320,7 +364,7 @@ def test_read_matches_the_vllm_runtimes_arithmetic(seed, t):
         PROBABILITIES: [np.array(p255)] * len(ks),
     }
     for stage in STAGES:
-        got = question_probabilities(rows[stage], Readout(w, C), cfg, rendered, inputs=stage)
+        got = question_probabilities(rows[stage], Readout(w, C), cfg, rendered, stage=stage)
         for k in ks:
             want = _softmax64(final_vllm[:k].tolist())
             assert np.allclose(got[f"k{k}"], want, rtol=0, atol=1e-5), (stage, k)
@@ -356,9 +400,9 @@ def test_the_hidden_state_is_rounded_to_bf16_before_the_gemm():
     assert sum(a != b for a, b in zip(z.tolist(), unrounded, strict=True)) >= 50
     # Through read, from the hidden stage: the bf16 hidden state's answers.
     rendered = _request(_rq("choice", [f"o{i}" for i in range(40)], name="c"))
-    probs = question_probabilities([h32], Readout(w, C), _config(), rendered, inputs=HIDDEN)
+    probs = question_probabilities([h32], Readout(w, C), _config(), rendered, stage=HIDDEN)
     want = question_probabilities(
-        [round_to_bf16(h32)], Readout(w, C), _config(), rendered, inputs=HIDDEN
+        [round_to_bf16(h32)], Readout(w, C), _config(), rendered, stage=HIDDEN
     )
     assert np.array_equal(probs["c"], want["c"])
     with pytest.raises(ValueError, match="finite in bf16"):
@@ -396,6 +440,37 @@ def test_load_safetensors(tmp_path, dtype):
     got = load_safetensors(tmp_path / "t.safetensors")
     assert set(got) == {"weight"} and got["weight"].dtype == np.float32
     assert np.array_equal(got["weight"], w)
+
+
+@pytest.mark.parametrize(
+    ("entry", "match"),
+    [
+        ({"dtype": "F32", "shape": [2], "data_offsets": [-8, 0]}, "data_offsets"),
+        ({"dtype": "F32", "shape": [2], "data_offsets": [8, 0]}, "data_offsets"),
+        ({"dtype": "F32", "shape": [2], "data_offsets": [8, 16]}, "outside"),
+        ({"dtype": "F32", "shape": [2], "data_offsets": [0, 4]}, "shape"),
+        ({"dtype": "F32", "shape": [3], "data_offsets": [0, 8]}, "shape"),
+        ({"dtype": "F32", "shape": [2], "data_offsets": [0.0, 8]}, "data_offsets"),
+        ({"dtype": "F32", "shape": [2], "data_offsets": [False, 8]}, "data_offsets"),
+        ({"dtype": "F32", "shape": [2], "data_offsets": [0]}, "data_offsets"),
+        ({"dtype": "F32", "shape": [-2], "data_offsets": [0, 8]}, "shape"),
+        ({"dtype": "F32", "shape": "2", "data_offsets": [0, 8]}, "shape"),
+        ({"dtype": "F32", "shape": [2]}, "data_offsets"),
+        ("weight", "no dtype"),
+    ],
+)
+def test_load_safetensors_refuses_bad_offsets_and_shapes(tmp_path, entry, match):
+    """Offsets lie within the data, in order, and hold exactly the shape's bytes: never a
+    slice from the file's end or of another tensor's bytes."""
+    p = tmp_path / "t.safetensors"
+    h = json.dumps({"w": entry}).encode()
+    p.write_bytes(struct.pack("<Q", len(h)) + h + bytes(8))
+    with pytest.raises(ValueError, match=match):
+        load_safetensors(p)
+    for header in (b"[1]", b"\xff"):
+        p.write_bytes(struct.pack("<Q", len(header)) + header + bytes(8))
+        with pytest.raises(ValueError, match="header"):
+            load_safetensors(p)
 
 
 def test_load_safetensors_refuses_other_dtypes(tmp_path):
@@ -449,6 +524,9 @@ def test_readout_load_accepts_an_agreeing_model_config(tmp_path, model_config):
         {"final_logit_softcapping": 50.0},
         {"final_logit_softcapping": None},
         {"text_config": {"final_logit_softcapping": 20.0}},
+        # Both places are read: a top-level value cannot hide text_config's, or the reverse.
+        {"final_logit_softcapping": 30.0, "text_config": {"final_logit_softcapping": 20.0}},
+        {"text_config": {"final_logit_softcapping": 30.0}, "final_logit_softcapping": 50.0},
     ],
 )
 def test_readout_load_refuses_a_disagreeing_model_config(tmp_path, model_config):
@@ -500,6 +578,17 @@ def test_noul_answer_reads_true_wherever_it_was_rendered():
     assert answer(flipped, [0.8, 0.2]) == {"type": "noul", "noul": 0.8}
 
 
+def test_a_tie_goes_to_the_first_option_in_request_order_however_rendered():
+    names = ["billing", "technical", "sales"]
+    tie = [0.4, 0.4, 0.2]
+    assert answer(_rq("choice", names), tie)["choice"] == "billing"
+    # Rendered as sales, technical, billing: the tie is between technical and billing, and
+    # billing comes first in the request.
+    permuted = _rq("choice", names, order=[2, 1, 0])
+    assert answer(permuted, [0.2, 0.4, 0.4])["choice"] == "billing"
+    assert answer(_rq("choice", names, order=[1, 0, 2]), [0.4, 0.4, 0.2])["choice"] == "billing"
+
+
 def test_choice_answer():
     a = answer(_rq("choice", ["billing", "technical", "sales"]), [0.234, 0.748, 0.018])
     assert a == {
@@ -525,6 +614,28 @@ def test_score_answer():
         "score", ["0", "1", "2"], order=[2, 1, 0], descriptions=["Calm", "Frustrated", "Very angry"]
     )
     assert answer(reversed_, [0.329, 0.578, 0.093]) == a
+
+
+def test_a_rendered_scores_legend_is_its_stripped_rubric():
+    """The legend comes from render: each level's rubric text stripped, as v1's legend is,
+    and not collapsed to one line as its option line is."""
+    tok = toy_tokenizer()
+    req = {
+        "state": "s",
+        "questions": {
+            "s": {
+                "type": "score",
+                "instructions": "x",
+                "criteria": ["  calm\n", "a  b\n c", "\tvery\n"],
+            }
+        },
+    }
+    rq = render(req, tok, PLAIN).questions["s"]
+    assert "A. 0 — calm\nB. 1 — a b c\nC. 2 — very\n" in rq.question_text
+    a = answer(rq, [0.2, 0.3, 0.5])
+    assert a["legend"] == {"0": "calm", "1": "a  b\n c", "2": "very"}
+    reversed_ = render(req, tok, PLAIN, option_orders={"s": [2, 1, 0]}).questions["s"]
+    assert answer(reversed_, [0.5, 0.3, 0.2])["legend"] == a["legend"]
 
 
 def test_answers_match_v1():
@@ -571,16 +682,16 @@ def test_every_stage_gives_the_same_answers():
     z = readout_logits(w, h)
     capped = softcap(z, C)
     final = capped / np.float32(t)
-    by_hidden = read(h, Readout(w, C), cfg, rendered, inputs=HIDDEN)
-    assert by_hidden == read({"c": h[1], "n": h[0]}, Readout(w, C), cfg, rendered, inputs=HIDDEN)
+    by_hidden = read(h, Readout(w, C), cfg, rendered, stage=HIDDEN)
+    assert by_hidden == read({"c": h[1], "n": h[0]}, Readout(w, C), cfg, rendered, stage=HIDDEN)
     for stage, rows in (
         (RAW_LOGITS, z),
         (CAPPED_LOGITS, capped),
         (FINAL_LOGITS, final),
         (FINAL_LOGITS, [final[0][:2], final[1][:3]]),  # each question's own codes only
     ):
-        assert read(rows, None, cfg, rendered, inputs=stage) == by_hidden, stage
-        assert read(rows, Readout(None, C), cfg, rendered, inputs=stage) == by_hidden, stage
+        assert read(rows, None, cfg, rendered, stage=stage) == by_hidden, stage
+        assert read(rows, Readout(None, C), cfg, rendered, stage=stage) == by_hidden, stage
     want = _manual(z[1].tolist(), 3, C, t)
     assert by_hidden["c"]["probabilities"] == {
         o: round(p, 4) for o, p in zip("xyz", want, strict=True)
@@ -591,9 +702,9 @@ def test_every_stage_gives_the_same_answers():
         None,
         cfg,
         rendered,
-        inputs=PROBABILITIES,
+        stage=PROBABILITIES,
     )
-    ref = question_probabilities(h, Readout(w, C), cfg, rendered, inputs=HIDDEN)
+    ref = question_probabilities(h, Readout(w, C), cfg, rendered, stage=HIDDEN)
     for n in ref:
         assert np.allclose(by_p[n], ref[n], rtol=0, atol=1e-6), n
 
@@ -603,42 +714,45 @@ def test_read_refuses_a_mismatch():
     rendered = _request(_rq("noul", ["false", "true"]))
     with pytest.raises(TypeError):
         read(np.zeros((1, 4)), Readout(w, C), _config(), rendered)  # type: ignore[call-arg]
-    for bad in ("logits", "probs", None):
-        with pytest.raises(ValueError, match="inputs must be"):
-            read(np.zeros((1, 4)), Readout(w, C), _config(), rendered, inputs=bad)
+    with pytest.raises(TypeError, match="stage"):
+        read(np.zeros((1, 4)), Readout(w, C), _config(), rendered, stage=None)
+    for bad in ("logits", "probs"):
+        with pytest.raises(ValueError, match="stage must be"):
+            read(np.zeros((1, 4)), Readout(w, C), _config(), rendered, stage=bad)
     with pytest.raises(ValueError, match="rendered for"):
         read(
             np.zeros((1, 4)),
             Readout(w, C),
             _config(prompt="strands-chat"),
             rendered,
-            inputs=HIDDEN,
+            stage=HIDDEN,
         )
     bad_ids = list(decision_config_fixture()["token_ids"])
     bad_ids[0], bad_ids[1] = bad_ids[1], bad_ids[0]
     with pytest.raises(ValueError, match="token_ids"):
-        read(np.zeros((1, 4)), Readout(w, C), _config(token_ids=bad_ids), rendered, inputs=HIDDEN)
+        read(np.zeros((1, 4)), Readout(w, C), _config(token_ids=bad_ids), rendered, stage=HIDDEN)
     with pytest.raises(ValueError, match="one per question"):
-        read(np.zeros((2, 4)), Readout(w, C), _config(), rendered, inputs=HIDDEN)
+        read(np.zeros((2, 4)), Readout(w, C), _config(), rendered, stage=HIDDEN)
     with pytest.raises(ValueError, match="no row"):
-        read({"other": np.zeros(4)}, Readout(w, C), _config(), rendered, inputs=HIDDEN)
+        read({"other": np.zeros(4)}, Readout(w, C), _config(), rendered, stage=HIDDEN)
     with pytest.raises(ValueError, match="rows for 255 codes"):
-        read(np.zeros((1, 4)), Readout(np.zeros((254, 4)), C), _config(), rendered, inputs=HIDDEN)
+        read(np.zeros((1, 4)), Readout(np.zeros((254, 4)), C), _config(), rendered, stage=HIDDEN)
     with pytest.raises(ValueError, match="hidden state of 4"):
-        read(np.zeros((1, 5)), Readout(w, C), _config(), rendered, inputs=HIDDEN)
+        read(np.zeros((1, 5)), Readout(w, C), _config(), rendered, stage=HIDDEN)
     with pytest.raises(ValueError, match="readout weight"):
-        read(np.zeros((1, 4)), Readout(None, C), _config(), rendered, inputs=HIDDEN)
+        read(np.zeros((1, 4)), Readout(None, C), _config(), rendered, stage=HIDDEN)
     with pytest.raises(ValueError, match="readout weight"):
-        read(np.zeros((1, 4)), None, _config(), rendered, inputs=HIDDEN)
+        read(np.zeros((1, 4)), None, _config(), rendered, stage=HIDDEN)
     with pytest.raises(ValueError, match="255 values"):
-        read(np.zeros((1, 100)), None, _config(), rendered, inputs=RAW_LOGITS)
+        read(np.zeros((1, 100)), None, _config(), rendered, stage=RAW_LOGITS)
     with pytest.raises(ValueError, match="a vector"):
-        read([np.zeros((2, 2))], None, _config(), rendered, inputs=RAW_LOGITS)
+        read([np.zeros((2, 2))], None, _config(), rendered, stage=RAW_LOGITS)
     # The readout's cap must be the checkpoint's: one source for c.
     with pytest.raises(ValueError, match="soft-cap"):
-        read(np.zeros((1, 4)), Readout(w, 20.0), _config(), rendered, inputs=HIDDEN)
-    with pytest.raises(ValueError, match="soft-cap"):
-        read(np.zeros((1, 4)), Readout(w, None), _config(), rendered, inputs=HIDDEN)
+        read(np.zeros((1, 4)), Readout(w, 20.0), _config(), rendered, stage=HIDDEN)
+    # Every checkpoint has a soft-cap, so a readout has one too.
+    with pytest.raises(ValueError, match="softcap"):
+        Readout(w, None)  # type: ignore[arg-type]
 
 
 def test_the_readout_holds_its_weight_in_bf16():
@@ -706,39 +820,107 @@ class _FakeBackend:
         # Probabilities over each question's own codes, ragged, as vLLM's logprobs give.
         ks = [2, 3]
         return [
-            code_probabilities(r[:k], k, inputs=FINAL_LOGITS, softcap_c=C, temperature=T)
+            code_probabilities(r[:k], k, stage=FINAL_LOGITS, softcap_c=C, temperature=T)
             for r, k in zip(final, ks, strict=True)
         ]
+
+
+class _DecoderBackend:
+    """A decoder with a hidden state per question, of width 16, and a readout that is
+    neither the identity nor square: it returns, for each question, the stage `outputs`
+    computed from them the way the stage's runtime would."""
+
+    def __init__(self, hidden: dict[tuple[int, ...], np.ndarray], weight, outputs: str):
+        self.hidden, self.weight, self.outputs, self.calls = hidden, weight, outputs, []
+
+    def forward(self, state, questions):
+        self.calls.append((state, questions))
+        h = np.stack([self.hidden[tuple(q)] for q in questions])
+        if self.outputs == HIDDEN:
+            return h
+        raw = readout_logits(self.weight, h)
+        if self.outputs == RAW_LOGITS:
+            return raw
+        capped = softcap(raw, C)
+        if self.outputs == CAPPED_LOGITS:
+            return capped
+        final = capped / np.float32(T)
+        if self.outputs == FINAL_LOGITS:
+            return final
+        # Probabilities over each question's own codes, ragged, as vLLM's logprobs give.
+        return [_softmax64(r[:k].tolist()) for r, k in zip(final, (2, 3), strict=True)]
+
+
+E2E_REQUEST = {
+    "state": "a short state",
+    "questions": {
+        "n": {"type": "noul", "instructions": "is it short"},
+        "c": {
+            "type": "choice",
+            "instructions": "pick",
+            "criteria": {"x": None, "y": None, "z": None},
+        },
+    },
+}
+
+
+def _e2e_decoder():
+    """A readout [255, 16] and two hidden states whose question codes' logits lie where the
+    cap bends them (|z| about 15 to 40) with gaps of about 2."""
+    rng = np.random.default_rng(21)
+    w = round_to_bf16(rng.normal(0, 1, (255, 16)))
+    # The smallest hidden states that give these logits on the question's codes.
+    h_n = np.linalg.lstsq(w[:2], np.array([-21.0, -19.0]), rcond=None)[0]
+    h_c = np.linalg.lstsq(w[:3], np.array([18.0, 20.5, 16.0]), rcond=None)[0]
+    return w, round_to_bf16(h_n), round_to_bf16(h_c)
+
+
+def test_the_end_to_end_numbers_can_see_a_misapplied_stage():
+    """The end-to-end test's numbers move by more than its tolerance when the cap is skipped
+    or applied twice, or the temperature is applied twice or not at all."""
+    w, h_n, h_c = _e2e_decoder()
+    z = readout_logits(w, np.stack([h_n, h_c]))
+    zn, zc = z[0, :2].astype(np.float64), z[1, :3].astype(np.float64)
+    assert 1.0 < abs(zn[1] - zn[0]) < 3.0 and all(10 < abs(v) < 45 for v in [*zn, *zc])
+
+    def p(v, cap, t):
+        return np.array(_softmax64([(C * math.tanh(x / C) if cap else x) / t for x in v]))
+
+    ref = [p(zn, True, T), p(zc, True, T)]
+    wrong = {
+        "cap skipped": [p(zn, False, T), p(zc, False, T)],
+        "cap twice": [p(C * np.tanh(zn / C), True, T), p(C * np.tanh(zc / C), True, T)],
+        "T twice": [p(zn, True, T * T), p(zc, True, T * T)],
+        "T skipped": [p(zn, True, 1.0), p(zc, True, 1.0)],
+    }
+    for name, (a, b) in wrong.items():
+        gap = max(np.max(np.abs(a - ref[0])), np.max(np.abs(b - ref[1])))
+        assert gap > 1e-2, name
 
 
 @pytest.mark.parametrize("outputs", STAGES)
 def test_evaluate_end_to_end_with_a_toy_tokenizer(outputs):
     tok = toy_tokenizer()
     cfg = _config(token_ids=[tok.token_to_id(c) for c in CODES], temperature=T)
-    req = {
-        "state": "a short state",
-        "questions": {
-            "n": {"type": "noul", "instructions": "is it short"},
-            "c": {
-                "type": "choice",
-                "instructions": "pick",
-                "criteria": {"x": None, "y": None, "z": None},
-            },
-        },
-    }
+    req = E2E_REQUEST
     rendered = render(req, tok, PLAIN)
     ids = {n: q.question_ids for n, q in rendered.questions.items()}
-    backend = _FakeBackend({ids["n"]: 1, ids["c"]: 2}, outputs)  # n -> B (true), c -> C (z)
-    readout = Readout(np.eye(255, dtype=np.float32), C) if outputs == HIDDEN else None
+    w, h_n, h_c = _e2e_decoder()
+    backend = _DecoderBackend({ids["n"]: h_n, ids["c"]: h_c}, w, outputs)
+    readout = Readout(w, C) if outputs == HIDDEN else None
     resp = evaluate(req, tok, readout, cfg, backend, model_name="t")
     ((state, questions),) = backend.calls
     assert state == list(rendered.state_ids)
     assert questions == [list(q.question_ids) for q in rendered.questions.values()]
     assert resp["model"] == "t" and list(resp["answers"]) == ["n", "c"]
-    # Every stage gives the reference's numbers: the cap and T applied once each.
-    want = _manual([0.0, 50.0], 2, C, T)[1]
-    assert resp["answers"]["n"]["noul"] == pytest.approx(want, abs=1e-4)
-    assert resp["answers"]["c"]["choice"] == "z"
+    # Every stage gives the reference's numbers: the cap and T applied once each, which
+    # test_the_end_to_end_numbers_can_see_a_misapplied_stage shows this tolerance can see.
+    z = readout_logits(w, np.stack([h_n, h_c]))
+    want_n, want_c = _manual(z[0].tolist(), 2, C, T), _manual(z[1].tolist(), 3, C, T)
+    assert resp["answers"]["n"]["noul"] == pytest.approx(want_n[1], abs=1e-4)
+    got_c = resp["answers"]["c"]["probabilities"]
+    assert list(got_c.values()) == pytest.approx(want_c, abs=1e-4)
+    assert resp["answers"]["c"]["choice"] == "xyz"[int(np.argmax(want_c))]
     assert resp["usage"] == {"input_tokens": rendered.input_tokens, "output_tokens": 2}
     with pytest.raises(ValueError, match="exceeds the limit"):
         evaluate(
@@ -748,6 +930,31 @@ def test_evaluate_end_to_end_with_a_toy_tokenizer(outputs):
             _config(token_ids=list(cfg.token_ids), max_length_validated=5, temperature=T),
             backend,
         )
+
+
+def test_evaluate_checks_the_configuration_before_the_forward_pass():
+    """What can be checked without the decoder is checked before it runs: a misconfigured
+    runtime never pays for a forward pass whose rows it cannot read."""
+    tok = toy_tokenizer()
+    ids = [tok.token_to_id(c) for c in CODES]
+    w, _, _ = _e2e_decoder()
+
+    class Untouchable:
+        outputs = HIDDEN
+
+        def forward(self, state, questions):
+            raise AssertionError("forward ran before the configuration was checked")
+
+    cases = [
+        (None, _config(token_ids=ids), "readout weight"),
+        (Readout(None, C), _config(token_ids=ids), "readout weight"),
+        (Readout(w, 20.0), _config(token_ids=ids), "soft-cap"),
+        (Readout(w[:254], C), _config(token_ids=ids), "rows for 255 codes"),
+        (Readout(w, C), _config(), "token_ids"),  # the fixture's ids, not the toy tokenizer's
+    ]
+    for readout, cfg, match in cases:
+        with pytest.raises(ValueError, match=match):
+            evaluate(E2E_REQUEST, tok, readout, cfg, Untouchable())
 
 
 IMAGE_REQUEST = {

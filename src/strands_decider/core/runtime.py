@@ -16,7 +16,7 @@ import numpy as np
 
 from .config import IMAGE, TEXT, DecisionConfig
 from .prompt import RenderedImage, render
-from .readout import STAGES, Readout, read
+from .readout import STAGES, Readout, check_rendered, check_stage, read
 from .request import NO_VISION, has_images
 
 if TYPE_CHECKING:
@@ -33,13 +33,13 @@ class Backend(Protocol):
         "final_logits"   tanh(z / c) * c / T, both applied (as strands-decider-vllm returns them)
         "probabilities"  the codes' probabilities: the question's k, or all 255
 
-    `inputs` says what `forward` takes, as decision_config.json's `inputs` names it:
-    ("text",), or ("text", "image") for a backend with an image path. A backend without
-    the attribute takes text only, and the core refuses image requests for it.
+    An optional attribute, `inputs`, says what `forward` takes, as decision_config.json's
+    `inputs` names it: ("text",), or ("text", "image") for a backend with an image path. A
+    backend without it takes text only, and the core refuses image requests for it. It is
+    not a member of this protocol, so that a text-only backend need not define it.
     """
 
     outputs: str
-    inputs: tuple[str, ...]
 
     def forward(
         self,
@@ -94,7 +94,9 @@ def evaluate(
     `config.max_length_validated` are refused unless `max_length` raises the limit.
     `readout` may be None for a backend that applies the readout itself. A request with
     images is refused, before its images are decoded, unless the checkpoint's `inputs`
-    and the backend's both hold "image".
+    and the backend's both hold "image". Everything that can be checked without the
+    decoder is checked before `forward` runs: the stage, the readout, and the rendered
+    request's prompt and code token ids.
     """
     stage = getattr(backend, "outputs", None)
     if stage not in STAGES:
@@ -102,6 +104,7 @@ def evaluate(
             f"the backend must say what forward returns: `outputs` is {stage!r}, not one "
             f"of {STAGES}"
         )
+    check_stage(stage, readout, config)
     if has_images(request):
         if IMAGE not in config.inputs:
             raise ValueError(
@@ -113,15 +116,14 @@ def evaluate(
     rendered = render(
         request, tokenizer, config.prompt, max_length=max_length or config.max_length_validated
     )
+    check_rendered(config, rendered)
     state = list(rendered.state_ids)
     questions = [list(q.question_ids) for q in rendered.questions.values()]
     if rendered.images:
         out = backend.forward(state, questions, images=rendered.images)
     else:
         out = backend.forward(state, questions)
-    answers = read(
-        out, readout, config, rendered, inputs=stage, ordinal_smoothing=ordinal_smoothing
-    )
+    answers = read(out, readout, config, rendered, stage=stage, ordinal_smoothing=ordinal_smoothing)
     return {
         "model": model_name,
         "answers": answers,
