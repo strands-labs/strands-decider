@@ -22,9 +22,9 @@ from typing import ClassVar
 
 import numpy as np
 import pytest
-from core_support import decision_config_fixture, image_b64, toy_tokenizer
+from core_support import decision_config_fixture, image_b64
 
-from strands_decider.core import CODES, HIDDEN
+from strands_decider.core import CODES, CONTROL_TOKEN_IDS, HIDDEN
 
 DECISION = Path(__file__).resolve().parents[1] / "deploy" / "lambda" / "decision"
 HIDDEN_SIZE = 8
@@ -75,17 +75,30 @@ def _safetensors(path: Path, weight: np.ndarray) -> None:
     path.write_bytes(struct.pack("<Q", len(header)) + header.encode() + bits.tobytes())
 
 
+def gemma_ids_tokenizer():
+    """A word-level tokenizer with Gemma 4's control tokens and every code at Gemma 4's ids (the
+    fixture's token_ids), so that it passes the core's check_tokenizer, as load_tokenizer runs
+    it; other text is a few small ids."""
+    from tokenizers import AddedToken, Regex, Tokenizer, models, pre_tokenizers
+
+    words = ["<unk>", "\n", " ", ".", "<", ">", "/", '"', "=", "—", "answer", "model", "user"]
+    taken = set(CONTROL_TOKEN_IDS.values()) | set(decision_config_fixture()["token_ids"])
+    free = (i for i in range(1000) if i not in taken)
+    vocab = {w: next(free) for w in words}
+    vocab.update(zip(CODES, decision_config_fixture()["token_ids"], strict=True))
+    vocab.update(CONTROL_TOKEN_IDS)
+    tok = Tokenizer(models.WordLevel(vocab, unk_token="<unk>"))
+    tok.pre_tokenizer = pre_tokenizers.Split(Regex(r"\w+|\s|[^\w\s]"), behavior="isolated")
+    tok.add_special_tokens([AddedToken(t, special=True) for t in CONTROL_TOKEN_IDS])
+    return tok
+
+
 def write_checkpoint(d: Path, *, vision: bool = True, **config) -> Path:
-    """What the image holds in /opt/model, with a toy tokenizer and a readout of identity rows."""
+    """What the image holds in /opt/model, with a tokenizer at Gemma 4's ids and a readout of
+    identity rows."""
     d.mkdir(parents=True, exist_ok=True)
-    tok = toy_tokenizer()
-    tok.save(str(d / "tokenizer.json"))
-    cfg = {
-        **decision_config_fixture(),
-        "token_ids": [tok.token_to_id(c) for c in CODES],
-        "max_length_validated": 512,
-        **config,
-    }
+    gemma_ids_tokenizer().save(str(d / "tokenizer.json"))
+    cfg = {**decision_config_fixture(), "max_length_validated": 512, **config}
     for k in [k for k, v in config.items() if v is None]:
         del cfg[k]
     (d / "decision_config.json").write_text(json.dumps(cfg))
@@ -304,6 +317,15 @@ def test_a_checkpoint_without_the_soft_cap_is_refused(load, tmp_path):
     with pytest.raises(ValueError, match=r"missing required fields \['final_logit_softcapping'\]"):
         load(write_checkpoint(tmp_path / "nocap", final_logit_softcapping=None))
     assert FakeBackend.calls == []  # refused before the model loads
+
+
+def test_a_tokenizer_without_the_checkpoints_ids_is_refused(load, tmp_path):
+    from core_support import toy_tokenizer
+
+    d = write_checkpoint(tmp_path / "toy")
+    toy_tokenizer().save(str(d / "tokenizer.json"))
+    with pytest.raises(ValueError, match="control tokens are not Gemma 4's"):
+        load(d)
 
 
 def test_other_decision_configs_are_refused(load, tmp_path):
