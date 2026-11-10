@@ -19,6 +19,8 @@ CPU), so they report the numbers serving returns. `--device mlx` is refused.
 - [Model artifact](#model-artifact): what a checkpoint holds, and the Hugging Face export.
 - [Ask](#ask): one command, with recorded v19 output and how to read its confidence.
 - [Serve](#serve): `POST /v1/systemone` and `/health`, on `127.0.0.1` with no authentication.
+- [Decision checkpoints](#decision-checkpoints): checkpoints of the decision interface
+  ([spec.md](spec.md)), with images, on the transformers backend.
 - [Asking many questions is nearly free](#asking-many-questions-is-nearly-free): the shared-prefix cache.
 - [Serving on a Mac](#serving-on-a-mac): MPS, and the one kernel that had to be replaced.
 - [Serving on a Mac with MLX](#serving-on-a-mac-with-mlx): `--device mlx`, measured against MPS.
@@ -296,6 +298,35 @@ the GPU on every task, with probabilities within 0.05 (0.13 for the 26B-A4B). CP
 took 4.9 s (E2B), 7.2 s (E4B), 13.5 s (12B) and 7.8 s (26B-A4B). The 26B-A4B is faster than the 12B
 there, because it computes with 4B of its parameters per token. On one H100, the median is
 102 ms, 139 ms, 136 ms and 245 ms.
+
+## Decision checkpoints
+
+A decision checkpoint follows the decision interface ([spec.md](spec.md)): the base Gemma 4
+model's own multimodal checkpoint with the fine-tuning merged in, beside `readout.safetensors`
+and a `decision_config.json` that says `"interface": "strands-decider"`. `ask` and `serve` take
+one the way they take any checkpoint, a local directory or a Hub id; every other checkpoint
+keeps the path described above.
+
+```bash
+strands-decider ask path/to/decision-checkpoint --state "A photo sent with a claim." \
+  --image photo.jpg --choice "What does the photo show?=a car,a bicycle,a house"
+strands-decider serve path/to/decision-checkpoint --port 8000
+```
+
+The core library renders each request with the checkpoint's prompt, and the transformers
+backend (`backends/transformers.py`) runs the model: every layer under the interface's mask,
+the state encoded once when a request asks several questions, the answers read from the hidden
+state at each question's last token. CPU runs float32, CUDA and MPS bf16; the first line the
+command prints names the device and dtype. A request may carry images when the checkpoint's
+`decision_config.json` lists `image` in `inputs`; `--vision` is not needed. The 12B's image
+processor needs torchvision. `--no-prefix-cache` runs one full pass per question, the spec's
+reference; `--max-batch` and `--max-batch-tokens` bound the questions of one pass over a
+state. `/health` reports the backend, the device, the dtype and whether images are served.
+`--device-map` and `--device mlx` do not apply.
+
+A checkpoint from before the interface, whose `decision_config.json` has no `interface`, names
+no prompt, so `ask` and `serve` refuse it; `TransformersBackend` runs it on token ids rendered
+elsewhere, as text only.
 
 ## Asking many questions is nearly free
 
