@@ -116,6 +116,12 @@ class Model:
         self.evaluate(_WARM_UP)
         if vision:
             self.evaluate({**_WARM_UP, "images": [_WARM_UP_IMAGE]})
+        if _page_cache() == "hot":
+            # The prefetch has brought the whole file into this environment, so the rows of the
+            # per-layer embedding table that a request reads come back quickly; the table's 2.4 GB
+            # (E2B) need not stay in the page cache, which Lambda counts as memory used.
+            for start, end in self.artifact.get("lazy_ranges", []):
+                _drop_from_page_cache(gguf, start, end - start)
         self.backend.max_request_tokens = max_request_tokens
         log.info("model ready in %.1f s", time.perf_counter() - started)
 
@@ -157,13 +163,24 @@ def _prefetch(path: str, chunk: int = 16 << 20, readers: int = 32) -> None:
         os.close(fd)
 
 
-def _drop_from_page_cache(path: str) -> None:
+def _drop_from_page_cache(path: str, offset: int = 0, length: int = 0) -> None:
+    """Drop a file's pages, or `length` bytes of them from `offset` (0: to the end), from the page
+    cache. Pages a process has mapped and touched stay."""
     if hasattr(os, "posix_fadvise"):
         fd = os.open(path, os.O_RDONLY)
         try:
-            os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
+            os.posix_fadvise(fd, offset, length, os.POSIX_FADV_DONTNEED)
         finally:
             os.close(fd)
+
+
+def _page_cache() -> str:
+    """DECIDER_PAGE_CACHE: "hot" (the default) keeps the model's hot tensors in the page cache and
+    drops the lazily read table after the prefetch; "all" keeps the whole file."""
+    value = os.environ.get("DECIDER_PAGE_CACHE") or "hot"
+    if value not in ("hot", "all"):
+        raise ValueError(f'DECIDER_PAGE_CACHE must be "hot" or "all", not {value!r}')
+    return value
 
 
 def _max_request_tokens() -> int | None:
@@ -174,6 +191,7 @@ def _max_request_tokens() -> int | None:
 
 
 def _load() -> Model:
+    _page_cache()  # checked before the model loads
     return Model(MODEL_DIR, _max_request_tokens())
 
 

@@ -52,6 +52,9 @@ COPY deploy/lambda/decision/scripts /opt/strands-decider/deploy/lambda/decision/
 ARG CHECKPOINT
 ARG CHECKPOINT_REVISION=main
 ARG LLAMA_CPP_REV=26d52b0f9543f441fc2bfa383557c992a4fbf4b9
+# The vision tower's type. q8_0 matches the reference as closely as f16 and encodes an image about
+# three times as fast on Graviton, where ggml's f16 matrix products are slow.
+ARG MMPROJ_TYPE=q8_0
 # The checkpoint goes to the container's disk and the BF16 GGUF to memory (/tmp/gguf): written to
 # Docker's storage in CodeBuild, the converter's write fails with "Not enough free space" with
 # hundreds of GB free. Both are gone when the step ends. An s3:// checkpoint is read with the
@@ -62,7 +65,7 @@ RUN --mount=type=secret,id=aws_container_credentials_uri --mount=type=tmpfs,targ
     && export LLAMA_CPP_REV \
     && python /opt/strands-decider/deploy/lambda/decision/scripts/build_artifact.py "${CHECKPOINT}" /model \
       --revision "${CHECKPOINT_REVISION}" --llama-cpp /llama --quantize /usr/local/bin/llama-quantize \
-      --work /tmp/build --gguf-tmp /tmp/gguf \
+      --mmproj-type "${MMPROJ_TYPE}" --work /tmp/build --gguf-tmp /tmp/gguf \
     && rm -rf /tmp/build /tmp/hf \
     && chmod -R a+rX /model  # Lambda runs the function as a user other than root
 
