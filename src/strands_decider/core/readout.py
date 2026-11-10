@@ -1,6 +1,6 @@
 """From the hidden state at a question's last token to its answer (docs/spec.md, The readout).
 
-    z = bf16(W h)              W: readout.safetensors `weight` in bf16; a bf16 GEMM
+    z = bf16(W bf16(h))        W: readout.safetensors `weight` in bf16; a bf16 GEMM
     z = tanh(z / c) * c        float32; c: decision_config.json `final_logit_softcapping`
     z = z / T                  float32; T: decision_config.json `temperature`
     p = softmax(z[:k])         float32, over the question's own k codes only
@@ -8,9 +8,10 @@
 
 This is the training reference's precision regime, and that of strands-decider-vllm, the vLLM
 runtime.
-numpy has no bf16, so the GEMM is emulated: the products are summed in float64, the sum is
-rounded to float32 and then to bf16 by the float32's bits, round to nearest, ties to even
-(`round_to_bf16`). The hidden state is used as the decoder returns it.
+numpy has no bf16, so the GEMM is emulated: the hidden state is rounded to bf16 (a bf16
+decoder's is unchanged by it), the products are summed in float64, and the sum is rounded to
+float32 and then to bf16 by the float32's bits, round to nearest, ties to even
+(`round_to_bf16`).
 
 A runtime may hand over any stage between the hidden state and the probabilities. The stage
 is always named (`inputs`, `Backend.outputs`), so neither the soft-cap nor the temperature
@@ -106,19 +107,26 @@ def round_to_bf16(x: Any) -> np.ndarray:
 
 
 def readout_logits(weight: Any, hidden: Any) -> np.ndarray:
-    """z = W h as a bf16 GEMM: `weight` [n_codes, hidden] rounded to bf16, `hidden` ([hidden]
-    or [rows, hidden]) as given, the products summed in float64, and each sum rounded to
-    float32 and then to bf16. Returns float32, [n_codes] or [rows, n_codes].
+    """z = W h as a bf16 GEMM: `weight` [n_codes, hidden] and `hidden` ([hidden] or [rows,
+    hidden]) each rounded to bf16, as a bf16 GEMM takes them (a hidden state wider than
+    float32 is rounded to float32 first), the products summed in float64, and each sum
+    rounded to float32 and then to bf16. Returns float32, [n_codes] or [rows, n_codes].
 
-    A GPU's bf16 GEMM sums in float32, in its own order, so where a sum falls next to a bf16
-    rounding boundary its z can differ from this one by one bf16 step.
+    A bf16 decoder's hidden state is unchanged by the rounding; a float32 decoder's (llama.cpp,
+    MLX in float32) is rounded, as strands-decider-vllm rounds it. A GPU's bf16 GEMM sums in
+    float32, in its own order, so where a sum falls next to a bf16 rounding boundary its z
+    can differ from this one by one bf16 step.
     """
     w = round_to_bf16(weight).astype(np.float64)
-    h = np.asarray(hidden, dtype=np.float64)
-    if w.ndim != 2 or h.ndim not in (1, 2) or h.shape[-1] != w.shape[1]:
-        raise ValueError(f"readout weight {w.shape} cannot take hidden states {h.shape}")
-    if not np.all(np.isfinite(h)):
+    h64 = np.asarray(hidden, dtype=np.float64)
+    if w.ndim != 2 or h64.ndim not in (1, 2) or h64.shape[-1] != w.shape[1]:
+        raise ValueError(f"readout weight {w.shape} cannot take hidden states {h64.shape}")
+    if not np.all(np.isfinite(h64)):
         raise ValueError("hidden states must be finite")
+    with np.errstate(over="ignore"):
+        h = round_to_bf16(h64).astype(np.float64)
+    if not np.all(np.isfinite(h)):
+        raise ValueError("hidden states must be finite in bf16")
     with np.errstate(over="ignore"):
         z32 = (h @ w.T).astype(np.float32)
     if not np.all(np.isfinite(z32)):

@@ -264,13 +264,16 @@ def _vllm_logits(w: list[list[float]], h: list[float], c: float, t: float) -> li
         codes = torch.tanh(codes / self.softcap) * self.softcap  # float32
         codes = codes / self.temperature                         # float32, when T != 1
 
-    The GEMM's products of bf16 numbers are exact in float64 and math.fsum adds them
-    exactly; the sum is rounded to float32, as the accumulator holds it, then to bf16 by
-    `_bf16`'s arithmetic."""
-    return [
-        _after_the_gemm(_bf16(_f32(math.fsum(a * b for a, b in zip(row, h, strict=True)))), c, t)
-        for row in w
-    ]
+    The hidden state is rounded to bf16 first. The GEMM's products of bf16 numbers are exact
+    in float64 and math.fsum adds them exactly; the sum is rounded to float32, as the
+    accumulator holds it, then to bf16 by `_bf16`'s arithmetic."""
+    return [_after_the_gemm(z, c, t) for z in _vllm_gemm(w, h)]
+
+
+def _vllm_gemm(w: list[list[float]], h: list[float]) -> list[float]:
+    """z = bf16(W bf16(h)), one rounding at a time."""
+    hb = [_bf16(_f32(x)) for x in h]
+    return [_bf16(_f32(math.fsum(a * b for a, b in zip(row, hb, strict=True)))) for row in w]
 
 
 @pytest.mark.parametrize("t", [1.0, 0.7, 1.9])
@@ -331,6 +334,37 @@ def test_read_matches_the_vllm_runtimes_arithmetic(seed, t):
         for lo, k in zip(loose, ks, strict=True)
     )
     assert gap > 1e-4
+
+
+def test_the_hidden_state_is_rounded_to_bf16_before_the_gemm():
+    """A float32 decoder's hidden state (llama.cpp's, or MLX's in float32) is rounded to bf16
+    before the GEMM, as strands-decider-vllm rounds it (`hidden_states.to(bf16)`): its z is
+    the bf16 hidden state's, which the unrounded one is not."""
+    rng = np.random.default_rng(11)
+    bf16 = np.vectorize(_bf16, otypes=[np.float64])
+    w = bf16(rng.normal(0, 1, (255, 64)) * 2)
+    h32 = rng.normal(0, 1, 64).astype(np.float32)
+    assert not np.array_equal(round_to_bf16(h32), h32), "the test needs a hidden state off bf16"
+    z = readout_logits(w, h32)
+    assert z.tolist() == _vllm_gemm(w.tolist(), h32.tolist())
+    assert np.array_equal(z, readout_logits(w, round_to_bf16(h32)))
+    assert np.array_equal(readout_logits(w, h32.astype(np.float64)), z)
+    unrounded = [
+        _bf16(_f32(math.fsum(a * float(b) for a, b in zip(row, h32, strict=True))))
+        for row in w.tolist()
+    ]
+    assert sum(a != b for a, b in zip(z.tolist(), unrounded, strict=True)) >= 50
+    # Through read, from the hidden stage: the bf16 hidden state's answers.
+    rendered = _request(_rq("choice", [f"o{i}" for i in range(40)], name="c"))
+    probs = question_probabilities([h32], Readout(w, C), _config(), rendered, inputs=HIDDEN)
+    want = question_probabilities(
+        [round_to_bf16(h32)], Readout(w, C), _config(), rendered, inputs=HIDDEN
+    )
+    assert np.array_equal(probs["c"], want["c"])
+    with pytest.raises(ValueError, match="finite in bf16"):
+        readout_logits(w, np.full(64, 3.4e38, np.float32))
+    with pytest.raises(ValueError, match="finite"):
+        readout_logits(w, np.full(64, np.nan))
 
 
 # ---- safetensors and the readout file ---------------------------------------------------
