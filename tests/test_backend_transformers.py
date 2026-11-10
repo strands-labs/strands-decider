@@ -52,6 +52,8 @@ from strands_decider.core import (
     read,
     readout_logits,
     render,
+    resize_image,
+    resized_size,
     round_to_bf16,
     soft_tokens,
 )
@@ -310,8 +312,8 @@ def test_state_reuse_is_the_full_pass(backends, kind, images):
     assert a.dtype == np.float32 and a.shape == (3, 64)
     assert np.abs(a - b).max() < 2e-5 * max(1.0, float(np.abs(a).max()))
     ck = full.checkpoint
-    assert read(a, ck.readout, ck.config, r, inputs="hidden") == read(
-        b, ck.readout, ck.config, r, inputs="hidden"
+    assert read(a, ck.readout, ck.config, r, stage="hidden") == read(
+        b, ck.readout, ck.config, r, stage="hidden"
     )
 
 
@@ -358,8 +360,8 @@ def test_bf16_state_reuse_moves_answers_by_rounding_only(ckpt, kind):
     reuse = tb.TransformersBackend.load(str(ckpt), dtype=torch.bfloat16)
     ck = full.checkpoint
     r, state, questions = _rendered(full, request(IMAGES[:1]))
-    pa = read(full.forward(state, questions, r.images), ck.readout, ck.config, r, inputs="hidden")
-    pb = read(reuse.forward(state, questions, r.images), ck.readout, ck.config, r, inputs="hidden")
+    pa = read(full.forward(state, questions, r.images), ck.readout, ck.config, r, stage="hidden")
+    pb = read(reuse.forward(state, questions, r.images), ck.readout, ck.config, r, stage="hidden")
     assert pa["team"]["choice"] == pb["team"]["choice"]
     for name in ("billing", "shipping", "sales"):
         assert abs(pa["team"]["probabilities"][name] - pb["team"]["probabilities"][name]) < 0.05
@@ -388,7 +390,7 @@ def test_rows_are_the_decoders_hidden_states_and_the_core_reads_them(ckpt, kind)
     # The answers are the core's precision regime on those rows: the bf16 GEMM, then the cap
     # and the checkpoint's temperature in float32, against torch's own bf16 GEMM.
     got = evaluate(request(), ck.tokenizer(), ck.readout, ck.config, backend)["answers"]
-    assert got == read(rows, ck.readout, ck.config, r, inputs="hidden")
+    assert got == read(rows, ck.readout, ck.config, r, stage="hidden")
     w = torch.from_numpy(ck.readout.weight).to(torch.bfloat16)
     z = (w @ torch.from_numpy(rows[1]).to(torch.bfloat16)).float()
     np.testing.assert_allclose(
@@ -495,7 +497,7 @@ def test_a_backend_without_its_vision_encoder_refuses_images(ckpt):
 @pytest.mark.parametrize(
     ("processor", "match"),
     [
-        ({"max_soft_tokens": 560}, "max_soft_tokens is 560"),
+        ({"max_soft_tokens": 560}, "'max_soft_tokens': 560"),
         ({"patch_size": 14}, "patch_size"),
         ({"image_processor_type": "SiglipImageProcessor"}, "names image processor"),
     ],
@@ -547,29 +549,6 @@ def test_the_tokenizer_must_agree_with_config_json_on_image_tokens(tmp_path):
 
 # ---- pixels -------------------------------------------------------------------------------
 
-SIZES = [
-    (64, 48),
-    (48, 64),
-    (50, 50),
-    (300, 40),
-    (1, 100),
-    (100, 1),
-    (803, 803),
-    (4032, 3024),
-    (17, 999),
-]
-
-
-@pytest.mark.parametrize(("w", "h"), SIZES)
-def test_resized_size_is_the_processors(w, h):
-    from transformers.models.gemma4.image_processing_pil_gemma4 import (
-        get_aspect_ratio_preserving_size,
-    )
-
-    rw, rh = tb.resized_size(w, h)
-    assert (rh, rw) == get_aspect_ratio_preserving_size(h, w, 16, 280 * 9, 3)
-    assert (rw // 48) * (rh // 48) == soft_tokens(w, h)
-
 
 def _photo(w: int, h: int, fmt: str, seed: int) -> bytes:
     """A smooth gradient with noise: a resize filter's errors show on it."""
@@ -584,41 +563,84 @@ def _photo(w: int, h: int, fmt: str, seed: int) -> bytes:
     return buf.getvalue()
 
 
+def _rendered_image(data: bytes):
+    from strands_decider.core import decode_image
+    from strands_decider.core.prompt import RenderedImage
+
+    im = decode_image(base64.b64encode(data).decode())
+    return RenderedImage(im.data, im.format, im.width, im.height, im.sha256, 1, im.tokens)
+
+
 @pytest.mark.skipif(
     not hasattr(transformers, "Gemma4ImageProcessorPil"), reason="no Gemma4ImageProcessorPil"
 )
 @pytest.mark.parametrize(
     ("w", "h", "fmt"),
     [(64, 48, "PNG"), (640, 480, "JPEG"), (300, 40, "WEBP"), (1, 100, "PNG"), (1200, 900, "JPEG"),
-     (768, 768, "PNG"), (97, 1301, "GIF")],
+     (768, 768, "PNG"), (97, 1301, "GIF"), (1080, 2400, "PNG")],
 )  # fmt: skip
-def test_pillow_resize_then_the_processor_is_gemma4s_pil_processor(w, h, fmt):
-    """docs/spec.md section 11.1, for E2B, E4B, 26B-A4B and 31B: Pillow's bicubic resize, then
-    the processor without its own, gives the pixels the PIL processor gives with its own."""
-    from strands_decider.core import decode_image
+def test_the_spec_resize_then_the_processor_is_gemma4s_pil_processor(w, h, fmt):
+    """docs/spec.md section 11.1, for E2B, E4B, 26B-A4B and 31B: the spec's bicubic resize
+    (`resize_image`), then the processor without its own, gives the pixels the PIL processor
+    gives with its own, wherever Pillow resizes the width first. Pillow 13 does the height
+    first when it shrinks more than twice as much as the width (the 1080 x 2400 case), and its
+    pixels then differ by a few levels: the spec's resize is the reference."""
+    from PIL import Image
 
-    data = base64.b64encode(_photo(w, h, fmt, w * h)).decode()
-    im = decode_image(data)
-    from strands_decider.core.prompt import RenderedImage
-
-    rendered = RenderedImage(im.data, im.format, im.width, im.height, im.sha256, 1, im.tokens)
+    rendered = _rendered_image(_photo(w, h, fmt, w * h))
     decoded = tb.decode(rendered)
+    target = resized_size(*decoded.size)
     proc = transformers.Gemma4ImageProcessorPil()
-    ours = proc(images=[tb.resize(decoded)], do_resize=False, return_tensors="pt")
+    ours = proc(images=[tb.resize(rendered, decoded)], do_resize=False, return_tensors="pt")
     theirs = proc(images=[decoded], return_tensors="pt")
-    assert torch.equal(ours["pixel_values"], theirs["pixel_values"])
     assert torch.equal(ours["image_position_ids"], theirs["image_position_ids"])
-    assert int(ours["num_soft_tokens_per_image"][0]) == im.tokens == soft_tokens(w, h)
+    assert int(ours["num_soft_tokens_per_image"][0]) == rendered.tokens == soft_tokens(w, h)
+    one_call = decoded.resize(target, Image.Resampling.BICUBIC)
+    if np.array_equal(np.asarray(one_call), np.asarray(resize_image(decoded, *target))):
+        assert torch.equal(ours["pixel_values"], theirs["pixel_values"])
+    else:  # Pillow 13, height first: within a few levels, and ours is the spec's
+        assert (ours["pixel_values"] - theirs["pixel_values"]).abs().max() <= 16 / 255
+
+
+def test_an_image_turned_by_its_exif_is_resized_to_its_decoded_shape(backends, kind):
+    """rotated-80x40.jpg: an 80 x 40 header, EXIF orientation 6, pixels 40 x 80, resized to
+    528 x 1104, never to the header's 1104 x 528 (both give N = 253)."""
+    _needs_images(kind)
+    from core_support import image_bytes
+
+    full, _ = backends
+    rendered = _rendered_image(image_bytes("rotated-80x40.jpg"))
+    assert (rendered.width, rendered.height) == (80, 40)
+    assert tb.resize(rendered, tb.decode(rendered)).size == (528, 1104)
+    positions = full.prepare_pixels([rendered])["image_position_ids"][0]
+    valid = positions[(positions != -1).all(-1)]
+    side = 16 if kind != UNIFIED else 48  # the 12B's processor merges 3 x 3 patches
+    assert (int(valid[:, 0].max()) + 1, int(valid[:, 1].max()) + 1) == (528 // side, 1104 // side)
+
+
+def test_a_decoded_size_that_is_not_the_headers_is_refused(backends, kind, monkeypatch):
+    _needs_images(kind)
+    from PIL import Image
+
+    from strands_decider.decision import RequestRefused
+
+    full, _ = backends
+    r, _, _ = _rendered(full, request(IMAGES[:1]))
+    monkeypatch.setattr(tb, "decode", lambda image: Image.new("RGB", (65, 48)))
+    with pytest.raises(RequestRefused, match="image could not be decoded: its pixels are 65x48"):
+        full.prepare_pixels(r.images)
 
 
 @pytest.mark.skipif(not (HAS_UNIFIED and TORCHVISION), reason="needs the 12B's processor")
 @pytest.mark.parametrize(("w", "h"), [(64, 48), (640, 480), (300, 40), (1, 100)])
-def test_the_12bs_processor_counts_the_cores_n_from_pillows_pixels(w, h):
+def test_the_12bs_processor_counts_the_cores_n_from_the_spec_resize(w, h):
     from PIL import Image
 
     proc = transformers.Gemma4UnifiedImageProcessor()
     img = Image.open(io.BytesIO(_photo(w, h, "PNG", 3))).convert("RGB")
-    out = proc(images=[tb.resize(img)], do_resize=False, return_tensors="pt")
+    out = proc(
+        images=[resize_image(img, *resized_size(w, h))], do_resize=False, return_tensors="pt"
+    )
     n = soft_tokens(w, h)
     assert int(out["num_soft_tokens_per_image"][0]) == n
     assert int((out["image_position_ids"][0] != -1).all(-1).sum()) == n
@@ -736,7 +758,7 @@ def _code_probabilities(ck, rows, k: int = 4) -> np.ndarray:
 
     z = readout_logits(ck.readout.weight, rows)
     return np.stack([
-        code_probabilities(r, k, inputs="raw_logits", softcap_c=ck.readout.softcap,
+        code_probabilities(r, k, stage="raw_logits", softcap_c=ck.readout.softcap,
                            temperature=ck.temperature)
         for r in z
     ])  # fmt: skip
@@ -816,7 +838,7 @@ def check_goldens(path, backend) -> tuple[int, int]:
             assert spans == want, f"line {i}: image spans differ"
             state, qs = list(r.state_ids), [list(q.question_ids) for q in r.questions.values()]
             rows = backend.forward(state, qs, r.images)
-            probs = question_probabilities(rows, ck.readout, ck.config, r, inputs="hidden")
+            probs = question_probabilities(rows, ck.readout, ck.config, r, stage="hidden")
             for name, p in probs.items():
                 n += 1
                 agree += int(np.argmax(p)) == int(np.argmax(g["probabilities"][name]))
@@ -831,7 +853,7 @@ def write_goldens(path, backend, requests) -> None:
             r = render(req, tok, ck.config.prompt)
             state, qs = list(r.state_ids), [list(q.question_ids) for q in r.questions.values()]
             rows = backend.forward(state, qs, r.images)
-            probs = question_probabilities(rows, ck.readout, ck.config, r, inputs="hidden")
+            probs = question_probabilities(rows, ck.readout, ck.config, r, stage="hidden")
             line = {
                 "request": req,
                 "ids": {n: list(q.ids) for n, q in r.questions.items()},
@@ -901,8 +923,8 @@ def test_the_12bs_pixels_are_pillows_resize_in_48_pixel_patches(tmp_path, w, h, 
     im = r.images[0]
     px = backend.prepare_pixels([im])
     values, positions = px["pixel_values"][0].numpy(), px["image_position_ids"][0].numpy()
-    arr = np.asarray(tb.resize(tb.decode(im)), dtype=np.float32) / 255
-    assert arr.shape[:2] == tuple(reversed(tb.resized_size(w, h)))
+    arr = np.asarray(tb.resize(im, tb.decode(im)), dtype=np.float32) / 255
+    assert arr.shape[:2] == tuple(reversed(resized_size(w, h)))
     valid = (positions != -1).all(-1)
     assert int(valid.sum()) == im.tokens == soft_tokens(w, h)
     for j in np.flatnonzero(valid):

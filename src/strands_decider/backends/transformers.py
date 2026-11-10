@@ -32,10 +32,13 @@ tests/test_backend_transformers.py checks that the two agree.
 The readout (section 7.1). Rows are float32, which holds a bf16 decoder's values exactly; the
 core's `Readout` does the bf16 GEMM and then the soft-cap and the temperature in float32.
 
-Images (section 11.1). Each file is decoded as v1 decodes it (`vision.decode_image`), resized
-with Pillow's bicubic filter to the size the image processor would choose, and given to the
-checkpoint's image processor with its own resize off. For E2B, E4B, 26B-A4B and 31B that is
-`Gemma4ImageProcessorPil`, whose pixels this reproduces; the 12B's
+Images (section 11.1). Each file is decoded as v1 decodes it (`vision.decode_image`), its
+decoded size checked against its header (`check_decoded_size`), resized to the size the image
+processor would choose for the decoded, oriented size by the spec's bicubic resize
+(`resize_image`: the width's pass, then the height's), and given to the checkpoint's image
+processor with its own resize off. For E2B, E4B, 26B-A4B and 31B that is
+`Gemma4ImageProcessorPil`, whose pixels this reproduces wherever Pillow resizes the width
+first (always before Pillow 13); the 12B's
 `Gemma4UnifiedImageProcessor` has only a torchvision backend, so 12B images need torchvision.
 The processor's soft-token count must equal the core's N. The model runs its vision encoder
 in the pass that holds the state, and each image's N vectors take the place of its
@@ -52,7 +55,6 @@ import base64
 import contextlib
 import importlib.util
 import json
-import math
 import os
 import threading
 import warnings
@@ -63,15 +65,22 @@ from typing import TYPE_CHECKING, Any, cast
 import numpy as np
 import torch
 
-from ..core import CODES, HIDDEN, DecisionConfig, Readout, RenderedImage
+from ..core import (
+    CODES,
+    HIDDEN,
+    DecisionConfig,
+    Readout,
+    RenderedImage,
+    check_decoded_size,
+    check_image_processor,
+    load_tokenizer,
+    resize_image,
+)
 from ..core.config import FILENAME, IMAGE, TEXT, check_float32_scale
 from ..core.images import (
     IMAGE_CLOSE,
     IMAGE_OPEN,
     IMAGE_SOFT,
-    MAX_SOFT_TOKENS,
-    PATCH_SIZE,
-    POOLING_KERNEL_SIZE,
 )
 from ..core.readout import MODEL_CONFIG_FILE, READOUT_FILE, load_safetensors
 from ..core.request import NO_VISION
@@ -265,6 +274,11 @@ class Checkpoint:
         )
 
     def tokenizer(self) -> Tokenizer:
+        """The checkpoint's tokenizer; for a decision checkpoint checked against the
+        interface's control and code ids (the core's `load_tokenizer`). An intermediate
+        checkpoint's is read as it is: it runs on ids rendered elsewhere."""
+        if self.config is not None:
+            return load_tokenizer(self.path, self.config)
         from tokenizers import Tokenizer
 
         return Tokenizer.from_file(os.path.join(self.path, TOKENIZER_FILE))
@@ -290,36 +304,14 @@ def image_processor_problem(processor_config: Any, unified: bool) -> str | None:
             f"{PROCESSOR_FILE} names image processor {ip.get('image_processor_type')!r}, not "
             f"{want!r}, so image requests are refused"
         )
-    for key, value in (
-        ("patch_size", PATCH_SIZE),
-        ("pooling_kernel_size", POOLING_KERNEL_SIZE),
-        ("max_soft_tokens", MAX_SOFT_TOKENS),
-    ):
-        if ip.get(key) != value:
-            return (
-                f"the image processor's {key} is {ip.get(key)!r}, not {value}: its soft-token "
-                "counts would not be the spec's, so image requests are refused"
-            )
+    try:
+        check_image_processor(processor_config)
+    except ValueError as e:  # its message names the settings, never a path
+        return f"{e}; image requests are refused"
     return None
 
 
 # ---- pixels -------------------------------------------------------------------------------
-
-
-def resized_size(width: int, height: int) -> tuple[int, int]:
-    """(W, H): the size Gemma 4's image processor resizes a `width` x `height` image to,
-    keeping its aspect ratio, with sides in multiples of 48 and at most 645,120 pixels
-    (docs/spec.md, section 3.2; `soft_tokens` gives (W / 48) x (H / 48))."""
-    side = POOLING_KERNEL_SIZE * PATCH_SIZE
-    target = MAX_SOFT_TOKENS * POOLING_KERNEL_SIZE**2 * PATCH_SIZE**2
-    factor = math.sqrt(target / (height * width))
-    h = math.floor(factor * height / side) * side
-    w = math.floor(factor * width / side) * side
-    if h == 0:
-        h, w = side, min(math.floor(width / height) * side, MAX_SOFT_TOKENS * side)
-    elif w == 0:
-        w, h = side, min(math.floor(height / width) * side, MAX_SOFT_TOKENS * side)
-    return w, h
 
 
 class ImageRefused(RequestRefused):
@@ -338,12 +330,16 @@ def decode(image: RenderedImage) -> Image.Image:
         raise ImageRefused(str(e)) from e
 
 
-def resize(img: Image.Image) -> Image.Image:
-    """`img` resized with Pillow's bicubic filter to `resized_size` (docs/spec.md, section
-    11.1): the reference resize for every size."""
-    from PIL import Image as PILImage
-
-    return img.resize(resized_size(*img.size), PILImage.Resampling.BICUBIC)
+def resize(image: RenderedImage, img: Image.Image) -> Image.Image:
+    """The decoded `img` of `image` resized as docs/spec.md section 11.1 says: to the size
+    the processor would choose for the decoded, oriented size (which must be the header's or
+    its transpose: `check_decoded_size`), by the spec's bicubic resize (`resize_image`, the
+    width's pass, then the height's, the same on every Pillow)."""
+    try:
+        width, height = check_decoded_size(image, *img.size)
+    except ValueError as e:
+        raise ImageRefused(str(e)) from e
+    return resize_image(img, width, height)
 
 
 PROCESSOR_FAILED = "the image processor could not be built, so image requests are refused"
@@ -650,7 +646,7 @@ class TransformersBackend:
         and puts each image's N vectors at its placeholders, in order."""
         if self.image_processor is None:
             raise ValueError(self.image_problem or NO_VISION)
-        pixels = [resize(decode(im)) for im in images]
+        pixels = [resize(im, decode(im)) for im in images]
         out = self.image_processor(images=pixels, do_resize=False, return_tensors="pt")
         counts = [int(n) for n in torch.as_tensor(out["num_soft_tokens_per_image"]).view(-1)]
         if counts != [im.tokens for im in images]:
@@ -878,5 +874,4 @@ __all__ = [
     "load_backend",
     "load_image_processor",
     "resize",
-    "resized_size",
 ]
