@@ -11,6 +11,9 @@ Two variants, `strands-plain` and `strands-chat`, share one body:
     plain:  <bos>                 + body + "\\n<answer>"
     chat:   <bos><|turn>user\\n     + body + "<turn|>\\n<|turn>model\\n"
 
+Images go first inside `<state>`, one line each: `<|image>`, N `<|image|>` placeholders
+(N from `images.soft_tokens`) and `<image|>`, then the state text's line.
+
 A prompt is a sequence of control tokens, emitted by id, and text runs, each encoded on
 its own as plain text: a special-token string inside the request (say `<turn|>` in a
 state) is text, never a control token. The state part and the question part are encoded
@@ -33,6 +36,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from .codes import codes_for
+from .images import IMAGE_CLOSE, IMAGE_OPEN, IMAGE_SOFT, EncodedImage
 from .request import Question, Request, parse_request
 
 if TYPE_CHECKING:
@@ -84,6 +88,27 @@ def state_block(state: Any) -> str:
     return f"<state>\n{text}\n</state>\n" if text else "<state>\n</state>\n"
 
 
+def state_pieces(state: Any, images: Sequence[EncodedImage] = ()) -> list[Piece]:
+    """The state block as pieces. Without images it is `state_block(state)`, one text run.
+    With images, each image's line comes first, in order: `<|image>`, N `<|image|>` and
+    `<image|>` as control tokens, the lines joined by a line feed; then the state text's
+    line, unless the state is empty:
+
+        <state>\\n<|image>...<image|>\\n<|image>...<image|>\\n{state}\\n</state>\\n
+        <state>\\n<|image>...<image|>\\n</state>\\n                       (empty state)
+    """
+    if not images:
+        return [(False, state_block(state))]
+    text = render_content(state)
+    pieces: list[Piece] = [(False, "<state>\n")]
+    for i, image in enumerate(images):
+        if i:
+            pieces.append((False, "\n"))
+        pieces += [(True, IMAGE_OPEN), *[(True, IMAGE_SOFT)] * image.tokens, (True, IMAGE_CLOSE)]
+    pieces.append((False, f"\n{text}\n</state>\n" if text else "\n</state>\n"))
+    return pieces
+
+
 @dataclass(frozen=True)
 class QuestionBlock:
     text: str
@@ -125,13 +150,17 @@ def question_block(question: Question, option_order: Sequence[int] | None = None
     )
 
 
-def prompt_pieces(variant: str, state: str, body: str) -> tuple[list[Piece], list[Piece]]:
-    """The state part's and the question part's pieces for `variant`."""
+def prompt_pieces(
+    variant: str, state: str | Sequence[Piece], body: str
+) -> tuple[list[Piece], list[Piece]]:
+    """The state part's and the question part's pieces for `variant`. `state` is the state
+    block, as text or as `state_pieces` gives it (which starts and ends with text)."""
+    sp = [(False, state)] if isinstance(state, str) else list(state)
     if variant == PLAIN:
-        return [(True, BOS), (False, state)], [(False, body + "\n<answer>")]
+        return [(True, BOS), *sp], [(False, body + "\n<answer>")]
     if variant == CHAT:
         return (
-            [(True, BOS), (True, TURN_OPEN), (False, "user\n" + state)],
+            [(True, BOS), (True, TURN_OPEN), (False, "user\n" + sp[0][1]), *sp[1:]],
             [
                 (False, body),
                 (True, TURN_CLOSE),
@@ -144,6 +173,32 @@ def prompt_pieces(variant: str, state: str, body: str) -> tuple[list[Piece], lis
 
 
 @dataclass(frozen=True)
+class RenderedImage:
+    """One image of the state, in the request's order: the file the request sent (`data`,
+    decoded from base64), its format, its header size, the sha256 of `data`, and where it
+    sits in the state ids. `state_ids[start:end]` are its `tokens` (N) `<|image|>`
+    placeholders, which the runtime's vision encoder fills in; `<|image>` is at `start - 1`
+    and `<image|>` at `end`."""
+
+    data: bytes = field(repr=False)
+    format: str
+    width: int
+    height: int
+    sha256: str
+    start: int
+    tokens: int
+
+    @property
+    def end(self) -> int:
+        return self.start + self.tokens
+
+    @property
+    def span(self) -> tuple[int, int]:
+        """[start, end): the placeholders in the state ids."""
+        return (self.start, self.end)
+
+
+@dataclass(frozen=True)
 class RenderedQuestion:
     """One question's prompt: `ids = state_ids + question_ids`, S = `state_len`.
 
@@ -152,6 +207,7 @@ class RenderedQuestion:
     "true", a choice name, or a score level) whose code is `codes[k]`, and
     `code_token_ids[k]` is that code's token id. `request_options` holds the same values
     in the request's order, which differs from `options` only under an option order.
+    `images` are the state's images, in order, with their spans in `state_ids`.
     """
 
     name: str
@@ -166,6 +222,7 @@ class RenderedQuestion:
     descriptions: tuple[str, ...]
     state_text: str
     question_text: str
+    images: tuple[RenderedImage, ...] = ()
 
     @property
     def state_len(self) -> int:
@@ -197,6 +254,11 @@ class RenderedRequest:
     @property
     def state_ids(self) -> tuple[int, ...]:
         return next(iter(self.questions.values())).state_ids
+
+    @property
+    def images(self) -> tuple[RenderedImage, ...]:
+        """The state's images, in order, with their spans in `state_ids`."""
+        return next(iter(self.questions.values())).images
 
     @property
     def input_tokens(self) -> int:
@@ -269,6 +331,41 @@ class _Encoder:
         return tuple(x[0] for x in ids)
 
 
+def _rendered_images(
+    state_ids: tuple[int, ...], images: Sequence[EncodedImage], enc: _Encoder
+) -> tuple[RenderedImage, ...]:
+    """Each image's span in the state ids. Request text never encodes to a control token,
+    so the placeholders are the only `<|image|>` ids, in runs of N between `<|image>` and
+    `<image|>`, one run per image in order."""
+    if not images:
+        return ()
+    soft, open_, close = (enc.control(t) for t in (IMAGE_SOFT, IMAGE_OPEN, IMAGE_CLOSE))
+    out: list[RenderedImage] = []
+    pos = 0
+    for image in images:
+        start = state_ids.index(soft, pos)
+        end = start + image.tokens
+        if (
+            state_ids[start - 1] != open_
+            or state_ids[start:end] != (soft,) * image.tokens
+            or state_ids[end] != close
+        ):
+            raise AssertionError("an image's placeholders are not where the template put them")
+        out.append(
+            RenderedImage(
+                data=image.data,
+                format=image.format,
+                width=image.width,
+                height=image.height,
+                sha256=image.sha256,
+                start=start,
+                tokens=image.tokens,
+            )
+        )
+        pos = end
+    return tuple(out)
+
+
 @dataclass(frozen=True)
 class _Prepared:
     request: Request
@@ -287,7 +384,7 @@ def _prepare(
     unknown = set(orders) - set(req.questions)
     if unknown:
         raise ValueError(f"option_orders names unknown questions {sorted(unknown)}")
-    sblock = state_block(req.state)
+    sblock = state_pieces(req.state, req.images)
     blocks = {n: question_block(q, orders.get(n)) for n, q in req.questions.items()}
     return _Prepared(
         request=req,
@@ -301,7 +398,8 @@ def render_text(
     request: Any, variant: str, *, option_orders: Mapping[str, Sequence[int]] | None = None
 ) -> tuple[str, dict[str, str]]:
     """The prompt as text, without a tokenizer: the state part, and each question's part.
-    Control tokens appear as their strings (`<bos>`, `<|turn>`, `<turn|>`)."""
+    Control tokens appear as their strings (`<bos>`, `<|turn>`, `<turn|>`, and an image's
+    `<|image>`, N `<|image|>` and `<image|>`)."""
     prep = _prepare(request, variant, option_orders)
     return _text(prep.state_pieces), {n: _text(p) for n, p in prep.question_pieces.items()}
 
@@ -332,6 +430,7 @@ def render(
 
     state_ids = tuple(encoded[0])
     state_text = _text(prep.state_pieces)
+    images = _rendered_images(state_ids, prep.request.images, enc)
     out: dict[str, RenderedQuestion] = {}
     for n, qids in zip(names, encoded[1:], strict=True):
         b = prep.blocks[n]
@@ -354,5 +453,6 @@ def render(
             descriptions=b.descriptions,
             state_text=state_text,
             question_text=_text(prep.question_pieces[n]),
+            images=images,
         )
     return RenderedRequest(variant=variant, model=prep.request.model, questions=out)
