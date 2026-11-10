@@ -46,6 +46,7 @@ from ..core.images import (
     POOLING_KERNEL_SIZE,
     check_decoded_size,
     check_image_processor,
+    resize_image,
 )
 from ..core.readout import HIDDEN
 
@@ -111,20 +112,13 @@ def decode_pixels(data: bytes) -> Image.Image:
 
 def prepare_pixels(image: RenderedImage) -> Image.Image:
     """A request image's file, decoded (`decode_pixels`), its decoded size checked against its
-    header (`strands_decider.core.check_decoded_size`), and resized with Pillow's bicubic
-    resampling to the W x H the image processor gives the decoded size: what the vision tower
-    reads (docs/spec.md, Images, steps 1 and 2). The resize is the spec's two passes, the width's
-    and then the height's, each a call of its own: Pillow 13 does the height's first, in one
-    call, when the height shrinks by more than twice as much as the width."""
-    from PIL import Image
-
+    header (`strands_decider.core.check_decoded_size`), and resized by the spec's bicubic resize
+    (`strands_decider.core.resize_image`, width then height) to the W x H the image processor
+    gives the decoded size: what the vision tower reads (docs/spec.md, Images, steps 1 and 2)."""
     img = decode_pixels(image.data)
     w, h = check_decoded_size(image, *img.size)
-    if img.width != w:
-        img = img.resize((w, img.height), Image.Resampling.BICUBIC)
-    if img.height != h:
-        img = img.resize((w, h), Image.Resampling.BICUBIC)
-    return img
+    resized: Image.Image = resize_image(img, w, h)
+    return resized
 
 
 def _ints(xs: Sequence[int]) -> Any:
