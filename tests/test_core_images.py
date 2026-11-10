@@ -18,6 +18,7 @@ import base64
 import hashlib
 import io
 import json
+import math
 import random
 import struct
 import zlib
@@ -35,6 +36,7 @@ from core_support import (
     gemma4_tokenizer_dir,
     image_b64,
     image_bytes,
+    knife_edge_sizes,
     processor_soft_tokens,
     reference_pixels,
     reference_resize,
@@ -333,6 +335,40 @@ def test_soft_tokens_match_the_processor_table():
     # The extremes are in it: the pixel limit's thinnest images, and both sides of 280:1.
     assert {(1, MAX_IMAGE_PIXELS), (MAX_IMAGE_PIXELS, 1), (4096, 4096)} <= sizes
     assert {(279, 1), (280, 1), (281, 1), (1, 279), (1, 280), (1, 281)} <= sizes
+    # And the knife edges: ratios where f h / 48 is an integer in exact arithmetic, so the
+    # floor is decided by the double's last bit, at many scales and both ways round.
+    edges = knife_edge_sizes()
+    assert len(edges) > 600 and edges <= sizes
+    assert {(1000, 700), (700, 1000), (385, 22), (22, 385), (350, 320)} <= sizes
+    by_size = {(w, h): n for w, h, n, _ in rows}
+    assert by_size[(385, 22)] == by_size[(22, 385)] == 276  # 280 in exact arithmetic
+
+
+def test_the_table_catches_formulas_that_round_otherwise():
+    """Ports that write the arithmetic another way, all equal in exact arithmetic, miscount
+    some knife-edge sizes of the table: the order of the operations is the rule."""
+    rows = _table()["rows"]
+
+    def count(w, h, f, scale):
+        th, tw = math.floor(scale(f, h)) * 48, math.floor(scale(f, w)) * 48
+        return None if th == 0 or tw == 0 else (th // 48) * (tw // 48)
+
+    exact = [(r[0], r[1], r[2]) for r in rows]
+    variants = {
+        "f * (h / 48)": lambda w, h: count(
+            w, h, math.sqrt(645120 / (h * w)), lambda f, x: f * (x / 48)
+        ),
+        "sqrt(645120) / sqrt(h w)": lambda w, h: count(
+            w, h, math.sqrt(645120) / math.sqrt(h * w), lambda f, x: f * x / 48
+        ),
+        "exact": lambda w, h: count(
+            w, h, 0, lambda f, x: math.isqrt(645120 * x * x // (w * h)) / 48
+        ),
+    }
+    edges = knife_edge_sizes()
+    for name, n_of in variants.items():
+        wrong = [(w, h) for w, h, n in exact if (got := n_of(w, h)) is not None and got != n]
+        assert wrong and set(wrong) & edges, name
 
 
 def test_soft_token_properties():
