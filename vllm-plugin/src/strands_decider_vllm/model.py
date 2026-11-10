@@ -259,7 +259,11 @@ class _Decider:
         self.register_buffer(
             "code_ids", torch.tensor(spec.token_ids, dtype=torch.long), persistent=False
         )
-        self.readout = nn.Linear(mc.hf_text_config.hidden_size, N_CODES, bias=False, dtype=mc.dtype)
+        # The readout is a bf16 GEMM whatever the decoder runs in (specification, 7.1): a float32 test model on a
+        # CPU build of vLLM keeps the readout's bf16 rounding too.
+        self.readout = nn.Linear(
+            mc.hf_text_config.hidden_size, N_CODES, bias=False, dtype=torch.bfloat16
+        )
         # vLLM's default loader reads this source after the model's own weights, from the same directory or Hub
         # repo, and passes its one tensor ``weight`` to load_weights as ``readout.weight``.
         self.secondary_weights = [
