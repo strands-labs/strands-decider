@@ -11,7 +11,7 @@ It takes the request as the JSON the client sent, so that fields v1's request mo
 know reach the core's checks: any `audio` but null, which the interface refuses
 (docs/spec.md, section 1), is refused rather than dropped. Other unknown fields are ignored,
 as v1 ignores them. On a torch device (cpu, cuda, mps) the backend is the transformers one
-(`backends/transformers.py`).
+(`backends/transformers.py`); on `mlx`, the mlx-vlm one (`backends/mlx.py`).
 """
 
 from __future__ import annotations
@@ -313,6 +313,13 @@ class DecisionEngine:
             SystemOneRequest(state=state, questions=questions, images=list(images))
         )
 
+    def close(self) -> None:
+        """Release the backend's resources, if it holds any (the MLX backend's worker
+        thread); `serve` calls it at shutdown."""
+        close = getattr(self.backend, "close", None)
+        if callable(close):
+            close()
+
     def describe(self) -> dict[str, Any]:
         """What `serve`'s health check reports."""
         info = dict(getattr(self.backend, "describe", dict)())
@@ -375,6 +382,8 @@ BACKENDS: dict[str, str] = {
     "cpu": "strands_decider.backends.transformers:load_backend",
     "cuda": "strands_decider.backends.transformers:load_backend",
     "mps": "strands_decider.backends.transformers:load_backend",
+    # Apple silicon through mlx-vlm (backends/mlx.py), in the dtype the checkpoint is stored in.
+    "mlx": "strands_decider.backends.mlx:load_backend",
 }
 _LOADERS: dict[str, Callable[..., Backend]] = {}  # registered with register_backend
 _IMPORTED: dict[str, Callable[..., Backend]] = {}  # BACKENDS' loaders, by import path
@@ -443,7 +452,8 @@ def load_decision_engine(
 ) -> DecisionEngine:
     """A decision checkpoint on `device`, through the backend registered for it (`BACKENDS`):
     on cpu, cuda and mps the transformers backend, in `dtype` (float32 or bfloat16) or the
-    device's own (float32 on CPU, bfloat16 on CUDA and MPS). The interface's files, decision_config.json
+    device's own (float32 on CPU, bfloat16 on CUDA and MPS); on mlx the MLX backend, in `dtype`
+    or the dtype the checkpoint is stored in. The interface's files, decision_config.json
     (validated strictly), readout.safetensors and the tokenizer, are read here for every
     backend. `reuse_state=False` runs each question as one full prompt; on CUDA in bfloat16
     that is the reference of docs/spec.md section 10."""

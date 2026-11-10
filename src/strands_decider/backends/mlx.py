@@ -13,8 +13,8 @@ The checkpoint is the Gemma 4 base's own multimodal checkpoint with the fine-tun
   (mlx-vlm's `make_cache` gives sliding layers a rotating window, which would drop state
   keys). Each question then runs over the cache, seeing every key, and the cache is cut back
   to the state. No state token ever reads a question, and no question reads another: exactly
-  prefix_bidir, with no window anywhere. With `share_state=False` each question is one full
-  pass under the dense mask instead, the reference's computation.
+  prefix_bidir, with no window anywhere. With `reuse_state=False` (`--no-prefix-cache`) each
+  question is one full pass under the dense mask instead, the reference's computation.
 - KV sharing. The last layers of E2B and E4B compute no keys or values; they read those of an
   earlier layer. Through them no token reads another token's hidden state, so only the last
   token's path reaches the answer, and a question carries only its last token through them
@@ -29,18 +29,18 @@ The checkpoint is the Gemma 4 base's own multimodal checkpoint with the fine-tun
   the bf16 decoder gives it (`outputs = "hidden"`), and the core's `Readout` applies the bf16
   GEMM, the soft-cap, the temperature and the softmax in the spec's precision regime.
 
-Audio is not part of the interface yet (spec section 12), so the audio encoder and its
-projection are dropped at load and never run.
+`ask` and `serve` reach this backend through `strands_decider.decision`, which registers
+`load_backend` for `--device mlx` and puts the core and the request checks around it. Audio is
+not part of the interface yet (spec section 12): the core refuses it, and the audio encoder and
+its projection are dropped at load and never run.
 
-mlx-vlm is pinned to the minor version tested (the `mlx` extra): this module calls its
-internals, `get_input_embeddings`, the language model's `__call__` (`inputs_embeds`,
+mlx-vlm is pinned to the release tested (the `mlx` extra): this module calls its internals, `get_input_embeddings`, the language model's `__call__` (`inputs_embeds`,
 `per_layer_inputs`, `mask`, `cache`, `logits_to_keep`), `encode_image`, `get_image_features`
 and its processors.
 """
 
 from __future__ import annotations
 
-import base64
 import io
 import json
 import math
@@ -50,26 +50,25 @@ import threading
 import warnings
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import mlx.core as mx
 import numpy as np
 
-from ..core import (
-    HIDDEN,
-    DecisionConfig,
-    Readout,
-    RenderedImage,
-    attention_mask,
-    evaluate,
-)
+try:
+    import mlx.core as mx
+    from mlx.utils import tree_map
+except ImportError as e:  # pragma: no cover - depends on the platform
+    raise ImportError(
+        "the MLX backend needs Apple silicon and the mlx extra: pip install 'strands-decider[mlx]'"
+    ) from e
+
+from ..core import HIDDEN, DecisionConfig, RenderedImage, attention_mask
 from ..core.config import IMAGE, TEXT
 from ..core.images import IMAGE_FORMATS, MAX_SOFT_TOKENS, PATCH_SIZE, POOLING_KERNEL_SIZE
 from ..core.readout import READOUT_FILE
 from ..core.request import NO_VISION
-from . import checkpoint_path
+from ..decision import RequestRefused
 
 # Requests whose images are decoded at once, requests waiting for or on the worker thread,
 # and how long a request past them waits for a place before it is refused.
@@ -115,6 +114,38 @@ def model_type(path: Path) -> str:
     return str(kind)
 
 
+def bases_form(model_config: dict[str, Any]) -> dict[str, Any] | None:
+    """config.json in the Gemma 4 bases' own form, which mlx-vlm reads, or None if it is
+    already in it. transformers 5.2x writes the full-attention layers' head size and KV heads
+    under `text_config.per_layer_config`; the bases give `global_head_dim` and
+    `num_global_key_value_heads`, and mlx-vlm, without them, builds those layers with its
+    defaults. Refused unless every entry is a full-attention layer and they agree."""
+    text = model_config.get("text_config") or {}
+    per_layer = text.get("per_layer_config")
+    if not per_layer:
+        return None
+    types = text.get("layer_types") or []
+    fields = {"head_dim": "global_head_dim", "num_key_value_heads": "num_global_key_value_heads"}
+    found: dict[str, set[Any]] = {}
+    for layer, settings in per_layer.items():
+        i = int(layer)
+        if not (0 <= i < len(types)) or types[i] != "full_attention" or set(settings) - set(fields):
+            raise ValueError(
+                f"config.json's per_layer_config {per_layer} is not what mlx-vlm can read: only "
+                "the full-attention layers' head_dim and num_key_value_heads"
+            )
+        for k, v in settings.items():
+            found.setdefault(fields[k], set()).add(v)
+    out: dict[str, Any] = json.loads(json.dumps(model_config))
+    t = out["text_config"]
+    t.pop("per_layer_config")
+    for key, values in found.items():
+        if len(values) != 1 or (key in t and t[key] not in values):
+            raise ValueError(f"config.json gives the full-attention layers {key} {sorted(values)}")
+        t[key] = values.pop()
+    return out
+
+
 def load_mlx_model(path: Path, *, keep: Sequence[str] = ()) -> Any:
     """mlx-vlm's model for the checkpoint or MLX artifact at `path`, loaded strictly and lazily
     (no tensor is read until it is evaluated). Modules named in AUDIO_MODULES and
@@ -122,21 +153,27 @@ def load_mlx_model(path: Path, *, keep: Sequence[str] = ()) -> Any:
 
     mlx-vlm reads the shards its index names or, with no index, every `*.safetensors` in the
     directory, which would take the readout for a weight file. A checkpoint without an index
-    (E2B, E4B and the 12B ship one `model.safetensors`) is therefore loaded through a
-    directory of links to everything but the readout."""
+    (E2B, E4B and the 12B ship one `model.safetensors`), or whose config.json is not in the
+    bases' form (`bases_form`), is therefore loaded through a directory of links to everything
+    but the readout, with config.json rewritten in that form."""
     from mlx_vlm.utils import load_model
 
     # Absolute, so that the links below point at the files wherever they are resolved from:
     # a relative link target is read against the link's own directory.
     path = Path(path).resolve()
-    if (path / INDEX).exists():
+    with open(path / "config.json", encoding="utf-8") as f:
+        rewritten = bases_form(json.load(f))
+    if (path / INDEX).exists() and rewritten is None:
         model = load_model(path, lazy=True, strict=True)
     else:
         # The shards stay open once loaded, so the links may go before they are read.
         with tempfile.TemporaryDirectory(prefix="strands-decider-mlx-") as view:
             for entry in os.listdir(path):
-                if entry != READOUT_FILE:
-                    os.symlink(path / entry, Path(view) / entry)
+                if entry == READOUT_FILE or (entry == "config.json" and rewritten is not None):
+                    continue
+                os.symlink(path / entry, Path(view) / entry)
+            if rewritten is not None:
+                (Path(view) / "config.json").write_text(json.dumps(rewritten), encoding="utf-8")
             model = load_model(Path(view), lazy=True, strict=True)
     for name in AUDIO_MODULES + VISION_MODULES:
         if name not in keep and getattr(model, name, None) is not None:
@@ -158,12 +195,12 @@ def decode_image(data: bytes) -> Any:
     try:
         img = Image.open(io.BytesIO(data), formats=IMAGE_FORMATS)
     except Exception as e:
-        raise ValueError(f"image could not be read as {'/'.join(IMAGE_FORMATS)}: {e}") from e
+        raise RequestRefused(f"image could not be read as {'/'.join(IMAGE_FORMATS)}: {e}") from e
     try:
         img.load()
         img = ImageOps.exif_transpose(img)
     except Exception as e:
-        raise ValueError(f"image could not be decoded: {e}") from e
+        raise RequestRefused(f"image could not be decoded: {e}") from e
     if img.mode in ("RGBA", "LA") or (img.mode == "P" and "transparency" in img.info):
         rgba = img.convert("RGBA")
         white = Image.new("RGBA", rgba.size, (255, 255, 255, 255))
@@ -288,6 +325,8 @@ class MLXBackend:
         unified: bool,
         share_state: bool = True,
         image_token_id: int,
+        image_problem: str | None = None,
+        quantization: dict[str, Any] | None = None,
         decode_slots: int = DECODE_SLOTS,
         max_pending: int = MAX_PENDING,
         queue_timeout: float = QUEUE_TIMEOUT,
@@ -295,6 +334,10 @@ class MLXBackend:
         self.model = model
         self.processor = processor
         self.inputs: tuple[str, ...] = (TEXT, IMAGE) if processor is not None else (TEXT,)
+        # Why a checkpoint that lists images cannot take them here; the decision engine
+        # refuses image requests with it.
+        self.image_problem = image_problem if processor is None else None
+        self.quantization = quantization
         self.share_state = share_state
         self.unified = unified
         self.image_token_id = image_token_id
@@ -314,7 +357,7 @@ class MLXBackend:
         images: Sequence[RenderedImage] = (),
     ) -> np.ndarray:
         if images and IMAGE not in self.inputs:
-            raise ValueError(NO_VISION)
+            raise ValueError(self.image_problem or NO_VISION)
         if not questions:
             raise ValueError("forward needs at least one question")
         for image in images:
@@ -337,6 +380,24 @@ class MLXBackend:
             return self._executor.submit(self._forward, state, questions, images, pixels).result()
         finally:
             self._pending.release()
+
+    def describe(self) -> dict[str, Any]:
+        """What `serve`'s health check reports of the backend."""
+        from importlib.metadata import version
+
+        dtype = self._decoder.norm.weight.dtype
+        return {
+            "backend": "mlx-vlm",
+            "mlx_vlm": version("mlx-vlm"),
+            "device": "mlx",
+            "dtype": str(dtype).removeprefix("mlx.core."),
+            "quantization": (
+                {k: self.quantization[k] for k in ("bits", "group_size") if k in self.quantization}
+                if self.quantization
+                else None
+            ),
+            "reuse_state": self.share_state,
+        }
 
     def close(self) -> None:
         """Stop the worker thread. The backend cannot run after this."""
@@ -437,48 +498,69 @@ class MLXBackend:
         return self._hidden(h)
 
 
+DTYPES = {"bfloat16": "bfloat16", "float32": "float32"}
+
+
 def load_backend(
-    checkpoint: str | os.PathLike[str],
-    config: DecisionConfig | None = None,
+    path: str | os.PathLike[str],
     *,
-    share_state: bool = True,
+    device: str = "mlx",
+    dtype: str | None = None,
+    reuse_state: bool = True,
+    max_batch: int = 32,
+    max_batch_tokens: int | None = None,
     cache_limit_bytes: int | None = DEFAULT_CACHE_LIMIT,
 ) -> MLXBackend:
-    """The MLX backend for a decision checkpoint or MLX artifact (a local directory or a Hub
-    repo id). `config` is its decision_config.json, read from the directory if not given.
+    """The loader `strands_decider.decision.BACKENDS` names for `--device mlx`: the MLX
+    backend for the decision checkpoint or MLX artifact in the local directory `path`.
 
-    The image path is loaded when the checkpoint's `inputs` hold "image" and it carries a
-    vision encoder and an image processor with the spec's settings; otherwise the backend
-    takes text only, and image requests are refused. `share_state=False` runs each question
-    as its own full pass. `cache_limit_bytes` sets MLX's process-wide buffer cache limit;
-    None leaves it as it is."""
-    path = checkpoint_path(checkpoint)
-    cfg = config if config is not None else DecisionConfig.load(path)
-    kind = model_type(path)
+    The image path is loaded when the checkpoint's `inputs` hold "image" and it carries an
+    image processor with the spec's settings; otherwise the backend takes text only, and says
+    why in `image_problem`. The weights run in the dtype they are stored in (bf16 for a
+    decision checkpoint), or `dtype` ("bfloat16" or "float32") for the parts not quantized.
+    `reuse_state=False` runs each question as its own full pass. Questions run one at a time
+    over the state, so `max_batch` and `max_batch_tokens` do not apply. `cache_limit_bytes`
+    sets MLX's process-wide buffer cache limit; None leaves it as it is."""
+    del max_batch, max_batch_tokens  # one question at a time: nothing to batch
+    if device != "mlx":
+        raise ValueError(f"the MLX backend runs on device 'mlx', not {device!r}")
+    if dtype is not None and dtype not in DTYPES:
+        raise ValueError(f"the MLX backend runs in {sorted(DTYPES)}, not {dtype!r}")
+    root = Path(path).resolve()
+    cfg = DecisionConfig.load(root)
+    kind = model_type(root)
     unified = kind == UNIFIED
-    processor, why = (None, "") if IMAGE not in cfg.inputs else image_processor(path, unified)
-    if IMAGE in cfg.inputs and processor is None:
-        warnings.warn(f"{path}: images are not supported: {why}", stacklevel=2)
-    with open(path / "config.json", encoding="utf-8") as f:
+    processor, why = (None, "") if IMAGE not in cfg.inputs else image_processor(root, unified)
+    with open(root / "config.json", encoding="utf-8") as f:
         model_config = json.load(f)
     image_token_id = int(model_config["image_token_id"])
     notice = conformance_notice(model_config)
     if notice:
-        warnings.warn(f"{path}: {notice}", stacklevel=2)
+        warnings.warn(f"{root}: {notice}", stacklevel=2)
     executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="mlx-backend")
 
     def build() -> MLXBackend:
         if cache_limit_bytes is not None:
             mx.set_cache_limit(cache_limit_bytes)
-        model = load_mlx_model(path, keep=VISION_MODULES if processor is not None else ())
+        model = load_mlx_model(root, keep=VISION_MODULES if processor is not None else ())
+        if dtype is not None:
+            target = getattr(mx, DTYPES[dtype])
+            model.update(
+                tree_map(
+                    lambda a: a.astype(target) if mx.issubdtype(a.dtype, mx.floating) else a,
+                    model.parameters(),
+                )
+            )
         mx.eval(model.parameters())
         return MLXBackend(
             model,
             processor,
             executor,
             unified=unified,
-            share_state=share_state,
+            share_state=reuse_state,
             image_token_id=image_token_id,
+            image_problem=f"images are not supported: {why}" if why else None,
+            quantization=model_config.get("quantization"),
         )
 
     try:
@@ -486,146 +568,3 @@ def load_backend(
     except BaseException:
         executor.shutdown(wait=True)
         raise
-
-
-# ---- serve and ask -----------------------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class ModelInfo:
-    """What `/health` reports of the model (v1's `model.config` fields)."""
-
-    base_model: str
-    max_length: int
-    temperature: float
-
-
-@dataclass(frozen=True)
-class _Model:
-    config: ModelInfo
-
-
-class MLXEngine:
-    """A decision checkpoint on MLX behind v1's engine surface, for `serve` and `ask`:
-    `evaluate(SystemOneRequest) -> SystemOneResponse`, `cfg` and `model.config`. Requests
-    are answered by `strands_decider.core.evaluate` over an `MLXBackend`. Build one with
-    `load_engine`."""
-
-    # serve calls `warm_up` instead of its own per-batch-size warm-up (server.create_app).
-    warms_itself = True
-
-    def __init__(
-        self,
-        path: Path,
-        config: DecisionConfig,
-        readout: Readout,
-        tokenizer: Any,
-        backend: MLXBackend,
-        engine_config: Any,
-    ) -> None:
-        self.path = path
-        self.config = config
-        self.readout = readout
-        self.tokenizer = tokenizer
-        self.backend = backend
-        self.cfg = engine_config
-        self.model = _Model(
-            ModelInfo(
-                base_model=config.provenance.base_model,
-                max_length=config.max_length_validated,
-                temperature=config.temperature,
-            )
-        )
-
-    @property
-    def takes_images(self) -> bool:
-        return IMAGE in self.backend.inputs
-
-    def answer(self, request: Any) -> dict[str, Any]:
-        """One request (a JSON object, or a `SystemOneRequest`), answered as JSON."""
-        if hasattr(request, "model_dump"):
-            request = request.model_dump()
-        return evaluate(
-            request,
-            self.tokenizer,
-            self.readout,
-            self.config,
-            self.backend,
-            model_name=self.cfg.model_name,
-        )
-
-    def evaluate(self, request: Any) -> Any:
-        from ..schema import SystemOneResponse
-
-        return SystemOneResponse.model_validate(self.answer(request))
-
-    def ask(self, state: Any, questions: dict[str, Any], images: Sequence[str] = ()) -> Any:
-        """`state`, `questions` (name to a v1 `Question` or its JSON) and base64 `images`."""
-        qs = {n: q.model_dump() if hasattr(q, "model_dump") else q for n, q in questions.items()}
-        return self.evaluate({"state": state, "questions": qs, "images": list(images)})
-
-    def warm_up(self) -> None:
-        """Answer each question type once, and an image request if the checkpoint takes
-        images, so the first request does not wait for MLX to build its kernels. Questions
-        run one at a time over the shared state, so one request per type covers every
-        number of questions."""
-        state = "A warm-up request, answered before the server accepts requests."
-        self.evaluate(
-            {
-                "state": state,
-                "questions": {
-                    "noul": {"type": "noul", "instructions": "Is this a warm-up?"},
-                    "choice": {
-                        "type": "choice",
-                        "instructions": "Pick one.",
-                        "criteria": {"a": None, "b": None},
-                    },
-                    "score": {
-                        "type": "score",
-                        "instructions": "How warm?",
-                        "criteria": ["cold", "warm"],
-                    },
-                },
-            }
-        )
-        if self.takes_images:
-            from PIL import Image
-
-            buf = io.BytesIO()
-            Image.new("RGB", (64, 64), (128, 128, 128)).save(buf, "PNG")
-            self.ask(
-                state,
-                {"q": {"type": "noul", "instructions": "Is the image grey?"}},
-                [base64.b64encode(buf.getvalue()).decode("ascii")],
-            )
-
-    def close(self) -> None:
-        self.backend.close()
-
-
-def load_engine(
-    checkpoint: str | os.PathLike[str],
-    config: Any | None = None,
-    *,
-    cache_limit_bytes: int | None = DEFAULT_CACHE_LIMIT,
-) -> MLXEngine:
-    """`serve` and `ask`'s engine for a decision checkpoint on MLX. `config` is v1's
-    `EngineConfig`: its `model_name` names the model in responses, and `use_prefix_cache`
-    False runs each question as its own full pass instead of over the shared state."""
-    from tokenizers import Tokenizer
-
-    if config is None:
-        from ..infer import EngineConfig
-
-        config = EngineConfig(device="mlx")
-    path = checkpoint_path(checkpoint)
-    decision = DecisionConfig.load(path)
-    readout = Readout.load(path, decision)
-    tokenizer = Tokenizer.from_file(str(path / TOKENIZER))
-    backend = load_backend(
-        path,
-        decision,
-        share_state=bool(getattr(config, "use_prefix_cache", True)),
-        cache_limit_bytes=cache_limit_bytes,
-    )
-    return MLXEngine(path, decision, readout, tokenizer, backend, config)

@@ -36,13 +36,13 @@ from typing import Any
 from ..core import DecisionConfig, Readout
 from ..core.config import FILENAME as DECISION_CONFIG
 from ..core.readout import READOUT_FILE
-from . import checkpoint_path
 from .mlx import (
     AUDIO_MODULES,
     INDEX,
     PROCESSOR_CONFIG,
     TOKENIZER,
     VISION_MODULES,
+    bases_form,
     conformance_notice,
     load_mlx_model,
     model_type,
@@ -87,6 +87,22 @@ def quantized_parts(model: Any) -> dict[str, int]:
     return out
 
 
+def _source_dir(checkpoint: str | os.PathLike[str]) -> Path:
+    """`checkpoint` as an absolute directory, or the Hub repo it names, downloaded."""
+    p = os.fspath(checkpoint)
+    if os.path.isdir(p):
+        return Path(p).resolve()
+    from huggingface_hub import snapshot_download
+
+    try:
+        return Path(snapshot_download(p))
+    except Exception as e:
+        raise FileNotFoundError(
+            f"{p}: not a local directory, and could not be downloaded from the Hugging Face "
+            f"Hub: {type(e).__name__}: {e}"
+        ) from e
+
+
 def convert(
     source: str | os.PathLike[str],
     dest: str | os.PathLike[str],
@@ -102,7 +118,7 @@ def convert(
     from mlx_vlm.quant_utils import quantize_model
     from mlx_vlm.utils import save_config, save_weights
 
-    src = checkpoint_path(source)
+    src = _source_dir(source)
     dst = Path(dest).resolve()
     if bits is not None and bits not in BITS:
         raise ValueError(f"bits must be one of {BITS} (or none, for bf16), not {bits!r}")
@@ -118,6 +134,7 @@ def convert(
         config = json.load(f)
     if "quantization" in config:
         raise ValueError(f"{src} is already a quantized MLX artifact; convert the bf16 checkpoint")
+    config = bases_form(config) or config  # the form mlx-vlm reads, written into the artifact
 
     notice = conformance_notice({"quantization": {"bits": bits}} if bits else {})
     if notice:
