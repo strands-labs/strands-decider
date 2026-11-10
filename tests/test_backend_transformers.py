@@ -310,6 +310,12 @@ def test_state_reuse_is_the_full_pass(backends, kind, images):
     )
 
 
+def test_one_question_is_one_full_pass(backends):
+    full, reuse = backends
+    _, state, questions = _rendered(full, request())
+    assert np.array_equal(full.forward(state, questions[:1]), reuse.forward(state, questions[:1]))
+
+
 def test_batches_follow_the_limits(backends):
     _, reuse = backends
     reuse_one = tb.TransformersBackend(
@@ -616,21 +622,26 @@ def test_prepare_pixels_checks_the_count(backends, kind, monkeypatch):
 
 
 def _agrees_with_cpu(ckpt, device: str) -> None:
-    cpu = tb.TransformersBackend.load(str(ckpt))
-    other = tb.TransformersBackend.load(str(ckpt), device=device)
-    assert other.dtype == torch.bfloat16
-    ck = cpu.checkpoint
-    for req in (request(), request(IMAGES[:1])):
-        a = evaluate(req, ck.tokenizer(), ck.readout, ck.config, cpu)["answers"]
-        b = evaluate(req, ck.tokenizer(), ck.readout, ck.config, other)["answers"]
-        assert a["team"]["choice"] == b["team"]["choice"]
-        for name, p in a["team"]["probabilities"].items():
-            assert abs(p - b["team"]["probabilities"][name]) < 0.05
-        assert abs(a["late"]["noul"] - b["late"]["noul"]) < 0.05
+    """The device against the CPU at each precision: float32 to float rounding, which checks
+    the device's kernels; and bf16, its default, to bf16's own error, which on random weights
+    is large (up to about 0.1 in probability on CPU too)."""
+    assert tb.default_dtype(device) == torch.bfloat16
+    for dtype, bound in ((torch.float32, 5e-3), (torch.bfloat16, 0.15)):
+        cpu = tb.TransformersBackend.load(str(ckpt), dtype=dtype)
+        other = tb.TransformersBackend.load(str(ckpt), device=device, dtype=dtype)
+        ck = cpu.checkpoint
+        for req in (request(), request(IMAGES[:1])):
+            a = evaluate(req, ck.tokenizer(), ck.readout, ck.config, cpu)["answers"]
+            b = evaluate(req, ck.tokenizer(), ck.readout, ck.config, other)["answers"]
+            for name, p in a["team"]["probabilities"].items():
+                assert abs(p - b["team"]["probabilities"][name]) < bound, (dtype, name)
+            assert abs(a["late"]["noul"] - b["late"]["noul"]) < bound, dtype
+            if dtype == torch.float32:
+                assert a["team"]["choice"] == b["team"]["choice"]
 
 
 @pytest.mark.skipif(not MPS, reason="needs Apple's MPS")
-def test_mps_bf16_agrees_with_cpu_float32(ckpt, kind):
+def test_mps_agrees_with_cpu(ckpt, kind):
     _needs_images(kind)
     _agrees_with_cpu(ckpt, "mps")
 
@@ -648,7 +659,7 @@ def test_mps_state_reuse_is_the_full_pass(ckpt, kind):
 
 
 @pytest.mark.skipif(not CUDA, reason="needs CUDA")
-def test_cuda_bf16_agrees_with_cpu_float32(ckpt, kind):
+def test_cuda_agrees_with_cpu(ckpt, kind):
     _needs_images(kind)
     _agrees_with_cpu(ckpt, "cuda")
 

@@ -21,13 +21,13 @@ the sliding windows, and the bidirectional image blocks of the larger sizes
 (`use_bidirectional_attention: "vision"`) all go. The model runs SDPA, which applies the mask
 it is given and no window of its own. An image's placeholders are state tokens like any other.
 
-State reuse (section 6). By default the state is encoded once, its keys and values kept for
-every layer, and the questions then run over them at positions S onwards: the state never
-attends to a question, so its keys and values are the same for every question. Questions run
-in batches (`max_batch`, `max_batch_tokens`), padded on the right, each one seeing only the
-state and itself. With `reuse_state=False` each question is one full prompt in one forward
-pass, the reference of section 10. tests/test_backend_transformers.py checks that the two
-agree.
+State reuse (section 6). By default a state with several questions is encoded once, its keys
+and values kept for every layer, and the questions then run over them at positions S
+onwards: the state never attends to a question, so its keys and values are the same for every
+question. Questions run in batches (`max_batch`, `max_batch_tokens`), padded on the right,
+each one seeing only the state and itself. A single question, and every question with
+`reuse_state=False`, is one full prompt in one forward pass, the reference of section 10.
+tests/test_backend_transformers.py checks that the two agree.
 
 The readout (section 7.1). Rows are float32, which holds a bf16 decoder's values exactly; the
 core's `Readout` does the bf16 GEMM and then the soft-cap and the temperature in float32.
@@ -747,7 +747,9 @@ class TransformersBackend:
             # The reference reruns the vision encoder in each prompt's pass, as one prompt per
             # pass does; with the state reused it runs once, in the state's pass.
             pixels = self.prepare_pixels(images) if images else None
-            if self.reuse_state:
+            # One question gains nothing from a shared state and would pay a second pass (as
+            # v1's engine measured; here E2B on an H100 took 324 ms against 174 ms).
+            if self.reuse_state and len(qs) > 1:
                 rows = self._over_state(state, qs, pixels)
             else:
                 rows = [self._full_pass(state, q, pixels) for q in qs]
