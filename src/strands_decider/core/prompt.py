@@ -30,7 +30,6 @@ from __future__ import annotations
 
 import json
 import threading
-import weakref
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -270,7 +269,11 @@ def _text(pieces: Sequence[Piece]) -> str:
     return "".join(s for _, s in pieces)
 
 
-_PLAIN_TEXT: weakref.WeakKeyDictionary[Tokenizer, Tokenizer] = weakref.WeakKeyDictionary()
+# Keyed by id with the tokenizer itself held, so an id is never reused while its entry lives:
+# tokenizers before 0.23 cannot be weakly referenced. Bounded, oldest first out, because a
+# server holds one or two tokenizers and each copy costs about 170 MB.
+_PLAIN_TEXT: dict[int, tuple[Tokenizer, Tokenizer]] = {}
+_PLAIN_TEXT_MAX = 4
 _PLAIN_TEXT_LOCK = threading.Lock()
 
 
@@ -278,16 +281,19 @@ def _plain_text_copy(tok: Tokenizer) -> Tokenizer:
     """A private copy of `tok` that encodes all text as plain text: special-token matching,
     padding and truncation off, set once and never changed, so it is safe to share across
     threads. One copy per tokenizer object, made on first use (Gemma 4's takes about 0.3 s
-    and 170 MB) and dropped with the tokenizer. A tokenizer changed after its first render
-    keeps its first copy: pass the changed one as a new object."""
+    and 170 MB); the last four tokenizers' copies are kept. A tokenizer changed after its first
+    render keeps its first copy: pass the changed one as a new object."""
     with _PLAIN_TEXT_LOCK:
-        copy = _PLAIN_TEXT.get(tok)
-        if copy is None:
-            copy = type(tok).from_str(tok.to_str())
-            copy.no_padding()
-            copy.no_truncation()
-            copy.encode_special_tokens = True
-            _PLAIN_TEXT[tok] = copy
+        entry = _PLAIN_TEXT.get(id(tok))
+        if entry is not None and entry[0] is tok:
+            return entry[1]
+        copy = type(tok).from_str(tok.to_str())
+        copy.no_padding()
+        copy.no_truncation()
+        copy.encode_special_tokens = True
+        _PLAIN_TEXT[id(tok)] = (tok, copy)
+        while len(_PLAIN_TEXT) > _PLAIN_TEXT_MAX:
+            del _PLAIN_TEXT[next(iter(_PLAIN_TEXT))]
         return copy
 
 
