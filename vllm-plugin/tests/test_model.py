@@ -318,3 +318,21 @@ def test_each_class_refuses_the_other_layouts_architecture(monkeypatch):
     with pytest.raises(ValueError, match="serves the decoder layout only"):
         model._start(vc, Cls, DECODER)
     model._start(vc, MM, MULTIMODAL)
+
+
+def test_the_readout_is_bf16_whatever_the_decoder_runs_in(tmp_path):
+    (tmp_path / "decision_config.json").write_text(json.dumps(decision_config()))
+    m = bare(Cls)
+    vc = SimpleNamespace(
+        model_config=SimpleNamespace(
+            model=str(tmp_path),
+            revision=None,
+            dtype=torch.float32,
+            architectures=[ARCH],
+            hf_text_config=SimpleNamespace(
+                final_logit_softcapping=30.0, vocab_size=1300, hidden_size=8
+            ),
+        )
+    )
+    Cls._init_readout(m, vc)
+    assert m.readout.weight.dtype == torch.bfloat16
