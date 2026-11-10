@@ -813,81 +813,105 @@ def test_a_real_checkpoint():
 
 # ---- model goldens (docs/spec.md, section 10) ---------------------------------------------
 #
-# Provisional: no release ships golden_vectors.jsonl yet, and the spec does not fix its keys.
-# This check reads one JSON object per line, {"request": ..., "ids": {question: [ids]},
-# "images": [{"start", "end", "sha256"}], "probabilities": {question: [p per code]}}, and is to
-# be aligned with the release's writer when it exists.
+# A golden_vectors.jsonl line, as section 10 gives it: {"request", "variant", "state_ids",
+# "images": [{"sha256", "span"}], "questions": {name: {"question_ids", "codes",
+# "probabilities"}}}. The core reads the reference's probabilities (`read_golden_vectors`) and
+# measures a runtime against them (`agreement`, `Agreement.conforms`).
 
 GOLDENS = "golden_vectors.jsonl"
 
 
-def check_goldens(path, backend) -> tuple[int, int]:
-    """(questions, top-1 agreements) of `backend` on the goldens at `path`, after checking that
-    every question's rendered ids and every image's span and sha256 are the goldens' exactly."""
+def golden_probabilities(path, backend) -> dict:
+    """`backend`'s code probabilities on the goldens at `path`, keyed as `read_golden_vectors`
+    keys the reference's, after checking that every line renders to the goldens' ids, spans,
+    image hashes and codes exactly (section 10, conformance condition 1)."""
     ck = backend.checkpoint
     tok = ck.tokenizer()
-    n = agree = 0
+    out = {}
     with open(path, encoding="utf-8") as f:
-        for i, line in enumerate(f):
+        for line_number, line in enumerate(f):
+            if not line.strip():
+                continue
             g = json.loads(line)
-            r = render(g["request"], tok, ck.config.prompt)
+            assert g["variant"] == ck.config.prompt, f"line {line_number}: another prompt"
+            r = render(g["request"], tok, g["variant"])
+            assert list(r.state_ids) == g["state_ids"], f"line {line_number}: state ids differ"
+            spans = [{"sha256": im.sha256, "span": [im.start, im.end]} for im in r.images]
+            assert spans == g["images"], f"line {line_number}: image spans differ"
             for name, q in r.questions.items():
-                assert list(q.ids) == g["ids"][name], f"line {i}, {name}: rendered ids differ"
-            spans = [[im.start, im.end, im.sha256] for im in r.images]
-            want = [[x["start"], x["end"], x["sha256"]] for x in g.get("images", [])]
-            assert spans == want, f"line {i}: image spans differ"
+                want = g["questions"][name]
+                assert list(q.question_ids) == want["question_ids"], (
+                    f"line {line_number}, {name}: rendered ids differ"
+                )
+                assert list(q.codes) == want["codes"], f"line {line_number}, {name}: codes"
             state, qs = list(r.state_ids), [list(q.question_ids) for q in r.questions.values()]
             rows = backend.forward(state, qs, r.images)
             probs = question_probabilities(rows, ck.readout, ck.config, r, stage="hidden")
-            for name, p in probs.items():
-                n += 1
-                agree += int(np.argmax(p)) == int(np.argmax(g["probabilities"][name]))
-    return n, agree
+            out.update({(line_number, n): [float(x) for x in p] for n, p in probs.items()})
+    return out
 
 
 def write_goldens(path, backend, requests) -> None:
+    """Goldens in section 10's format, from `backend` (one full pass per prompt, as the
+    reference runtime computes them)."""
     ck = backend.checkpoint
     tok = ck.tokenizer()
     with open(path, "w", encoding="utf-8") as f:
         for req in requests:
             r = render(req, tok, ck.config.prompt)
             state, qs = list(r.state_ids), [list(q.question_ids) for q in r.questions.values()]
-            rows = backend.forward(state, qs, r.images)
-            probs = question_probabilities(rows, ck.readout, ck.config, r, stage="hidden")
+            probs = question_probabilities(
+                backend.forward(state, qs, r.images), ck.readout, ck.config, r, stage="hidden"
+            )
             line = {
                 "request": req,
-                "ids": {n: list(q.ids) for n, q in r.questions.items()},
-                "images": [
-                    {"start": im.start, "end": im.end, "sha256": im.sha256} for im in r.images
-                ],
-                "probabilities": {n: [float(x) for x in p] for n, p in probs.items()},
+                "variant": r.variant,
+                "state_ids": list(r.state_ids),
+                "images": [{"sha256": im.sha256, "span": [im.start, im.end]} for im in r.images],
+                "questions": {
+                    n: {
+                        "question_ids": list(q.question_ids),
+                        "codes": list(q.codes),
+                        "probabilities": [float(x) for x in probs[n]],
+                    }
+                    for n, q in r.questions.items()
+                },
             }
             f.write(json.dumps(line) + "\n")
 
 
 def test_the_goldens_check_passes_its_own_goldens_and_catches_a_wrong_id(backends, kind, tmp_path):
+    from strands_decider.core import agreement, read_golden_vectors
+
     full, reuse = backends
     reqs = [request(), request(state="")]
     if IMAGING[kind]:
         reqs.append(request(IMAGES))
     path = tmp_path / GOLDENS
     write_goldens(path, full, reqs)
+    reference = read_golden_vectors(path)
+    assert len(reference) == 3 * len(reqs)
     for backend in (full, reuse):
-        n, agree = check_goldens(path, backend)
-        assert n == 3 * len(reqs) and agree == n
+        measured = agreement(golden_probabilities(path, backend), reference)
+        assert measured.questions == len(reference)
+        assert measured.top1 == 1.0 and measured.mean_abs_dp < 1e-4
+        # bf16's bounds are met, but on too few questions for a conformance claim.
+        assert not measured.conforms()
     lines = path.read_text().splitlines()
     g = json.loads(lines[0])
-    g["ids"]["late"][-1] += 1
+    g["questions"]["late"]["question_ids"][-1] += 1
     path.write_text("\n".join([json.dumps(g), *lines[1:]]) + "\n")
     with pytest.raises(AssertionError, match="rendered ids differ"):
-        check_goldens(path, full)
+        golden_probabilities(path, full)
 
 
 @pytest.mark.skipif(not REAL, reason="set STRANDS_DECIDER_TEST_CHECKPOINT to a decision checkpoint")
 def test_a_real_checkpoint_meets_its_goldens():
-    """Section 10: the rendered ids are the goldens', and in bf16 the top-1 code agrees on at
-    least 98% of the questions, both with one full pass per prompt (the reference) and with the
-    state reused."""
+    """Section 10: the rendered ids are the goldens', and in bf16 the runtime conforms (top-1
+    agreement at least 98% and mean |dp| at most 0.02, on at least 1,000 questions), both with
+    one full pass per prompt (the reference) and with the state reused."""
+    from strands_decider.core import agreement, read_golden_vectors
+
     path = os.path.join(tb.Checkpoint.open(REAL).path, GOLDENS)
     if not os.path.exists(path):
         pytest.skip(f"the checkpoint has no {GOLDENS} yet")
@@ -901,9 +925,10 @@ def test_a_real_checkpoint_meets_its_goldens():
         full.model, full.checkpoint, device=device, dtype=full.dtype,
         image_processor=full.image_processor, image_problem=full.image_problem,
     )  # fmt: skip
+    reference = read_golden_vectors(path)
     for backend in (full, reuse):
-        n, agree = check_goldens(path, backend)
-        assert n and agree / n >= 0.98, (backend.reuse_state, agree, n)
+        measured = agreement(golden_probabilities(path, backend), reference)
+        assert measured.conforms(), (backend.reuse_state, measured)
 
 
 # ---- the 12B's pixels ---------------------------------------------------------------------

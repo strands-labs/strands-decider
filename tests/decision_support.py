@@ -3,9 +3,9 @@
 `decision_checkpoint` writes a directory in docs/spec.md's layout (section 9): the base's
 multimodal class saved by transformers (`Gemma4ForConditionalGeneration`, or
 `Gemma4UnifiedForConditionalGeneration` for the 12B's encoder-free design) in bf16,
-`processor_config.json`, a word-level tokenizer with Gemma 4's control tokens at their ids
-(`tokenizer()`, so that the core's `check_tokenizer` holds), `readout.safetensors` and
-`decision_config.json`. The decoder has a sliding window of 2, shorter than any prompt
+`processor_config.json`, a word-level tokenizer with Gemma 4's control tokens and codes at
+their ids (`tokenizer()`, so that the core's `check_tokenizer` holds), `readout.safetensors`
+and `decision_config.json`, whose `token_ids` are therefore Gemma 4's. The decoder has a sliding window of 2, shorter than any prompt
 here, so a runtime that kept the window would answer differently; the Gemma 4 variant has
 E2B's KV-shared layers and per-layer embeddings. `intermediate_checkpoint` writes the layout
 the intermediate checkpoints have: a bare `Gemma4TextModel` and a decision_config.json from
@@ -25,6 +25,7 @@ if not hasattr(transformers, "Gemma4ForConditionalGeneration"):
     pytest.skip("this transformers has no Gemma 4", allow_module_level=True)
 
 from strands_decider.core import CODES, CONTROL_TOKEN_IDS  # noqa: E402
+from strands_decider.core.tokenizer import CODE_TOKEN_IDS  # noqa: E402
 
 GEMMA4 = "gemma4"  # E2B's design: per-layer embeddings, KV-shared layers
 # 26B-A4B's and 31B's: the same class, with bidirectional image blocks ("vision"), no per-layer
@@ -50,15 +51,19 @@ PROCESSOR_TYPES = {
 
 
 def tokenizer():
-    """The toy tokenizer of tests/core_support.py, with Gemma 4's control tokens at Gemma 4's
-    ids (`CONTROL_TOKEN_IDS`) and `<eos>` at 1, so that a checkpoint's tokenizer passes the
-    core's `check_tokenizer`; words and codes take the free ids from 0 up."""
+    """The toy tokenizer of tests/core_support.py, with Gemma 4's ids where the interface
+    fixes them, so that a checkpoint's tokenizer passes the core's `check_tokenizer`: the
+    control tokens at `CONTROL_TOKEN_IDS`, `<eos>` at 1, and each code at its id in
+    `CODE_TOKEN_IDS` (docs/spec.md, The codes). The other words take the free ids from 0 up."""
     from tokenizers import AddedToken, Regex, Tokenizer, models, pre_tokenizers
 
     words = ["<unk>", "\n", " ", ".", "<", ">", "/", '"', "=", "—", "answer", "model", "user"]
     fixed = {"<eos>": 1, **CONTROL_TOKEN_IDS}
-    free = (i for i in range(10**6) if i not in fixed.values())
-    vocab = {w: next(free) for w in dict.fromkeys(words + list(CODES))}
+    codes = dict(zip(CODES, CODE_TOKEN_IDS, strict=True))
+    taken = {*fixed.values(), *codes.values()}
+    free = (i for i in range(10**6) if i not in taken)
+    vocab = {w: next(free) for w in dict.fromkeys(words) if w not in codes}
+    vocab.update(codes)
     vocab.update(fixed)
     tok = Tokenizer(models.WordLevel(vocab, unk_token="<unk>"))
     tok.pre_tokenizer = pre_tokenizers.Split(Regex(r"\w+|\s|[^\w\s]"), behavior="isolated")

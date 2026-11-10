@@ -23,9 +23,18 @@ import sys
 import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
-from .core import STAGES, DecisionConfig, Readout, RenderedRequest, load_tokenizer, read, render
+from .core import (
+    STAGES,
+    DecisionConfig,
+    Readout,
+    RenderedRequest,
+    load_tokenizer,
+    plain_text_tokenizer,
+    read,
+    render,
+)
 from .core.config import FILENAME, IMAGE, INTERFACE
 from .core.readout import check_rendered, check_stage
 from .core.request import NO_VISION, has_images, parse_request
@@ -43,7 +52,7 @@ from .schema import (
 if TYPE_CHECKING:
     from tokenizers import Tokenizer
 
-    from .core import Backend
+    from .core import Backend, ImageBackend
 
 DECISION = "decision"  # decision_config.json with "interface": "strands-decider"
 INTERMEDIATE = "intermediate"  # decision_config.json from before the interface field
@@ -245,8 +254,9 @@ class DecisionEngine:
                 f"({self.max_concurrency} request(s) at a time)"
             )
         try:
-            if rendered.images:
-                rows = self.backend.forward(state, questions, images=rendered.images)
+            if rendered.images:  # only a backend whose inputs hold "image" gets here
+                image_backend = cast("ImageBackend", self.backend)
+                rows = image_backend.forward(state, questions, images=rendered.images)
             else:
                 rows = self.backend.forward(state, questions)
         except RequestRefused:
@@ -419,7 +429,9 @@ def load_decision_engine(
         raise refuse_intermediate(checkpoint)
     config = DecisionConfig.from_dict(raw)
     readout = Readout.load(path, config)
-    tokenizer = load_tokenizer(path, config)  # its control and code ids, before any weight
+    # Its control and code ids checked before any weight loads, then handed to the core, which
+    # renders with it directly instead of keeping a private copy (about 170 MB for Gemma 4's).
+    tokenizer = plain_text_tokenizer(load_tokenizer(path, config))
     backend = loader(
         path,
         device=device,

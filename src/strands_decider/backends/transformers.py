@@ -1,9 +1,10 @@
 """The transformers backend: decision checkpoints on PyTorch, on CPU, CUDA or Apple's MPS.
 
 It is the reference runtime of docs/spec.md (sections 10 and 11), the PyTorch model behind
-`strands_decider.core.evaluate`, and implements the core's `Backend`: given a state's token
-ids, its images with their spans, and each question's ids, it returns each question's
-final-norm hidden state at its last token (`outputs = "hidden"`).
+`strands_decider.core.evaluate`, and implements the core's `ImageBackend` (its `Backend`
+with an image path): given a state's token ids, its images with their spans, and each
+question's ids, it returns each question's final-norm hidden state at its last token
+(`outputs = "hidden"`).
 
 Loading (section 9). A decision checkpoint is the base model's own multimodal checkpoint,
 loaded with transformers' class for it: `Gemma4ForConditionalGeneration` for E2B, E4B, 26B-A4B
@@ -89,6 +90,8 @@ from ..refusals import RequestRefused
 if TYPE_CHECKING:
     from PIL import Image
     from tokenizers import Tokenizer
+
+    from ..core import ImageBackend
 
 # The two layouts a checkpoint may have.
 MULTIMODAL = "multimodal"  # the base's own multimodal checkpoint: the released layout
@@ -339,7 +342,8 @@ def resize(image: RenderedImage, img: Image.Image) -> Image.Image:
         width, height = check_decoded_size(image, *img.size)
     except ValueError as e:
         raise ImageRefused(str(e)) from e
-    return resize_image(img, width, height)
+    resized: Image.Image = resize_image(img, width, height)
+    return resized
 
 
 PROCESSOR_FAILED = "the image processor could not be built, so image requests are refused"
@@ -858,6 +862,12 @@ def _tokenizer_problem(ckpt: Checkpoint) -> str | None:
                 "image requests are refused"
             )
     return None
+
+
+if TYPE_CHECKING:
+
+    def _implements_the_core_protocol(backend: TransformersBackend) -> ImageBackend:
+        return backend  # mypy checks TransformersBackend against the core's ImageBackend
 
 
 __all__ = [
