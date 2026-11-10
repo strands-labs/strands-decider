@@ -11,18 +11,25 @@ checkpoint. The readout and the soft-cap come from the checkpoint's readout.safe
 decision_config.json, which the load validates.
 
 A request may carry at most 4 images, its prompts at most the checkpoint's max_length_validated
-tokens (the state, image placeholders included, plus a question), and, with
-DECIDER_MAX_REQUEST_TOKENS set, at most that many tokens in all: the state once, then every
-question. Each limit is checked before any image is decoded or any token is run.
+tokens (the state, image placeholders included, plus a question), and at most
+DECIDER_MAX_REQUEST_TOKENS tokens in all, the state once, then every question: 16,384 unless it is
+set, which keeps the slowest request inside the 15-minute timeout on Graviton2, and 0 for no limit.
+Each limit is checked before any image is decoded or any token is run. A request that breaks one,
+or carries an image that cannot be read, gets a 422; anything else that fails is a 500.
 
-The model loads once per execution environment. With SnapStart it loads at import, when a version
-is published. Otherwise it loads in a background thread: Lambda gives an on-demand init 10 s, and
-every invocation waits for the load.
+Every file the function serves is checked at load against the sha256 artifact.json records, the
+GGUFs chunk by chunk as they are read into the page cache; a mismatch fails the load.
+
+The model loads once per execution environment. On demand it loads in a background thread: Lambda
+gives an on-demand init 10 s, and every invocation waits for the load. With provisioned
+concurrency it loads at import. SnapStart is not offered for decision checkpoints: it was not
+measured, and the page-cache drop after the warm-up assumes the prefetch ran in this environment.
 """
 
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import logging
 import os
@@ -32,7 +39,7 @@ from collections.abc import Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Any
 
-from strands_decider.backends.llama_cpp import LlamaCppBackend
+from strands_decider.backends.llama_cpp import ImageError, LlamaCppBackend
 from strands_decider.core import DecisionConfig, Readout, evaluate, load_tokenizer
 from strands_decider.core.config import IMAGE
 
@@ -42,6 +49,10 @@ log.setLevel(logging.INFO)
 MODEL_DIR = os.environ.get("DECIDER_MODEL_DIR", "/opt/model")  # the Dockerfile's, unless set
 LIBRARY = os.path.join(os.path.dirname(os.path.abspath(__file__)), "libdecision.so")
 ROUTES = {"/health": "GET", "/v1/systemone": "POST"}
+# The request limit without DECIDER_MAX_REQUEST_TOKENS (README.md, Decision checkpoints, Limits).
+DEFAULT_MAX_REQUEST_TOKENS = 16384
+# The chunk the GGUFs are read and checked in: artifact.json's chunk_size.
+CHUNK = 16 << 20
 # A 64x64 white PNG, for the image warm-up.
 _WARM_UP_IMAGE = (
     "iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAATUlEQVR42u3PQQ0AAAgEILV/5zOFDzdoQCepz6aeEx"
@@ -50,7 +61,12 @@ _WARM_UP_IMAGE = (
 _WARM_UP = {"state": "Warm up.", "questions": {"q": {"type": "noul", "instructions": "?"}}}
 
 
-class RequestTooLarge(ValueError):
+class RequestError(ValueError):
+    """The request's fault: an invalid request, an image that cannot be read, or one over a limit.
+    The Function URL answers it with a 422; every other failure is a 500."""
+
+
+class RequestTooLarge(RequestError):
     pass
 
 
@@ -63,6 +79,7 @@ class LimitedBackend:
         self.max_request_tokens = max_request_tokens
         self.outputs = backend.outputs
         self.inputs = backend.inputs
+        self.forwarded = False  # whether the request has been through the decoder
 
     def forward(
         self, state: list[int], questions: list[list[int]], images: Sequence[Any] = ()
@@ -73,9 +90,18 @@ class LimitedBackend:
                 f"request of {n} tokens (the state's {len(state)} once, then its questions) "
                 f"exceeds the limit of {self.max_request_tokens} tokens per request"
             )
-        if images:
-            return self.backend.forward(state, questions, images)
-        return self.backend.forward(state, questions)
+        try:
+            out = (
+                self.backend.forward(state, questions, images)
+                if images
+                else self.backend.forward(state, questions)
+            )
+        except ImageError as e:
+            raise RequestError(str(e)) from e
+        except ValueError as e:  # the backend's own, not the request's
+            raise RuntimeError(f"the backend failed: {e}") from e
+        self.forwarded = True
+        return out
 
 
 class Model:
@@ -83,20 +109,26 @@ class Model:
 
     def __init__(self, model_dir: str, max_request_tokens: int | None):
         started = time.perf_counter()
+        with open(os.path.join(model_dir, "artifact.json"), encoding="utf-8") as f:
+            self.artifact = json.load(f)
+        files: dict[str, Any] = self.artifact["files"]
+        # The small files, checked before they are read; the GGUFs below, as they are read.
+        for name, record in files.items():
+            if not name.endswith(".gguf"):
+                _verify(os.path.join(model_dir, name), record)
         # The checkpoint's own files, validated before the model loads: a decision_config.json
         # without `"interface": "strands-decider"`, or without the soft-cap, is refused here, and
         # so is a tokenizer that does not give the config's code and control token ids.
         self.config = DecisionConfig.load(model_dir)
         self.readout = Readout.load(model_dir, self.config)
         self.tokenizer = load_tokenizer(model_dir, self.config)
-        with open(os.path.join(model_dir, "artifact.json"), encoding="utf-8") as f:
-            self.artifact = json.load(f)
         self.name = str(self.artifact["model_name"])
         gguf = os.path.join(model_dir, "model.gguf")
         mmproj = os.path.join(model_dir, "mmproj.gguf")
-        vision = IMAGE in self.config.inputs and os.path.exists(mmproj)
+        # An artifact without a vision tower serves text only; one that lists it must have it.
+        vision = IMAGE in self.config.inputs and "mmproj.gguf" in files
         for path in (gguf, mmproj) if vision else (gguf,):
-            _prefetch(path)
+            _prefetch(path, files[os.path.basename(path)])
         log.info("model read in %.1f s", time.perf_counter() - started)
         backend = LlamaCppBackend(
             LIBRARY,
@@ -117,17 +149,34 @@ class Model:
             self.evaluate({**_WARM_UP, "images": [_WARM_UP_IMAGE]})
         if _page_cache() == "hot":
             # The prefetch has brought the whole file into this environment, so the rows of the
-            # per-layer embedding table that a request reads come back quickly; the table's 2.4 GB
+            # per-layer embedding table that a request reads come back quickly; the table's 2.5 GB
             # (E2B) need not stay in the page cache, which Lambda counts as memory used.
+            size = files["model.gguf"]["size"]
             for start, end in self.artifact.get("lazy_ranges", []):
-                _drop_from_page_cache(gguf, start, end - start)
+                if isinstance(start, int) and isinstance(end, int) and 0 <= start < end <= size:
+                    _drop_from_page_cache(gguf, start, end - start)
         self.backend.max_request_tokens = max_request_tokens
         log.info("model ready in %.1f s", time.perf_counter() - started)
 
     def evaluate(self, request: Any) -> dict[str, Any]:
-        return evaluate(
-            request, self.tokenizer, self.readout, self.config, self.backend, model_name=self.name
-        )
+        """The response to `request`. A RequestError is the request's fault: the core's refusals
+        come before the decoder runs, so a ValueError after it is the runtime's (RuntimeError)."""
+        self.backend.forwarded = False
+        try:
+            return evaluate(
+                request,
+                self.tokenizer,
+                self.readout,
+                self.config,
+                self.backend,
+                model_name=self.name,
+            )
+        except RequestError:
+            raise
+        except ValueError as e:
+            if self.backend.forwarded:
+                raise RuntimeError(f"reading the answers failed: {e}") from e
+            raise RequestError(str(e)) from e
 
     def health(self) -> dict[str, Any]:
         return {
@@ -139,27 +188,48 @@ class Model:
         }
 
 
-def _prefetch(path: str, chunk: int = 16 << 20, readers: int = 32) -> None:
-    """Read a file into the page cache, many ranges at once. Lambda loads an image's files lazily:
-    read in order, as llama.cpp reads it, a model takes minutes to load in a new environment.
-    The whole GGUF is read, its per-layer embedding table included, whose rows llama.cpp would
-    otherwise read on demand, slowly and erratically, from the lazily loaded image."""
+def _verify(path: str, record: dict[str, Any]) -> None:
+    """That a served file has the size and sha256 artifact.json records for it."""
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        while block := f.read(CHUNK):
+            h.update(block)
+    if os.path.getsize(path) != record["size"] or h.hexdigest() != record["sha256"]:
+        raise ValueError(f"{path} is not the file the image build wrote: its sha256 differs")
+
+
+def _prefetch(path: str, record: dict[str, Any], readers: int = 32) -> None:
+    """Read a file into the page cache, many chunks at once, and check each chunk against the
+    sha256 artifact.json records for it. Lambda loads an image's files lazily: read in order, as
+    llama.cpp reads it, a model takes minutes to load in a new environment. The whole GGUF is
+    read, its per-layer embedding table included, whose rows llama.cpp would otherwise read on
+    demand, slowly and erratically, from the lazily loaded image."""
+    chunks: list[str] = record["chunks"]
+    if record.get("chunk_size") != CHUNK:
+        raise ValueError(f"{path}: artifact.json's chunk size is not {CHUNK}")
     fd = os.open(path, os.O_RDONLY)
     try:
         size = os.fstat(fd).st_size
+        if size != record["size"] or len(chunks) != -(-size // CHUNK):
+            raise ValueError(f"{path} is not the file the image build wrote: its size differs")
 
-        def read(offset: int) -> None:
-            end = min(offset + chunk, size)
+        def read(i: int) -> bool:
+            offset, end = i * CHUNK, min((i + 1) * CHUNK, size)
+            h = hashlib.sha256()
             while offset < end:
-                n = len(os.pread(fd, min(end - offset, 4 << 20), offset))
-                if n == 0:
-                    break
-                offset += n
+                block = os.pread(fd, min(end - offset, 4 << 20), offset)
+                if not block:
+                    return False
+                h.update(block)
+                offset += len(block)
+            return h.hexdigest() == chunks[i]
 
         with ThreadPoolExecutor(readers) as pool:
-            list(pool.map(read, range(0, size, chunk)))
+            bad = [i for i, ok in enumerate(pool.map(read, range(len(chunks)))) if not ok]
     finally:
         os.close(fd)
+    if bad:
+        raise ValueError(f"{path} is not the file the image build wrote: chunks {bad[:5]} differ")
 
 
 def _drop_from_page_cache(path: str, offset: int = 0, length: int = 0) -> None:
@@ -183,7 +253,9 @@ def _page_cache() -> str:
 
 
 def _max_request_tokens() -> int | None:
-    value = int(os.environ.get("DECIDER_MAX_REQUEST_TOKENS") or 0)
+    """DECIDER_MAX_REQUEST_TOKENS: DEFAULT_MAX_REQUEST_TOKENS when unset, None (no limit) for 0."""
+    raw = os.environ.get("DECIDER_MAX_REQUEST_TOKENS")
+    value = DEFAULT_MAX_REQUEST_TOKENS if raw is None or raw.strip() == "" else int(raw)
     if value < 0:
         raise ValueError(f"DECIDER_MAX_REQUEST_TOKENS must be 0 (no limit) or more, not {value}")
     return value or None
@@ -234,7 +306,7 @@ def _evaluate(request: Any) -> tuple[dict[str, Any], dict[str, Any]]:
         "load_wait_ms": round(waited, 1),
         "input_tokens": payload["usage"]["input_tokens"],
         "questions": payload["usage"]["output_tokens"],
-        "images": len(timings.get("images", [])),
+        "images": timings.get("n_images", 0),
         "cpu_part": _cpu_part(),
         "maxrss_mb": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss // 1024,
         "timings_ms": _rounded(timings),
@@ -278,7 +350,8 @@ def _http(event: dict[str, Any]) -> dict[str, Any]:
         return _response(422, {"detail": f"the body is not JSON: {e}"})
     try:
         payload, info = _evaluate(request)
-    except ValueError as e:  # an invalid request, an undecodable image, or over a limit
+    except RequestError as e:  # an invalid request, an image that cannot be read, or over a limit
+        log.info("refused: %s", e)
         return _response(422, {"detail": str(e)})
     except Exception:
         log.exception("request failed")
