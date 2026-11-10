@@ -3,6 +3,8 @@
   "context": {
     "model": "StrandsAgents/strands-decider-2B-qwen3.5-v1-2610",
     "model_revision": "main",
+    "decision": false,
+    "checkpoint_revision": "main",
     "snapstart": false,
     "max_request_tokens": 24576
   }
