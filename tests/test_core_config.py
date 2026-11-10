@@ -1,7 +1,7 @@
 """`decision_config.json` (docs/spec.md, The decision_config.json schema): strict, with
-an `interface` discriminator, and a provenance check that catches common leaks of internal
-locations (not a guarantee). Torch-free; the fixture is the E2B checkpoint's file reduced to
-the schema's fields."""
+an `interface` discriminator, the inputs a checkpoint takes, and a required provenance whose
+check catches common leaks of internal locations (not a guarantee). Torch-free; the fixture
+is the E2B checkpoint's file reduced to the schema's fields."""
 
 from __future__ import annotations
 
@@ -14,12 +14,18 @@ from core_support import FIXTURES, decision_config_fixture
 from strands_decider.core import (
     CODES,
     FORMAT_VERSION,
+    INPUTS,
     INTERFACE,
     VARIANTS,
     DecisionConfig,
     Provenance,
 )
 from strands_decider.core.config import REQUIRED
+
+BASE = {
+    "base_model": "google/gemma-4-E2B-it",
+    "base_revision": "3e22461f65e89153144f8adb70e3b8c2cc9845a7",
+}
 
 
 def _with(**kw) -> dict:
@@ -35,21 +41,64 @@ def test_fixture_loads_from_file_and_directory():
     assert a.final_logit_softcapping == 30.0
     assert a.codes == CODES and len(a.token_ids) == 255
     assert a.attention_mode == "prefix_bidir" and a.pooling == "last"
-    assert a.provenance == Provenance(
-        base_model="google/gemma-4-E2B-it",
-        base_revision="3e22461f65e89153144f8adb70e3b8c2cc9845a7",
-    )
+    assert a.inputs == ("text", "image") and INPUTS == ("text", "image")
+    assert a.provenance == Provenance(**BASE)
     assert DecisionConfig.from_dict(json.loads(json.dumps(a.to_dict()))) == a
     assert a.to_dict() == decision_config_fixture()
 
 
-def test_provenance_is_optional_but_not_null():
+def test_provenance_and_its_base_are_required():
+    """The image processor, the tokenizer and any part not fine-tuned are the base's at
+    `base_revision`, so a checkpoint must name them."""
     d = _with()
     del d["provenance"]
-    assert DecisionConfig.from_dict(d).provenance is None
-    assert "provenance" not in DecisionConfig.from_dict(d).to_dict()
-    with pytest.raises(ValueError, match="leave the field out"):
+    with pytest.raises(ValueError, match=r"missing required fields \['provenance'\]"):
+        DecisionConfig.from_dict(d)
+    with pytest.raises(ValueError, match="provenance must be an object"):
         DecisionConfig.from_dict(_with(provenance=None))
+    for field in BASE:
+        partial = {k: v for k, v in BASE.items() if k != field}
+        with pytest.raises(
+            ValueError, match=f"provenance is missing required fields \\['{field}'\\]"
+        ):
+            DecisionConfig.from_dict(_with(provenance=partial))
+        with pytest.raises(ValueError, match=f"provenance.{field}"):
+            DecisionConfig.from_dict(_with(provenance={**BASE, field: None}))
+    with pytest.raises(ValueError, match="missing required fields"):
+        DecisionConfig.from_dict(_with(provenance={}))
+    with pytest.raises(TypeError):
+        Provenance(base_model=BASE["base_model"])  # type: ignore[call-arg]
+    good = DecisionConfig.load(FIXTURES)
+    with pytest.raises(ValueError, match="provenance must be a Provenance"):
+        DecisionConfig(**{**good.__dict__, "provenance": None})
+
+
+@pytest.mark.parametrize("inputs", [["text"], ["text", "image"], ["image", "text"]])
+def test_inputs_name_what_the_checkpoint_takes(inputs):
+    cfg = DecisionConfig.from_dict(_with(inputs=inputs))
+    assert cfg.inputs == tuple(inputs)
+    assert cfg.to_dict()["inputs"] == inputs
+
+
+@pytest.mark.parametrize(
+    "inputs",
+    [
+        [],
+        ["image"],
+        ["text", "text"],
+        ["text", "image", "image"],
+        ["text", "audio"],
+        ["Text"],
+        ["text", None],
+        ["text", 1],
+        "text",
+        None,
+        {"text": True},
+    ],
+)
+def test_inputs_must_be_distinct_known_and_hold_text(inputs):
+    with pytest.raises(ValueError, match="inputs must be an array"):
+        DecisionConfig.from_dict(_with(inputs=inputs))
 
 
 @pytest.mark.parametrize("field", [f for f in REQUIRED if f != "interface"])
@@ -175,29 +224,30 @@ def test_bad_values_are_errors(field, value, match):
 
 
 @pytest.mark.parametrize(
-    "provenance",
+    ("provenance", "match"),
     [
-        {"base_model": "/fsx/user/models/gemma-4-E2B-it"},
-        {"source": "/fsx/user/run/train.py"},
-        {"release": "fsx/user/run"},
-        {"source": "s3://bucket/checkpoints/run-1"},
-        {"source": "file:///home/user/run"},
-        {"source": "http://example.com/recipe"},
-        {"release": "~/checkpoints/e2b"},
-        {"release": "../checkpoints/e2b"},
-        {"release": "C:\\runs\\e2b"},
-        {"base_model": "gemma-4-E2B-it"},
-        {"base_revision": "main"},
-        {"base_revision": "3e22461"},
-        {"release": ""},
-        {"release": 3},
-        {"trainer": "train.py"},
-        {"base_model": "google/gemma-4-E2B-it", "data": "corpus-v1"},
+        ({"base_model": "/fsx/user/models/gemma-4-E2B-it"}, "base_model must be a Hub id"),
+        ({"source": "/fsx/user/run/train.py"}, "source must be an https URL"),
+        ({"release": "fsx/user/run"}, "release must be a model name"),
+        ({"source": "s3://bucket/checkpoints/run-1"}, "source must be an https URL"),
+        ({"source": "file:///home/user/run"}, "source must be an https URL"),
+        ({"source": "http://example.com/recipe"}, "source must be an https URL"),
+        ({"release": "~/checkpoints/e2b"}, "release must be a model name"),
+        ({"release": "../checkpoints/e2b"}, "release must be a model name"),
+        ({"release": "C:\\runs\\e2b"}, "release must be a model name"),
+        ({"base_model": "gemma-4-E2B-it"}, "base_model must be a Hub id"),
+        ({"base_revision": "main"}, "base_revision must be a 40-character"),
+        ({"base_revision": "3e22461"}, "base_revision must be a 40-character"),
+        ({"release": ""}, "release must be a non-empty string"),
+        ({"release": 3}, "release must be a non-empty string"),
+        ({"trainer": "train.py"}, "unknown fields"),
+        ({"data": "corpus-v1"}, "unknown fields"),
     ],
 )
-def test_internal_or_unknown_provenance_is_refused(provenance):
-    with pytest.raises(ValueError, match="provenance"):
-        DecisionConfig.from_dict(_with(provenance=provenance))
+def test_internal_or_unknown_provenance_is_refused(provenance, match):
+    """Each value beside a valid base, so that the check that refuses it is the one named."""
+    with pytest.raises(ValueError, match=match):
+        DecisionConfig.from_dict(_with(provenance={**BASE, **provenance}))
 
 
 def test_public_provenance_is_accepted():
@@ -215,7 +265,7 @@ def test_public_provenance_is_accepted():
 def test_the_fixture_holds_no_internal_value():
     text = (FIXTURES / "decision_config.json").read_text(encoding="utf-8")
     assert "/fsx" not in text and "s3://" not in text
-    assert set(json.loads(text)) <= {*REQUIRED, "provenance"}
+    assert set(json.loads(text)) == set(REQUIRED)
 
 
 def test_constructing_directly_validates_too():
