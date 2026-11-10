@@ -55,7 +55,15 @@ def result(tmp_path_factory):
 
 
 def test_the_conversion(result):
-    assert not [f for f in result["failures"] if "mmproj" in f or "lazy_ranges" in f]
+    assert not [
+        f for f in result["failures"] if "mmproj" in f or "lazy_ranges" in f or "loader" in f
+    ]
+    assert result["convert"]["matcher"] == {
+        "pplx-decider": True,
+        "vllm-d3": False,
+        "strands-decider": False,
+        "not an object": False,
+    }
     full, vision = result["convert"]["mmproj_tensors"]
     assert vision < full
 

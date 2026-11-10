@@ -18,8 +18,10 @@ convert_hf_to_gguf.py (the decoder in f32; --mmproj, then vision_only_mmproj.py)
 LlamaCppBackend, and runs the same prompts in transformers' Gemma4ForConditionalGeneration in
 float32 with the masks passed per layer type. It checks:
 
-  convert   the vision-only mmproj has no audio tensor or key left and the vision tower's tensors
-            unchanged, and lazy_ranges finds the per-layer embedding table;
+  convert   the converter's pplx-decider loader leaves a Strands Decider directory, and one whose
+            decision_config.json is not an object, and still claims its own (patches/0002); the
+            vision-only mmproj has no audio tensor or key left and the vision tower's tensors
+            unchanged; and lazy_ranges finds the per-layer embedding table;
   mask      the shim matches the prefix_bidir reference, and for each question is several times
             further from each reference that differs from it in one way: a causal state, a causal question, causal throughout, a sliding window
             (8 tokens, shorter than the prompts), or causal full-attention layers with bidirectional
@@ -214,8 +216,34 @@ def convert(llama_cpp: Path, ckpt: Path, out: Path) -> tuple[Path, Path]:
     return gguf, mmproj
 
 
+# Which directories the converter's pplx-decider loader claims: decision_config.json in each, beside
+# a config.json and a readout. Run in llama.cpp's tree, as its own tests import it.
+MATCHER = """
+import json, sys, tempfile
+from pathlib import Path
+from conversion.pplx_decider import _is_pplx_decider_checkpoint
+cases = {"pplx-decider": {"format_version": 1, "temperature": 1.0},
+         "vllm-d3": {"format_id": "d3-code-readout-v1", "format_version": 1},
+         "strands-decider": {"interface": "strands-decider", "format_version": 1},
+         "not an object": [1, 2]}
+out = {}
+for name, decision in cases.items():
+    with tempfile.TemporaryDirectory() as d:
+        for f, text in (("config.json", "{}"), ("decision_config.json", json.dumps(decision)),
+                        ("readout.safetensors", "")):
+            (Path(d) / f).write_text(text)
+        try:
+            out[name] = _is_pplx_decider_checkpoint(Path(d))
+        except Exception as e:
+            out[name] = repr(e)
+print(json.dumps(out))
+"""
+MATCHES = {"pplx-decider": True, "vllm-d3": False, "strands-decider": False, "not an object": False}
+
+
 def check_conversion(llama_cpp: Path, gguf_path: Path, mmproj: Path) -> dict:
-    """The vision-only copy against the converter's full mmproj, and the decoder's lazy ranges."""
+    """The converter's loader matcher, the vision-only copy against the converter's full mmproj,
+    and the decoder's lazy ranges."""
     sys.path.insert(0, str(llama_cpp / "gguf-py"))
     import gguf
 
@@ -223,6 +251,16 @@ def check_conversion(llama_cpp: Path, gguf_path: Path, mmproj: Path) -> dict:
     from build_artifact import lazy_ranges
 
     failures = []
+    env = {
+        **os.environ,
+        "PYTHONPATH": os.pathsep.join([str(llama_cpp), str(llama_cpp / "gguf-py")]),
+    }
+    r = subprocess.run(
+        [sys.executable, "-c", MATCHER], cwd=llama_cpp, env=env, capture_output=True, text=True
+    )
+    matches = json.loads(r.stdout) if r.returncode == 0 else {"error": r.stderr[-500:]}
+    if matches != MATCHES:
+        failures.append(f"the converter's pplx-decider loader claims {matches}, not {MATCHES}")
     full, vision = gguf.GGUFReader(mmproj.with_name("mmproj-full.gguf")), gguf.GGUFReader(mmproj)
     audio_tensors = [t.name for t in vision.tensors if t.name.startswith(("a.", "mm.a."))]
     audio_keys = [
@@ -246,6 +284,7 @@ def check_conversion(llama_cpp: Path, gguf_path: Path, mmproj: Path) -> dict:
     if len(ranges) != 1 or not 0 < ranges[0][0] < ranges[0][1] <= size:
         failures.append(f"lazy_ranges gives {ranges} for a {size}-byte GGUF")
     return {
+        "matcher": matches,
         "mmproj_tensors": [len(full.tensors), len(vision.tensors)],
         "lazy_ranges": ranges,
         "failures": failures,
