@@ -332,7 +332,8 @@ together; the others wait up to `--queue-timeout` seconds (default 60) and then 
 refused request is answered at once, without waiting. `--revision` names the branch, tag or
 commit of a checkpoint on the Hub. `/health` reports the backend, the device, the dtype,
 whether images are served and the concurrency. `--device-map` does not apply, and `--dtype`,
-`--max-concurrency` and `--revision` apply to decision checkpoints only.
+`--max-concurrency` and `--revision` apply to decision checkpoints only. On `--device mlx`
+the MLX backend runs the checkpoint instead ([Decision checkpoints on MLX](#decision-checkpoints-on-mlx)).
 
 A checkpoint from before the interface, whose `decision_config.json` has no `interface`, names
 no prompt, so `ask` and `serve` refuse it; `TransformersBackend` runs it on token ids rendered
@@ -429,10 +430,14 @@ Evaluations run one at a time, because `_fit` keeps a request's option offsets o
 
 A decision checkpoint ([`spec.md`](spec.md): the Gemma 4 base's multimodal checkpoint with its
 fine-tuning merged in, beside a `readout.safetensors` and a `decision_config.json`) runs on
-`--device mlx` through mlx-vlm ([`backends/mlx.py`](../src/strands_decider/backends/mlx.py)).
-`ask` and `serve` tell it from a v1 checkpoint by its `decision_config.json`, and load it the
-same way. It takes images whenever the checkpoint's `inputs` hold `image`; `--vision` is not
-needed.
+`--device mlx` through mlx-vlm ([`backends/mlx.py`](../src/strands_decider/backends/mlx.py)),
+behind the same decision engine as the transformers backend ([Decision
+checkpoints](#decision-checkpoints)): the same request checks, audio refused with 422, one
+request at a time on the model, and `/health` naming the backend (`mlx-vlm`). The weights run
+in the dtype they are stored in, bf16 for a decision checkpoint, unless `--dtype` says
+otherwise. It takes images whenever the checkpoint's `inputs` hold `image`; `--vision` is not
+needed. A checkpoint whose `config.json` transformers 5.2x wrote (`per_layer_config` in place
+of the bases' `global_head_dim`) is read in the bases' form.
 
 ```bash
 strands-decider ask CHECKPOINT --device mlx --state "A photo from the support chat." \
@@ -496,7 +501,8 @@ same code; their answers on a Mac are not yet measured.
 
 Limits. mlx-vlm is pinned to the release tested, because the backend relies on its Gemma 4
 internals. 4-bit makes no conformance claim until it is measured (spec section 10): a 4-bit E2B
-quantized with the same affine quantizer has agreed on only 88.9% of top codes. A request
-waits for at most 16 others on the backend's worker, and is refused after 300 s without a
-place; images are decoded two requests at a time. Each request encodes its state afresh: there is no cache across
-requests. Audio is not served.
+quantized with the same affine quantizer has agreed on only 88.9% of top codes. Called
+directly, outside the decision engine's one-at-a-time slot, the backend holds at most 16
+requests waiting for or on its worker thread, refuses the next after 300 s without a place,
+and decodes images for two requests at a time, on the calling thread, as numpy. Each request
+encodes its state afresh: there is no cache across requests.
