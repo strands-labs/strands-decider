@@ -3,8 +3,9 @@
 `decision_checkpoint` writes a directory in docs/spec.md's layout (section 9): the base's
 multimodal class saved by transformers (`Gemma4ForConditionalGeneration`, or
 `Gemma4UnifiedForConditionalGeneration` for the 12B's encoder-free design) in bf16,
-`processor_config.json`, the toy tokenizer of tests/core_support.py, `readout.safetensors`
-and `decision_config.json`. The decoder has a sliding window of 2, shorter than any prompt
+`processor_config.json`, a word-level tokenizer with Gemma 4's control tokens at their ids
+(`tokenizer()`, so that the core's `check_tokenizer` holds), `readout.safetensors` and
+`decision_config.json`. The decoder has a sliding window of 2, shorter than any prompt
 here, so a runtime that kept the window would answer differently; the Gemma 4 variant has
 E2B's KV-shared layers and per-layer embeddings. `intermediate_checkpoint` writes the layout
 the intermediate checkpoints have: a bare `Gemma4TextModel` and a decision_config.json from
@@ -23,9 +24,7 @@ transformers = pytest.importorskip("transformers")
 if not hasattr(transformers, "Gemma4ForConditionalGeneration"):
     pytest.skip("this transformers has no Gemma 4", allow_module_level=True)
 
-from core_support import toy_tokenizer  # noqa: E402
-
-from strands_decider.core import CODES  # noqa: E402
+from strands_decider.core import CODES, CONTROL_TOKEN_IDS  # noqa: E402
 
 GEMMA4 = "gemma4"  # E2B's design: per-layer embeddings, KV-shared layers
 # 26B-A4B's and 31B's: the same class, with bidirectional image blocks ("vision"), no per-layer
@@ -51,7 +50,25 @@ PROCESSOR_TYPES = {
 
 
 def tokenizer():
-    return toy_tokenizer()
+    """The toy tokenizer of tests/core_support.py, with Gemma 4's control tokens at Gemma 4's
+    ids (`CONTROL_TOKEN_IDS`) and `<eos>` at 1, so that a checkpoint's tokenizer passes the
+    core's `check_tokenizer`; words and codes take the free ids from 0 up."""
+    from tokenizers import AddedToken, Regex, Tokenizer, models, pre_tokenizers
+
+    words = ["<unk>", "\n", " ", ".", "<", ">", "/", '"', "=", "—", "answer", "model", "user"]
+    fixed = {"<eos>": 1, **CONTROL_TOKEN_IDS}
+    free = (i for i in range(10**6) if i not in fixed.values())
+    vocab = {w: next(free) for w in dict.fromkeys(words + list(CODES))}
+    vocab.update(fixed)
+    tok = Tokenizer(models.WordLevel(vocab, unk_token="<unk>"))
+    tok.pre_tokenizer = pre_tokenizers.Split(Regex(r"\w+|\s|[^\w\s]"), behavior="isolated")
+    tok.add_special_tokens([AddedToken(t, special=True) for t in fixed])
+    return tok
+
+
+def vocab_size(tok) -> int:
+    """Rows the model's embedding needs: the largest id, 258882, and one."""
+    return max(tok.get_vocab().values()) + 1
 
 
 def _text_kwargs(vocab: int) -> dict:
@@ -94,7 +111,7 @@ def model_config(kind: str, tok, *, vision: bool = True, text: dict | None = Non
         "image_token_id": tok.token_to_id("<|image|>"),
         "eoi_token_id": tok.token_to_id("<image|>"),
     }
-    vocab = tok.get_vocab_size()
+    vocab = vocab_size(tok)
     if kind in (GEMMA4, GEMMA4_VISION):
         if kind == GEMMA4_VISION:
             text = {**VISION_TEXT, **(text or {})}
@@ -208,7 +225,7 @@ def intermediate_checkpoint(path: Path, *, seed: int = 0, decision: dict | None 
     """A bare Gemma4TextModel with a decision_config.json from before the interface field."""
     tok = tokenizer()
     torch.manual_seed(seed)
-    model = transformers.Gemma4TextModel(gemma4_text_config(tok.get_vocab_size()))
+    model = transformers.Gemma4TextModel(gemma4_text_config(vocab_size(tok)))
     path.mkdir(parents=True, exist_ok=True)
     model.to(torch.bfloat16).save_pretrained(str(path))
     tok.save(str(path / "tokenizer.json"))

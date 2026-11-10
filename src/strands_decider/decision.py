@@ -25,9 +25,10 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
-from .core import STAGES, DecisionConfig, Readout, RenderedRequest, read, render
+from .core import STAGES, DecisionConfig, Readout, RenderedRequest, load_tokenizer, read, render
 from .core.config import FILENAME, IMAGE, INTERFACE
-from .core.request import NO_VISION, has_images
+from .core.readout import check_rendered, check_stage
+from .core.request import NO_VISION, has_images, parse_request
 from .refusals import EngineBusy, RequestRefused
 from .schema import (
     ChoiceQuestion,
@@ -182,6 +183,7 @@ class DecisionEngine:
                 f"the backend must say what forward returns: `outputs` is {stage!r}, not one "
                 f"of {STAGES}"
             )
+        check_stage(stage, readout, config)  # what reading its rows needs, before any request
         self.backend = backend
         self.stage: str = stage
         self.tokenizer = tokenizer
@@ -199,9 +201,14 @@ class DecisionEngine:
         return IMAGE in self.config.inputs and IMAGE in tuple(getattr(self.backend, "inputs", ()))
 
     def _render(self, payload: Any) -> RenderedRequest:
-        """The request rendered once, or the core's refusal of it, in the core's order: images
-        the checkpoint or the backend cannot take, before any is decoded; then the request's
-        schema, its images' files and audio, and the prompt's length."""
+        """The request rendered once, or the core's refusal of it, in the order the spec pins
+        (section 11.1) and `core.evaluate` keeps: the request's own checks, its images left
+        out; then images the checkpoint or the backend cannot take, before any is decoded;
+        then the images' files and the prompt's length, by rendering it."""
+        try:
+            parse_request(payload, images=False)
+        except ValueError as e:
+            raise RequestRefused(str(e)) from e
         if has_images(payload):
             if IMAGE not in self.config.inputs:
                 raise RequestRefused(
@@ -213,7 +220,7 @@ class DecisionEngine:
             if IMAGE not in tuple(getattr(self.backend, "inputs", ())):
                 raise RequestRefused(NO_VISION)
         try:
-            return render(
+            rendered = render(
                 payload,
                 self.tokenizer,
                 self.config.prompt,
@@ -221,6 +228,11 @@ class DecisionEngine:
             )
         except ValueError as e:
             raise RequestRefused(str(e)) from e
+        try:  # the checkpoint's prompt and code ids: the runtime's to get right, not the caller's
+            check_rendered(self.config, rendered)
+        except ValueError as e:
+            raise RuntimeError(str(e)) from e
+        return rendered
 
     def evaluate(self, request: SystemOneRequest | Mapping[str, Any]) -> SystemOneResponse:
         payload = request.model_dump() if isinstance(request, SystemOneRequest) else request
@@ -244,7 +256,7 @@ class DecisionEngine:
         finally:
             self._slots.release()
         try:
-            answers = read(rows, self.readout, self.config, rendered, inputs=self.stage)
+            answers = read(rows, self.readout, self.config, rendered, stage=self.stage)
             return SystemOneResponse.model_validate(
                 {
                     "model": self.model_name,
@@ -400,8 +412,6 @@ def load_decision_engine(
     that is the reference of docs/spec.md section 10."""
     loader = backend_loader(device)
     check_dtype(device, dtype)
-    from tokenizers import Tokenizer
-
     path = _local_dir(checkpoint, revision)
     with open(os.path.join(path, FILENAME), encoding="utf-8") as f:
         raw = json.load(f)
@@ -409,6 +419,7 @@ def load_decision_engine(
         raise refuse_intermediate(checkpoint)
     config = DecisionConfig.from_dict(raw)
     readout = Readout.load(path, config)
+    tokenizer = load_tokenizer(path, config)  # its control and code ids, before any weight
     backend = loader(
         path,
         device=device,
@@ -435,7 +446,7 @@ def load_decision_engine(
     name = model_name or os.path.basename(checkpoint.rstrip("/")) or checkpoint
     return DecisionEngine(
         backend,
-        Tokenizer.from_file(os.path.join(path, "tokenizer.json")),
+        tokenizer,
         config,
         readout,
         model_name=name,

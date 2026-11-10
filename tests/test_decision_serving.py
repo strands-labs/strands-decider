@@ -40,7 +40,7 @@ def test_checkpoint_kind(ckpt, tmp_path):
     assert checkpoint_kind(str(tmp_path)) is None  # no decision_config.json: v1
     other = tmp_path / "other"
     other.mkdir()
-    (other / "decision_config.json").write_text(json.dumps({"format_id": "pplx-decider"}))
+    (other / "decision_config.json").write_text(json.dumps({"format_id": "another-format"}))
     assert checkpoint_kind(str(other)) is None  # another format's file of the same name
 
 
