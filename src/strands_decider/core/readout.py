@@ -6,7 +6,8 @@
     p = softmax(z[:k])         float32, over the question's own k codes only
     p -> the answer            v1's response schema and confidence formulas
 
-This is the training reference's precision regime, and the vLLM plugin's (`compute_logits`).
+This is the training reference's precision regime, and that of strands-decider-vllm, the vLLM
+runtime.
 numpy has no bf16, so the GEMM is emulated: the products are summed in float64, the sum is
 rounded to float32 and then to bf16 by the float32's bits, round to nearest, ties to even
 (`round_to_bf16`). The hidden state is used as the decoder returns it.
@@ -39,7 +40,7 @@ MODEL_CONFIG_FILE = "config.json"
 HIDDEN = "hidden"  # h, the final-norm hidden state at the last token: nothing applied
 RAW_LOGITS = "raw_logits"  # z = W h: the readout applied, not the soft-cap or the temperature
 CAPPED_LOGITS = "capped_logits"  # tanh(z / c) * c: the soft-cap applied, not the temperature
-FINAL_LOGITS = "final_logits"  # tanh(z / c) * c / T: both (the vLLM plugin's compute_logits)
+FINAL_LOGITS = "final_logits"  # tanh(z / c) * c / T: both (as strands-decider-vllm returns them)
 PROBABILITIES = "probabilities"  # softmax of the final logits, over the k codes or all 255
 STAGES = (HIDDEN, RAW_LOGITS, CAPPED_LOGITS, FINAL_LOGITS, PROBABILITIES)
 
@@ -126,7 +127,7 @@ def readout_logits(weight: Any, hidden: Any) -> np.ndarray:
 
 
 def softcap(z: Any, c: float | None) -> np.ndarray:
-    """Gemma's final-logit soft-cap in float32, as the plugin computes it: `tanh(z / c) * c`,
+    """Gemma's final-logit soft-cap in float32, as strands-decider-vllm computes it: `tanh(z / c) * c`,
     each operation rounded to float32. None leaves z as it is (as float32)."""
     z32 = np.asarray(z, dtype=np.float32)
     if c is None:

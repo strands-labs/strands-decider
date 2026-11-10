@@ -2,8 +2,8 @@
 
 Torch-free: numpy and tokenizers. Nothing here needs Gemma 4's tokenizer; the end-to-end
 test uses a toy one. The precision regime (a bf16 GEMM, then float32) is checked against an
-independent reimplementation of the vLLM plugin's `compute_logits`, which rounds by
-arithmetic where the core rounds by bits.
+independent reimplementation of the arithmetic of strands-decider-vllm, the vLLM runtime,
+which rounds by arithmetic where the core rounds by bits.
 """
 
 from __future__ import annotations
@@ -63,7 +63,7 @@ def _bf16(x: float) -> float:
 
 
 def _after_the_gemm(z: float, c: float | None, t: float) -> float:
-    """The plugin's float32 steps on one bf16 logit: `tanh(z / c) * c`, then `z / T`."""
+    """strands-decider-vllm's float32 steps on one bf16 logit: `tanh(z / c) * c`, then `z / T`."""
     if c is not None:
         z = _f32(_f32(math.tanh(_f32(z / _f32(c)))) * _f32(c))
     return _f32(z / _f32(t)) if t != 1.0 else z
@@ -256,9 +256,9 @@ def test_stages_past_the_cap_say_so():
             code_probabilities(bad, 2, inputs=PROBABILITIES, softcap_c=C, temperature=1.0)
 
 
-def _plugin_compute_logits(w: list[list[float]], h: list[float], c: float, t: float) -> list[float]:
-    """An independent reimplementation of the vLLM plugin's `compute_logits` at the codes'
-    ids, one IEEE operation at a time:
+def _vllm_logits(w: list[list[float]], h: list[float], c: float, t: float) -> list[float]:
+    """An independent reimplementation of strands-decider-vllm's logits at the codes' ids,
+    one IEEE operation at a time:
 
         codes = self.readout(hidden_states.to(bf16)).float()   # a bf16 GEMM
         codes = torch.tanh(codes / self.softcap) * self.softcap  # float32
@@ -275,51 +275,51 @@ def _plugin_compute_logits(w: list[list[float]], h: list[float], c: float, t: fl
 
 @pytest.mark.parametrize("t", [1.0, 0.7, 1.9])
 @pytest.mark.parametrize("seed", [0, 1, 2])
-def test_read_matches_the_vllm_plugins_arithmetic(seed, t):
+def test_read_matches_the_vllm_runtimes_arithmetic(seed, t):
     """Random bf16 weights and hidden states, scaled so that many logits fall between 16
     and 32 (where bf16's spacing is 0.125) and some past the cap. The core's z is the
-    plugin's bit for bit; its probabilities, from every stage, are the plugin's softmax."""
+    vLLM runtime's bit for bit; its probabilities, from every stage, are its softmax."""
     rng = np.random.default_rng(seed)
     bf16 = np.vectorize(_bf16, otypes=[np.float64])
     hidden = 64
     h = bf16(rng.normal(0, 1, hidden))
     scale = np.array([0.25, 0.5, 1.0, 2.0, 4.0])[np.arange(255) % 5, None]
     w = bf16(rng.normal(0, 1, (255, hidden)) * scale)
-    z_plugin = [
+    z_vllm = [
         _bf16(_f32(math.fsum(a * b for a, b in zip(r, h.tolist(), strict=True))))
         for r in w.tolist()
     ]
-    za = np.abs(np.array(z_plugin))
+    za = np.abs(np.array(z_vllm))
     assert np.sum((za >= 16) & (za < 32)) >= 20 and np.sum(za >= 32) >= 5, "cover the band"
 
     # The GEMM: bit for bit (float32 holds bf16 exactly).
     z = readout_logits(w, h)
-    assert z.dtype == np.float32 and z.tolist() == z_plugin
-    assert readout_logits(w, np.stack([h, h])).tolist() == [z_plugin, z_plugin]
+    assert z.dtype == np.float32 and z.tolist() == z_vllm
+    assert readout_logits(w, np.stack([h, h])).tolist() == [z_vllm, z_vllm]
 
     # The float32 cap and temperature: within a few float32 steps (numpy's float32 tanh
     # and the correctly rounded one may differ in the last bits).
-    final_plugin = np.array(_plugin_compute_logits(w.tolist(), h.tolist(), C, t))
+    final_vllm = np.array(_vllm_logits(w.tolist(), h.tolist(), C, t))
     capped = softcap(z, C)
     final = capped / np.float32(t) if t != 1.0 else capped
-    assert np.allclose(final, final_plugin, rtol=0, atol=2e-5)
+    assert np.allclose(final, final_vllm, rtol=0, atol=2e-5)
 
     # read() from every stage, for questions of 2, 7, 40 and 255 options.
     ks = (2, 7, 40, 255)
     rendered = _request(*[_rq("choice", [f"o{i}" for i in range(k)], name=f"k{k}") for k in ks])
     cfg = _config(temperature=t)
-    p255 = _softmax64(final_plugin.tolist())  # what vLLM returns for logprobs: 255
+    p255 = _softmax64(final_vllm.tolist())  # what vLLM returns for logprobs: 255
     rows = {
         HIDDEN: [h] * len(ks),
-        RAW_LOGITS: [np.array(z_plugin)] * len(ks),
+        RAW_LOGITS: [np.array(z_vllm)] * len(ks),
         CAPPED_LOGITS: [capped] * len(ks),
-        FINAL_LOGITS: [final_plugin[:k] for k in ks],  # the question's own codes only
+        FINAL_LOGITS: [final_vllm[:k] for k in ks],  # the question's own codes only
         PROBABILITIES: [np.array(p255)] * len(ks),
     }
     for stage in STAGES:
         got = question_probabilities(rows[stage], Readout(w, C), cfg, rendered, inputs=stage)
         for k in ks:
-            want = _softmax64(final_plugin[:k].tolist())
+            want = _softmax64(final_vllm[:k].tolist())
             assert np.allclose(got[f"k{k}"], want, rtol=0, atol=1e-5), (stage, k)
 
     # The regime matters: skipping the bf16 rounding (a float64 readout) moves these
@@ -327,7 +327,7 @@ def test_read_matches_the_vllm_plugins_arithmetic(seed, t):
     z64 = w @ h
     loose = [_softmax64((C * np.tanh(z64[:k] / C) / t).tolist()) for k in ks]
     gap = max(
-        np.max(np.abs(np.array(lo) - _softmax64(final_plugin[:k].tolist())))
+        np.max(np.abs(np.array(lo) - _softmax64(final_vllm[:k].tolist())))
         for lo, k in zip(loose, ks, strict=True)
     )
     assert gap > 1e-4

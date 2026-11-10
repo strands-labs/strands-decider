@@ -1,7 +1,8 @@
 """`decision_config.json` (docs/spec.md, The decision_config.json schema): strict, with
-an `interface` discriminator, the inputs a checkpoint takes, and a required provenance whose
-check catches common leaks of internal locations (not a guarantee). Torch-free; the fixture
-is the E2B checkpoint's file reduced to the schema's fields."""
+an `interface` discriminator, the inputs a checkpoint takes, and a required provenance in
+public formats: a Hub id, a commit, a model name and an https URL. Keeping private paths out
+of a released checkpoint is the release export's job, not the loader's. Torch-free; the
+fixture is the E2B checkpoint's file reduced to the schema's fields."""
 
 from __future__ import annotations
 
@@ -111,7 +112,7 @@ def test_missing_required_fields_are_errors(field):
 
 @pytest.mark.parametrize(
     "interface",
-    ["<missing>", None, "", "strands-decider-v1", "Strands-Decider", "pplx-decider", 2],
+    ["<missing>", None, "", "strands-decider-v1", "Strands-Decider", "other-decider", 2],
 )
 def test_the_interface_field_is_required_and_exact(interface):
     d = _with(interface=interface)
