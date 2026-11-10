@@ -289,8 +289,9 @@ src/strands_decider/              -- published package (inference only)
                   rendering, the code readout, decision_config.json, the runtime contract
   backends/       runtimes for decision checkpoints; transformers.py runs them on PyTorch
                   (CPU, CUDA, MPS), with images, and is the spec's reference runtime;
-                  mlx.py runs them on Apple silicon through mlx-vlm (--device mlx), and
-                  mlx_convert.py writes their MLX artifacts (strands-decider convert-mlx)
+                  mlx.py runs them on Apple silicon through mlx-vlm (--device mlx),
+                  mlx_convert.py writes their MLX artifacts (strands-decider convert-mlx),
+                  and mlx_format.py holds the rules both share that need no MLX
   decision.py     decision checkpoints behind ask and serve: the core, and a backend per
                   device kind (BACKENDS; another runtime registers its own)
 
