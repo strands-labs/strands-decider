@@ -29,8 +29,10 @@ from .images import (
     MAX_IMAGE_PIXELS,
     MAX_IMAGES,
     EncodedImage,
+    check_decoded_size,
     decode_image,
     image_size,
+    resize_target,
     soft_tokens,
 )
 from .prompt import (
@@ -94,6 +96,7 @@ __all__ = [
     "RenderedRequest",
     "answer",
     "attention_mask",
+    "check_decoded_size",
     "check_tokenizer",
     "code_probabilities",
     "codes_for",
@@ -109,6 +112,7 @@ __all__ = [
     "render",
     "render_content",
     "render_text",
+    "resize_target",
     "round_to_bf16",
     "soft_tokens",
     "softcap",
