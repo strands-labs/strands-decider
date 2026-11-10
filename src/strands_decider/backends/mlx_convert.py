@@ -17,8 +17,9 @@ and everything else is copied byte for byte:
 - The artifact is reloaded and checked: the same decision files, and no quantized module
   outside the decoder.
 
-Quantized formats have no top-1 bound recorded in the spec yet (section 10); a quantized
-artifact makes no conformance claim until its format has one.
+A quantized artifact makes no conformance claim until its bit width has been measured against
+the reference (docs/spec.md section 10; `mlx.MEASURED_BITS`): 8-bit has, 4-bit has not, and
+converting to it, or loading it, says so.
 """
 
 from __future__ import annotations
@@ -27,6 +28,8 @@ import hashlib
 import json
 import os
 import shutil
+import tempfile
+import warnings
 from pathlib import Path
 from typing import Any
 
@@ -40,6 +43,7 @@ from .mlx import (
     PROCESSOR_CONFIG,
     TOKENIZER,
     VISION_MODULES,
+    conformance_notice,
     load_mlx_model,
     model_type,
 )
@@ -99,7 +103,7 @@ def convert(
     from mlx_vlm.utils import save_config, save_weights
 
     src = checkpoint_path(source)
-    dst = Path(dest)
+    dst = Path(dest).resolve()
     if bits is not None and bits not in BITS:
         raise ValueError(f"bits must be one of {BITS} (or none, for bf16), not {bits!r}")
     if dst.exists() and any(dst.iterdir()):
@@ -115,20 +119,36 @@ def convert(
     if "quantization" in config:
         raise ValueError(f"{src} is already a quantized MLX artifact; convert the bf16 checkpoint")
 
-    model = load_mlx_model(src, keep=AUDIO_MODULES + VISION_MODULES)
-    if bits is not None:
-        model, config = quantize_model(
-            model, config, group_size, bits, quant_predicate=decoder_only(model)
-        )
-    dst.mkdir(parents=True, exist_ok=True)
-    save_weights(dst, model, donate_weights=True)
-    del model
-    mx.clear_cache()
-    save_config(config, config_path=dst / "config.json")
-    for name in REQUIRED + OPTIONAL:
-        if (src / name).is_file():
-            shutil.copyfile(src / name, dst / name)
-    return verify(src, dst)
+    notice = conformance_notice({"quantization": {"bits": bits}} if bits else {})
+    if notice:
+        warnings.warn(notice, stacklevel=2)
+    # Written beside `dest` and renamed into place once verified, so that a failed or rejected
+    # conversion never leaves a directory that loads like an artifact.
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    work = Path(tempfile.mkdtemp(prefix=f".{dst.name}.", suffix=".partial", dir=dst.parent))
+    try:
+        model = load_mlx_model(src, keep=AUDIO_MODULES + VISION_MODULES)
+        if bits is not None:
+            model, config = quantize_model(
+                model, config, group_size, bits, quant_predicate=decoder_only(model)
+            )
+        save_weights(work, model, donate_weights=True)
+        del model
+        mx.clear_cache()
+        save_config(config, config_path=work / "config.json")
+        for name in REQUIRED + OPTIONAL:
+            if (src / name).is_file():
+                shutil.copyfile(src / name, work / name)
+        summary = verify(src, work)
+        if dst.exists():
+            dst.rmdir()  # empty, as checked above
+        work.rename(dst)
+    except BaseException:
+        shutil.rmtree(work, ignore_errors=True)
+        raise
+    summary["artifact"] = str(dst)
+    summary["notice"] = notice
+    return summary
 
 
 def verify(source: Path, artifact: Path) -> dict[str, Any]:

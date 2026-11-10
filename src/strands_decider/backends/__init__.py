@@ -29,10 +29,11 @@ def is_decision_checkpoint(checkpoint: str | os.PathLike[str]) -> bool:
 
 
 def checkpoint_path(checkpoint: str | os.PathLike[str]) -> Path:
-    """`checkpoint` if it is a local directory, else the Hub repo it names, downloaded."""
+    """`checkpoint` as an absolute path if it is a local directory, else the Hub repo it
+    names, downloaded."""
     p = os.fspath(checkpoint)
     if os.path.isdir(p):
-        return Path(p)
+        return Path(p).resolve()
     try:
         from huggingface_hub import snapshot_download
 

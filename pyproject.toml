@@ -44,13 +44,17 @@ vision = ["pillow>=13", "torchvision>=0.22"]
 # `--device mlx`: the torso on Apple silicon's GPU through mlx-lm
 # (src/strands_decider/mlx_engine.py), and decision checkpoints through mlx-vlm
 # (src/strands_decider/backends/mlx.py).
-# mlx-lm and mlx-vlm are capped at the minor version tested: the backends use mlx-lm's Qwen3.5
-# module layout and prompt-cache classes, and mlx-vlm's Gemma 4 classes, caches and image
-# processors, which are internals.
+# mlx-lm is capped at the minor version tested: v1's engine uses its Qwen3.5 module layout and
+# prompt-cache classes, which are internals. mlx-vlm is pinned to the release tested: the
+# backend relies on behaviour no release promises (a passed mask reaches every layer as it is,
+# `logits_to_keep` through the KV-shared layers, its caches and image processors), and a patch
+# release that changed it would change answers without an error. mlx-vlm 0.7.12 needs
+# mlx 0.32.4 and no mlx-lm. Pillow decodes and resizes images.
 mlx = [
     "mlx>=0.32.4; sys_platform == 'darwin' and platform_machine == 'arm64'",
     "mlx-lm>=0.32,<0.33; sys_platform == 'darwin' and platform_machine == 'arm64'",
-    "mlx-vlm>=0.7.12,<0.8; sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "mlx-vlm==0.7.12; sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "pillow>=13; sys_platform == 'darwin' and platform_machine == 'arm64'",
 ]
 # `--device cuda`: flash-linear-attention's Triton kernels for the Gated DeltaNet layers. The conv
 # layer's kernel, causal-conv1d, compiles against the local CUDA toolkit and is not listed; on a

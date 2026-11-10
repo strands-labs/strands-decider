@@ -455,12 +455,15 @@ classes, unpatched:
 - The backend hands the core the final-norm hidden state, and the core's `Readout` applies the
   readout in the spec's precision regime.
 
-`strands-decider convert-mlx CHECKPOINT OUT [--bits 8]` writes an MLX artifact
-([`backends/mlx_convert.py`](../src/strands_decider/backends/mlx_convert.py)), which `ask` and
-`serve` load like the checkpoint. Only the decoder is quantized: the vision and audio encoders
-and their projections stay bf16, and `readout.safetensors`, `decision_config.json`,
-`processor_config.json` and the tokenizer are copied byte for byte. `mlx_vlm.convert` alone
-would lose the readout and quantize the audio projection.
+`strands-decider convert-mlx CHECKPOINT OUT [--bits 8|4]` writes an MLX artifact, bf16 without
+`--bits` ([`backends/mlx_convert.py`](../src/strands_decider/backends/mlx_convert.py)), which
+`ask` and `serve` load like the checkpoint. Only the decoder is quantized: the vision and audio
+encoders and their projections stay bf16, and `readout.safetensors`, `decision_config.json`,
+`processor_config.json` and the tokenizer are copied byte for byte. The artifact is written
+beside `OUT`, reloaded and checked, and only then renamed to `OUT`. `mlx_vlm.convert` alone
+would lose the readout and quantize the audio projection. 8-bit is the quantized format
+measured against the reference (below); a 4-bit artifact makes no conformance claim, and
+`convert-mlx` and loading it both say so.
 
 Measured on an M4 Pro (48 GB) with an intermediate Strands Decider v2 E2B checkpoint in the
 multimodal layout, against reference outputs computed with transformers in bf16 on a GPU, one
@@ -491,8 +494,9 @@ masked pass per prompt:
 The 12B, 26B-A4B and 31B load strictly, and convert to 8 bits (and the 26B-A4B to 4), with the
 same code; their answers on a Mac are not yet measured.
 
-Limits. mlx-vlm is pinned to the minor version tested, because the backend calls its Gemma 4
-internals. A quantized artifact makes no conformance claim until the spec records a bound for its
-format (spec section 10); a 4-bit E2B quantized with the same affine quantizer has agreed on
-only 88.9% of top codes. Each request encodes its state afresh: there is no cache across
+Limits. mlx-vlm is pinned to the release tested, because the backend relies on its Gemma 4
+internals. 4-bit makes no conformance claim until it is measured (spec section 10): a 4-bit E2B
+quantized with the same affine quantizer has agreed on only 88.9% of top codes. A request
+waits for at most 16 others on the backend's worker, and is refused after 300 s without a
+place; images are decoded two requests at a time. Each request encodes its state afresh: there is no cache across
 requests. Audio is not served.

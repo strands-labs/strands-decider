@@ -46,6 +46,7 @@ import json
 import math
 import os
 import tempfile
+import threading
 import warnings
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
@@ -69,6 +70,12 @@ from ..core.images import IMAGE_FORMATS, MAX_SOFT_TOKENS, PATCH_SIZE, POOLING_KE
 from ..core.readout import READOUT_FILE
 from ..core.request import NO_VISION
 from . import checkpoint_path
+
+# Requests whose images are decoded at once, requests waiting for or on the worker thread,
+# and how long a request past them waits for a place before it is refused.
+DECODE_SLOTS = 2
+MAX_PENDING = 16
+QUEUE_TIMEOUT = 300.0
 
 # MLX keeps freed buffers for reuse, by default up to its memory limit (nearly all of RAM); v1's
 # MLX engine caps the cache at 1 GiB, and so does this backend.
@@ -119,6 +126,9 @@ def load_mlx_model(path: Path, *, keep: Sequence[str] = ()) -> Any:
     directory of links to everything but the readout."""
     from mlx_vlm.utils import load_model
 
+    # Absolute, so that the links below point at the files wherever they are resolved from:
+    # a relative link target is read against the link's own directory.
+    path = Path(path).resolve()
     if (path / INDEX).exists():
         model = load_model(path, lazy=True, strict=True)
     else:
@@ -214,7 +224,33 @@ def prepare_image(image: RenderedImage, processor: Any) -> dict[str, np.ndarray]
             f"the image processor gives {list(counts)} soft tokens for a {pil.size[0]}x"
             f"{pil.size[1]} image whose prompt holds {image.tokens}"
         )
-    return {k: np.asarray(v) for k, v in data.items() if k != "num_soft_tokens_per_image"}
+    out = {k: v for k, v in data.items() if k != "num_soft_tokens_per_image"}
+    # This runs off the worker thread, so it must be numpy: an MLX array here would be MLX
+    # work on the caller's thread.
+    wrong = {k: type(v).__name__ for k, v in out.items() if not isinstance(v, np.ndarray)}
+    if wrong:
+        raise TypeError(f"the image processor returned {wrong}, not numpy arrays")
+    return out
+
+
+# ---- quantized artifacts -----------------------------------------------------------------------
+
+# The quantized MLX formats measured against a checkpoint's reference (docs/spec.md section 10):
+# an 8-bit E2B agreed with it on 98.83% of top codes over 1,200 golden prompts. Another bit
+# width makes no conformance claim until it is measured and recorded.
+MEASURED_BITS = (8,)
+
+
+def conformance_notice(model_config: dict[str, Any]) -> str | None:
+    """The notice a quantized artifact of an unmeasured bit width carries, from its
+    config.json's `quantization`; None for bf16 and for MEASURED_BITS."""
+    q = model_config.get("quantization")
+    if not q or q.get("bits") in MEASURED_BITS:
+        return None
+    return (
+        f"a {q.get('bits')}-bit MLX artifact makes no conformance claim: no top-1 bound has "
+        f"been measured for its format (docs/spec.md section 10)"
+    )
 
 
 # ---- the backend -----------------------------------------------------------------------------
@@ -226,13 +262,20 @@ def _everything(keys: int) -> Any:
     return mx.ones((1, keys), dtype=mx.bool_)
 
 
+class BackendBusy(RuntimeError):
+    """More requests are waiting for the MLX backend than it queues."""
+
+
 class MLXBackend:
     """`strands_decider.core.Backend` on mlx-vlm: one row per question, the final-norm hidden
     state at its last token. Build one with `load_backend`.
 
     Every MLX call runs on one worker thread the backend owns: MLX's arrays and Metal
     streams belong to the thread that made them, and a server calls from a pool. Images are
-    decoded and prepared on the caller's thread."""
+    decoded and prepared, as numpy, on the caller's thread, `decode_slots` requests at a
+    time: one image may decode to tens of megabytes. At most `max_pending` requests wait for
+    or run on the worker; another waits `queue_timeout` seconds for a place, then is refused
+    with `BackendBusy`."""
 
     outputs = HIDDEN
 
@@ -245,6 +288,9 @@ class MLXBackend:
         unified: bool,
         share_state: bool = True,
         image_token_id: int,
+        decode_slots: int = DECODE_SLOTS,
+        max_pending: int = MAX_PENDING,
+        queue_timeout: float = QUEUE_TIMEOUT,
     ) -> None:
         self.model = model
         self.processor = processor
@@ -253,6 +299,10 @@ class MLXBackend:
         self.unified = unified
         self.image_token_id = image_token_id
         self._executor = executor
+        self._decoding = threading.BoundedSemaphore(decode_slots)
+        self._pending = threading.BoundedSemaphore(max_pending)
+        self._max_pending = max_pending
+        self._queue_timeout = queue_timeout
         self._decoder = model.language_model.model
         # The layers that own keys and values; a KV-shared layer reads an earlier one's.
         self._owners = int(self._decoder.first_kv_shared_layer_idx)
@@ -273,8 +323,20 @@ class MLXBackend:
                 raise ValueError(
                     f"state ids [{image.start}, {image.end}) are not an image's placeholders"
                 )
-        pixels = [prepare_image(image, self.processor) for image in images]
-        return self._executor.submit(self._forward, state, questions, images, pixels).result()
+        if not self._pending.acquire(timeout=self._queue_timeout):
+            raise BackendBusy(
+                f"the MLX backend has {self._max_pending} requests waiting or running; "
+                f"none finished within {self._queue_timeout:g} s"
+            )
+        try:
+            if images:
+                with self._decoding:
+                    pixels = [prepare_image(image, self.processor) for image in images]
+            else:
+                pixels = []
+            return self._executor.submit(self._forward, state, questions, images, pixels).result()
+        finally:
+            self._pending.release()
 
     def close(self) -> None:
         """Stop the worker thread. The backend cannot run after this."""
@@ -398,7 +460,11 @@ def load_backend(
     if IMAGE in cfg.inputs and processor is None:
         warnings.warn(f"{path}: images are not supported: {why}", stacklevel=2)
     with open(path / "config.json", encoding="utf-8") as f:
-        image_token_id = int(json.load(f)["image_token_id"])
+        model_config = json.load(f)
+    image_token_id = int(model_config["image_token_id"])
+    notice = conformance_notice(model_config)
+    if notice:
+        warnings.warn(f"{path}: {notice}", stacklevel=2)
     executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="mlx-backend")
 
     def build() -> MLXBackend:
@@ -444,6 +510,9 @@ class MLXEngine:
     `evaluate(SystemOneRequest) -> SystemOneResponse`, `cfg` and `model.config`. Requests
     are answered by `strands_decider.core.evaluate` over an `MLXBackend`. Build one with
     `load_engine`."""
+
+    # serve calls `warm_up` instead of its own per-batch-size warm-up (server.create_app).
+    warms_itself = True
 
     def __init__(
         self,

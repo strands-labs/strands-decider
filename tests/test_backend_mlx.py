@@ -232,10 +232,14 @@ def edit_json(path: Path, name: str, **changes) -> None:
     p.write_text(json.dumps(d))
 
 
+CKPT_DIRS: dict[str, Path] = {}
+
+
 @pytest.fixture(scope="module")
 def ckpts(tmp_path_factory):
     root = tmp_path_factory.mktemp("mlx-ckpts")
-    return {kind: build(kind, root / kind) for kind in KINDS}
+    CKPT_DIRS.update({kind: build(kind, root / kind) for kind in KINDS})
+    return CKPT_DIRS
 
 
 @pytest.fixture(scope="module")
@@ -271,22 +275,61 @@ def _torch_model(path: str):
     ).eval()
 
 
+def _unified_reference_pixels(pil, settings: dict) -> tuple[np.ndarray, np.ndarray]:
+    """The 12B's pixels as transformers' `Gemma4UnifiedImageProcessor` makes them, in numpy,
+    from an image already resized to multiples of 48: scaled to [0, 1], cut into 16-pixel
+    patches with their (x, y) positions, then each 3 x 3 group merged into one 48-pixel patch
+    (`patches_merge`: the groups in row-major order, each a 48 x 48 x 3 block), padded to
+    `max_soft_tokens` with position -1. Written from transformers' code, not mlx-vlm's."""
+    p, k, n = settings["patch_size"], settings["pooling_kernel_size"], settings["max_soft_tokens"]
+    img = np.asarray(pil, dtype=np.float32).transpose(2, 0, 1) * np.float32(
+        settings["rescale_factor"]
+    )
+    c, h, w = img.shape
+    small = img.reshape(c, h // p, p, w // p, p).transpose(1, 3, 2, 4, 0).reshape(-1, p * p * c)
+    gx, gy = np.meshgrid(np.arange(w // p), np.arange(h // p), indexing="xy")
+    pos = np.stack([gx, gy], -1).reshape(-1, 2)
+    max_x = pos[:, 0].max() + 1
+    kernel, within = pos // k, pos % k
+    order = (k * k * kernel[:, 0] + k * max_x * kernel[:, 1]) + (within[:, 0] + within[:, 1] * k)
+    perm = np.argsort(order, kind="stable")
+    length = small.shape[0] // (k * k)
+    grouped = small[perm].reshape(length, k, k, p, p, c).transpose(0, 1, 3, 2, 4, 5)
+    merged = grouped.reshape(length, k * p * k * p * c)
+    merged_pos = (pos[perm] // k).reshape(length, k * k, 2).min(axis=1)
+    pad = n - length
+    merged = np.concatenate([merged, np.zeros((pad, merged.shape[1]), np.float32)])
+    merged_pos = np.concatenate([merged_pos, -np.ones((pad, 2), merged_pos.dtype)])
+    return merged, merged_pos
+
+
 def _torch_pixels(path: Path, images, backend) -> dict:
-    if backend.unified:  # transformers' 12B processor needs torchvision: the backend's pixels
-        px = [prepare_image(im, backend.processor) for im in images]
-        return {
-            "pixel_values": torch.tensor(np.concatenate([p["pixel_values"] for p in px])),
-            "image_position_ids": torch.tensor(
-                np.concatenate([p["image_position_ids"] for p in px])
-            ),
-        }
     settings = json.loads((path / "processor_config.json").read_text())["image_processor"]
     settings = {k: v for k, v in settings.items() if k != "image_processor_type"}
-    processor = transformers.Gemma4ImageProcessorPil(**{**settings, "do_resize": False})
     pils = []
     for im in images:
         pil = decode_image(im.data)
         pils.append(pil.resize(resized_size(*pil.size), Image.Resampling.BICUBIC))
+    if backend.unified:
+        try:  # transformers' own 12B processor needs torchvision
+            import torchvision  # noqa: F401
+
+            processor = transformers.Gemma4UnifiedImageProcessor(**{**settings, "do_resize": False})
+            out = processor(images=pils, return_tensors="pt")
+            return {k: v for k, v in out.items() if k != "num_soft_tokens_per_image"}
+        except ImportError:
+            pass
+        ref = [_unified_reference_pixels(pil, settings) for pil in pils]
+        # The backend's own pixels must be these, before the model sees either.
+        for im, (pv, pos) in zip(images, ref, strict=True):
+            ours = prepare_image(im, backend.processor)
+            np.testing.assert_allclose(ours["pixel_values"][0], pv, atol=1e-6)
+            np.testing.assert_array_equal(ours["image_position_ids"][0], pos)
+        return {
+            "pixel_values": torch.tensor(np.stack([pv for pv, _ in ref])),
+            "image_position_ids": torch.tensor(np.stack([pos for _, pos in ref])),
+        }
+    processor = transformers.Gemma4ImageProcessorPil(**{**settings, "do_resize": False})
     out = processor(images=pils, return_tensors="pt")
     assert [int(n) for n in out["num_soft_tokens_per_image"]] == [im.tokens for im in images]
     return {k: v for k, v in out.items() if k != "num_soft_tokens_per_image"}
@@ -777,3 +820,146 @@ def test_cli_ask_and_convert(bf16_ckpts, tmp_path, monkeypatch):
     result = runner.invoke(cli.app, [*args, "--choice", "Which colour ?=red,blue"])
     assert result.exit_code == 0, result.output
     assert set(json.loads(result.output)["answers"]["choice_0"]["probabilities"]) == {"red", "blue"}
+
+
+# ---- paths, conversion failures, bounds, notices -------------------------------------------------
+
+
+def test_a_relative_path_loads_and_converts(bf16_ckpts, tmp_path, monkeypatch):
+    """E2B, E4B and the 12B ship one model.safetensors and no index, so they load through a
+    directory of links; a relative path must still point the links at the files."""
+    src = bf16_ckpts["e2b"]
+    assert not (src / "model.safetensors.index.json").exists()
+    monkeypatch.chdir(src.parent)
+    b = load_backend(src.name)
+    try:
+        rows = b.forward(STATE, QUESTIONS[:1])
+    finally:
+        b.close()
+    monkeypatch.chdir(tmp_path)
+    shutil.copytree(src, tmp_path / "ckpt")
+    summary = convert("ckpt", "mlx")
+    assert summary["artifact"] == str(tmp_path / "mlx")
+    c = load_backend("mlx")
+    try:
+        np.testing.assert_array_equal(c.forward(STATE, QUESTIONS[:1]), rows)
+    finally:
+        c.close()
+
+
+def test_a_failed_conversion_leaves_nothing(bf16_ckpts, tmp_path, monkeypatch):
+    from strands_decider.backends import mlx_convert
+
+    def reject(source, artifact):
+        raise AssertionError("rejected")
+
+    monkeypatch.setattr(mlx_convert, "verify", reject)
+    with pytest.raises(AssertionError, match="rejected"):
+        convert(bf16_ckpts["e2b"], tmp_path / "out", bits=8)
+    assert list(tmp_path.iterdir()) == []  # no artifact, and no partial directory beside it
+
+
+def test_4_bit_says_it_makes_no_conformance_claim(bf16_ckpts, tmp_path):
+    with pytest.warns(UserWarning, match="4-bit MLX artifact makes no conformance claim"):
+        summary = convert(bf16_ckpts["e2b"], tmp_path / "q4", bits=4)
+    assert summary["quantization"]["bits"] == 4 and summary["notice"]
+    with pytest.warns(UserWarning, match="no conformance claim"):
+        load_backend(tmp_path / "q4").close()
+    import warnings
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")  # 8-bit is measured: no notice
+        q8 = convert(bf16_ckpts["e2b"], tmp_path / "q8", bits=8)
+        assert q8["notice"] is None
+        load_backend(tmp_path / "q8").close()
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_the_processor_hands_over_numpy(kind, backends):
+    """Images are prepared on the caller's thread, so their pixels must not be MLX arrays."""
+    rendered = render({**REQUEST, "images": [png("red")]}, TOK, "strands-plain")
+    px = prepare_image(rendered.images[0], backends[kind].processor)
+    assert px and all(isinstance(v, np.ndarray) for v in px.values())
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_the_cache_grows_past_its_first_block_and_trims_back(kind, ckpts, backends):
+    """A 250-token state fills most of the cache's first 256-token block; a 20-token question
+    makes it grow, and the 5-token question after it must see the state alone."""
+    b = backends[kind]
+    state = [TOK.token_to_id("<bos>"), *ids(11, 249)]
+    long, short = ids(12, 20), ids(13, 5)
+    together = b.forward(state, [long, short, long])
+    np.testing.assert_array_equal(together[1], b.forward(state, [short])[0])
+    np.testing.assert_array_equal(together[0], together[2])
+    for q, row in zip([long, short], together, strict=False):
+        ref = reference(CKPT_DIRS[kind], state, q)
+        assert np.abs(row - ref).max() < 2e-4 * max(1.0, np.abs(ref).max())
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_forward_from_several_threads(kind, backends):
+    """A server calls from a pool: requests from eight threads, with and without images,
+    give what they give one at a time."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    b = backends[kind]
+    jobs = []
+    for i, color in enumerate([(200, 30, 30), (30, 200, 30), None, (30, 30, 200)] * 2):
+        req = {**REQUEST, "images": [png(color)]} if color else REQUEST
+        r = render({**req, "state": f"Request {i} ."}, TOK, "strands-plain")
+        jobs.append(
+            (list(r.state_ids), [list(q.question_ids) for q in r.questions.values()], r.images)
+        )
+    alone = [b.forward(*job) for job in jobs]
+    with ThreadPoolExecutor(8) as pool:
+        together = list(pool.map(lambda job: b.forward(*job), jobs))
+    for x, y in zip(alone, together, strict=True):
+        np.testing.assert_array_equal(x, y)
+
+
+def test_image_decoding_and_the_queue_are_bounded(backends, monkeypatch):
+    import threading
+    import time
+
+    from strands_decider.backends import mlx as backend_mlx
+
+    b = backends["e2b"]
+    live, peak, lock = [0], [0], threading.Lock()
+    real = backend_mlx.prepare_image
+
+    def counting(image, processor):
+        with lock:
+            live[0] += 1
+            peak[0] = max(peak[0], live[0])
+        time.sleep(0.05)
+        try:
+            return real(image, processor)
+        finally:
+            with lock:
+                live[0] -= 1
+
+    monkeypatch.setattr(backend_mlx, "prepare_image", counting)
+    r = render({**REQUEST, "images": [png("red")]}, TOK, "strands-plain")
+    job = (list(r.state_ids), [list(r.questions["urgent"].question_ids)], r.images)
+    from concurrent.futures import ThreadPoolExecutor
+
+    with ThreadPoolExecutor(6) as pool:
+        list(pool.map(lambda _: b.forward(*job), range(6)))
+    assert peak[0] == backend_mlx.DECODE_SLOTS
+
+    # One place in the queue, held by a request the worker is still running: the next waits
+    # its timeout, then is refused.
+    gate = threading.Event()
+    monkeypatch.setattr(b, "_pending", threading.BoundedSemaphore(1))
+    monkeypatch.setattr(b, "_max_pending", 1)
+    monkeypatch.setattr(b, "_queue_timeout", 0.2)
+    forward = b._forward
+    monkeypatch.setattr(b, "_forward", lambda *a: (gate.wait(10), forward(*a))[1])
+    first = threading.Thread(target=b.forward, args=(STATE, QUESTIONS[:1]))
+    first.start()
+    time.sleep(0.1)
+    with pytest.raises(backend_mlx.BackendBusy, match="1 requests waiting or running"):
+        b.forward(STATE, QUESTIONS[:1])
+    gate.set()
+    first.join()

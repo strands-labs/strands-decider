@@ -296,7 +296,8 @@ def convert_mlx_cmd(
         None,
         "--bits",
         help="Quantize the decoder to 8 or 4 bits. Omitted: bf16. The vision and audio "
-        "encoders and their projections stay bf16, and the readout is copied unchanged.",
+        "encoders and their projections stay bf16, and the readout is copied unchanged. "
+        "A 4-bit artifact makes no conformance claim (docs/spec.md section 10).",
     ),
     group_size: int = typer.Option(64, "--group-size", help="Quantization group size."),
 ) -> None:
@@ -304,6 +305,8 @@ def convert_mlx_cmd(
     from .backends.mlx_convert import convert
 
     summary = convert(checkpoint, out, bits=bits, group_size=group_size)
+    if summary["notice"]:
+        console.print(f"[yellow]note[/] {summary['notice']}")
     q = summary["quantization"]
     console.print(
         f"[green]wrote[/] {summary['artifact']}: {summary['bytes'] / 1e9:.2f} GB, "
