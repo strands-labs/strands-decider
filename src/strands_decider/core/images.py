@@ -8,7 +8,7 @@ the runtime's vision encoder fills the placeholders in. Decoding the pixels and 
 them for the encoder stay with the runtime.
 
 Validation follows v1's (`strands_decider.vision.decode_image`), with its messages: at most
-4 images; base64 as Python's `base64.b64decode(validate=True)` reads it, after an optional
+4 images; standard base64 by the spec's rule (not Python's, which varies by version), after an optional
 `data:image/...;base64,` prefix; one of the four formats, by its signature; at most
 4096 x 4096 pixels, from the header. v1 opens the file with Pillow, which reads the same
 header fields; where the core finds the header malformed it gives its own reason after v1's
@@ -104,6 +104,24 @@ class EncodedImage:
         return soft_tokens(self.width, self.height)
 
 
+_B64_DATA = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/")
+# RFC 4648 section 4: groups of four, the last one padded with one or two "=" when short.
+_B64_CANONICAL = re.compile(r"(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?")
+
+
+def _strict_b64decode(payload: str) -> bytes:
+    """Standard base64 and nothing else, by the spec's rule rather than Python's: what
+    `base64.b64decode(validate=True)` accepts, and the messages it gives, change between Python
+    3.10, 3.11, 3.12 and 3.13. Non-zero bits before the padding are accepted."""
+    if not payload.isascii():
+        raise ValueError("a character that is not ASCII")
+    if not _B64_DATA.issuperset(payload.replace("=", "")):
+        raise ValueError("a character outside the standard base64 alphabet")
+    if not _B64_CANONICAL.fullmatch(payload):
+        raise ValueError("its length or padding is wrong")
+    return base64.b64decode(payload, validate=True)
+
+
 def decode_image(data: str, max_pixels: int = MAX_IMAGE_PIXELS) -> EncodedImage:
     """One request image, checked as v1 checks it: the file, its format and its header size.
 
@@ -111,7 +129,7 @@ def decode_image(data: str, max_pixels: int = MAX_IMAGE_PIXELS) -> EncodedImage:
     not decoded."""
     payload = DATA_URI.sub("", data.strip())
     try:
-        raw = base64.b64decode(payload, validate=True)
+        raw = _strict_b64decode(payload)
     except (binascii.Error, ValueError) as e:
         raise ValueError(f"image is not valid base64: {e}") from e
     try:

@@ -176,20 +176,22 @@ def test_header_reading_never_decodes_pixels():
 # ---- validation and v1's messages ------------------------------------------------------------
 
 
-def test_base64_is_v1s():
-    """Standard base64 with its padding, nothing else, as Python's
-    `base64.b64decode(validate=True)` reads it; surrounding whitespace is stripped first."""
+def test_base64_is_standard_and_nothing_else():
+    """Standard base64 with its padding, nothing else; surrounding whitespace is stripped first.
+    The reasons are the core's own, the same on every Python version."""
     png = image_b64("checker-64x48.png")
     assert decode_image(f" \n{png}\t\n").data == image_bytes("checker-64x48.png")
+    alphabet = "a character outside the standard base64 alphabet"
+    padding = "its length or padding is wrong"
     cases = {
-        png[:-1]: "Incorrect padding",
-        png[:40] + "\n" + png[40:]: "Only base64 data is allowed",
-        png[:40] + " " + png[40:]: "Only base64 data is allowed",
-        png + "=": "Excess data after padding",
-        png + png: "Excess data after padding",
-        "=" + png[1:]: "Leading padding not allowed",
-        "-_-_": "Only base64 data is allowed",  # "+/+/" in the URL-safe alphabet
-        png[:40] + "é" + png[40:]: "string argument should contain only ASCII characters",
+        png[:-1]: padding,
+        png[:40] + "\n" + png[40:]: alphabet,
+        png[:40] + " " + png[40:]: alphabet,
+        png + "=": padding,
+        png + png: padding,
+        "=" + png[1:]: padding,
+        "-_-_": alphabet,  # "+/+/" in the URL-safe alphabet
+        png[:40] + "é" + png[40:]: "a character that is not ASCII",
     }
     for data, reason in cases.items():
         with pytest.raises(ValueError) as e:
@@ -198,6 +200,37 @@ def test_base64_is_v1s():
     with pytest.raises(ValueError) as e:
         decode_image("")
     assert str(e.value).startswith(COULD_NOT_READ)
+
+
+def test_base64_rule_is_python_312s_and_never_wider_than_this_pythons():
+    """The rule is RFC 4648's, which is what Python 3.12's `b64decode(validate=True)` accepts.
+    On any version, whatever the core accepts this interpreter's strict decode accepts too, to
+    the same bytes; on 3.12 the two accept exactly the same strings."""
+    import binascii
+    import sys
+
+    from strands_decider.core.images import _strict_b64decode
+
+    rng = random.Random(0)
+    alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+    for _ in range(5000):
+        s = "".join(rng.choice(alphabet) for _ in range(rng.randrange(0, 14)))
+        s += "=" * rng.choice((0, 0, 1, 2, 3))
+        if rng.random() < 0.2:
+            i = rng.randrange(len(s) + 1)
+            s = s[:i] + rng.choice("=-_ \n.A") + s[i:]
+        try:
+            got: bytes | None = _strict_b64decode(s)
+        except ValueError:
+            got = None
+        try:
+            want: bytes | None = base64.b64decode(s, validate=True)
+        except (binascii.Error, ValueError):
+            want = None
+        if got is not None:
+            assert got == want, s
+        if sys.version_info[:2] == (3, 12):
+            assert (got is None) == (want is None), s
 
 
 def test_data_uri_prefix_is_v1s():
