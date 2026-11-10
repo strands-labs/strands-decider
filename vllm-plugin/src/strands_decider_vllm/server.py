@@ -20,9 +20,12 @@ its choosing, which vLLM then uses as the image's cache key. This server takes v
 5. It reads each question's code probabilities from the processed logprobs and answers in v1's response format
    (``strands_decider.core.read``).
 
-Parsing, rendering and image decoding run on a small thread pool (``--preprocess-workers``), never on the event loop,
-so ``/ping`` and ``/health`` answer while images are decoded; vLLM runs its own image preprocessing on its renderer's
-threads. A body over ``--max-body-mb`` gets HTTP 413, and uvicorn answers 503 past ``--limit-concurrency``
+Parsing and rendering run on one lane of threads and image decoding on another (``--preprocess-workers`` each), never
+on the event loop, so ``/ping`` and ``/health`` answer while images are decoded and a request without images never
+waits behind a decode. vLLM 0.33 runs its own image preprocessing on its renderer's threads (tests/gpu/engine_checks.py
+checks both on a real engine). A body over ``--max-body-mb`` gets HTTP 413. Bodies over 1 MiB share a budget of
+``--max-buffered-mb`` buffered bytes, granted in arrival order and held until the request's images are decoded and
+its files dropped, so buffered bodies are bounded in aggregate. uvicorn answers 503 past ``--limit-concurrency``
 connections.
 
 Endpoints: ``POST /v1/systemone`` and ``POST /invocations`` (the same handler, for SageMaker), ``GET /ping`` and
@@ -35,6 +38,7 @@ only behind the deployment's own authentication, such as SageMaker's IAM-signed 
 from __future__ import annotations
 
 import asyncio
+import collections
 import inspect
 import io
 import json
@@ -54,20 +58,35 @@ from fastapi.responses import JSONResponse
 
 from . import ARCH_FOR_BASE, PREFIX_END_KEY, SERVER_CONFIG_KEY, __version__, logger
 
-#: Gemma 4's image control tokens.
-IMAGE_OPEN, IMAGE_SOFT, IMAGE_CLOSE = "<|image>", "<|image|>", "<image|>"
-#: The image processor settings the core's N is computed with (specification, section 3.2).
-PROCESSOR_SETTINGS = {"patch_size": 16, "pooling_kernel_size": 3, "max_soft_tokens": 280}
+#: Gemma 4's image placeholder, which vLLM's processor expands.
+IMAGE_SOFT = "<|image|>"
+#: The side, in pixels, of one soft token's patch group (pooling_kernel_size x patch_size, specification 3.2).
+SOFT_TOKEN_SIDE = 48
 IMAGE_FORMATS = ("PNG", "JPEG", "WEBP", "GIF")
 MAX_IMAGES = 4
 LOOPBACK = ("127.0.0.1", "::1", "localhost")
 #: The core library this server is written against, as pip writes it (pyproject.toml's ``serve`` extra).
 CORE_REQUIREMENT = "strands-decider>=0.3.1.dev0,<0.5"
+#: What the server uses from the core library, all required at startup.
+CORE_NAMES = (
+    "render",
+    "read",
+    "DecisionConfig",
+    "check_tokenizer",
+    "check_image_processor",
+    "check_decoded_size",
+    "resize_image",
+)
 
 #: The default body limit is four image files of IMAGE_FILE_BYTES each, base64-encoded, plus TEXT_BYTES of text and
-#: JSON. 32 MiB holds a photo of the core's largest size (4,096 x 4,096 pixels) as JPEG, WebP or a compressed PNG.
-IMAGE_FILE_BYTES = 32 * 2**20
-TEXT_BYTES = 16 * 2**20
+#: JSON (93 MiB). 16 MiB holds a photo of the core's largest size (4,096 x 4,096 pixels) as JPEG or WebP.
+IMAGE_FILE_BYTES = 16 * 2**20
+TEXT_BYTES = 8 * 2**20
+#: Bodies up to this size are read at once. A larger one first reserves its size from the server's budget of
+#: buffered body bytes (``--max-buffered-mb``), and holds it until its images are decoded and its files dropped.
+SMALL_BODY = 2**20
+#: The default budget of buffered body bytes over SMALL_BODY: about two and a half bodies at the default limit.
+BUFFERED_BYTES = 256 * 2**20
 
 
 def base64_size(n: int) -> int:
@@ -76,7 +95,7 @@ def base64_size(n: int) -> int:
 
 
 def default_max_body(takes_images: bool) -> int:
-    """The body limit for a checkpoint: the text budget, plus four image files when it takes images (187 MiB)."""
+    """The body limit for a checkpoint: the text budget, plus four image files when it takes images (93 MiB)."""
     return TEXT_BYTES + (MAX_IMAGES * base64_size(IMAGE_FILE_BYTES) if takes_images else 0)
 
 
@@ -91,16 +110,10 @@ class Mismatch(RuntimeError):
 # --- the core library -----------------------------------------------------------------------------------------------
 
 
-def stage_argument(read: Any) -> str:
-    """The name of ``read``'s argument for the rows' stage: ``stage``, or ``inputs`` in a core from before the
-    rename (which still accepts it, with a DeprecationWarning, after it)."""
-    return "stage" if "stage" in inspect.signature(read).parameters else "inputs"
-
-
 def require_core() -> SimpleNamespace:
     """What the server uses from the core library (``strands_decider.core``, ``CORE_REQUIREMENT``), or SystemExit
-    naming what is missing; ``serve`` calls it before the engine starts. ``read`` names the rows' stage ``stage=``;
-    a core that still calls it ``inputs=`` is given that name."""
+    naming what is missing; ``serve`` calls it before the engine starts. Every helper is required: the server keeps
+    no copy of the core's checks or its resize."""
     try:
         from strands_decider import core
         from strands_decider.core.request import has_images
@@ -109,25 +122,19 @@ def require_core() -> SimpleNamespace:
             f"strands-decider-vllm serve needs the core library, strands_decider.core ({CORE_REQUIREMENT}): "
             f"install it with pip install 'strands-decider-vllm[serve]' ({e})"
         ) from e
-    missing = [n for n in ("render", "read", "DecisionConfig") if not hasattr(core, n)]
+    missing = [n for n in CORE_NAMES if not hasattr(core, n)]
+    if "read" not in missing and "stage" not in inspect.signature(core.read).parameters:
+        missing.append("read(stage=)")
+    if "check_tokenizer" not in missing and (
+        "hand_over" not in inspect.signature(core.check_tokenizer).parameters
+    ):
+        missing.append("check_tokenizer(hand_over=)")
     if missing:
         raise SystemExit(
             f"strands-decider-vllm serve: the installed core library has no {', '.join(missing)}; the server "
-            f"needs {CORE_REQUIREMENT}"
+            f"needs {CORE_REQUIREMENT} at PR #129's head or later"
         )
-    return SimpleNamespace(
-        render=core.render,
-        read=core.read,
-        DecisionConfig=core.DecisionConfig,
-        has_images=has_images,
-        stage={stage_argument(core.read): "probabilities"},
-        # What a newer core provides; the server's own functions stand in for them without it.
-        check_tokenizer=getattr(core, "check_tokenizer", None),
-        check_image_processor=getattr(core, "check_image_processor", None),
-        check_decoded_size=getattr(core, "check_decoded_size", None),
-        resize_image=getattr(core, "resize_image", None) or bicubic,
-        resized_size=getattr(core, "resized_size", None) or resized_size,
-    )
+    return SimpleNamespace(**{n: getattr(core, n) for n in CORE_NAMES}, has_images=has_images)
 
 
 # --- the checkpoint -------------------------------------------------------------------------------------------------
@@ -201,24 +208,15 @@ def plugin_architecture(config: dict) -> str:
     )
 
 
-def processor_problem(processor_config: dict | None, check: Any = None) -> str | None:
+def processor_problem(processor_config: dict | None, check: Any) -> str | None:
     """Why image requests must be refused for this image processor configuration, or None. ``check`` is the core
-    library's ``check_image_processor`` when it has one."""
+    library's ``check_image_processor``."""
     if processor_config is None:
         return "the checkpoint has no processor_config.json"
-    if check is not None:
-        try:
-            check(processor_config)
-        except ValueError as e:
-            return str(e)
-        return None
-    ip = processor_config.get("image_processor") or {}
-    bad = {k: ip.get(k) for k, v in PROCESSOR_SETTINGS.items() if ip.get(k) != v}
-    if bad:
-        return (
-            f"the checkpoint's image processor has {bad}; N is defined for {PROCESSOR_SETTINGS} "
-            "(specification, section 3.2)"
-        )
+    try:
+        check(processor_config)
+    except ValueError as e:
+        return str(e)
     return None
 
 
@@ -246,59 +244,35 @@ def decode_image(data: bytes) -> Any:
     return img.convert("RGB")
 
 
-def resized_size(width: int, height: int) -> tuple[int, int]:
-    """Section 3.2's W and H: the largest size with sides that are multiples of 48 pixels and area at most
-    645,120 pixels at the image's aspect ratio, in IEEE double precision as the specification writes it. The image
-    then has (W / 48) x (H / 48) soft tokens, the core's N."""
-    side = PROCESSOR_SETTINGS["pooling_kernel_size"] * PROCESSOR_SETTINGS["patch_size"]
-    target = PROCESSOR_SETTINGS["max_soft_tokens"] * side * side
-    f = math.sqrt(target / (height * width))
-    h = math.floor((f * height) / side) * side
-    w = math.floor((f * width) / side) * side
-    if h == 0:
-        h, w = (
-            side,
-            min(math.floor(width / height) * side, PROCESSOR_SETTINGS["max_soft_tokens"] * side),
-        )
-    elif w == 0:
-        w, h = (
-            side,
-            min(math.floor(height / width) * side, PROCESSOR_SETTINGS["max_soft_tokens"] * side),
-        )
-    return w, h
-
-
-def bicubic(img: Any, width: int, height: int) -> Any:
-    """Section 11.1's resize, for a core without ``resize_image`` (which is the same): Pillow's bicubic resampling,
-    the width's pass first and then the height's, each left out when its size does not change. Pillow 10 to 12 do
-    this in one call; Pillow 13 may do the height first, so it is two calls, which give the same bytes on every
-    version."""
-    from PIL import Image
-
-    if img.size[0] != width:
-        img = img.resize((width, img.size[1]), Image.Resampling.BICUBIC)
-    if img.size[1] != height:
-        img = img.resize((width, height), Image.Resampling.BICUBIC)
-    return img
-
-
-def prepare_image(data: bytes, tokens: int, target: Any = None, resize: Any = None) -> Any:
-    """The decoded image, resized to W x H (specification, section 11.1). W and H come from the decoded size, after
-    the orientation: ``target(width, height)`` gives them, the core library's ``check_decoded_size`` for this image
-    when it has one (which refuses a decoded size that is neither the header's nor its transpose), else section
-    3.2's arithmetic. ``resize`` is the core's ``resize_image`` when it has one, else :func:`bicubic`, the same
-    rule."""
+def prepare_image(data: bytes, tokens: int, target: Any, resize: Any) -> Any:
+    """The decoded image, resized to W x H (specification, section 11.1). ``target(width, height)`` gives W and H
+    from the decoded size, after the orientation: the core's ``check_decoded_size`` for this image, which refuses a
+    decoded size that is neither the header's nor its transpose. ``resize`` is the core's ``resize_image``: Pillow's
+    bicubic resampling, the width's pass and then the height's, the same pixels on every Pillow version."""
     img = decode_image(data)
     try:
-        w, h = target(*img.size) if target is not None else resized_size(*img.size)
+        w, h = target(*img.size)
     except ValueError as e:  # the core refuses the decoded size
         raise Refused(str(e)) from e
-    side = PROCESSOR_SETTINGS["pooling_kernel_size"] * PROCESSOR_SETTINGS["patch_size"]
-    if (w // side) * (h // side) != tokens:
+    if (w // SOFT_TOKEN_SIDE) * (h // SOFT_TOKEN_SIDE) != tokens:
         raise Mismatch(
             f"a {img.size[0]} x {img.size[1]} image resizes to {w} x {h}, not to the core's {tokens} tokens"
         )
-    return (resize or bicubic)(img, w, h)
+    return resize(img, w, h)
+
+
+def without_image_files(rendered: Any) -> Any:
+    """``rendered`` with each image's file (``data``) dropped, once its pixels are decoded, so that a request does
+    not keep its files while the engine runs; everything else (spans, sha256, ids) is kept."""
+    from dataclasses import replace
+
+    if not rendered.images:
+        return rendered
+    images = tuple(replace(im, data=b"") for im in rendered.images)
+    return replace(
+        rendered,
+        questions={n: replace(q, images=images) for n, q in rendered.questions.items()},
+    )
 
 
 def collapse(state_ids: tuple[int, ...], images: Any, image_id: int) -> list[int]:
@@ -329,7 +303,7 @@ def probabilities(logprobs: dict, code_ids: tuple[int, ...]) -> list[float]:
 # --- requests -------------------------------------------------------------------------------------------------------
 
 
-def parse_body(raw: bytes) -> dict:
+def parse_body(raw: bytes | bytearray) -> dict:
     """The request's JSON object, or Refused."""
     try:
         body = json.loads(raw)
@@ -362,6 +336,46 @@ async def all_or_none(coros: list[Any]) -> list[Any]:
         raise
 
 
+class ByteBudget:
+    """A budget of buffered body bytes, granted in arrival order: a request waits until its reservation fits, and
+    later requests wait behind it, so a large body is not starved by smaller ones. One per event loop."""
+
+    def __init__(self, capacity: int) -> None:
+        self.capacity = max(1, capacity)
+        self.used = 0
+        self._waiters: collections.deque[tuple[int, asyncio.Future]] = collections.deque()
+
+    async def take(self, n: int) -> int:
+        """Reserve ``n`` bytes (at most the whole budget) and return the reservation."""
+        n = min(n, self.capacity)
+        if not self._waiters and self.used + n <= self.capacity:
+            self.used += n
+            return n
+        fut = asyncio.get_running_loop().create_future()
+        self._waiters.append((n, fut))
+        try:
+            await fut
+        except BaseException:
+            if fut.done() and not fut.cancelled():
+                self.give(n)  # granted as it was cancelled
+            else:
+                self._waiters.remove((n, fut))
+                self._grant()
+            raise
+        return n
+
+    def give(self, n: int) -> None:
+        self.used -= n
+        self._grant()
+
+    def _grant(self) -> None:
+        while self._waiters and self.used + self._waiters[0][0] <= self.capacity:
+            n, fut = self._waiters.popleft()
+            if not fut.done():
+                self.used += n
+                fut.set_result(None)
+
+
 class Decider:
     """The engine and what the server needs around it."""
 
@@ -375,6 +389,7 @@ class Decider:
         prefix_caching: bool,
         image_problem: str | None,
         max_body: int | None = None,
+        max_buffered: int = BUFFERED_BYTES,
         preprocess_workers: int = 4,
         tokenizer: Any = None,
         core: SimpleNamespace | None = None,
@@ -394,14 +409,18 @@ class Decider:
             if max_body is not None
             else default_max_body(self.takes_images and not image_problem)
         )
-        # Parsing, rendering and decoding run on this pool, at most preprocess_workers requests at once; the others
-        # wait on a semaphore, where a cancelled request leaves nothing queued.
+        self.max_buffered = max(max_buffered, self.max_body)
+        # Two lanes of preprocess_workers threads each: parsing and rendering, and image decoding. A request without
+        # images never waits behind another request's decode. Each lane's semaphore admits at most
+        # preprocess_workers at once, so nothing queues inside the pool, and a cancelled request leaves nothing
+        # behind.
         self.preprocess_workers = max(1, preprocess_workers)
         self._pool = ThreadPoolExecutor(
-            self.preprocess_workers, thread_name_prefix="strands-decider"
+            2 * self.preprocess_workers, thread_name_prefix="strands-decider"
         )
-        self._slots: asyncio.Semaphore | None = None
-        self._slots_loop: Any = None
+        self._loop: Any = None
+        self._lanes: dict[str, asyncio.Semaphore] = {}
+        self._budget: ByteBudget | None = None
 
     @property
     def takes_images(self) -> bool:
@@ -410,11 +429,33 @@ class Decider:
     def close(self) -> None:
         self._pool.shutdown(wait=False, cancel_futures=True)
 
-    def prepare(self, body: Any) -> tuple[Any, list[Any]]:
-        """The rendered request and its images resized to W x H. Blocking: it runs on the pool. ``body`` is the raw
-        body or its parsed JSON object."""
+    def _bind(self) -> asyncio.AbstractEventLoop:
+        loop = asyncio.get_running_loop()
+        if self._loop is not loop:
+            self._loop = loop
+            self._lanes = {
+                "render": asyncio.Semaphore(self.preprocess_workers),
+                "decode": asyncio.Semaphore(self.preprocess_workers),
+            }
+            self._budget = ByteBudget(self.max_buffered)
+        return loop
+
+    @property
+    def budget(self) -> ByteBudget:
+        self._bind()
+        assert self._budget is not None
+        return self._budget
+
+    async def _run(self, lane: str, fn: Any, *args: Any) -> Any:
+        loop = self._bind()
+        async with self._lanes[lane]:
+            return await loop.run_in_executor(self._pool, fn, *args)
+
+    def render_request(self, body: Any) -> Any:
+        """The rendered request (blocking: it runs on the render lane). ``body`` is the raw body or its parsed JSON
+        object."""
         if isinstance(body, (bytes, bytearray)):
-            body = parse_body(bytes(body))
+            body = parse_body(body)
         elif not isinstance(body, dict):
             raise Refused(f"the body must be a JSON object, not {type(body).__name__}")
         if self.core.has_images(body):
@@ -426,28 +467,30 @@ class Decider:
             if self.image_problem:
                 raise Refused(f"image requests are refused: {self.image_problem}")
         try:
-            rendered = self.core.render(
+            return self.core.render(
                 body, self.tokenizer, self.config.prompt, max_length=self.max_length
             )
         except ValueError as e:  # the core library refuses the request
             raise Refused(str(e)) from e
+
+    def prepare_images(self, rendered: Any) -> list[Any]:
+        """The request's images, decoded and resized to W x H (blocking: it runs on the decode lane)."""
         check = self.core.check_decoded_size
-        return rendered, [
+        return [
             prepare_image(
-                im.data,
-                im.tokens,
-                self.core.resized_size if check is None else (lambda w, h, im=im: check(im, w, h)),
-                self.core.resize_image,
+                im.data, im.tokens, lambda w, h, im=im: check(im, w, h), self.core.resize_image
             )
             for im in rendered.images
         ]
 
-    async def _offload(self, fn: Any, *args: Any) -> Any:
-        loop = asyncio.get_running_loop()
-        if self._slots is None or self._slots_loop is not loop:
-            self._slots, self._slots_loop = asyncio.Semaphore(self.preprocess_workers), loop
-        async with self._slots:
-            return await loop.run_in_executor(self._pool, fn, *args)
+    async def prepare(self, body: Any) -> tuple[Any, list[Any]]:
+        """The rendered request, its image files dropped, and its images resized to W x H."""
+        rendered = await self._run("render", self.render_request, body)
+        del body
+        if not rendered.images:
+            return rendered, []
+        images = await self._run("decode", self.prepare_images, rendered)
+        return without_image_files(rendered), images
 
     async def _question(
         self, q: Any, images: list[Any], rendered_images: Any
@@ -491,9 +534,8 @@ class Decider:
             getattr(final, "num_cached_tokens", None) or 0
         )
 
-    async def decide(self, body: Any) -> dict[str, Any]:
-        """The answers to one request. ``body`` is its raw JSON body or the parsed object."""
-        rendered, images = await self._offload(self.prepare, body)
+    async def answer(self, rendered: Any, images: list[Any]) -> dict[str, Any]:
+        """The answers to a prepared request (``prepare``)."""
         questions = list(rendered.questions.values())
         first, rest = questions[:1], questions[1:]
         if not self.prefix_caching:
@@ -501,7 +543,7 @@ class Decider:
         results = [await self._question(q, images, rendered.images) for q in first]
         results += await all_or_none([self._question(q, images, rendered.images) for q in rest])
         answers = self.core.read(
-            [p for p, _ in results], None, self.config, rendered, **self.core.stage
+            [p for p, _ in results], None, self.config, rendered, stage="probabilities"
         )
         return {
             "model": self.served_name,
@@ -514,30 +556,70 @@ class Decider:
             },
         }
 
+    async def decide(self, body: Any) -> dict[str, Any]:
+        """The answers to one request: ``body`` is its raw JSON body or the parsed object."""
+        rendered, images = await self.prepare(body)
+        del body
+        return await self.answer(rendered, images)
 
-async def read_body(request: Request, limit: int) -> bytes:
-    """The request's body, refused with HTTP 413 past ``limit`` bytes: by its Content-Length before reading, and by
-    what arrives while reading."""
+    async def decide_http(self, request: Request) -> dict[str, Any]:
+        """The answers to one HTTP request. A body over SMALL_BODY reserves its size from the budget of buffered
+        bytes before it is read past SMALL_BODY, and gives it back once the body is parsed and its images decoded,
+        before the engine runs."""
+        reserved = 0
+        try:
+            raw, reserved = await read_body(request, self.max_body, self.budget)
+            prepared = await self.prepare(raw)
+            del raw
+        finally:
+            if reserved:
+                self.budget.give(reserved)
+        return await self.answer(*prepared)
+
+
+def too_large(limit: int, n: int | None = None) -> HTTPException:
+    what = f"is {n} bytes" if n is not None else f"is over {limit} bytes"
+    return HTTPException(
+        status_code=413,
+        detail=f"the body {what}; this server takes at most {limit} (--max-body-mb)",
+    )
+
+
+async def read_body(
+    request: Request, limit: int, budget: ByteBudget | None = None
+) -> tuple[bytearray, int]:
+    """The request's body and the bytes it reserved from ``budget``. It is refused with HTTP 413 past ``limit``
+    bytes, by its Content-Length before reading and by what arrives while reading. A body declared over SMALL_BODY
+    reserves its declared size before reading; one without a length reads SMALL_BODY freely and then reserves the
+    limit, returning what it does not use once read. The caller gives the reservation back."""
     declared = request.headers.get("content-length")
+    n = None
     if declared is not None:
         try:
             n = int(declared)
         except ValueError:
             raise HTTPException(status_code=400, detail="Content-Length is not a number") from None
         if n > limit:
-            raise HTTPException(
-                status_code=413,
-                detail=f"the body is {n} bytes; this server takes at most {limit} (--max-body-mb)",
-            )
-    body = bytearray()
-    async for chunk in request.stream():
-        body += chunk
-        if len(body) > limit:
-            raise HTTPException(
-                status_code=413,
-                detail=f"the body is over {limit} bytes, the most this server takes (--max-body-mb)",
-            )
-    return bytes(body)
+            raise too_large(limit, n)
+    reserved = 0
+    try:
+        if budget is not None and n is not None and n > SMALL_BODY:
+            reserved = await budget.take(n)
+        body = bytearray()
+        async for chunk in request.stream():
+            body += chunk
+            if len(body) > limit:
+                raise too_large(limit)
+            if budget is not None and not reserved and len(body) > SMALL_BODY:
+                reserved = await budget.take(limit)
+        if budget is not None and reserved > len(body) and n is None:
+            budget.give(reserved - len(body))
+            reserved = len(body)
+    except BaseException:
+        if reserved:
+            budget.give(reserved)
+        raise
+    return body, reserved
 
 
 def build_app(decider_factory: Any) -> Any:
@@ -571,6 +653,7 @@ def build_app(decider_factory: Any) -> Any:
                 "prompt": d.config.prompt,
                 "max_length": d.max_length,
                 "max_body_bytes": d.max_body,
+                "max_buffered_bytes": d.max_buffered,
                 "prefix_cache": d.prefix_caching,
                 "version": __version__,
             }
@@ -579,9 +662,10 @@ def build_app(decider_factory: Any) -> Any:
     async def systemone(request: Request) -> JSONResponse:
         d: Decider = request.app.state.decider
         started = time.perf_counter()
-        raw = await read_body(request, d.max_body)
         try:
-            payload = await d.decide(raw)
+            payload = await d.decide_http(request)
+        except HTTPException:
+            raise
         except Exception as e:
             if refusal(e):
                 raise HTTPException(status_code=400, detail=str(e)) from e
@@ -678,6 +762,7 @@ class Settings:
     max_length: int
     image_problem: str | None
     max_body: int
+    max_buffered: int
 
 
 def settings(a: Any) -> Settings:
@@ -694,11 +779,11 @@ def settings(a: Any) -> Settings:
             "`vllm serve` and pre-rendered token ids instead (README, Serving)."
         ) from e
     tokenizer = checkpoint.tokenizer()
-    if core.check_tokenizer is not None:
-        try:
-            core.check_tokenizer(tokenizer, config)
-        except ValueError as e:
-            raise SystemExit(f"strands-decider-vllm serve: tokenizer.json: {e}") from e
+    try:
+        # Handed over: checked in place, and rendered from without a private copy (about 170 MB for Gemma 4's).
+        core.check_tokenizer(tokenizer, config, hand_over=True)
+    except ValueError as e:
+        raise SystemExit(f"strands-decider-vllm serve: tokenizer.json: {e}") from e
     image_problem = None
     if "image" in config.inputs:
         pc = (
@@ -723,6 +808,7 @@ def settings(a: Any) -> Settings:
         max_length,
         image_problem,
         max_body,
+        int(a.max_buffered_mb * 2**20) if a.max_buffered_mb else max(BUFFERED_BYTES, max_body),
     )
 
 
@@ -736,6 +822,7 @@ def decider(engine: Any, s: Settings, a: Any) -> Decider:
         prefix_caching=a.enable_prefix_caching,
         image_problem=s.image_problem,
         max_body=s.max_body,
+        max_buffered=s.max_buffered,
         preprocess_workers=a.preprocess_workers,
         tokenizer=s.tokenizer,
         core=s.core,

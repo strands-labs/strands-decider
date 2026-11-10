@@ -84,7 +84,13 @@ def checkpoint(tmp_path):
         pc = (
             processor
             if processor is not None
-            else {"image_processor": dict(server.PROCESSOR_SETTINGS)}
+            else {
+                "image_processor": {
+                    "patch_size": 16,
+                    "pooling_kernel_size": 3,
+                    "max_soft_tokens": 280,
+                }
+            }
         )
         (tmp_path / "processor_config.json").write_text(json.dumps(pc))
         return server.Checkpoint.open(str(tmp_path)), tok
@@ -144,7 +150,9 @@ def decider(make, engine_kwargs=None, max_body=None, **kw):
     engine = FakeEngine(tok, **(engine_kwargs or {}))
     problem = None
     if "image" in json.loads(ckpt.files["decision_config.json"].read_text())["inputs"]:
-        problem = server.processor_problem(ckpt.json("processor_config.json"))
+        problem = server.processor_problem(
+            ckpt.json("processor_config.json"), core.check_image_processor
+        )
     d = server.Decider(
         engine,
         ckpt,
@@ -201,11 +209,9 @@ def test_probabilities_renormalize_over_the_questions_codes():
     ],
 )
 def test_the_image_processor_must_have_the_specifications_settings(settings, ok):
-    assert (server.processor_problem({"image_processor": settings}) is None) is ok
-    assert server.processor_problem(None) is not None
-    check = getattr(core, "check_image_processor", None)
-    if check is not None:  # the core's own check, when it has one, gives the same verdict
-        assert (server.processor_problem({"image_processor": settings}, check) is None) is ok
+    check = core.check_image_processor  # the core's check: the server keeps no copy of it
+    assert (server.processor_problem({"image_processor": settings}, check) is None) is ok
+    assert server.processor_problem(None, check) is not None
 
 
 @pytest.mark.parametrize(
@@ -222,48 +228,36 @@ def test_the_plugin_architecture_follows_the_base(base, arch):
         server.plugin_architecture({"architectures": ["Qwen3ForCausalLM"]})
 
 
-@pytest.mark.parametrize(
-    "w, h",
-    [
-        (1, 1),
-        (64, 48),
-        (300, 40),
-        (640, 480),
-        (4096, 4096),
-        (1, 300),
-        (300, 1),
-        (1, 16777216),
-        (13441, 47),
-    ],
-)
-def test_resized_size_has_the_cores_soft_tokens(w, h):
-    W, H = server.resized_size(w, h)
-    assert W % 48 == 0 and H % 48 == 0 and W * H <= 645120
-    assert (W // 48) * (H // 48) == core.soft_tokens(w, h)
-    if hasattr(core, "resized_size"):  # the core's own, which the server uses when the core has it
-        assert core.resized_size(w, h) == (W, H)
+def target(data):
+    """The core's check_decoded_size for a request's image, as the server binds it."""
+    r = core.render(
+        {"state": "x", "images": [b64(data)], "questions": QUESTIONS},
+        toy_tokenizer(),
+        "strands-plain",
+    )
+    im = r.images[0]
+    return im, (lambda w, h: core.check_decoded_size(im, w, h))
 
 
-def test_prepare_image_resizes_with_pillows_bicubic():
+def test_prepare_image_resizes_with_the_cores_resize_image():
     data = png(64, 48, (10, 200, 30, 255), mode="RGBA")
-    img = server.prepare_image(data, 266)
-    expected = server.decode_image(data).resize((912, 672), PIL.Resampling.BICUBIC)
+    im, size = target(data)
+    img = server.prepare_image(data, im.tokens, size, core.resize_image)
+    expected = core.resize_image(server.decode_image(data), 912, 672)
     assert img.size == (912, 672) and img.tobytes() == expected.tobytes()
     with pytest.raises(server.Mismatch, match="not to the core's 265 tokens"):
-        server.prepare_image(data, 265)
+        server.prepare_image(data, 265, size, core.resize_image)
 
 
-def test_the_resize_is_the_widths_pass_then_the_heights():
-    # A tall screenshot shrinks its height by more than twice its width: Pillow 13 would do the height first in one
-    # call. Section 11.1's rule is the width's pass first, which two calls give on every Pillow.
-    img = PIL.effect_noise((1080, 2400), 64).convert("RGB")
-    W, H = server.resized_size(1080, 2400)
-    want = img.resize((W, 2400), PIL.Resampling.BICUBIC).resize((W, H), PIL.Resampling.BICUBIC)
-    assert server.bicubic(img, W, H).tobytes() == want.tobytes()
-    assert server.bicubic(img, 1080, 2400) is img, "a pass that changes nothing is left out"
-    if hasattr(core, "resize_image"):  # the core's, which the server uses when the core has it
-        assert core.resize_image(img, W, H).tobytes() == want.tobytes()
-        assert server.require_core().resize_image is core.resize_image
+def test_the_server_uses_the_cores_helpers_and_needs_every_one(monkeypatch):
+    c = server.require_core()
+    for name in server.CORE_NAMES:
+        assert getattr(c, name) is getattr(core, name)
+    for name in ("check_decoded_size", "resize_image"):
+        with monkeypatch.context() as m:
+            m.delattr(core, name)
+            with pytest.raises(SystemExit, match=name):
+                server.require_core()
 
 
 def test_a_decoded_size_the_core_refuses_is_a_refusal():
@@ -271,7 +265,18 @@ def test_a_decoded_size_the_core_refuses_is_a_refusal():
         raise ValueError(f"image could not be decoded: its pixels are {w}x{h}")
 
     with pytest.raises(server.Refused, match="could not be decoded: its pixels are 64x48"):
-        server.prepare_image(png(64, 48), 266, refuse)
+        server.prepare_image(png(64, 48), 266, refuse, core.resize_image)
+
+
+def test_an_image_request_drops_its_files_once_decoded(checkpoint):
+    d, _, _ = decider(checkpoint)
+    rendered, images = asyncio.run(
+        d.prepare({"state": "x", "images": [b64(png(64, 48))], "questions": QUESTIONS})
+    )
+    assert [im.size for im in images] == [(912, 672)]
+    assert all(im.data == b"" for q in rendered.questions.values() for im in q.images)
+    assert rendered.images[0].sha256 and rendered.images[0].tokens == 266, "spans and keys kept"
+    d.close()
 
 
 def test_decode_image_composites_transparency_onto_white():
@@ -522,8 +527,68 @@ def test_a_body_over_the_limit_is_413_whether_or_not_it_declares_its_length(clie
 def test_the_default_body_limit_holds_four_images_and_the_text():
     four = server.MAX_IMAGES * server.base64_size(server.IMAGE_FILE_BYTES)
     assert server.default_max_body(True) == server.TEXT_BYTES + four
-    assert round(server.default_max_body(True) / 2**20) == 187
+    assert round(server.default_max_body(True) / 2**20) == 93
     assert server.default_max_body(False) == server.TEXT_BYTES
+
+
+def test_the_byte_budget_bounds_buffered_bodies_and_grants_in_arrival_order():
+    async def run():
+        b = server.ByteBudget(100)
+        order = []
+        assert await b.take(60) == 60
+        big = asyncio.ensure_future(b.take(80))
+        await asyncio.sleep(0)
+        small = asyncio.ensure_future(
+            b.take(10)
+        )  # fits now, but waits behind the earlier, larger one
+        await asyncio.sleep(0)
+        for t, name in ((big, "big"), (small, "small")):
+            t.add_done_callback(lambda _, name=name: order.append(name))
+        assert not big.done() and not small.done() and b.used == 60
+        b.give(60)
+        await asyncio.wait_for(asyncio.gather(big, small), 5)
+        assert order == ["big", "small"] and b.used == 90
+        cancelled = asyncio.ensure_future(b.take(50))
+        await asyncio.sleep(0)
+        cancelled.cancel()
+        await asyncio.gather(cancelled, return_exceptions=True)
+        assert b.used == 90 and not b._waiters, "a cancelled wait takes nothing"
+        b.give(90)
+        assert await b.take(10**9) == 100, "a reservation is at most the whole budget"
+
+    asyncio.run(run())
+
+
+def test_large_bodies_wait_for_the_budget_and_give_it_back(checkpoint):
+    import httpx
+
+    d, _, _ = decider(checkpoint, max_body=10 * 2**20)
+    d.max_buffered = 3 * 2**20
+    app = server.build_app(None)
+    app.state.decider = d
+    pad = "x" * (2 * 2**20)  # a 2 MiB body: over SMALL_BODY, so it reserves its size
+    body = {"state": pad, "questions": QUESTIONS}
+    seen = []
+    real_render = d.render_request
+
+    def render(raw):
+        seen.append(d._budget.used)  # on a pool thread: read the loop's budget directly
+        return real_render(raw)
+
+    d.render_request = render
+
+    async def run():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            rs = await asyncio.gather(*(c.post("/v1/systemone", json=body) for _ in range(3)))
+        return rs
+
+    d.max_length = 10**7
+    rs = asyncio.run(run())
+    assert [r.status_code for r in rs] == [200] * 3
+    assert max(seen) <= d.max_buffered and max(seen) > 0, seen
+    assert d._budget.used == 0, "every reservation is given back"
+    d.close()
 
 
 def test_ping_answers_while_an_image_is_decoded(checkpoint, monkeypatch):
@@ -561,6 +626,94 @@ def test_ping_answers_while_an_image_is_decoded(checkpoint, monkeypatch):
     ping, waited, decoding, answer = asyncio.run(run())
     assert ping.status_code == 200 and decoding and waited < 5, waited
     assert answer.status_code == 200
+    d.close()
+
+
+def test_a_request_without_images_never_waits_behind_a_decode(checkpoint, monkeypatch):
+    import threading
+
+    d, _, _ = decider(checkpoint)  # preprocess_workers=2
+    entered, release, inside, most = threading.Semaphore(0), threading.Event(), [0], [0]
+    lock = threading.Lock()
+    real = server.prepare_image
+
+    def slow(*args):
+        with lock:
+            inside[0] += 1
+            most[0] = max(most[0], inside[0])
+        entered.release()
+        assert release.wait(20)
+        with lock:
+            inside[0] -= 1
+        return real(*args)
+
+    monkeypatch.setattr(server, "prepare_image", slow)
+    image = {"state": "x", "images": [b64(png(640, 480))], "questions": QUESTIONS}
+
+    async def run():
+        decodes = [asyncio.ensure_future(d.decide(dict(image))) for _ in range(5)]
+        for _ in range(2):
+            assert await asyncio.get_running_loop().run_in_executor(None, entered.acquire, True, 20)
+        await asyncio.sleep(0.2)
+        text = await asyncio.wait_for(d.decide({"state": "x", "questions": QUESTIONS}), 10)
+        blocked = not release.is_set()
+        release.set()
+        return text, blocked, await asyncio.gather(*decodes)
+
+    text, blocked, done = asyncio.run(run())
+    assert blocked and set(text["answers"]) == set(QUESTIONS), (
+        "answered while both decode threads were busy"
+    )
+    assert most[0] == 2, f"at most preprocess_workers decodes at once, saw {most[0]}"
+    assert len(done) == 5
+    d.close()
+
+
+def test_concurrent_renders_on_the_shared_tokenizer_give_the_sequential_ids(checkpoint):
+    d, _, _ = decider(checkpoint)
+    bodies = [{"state": f"ticket {i} " * (i + 1), "questions": QUESTIONS} for i in range(12)]
+    alone = [d.render_request(b) for b in bodies]
+
+    async def run():
+        return await asyncio.gather(*(d._run("render", d.render_request, b) for b in bodies))
+
+    together = asyncio.run(run())
+    for a, t in zip(alone, together, strict=True):
+        assert {n: q.ids for n, q in a.questions.items()} == {
+            n: q.ids for n, q in t.questions.items()
+        }
+    d.close()
+
+
+def test_cancelling_a_request_cancels_its_engine_requests(checkpoint):
+    d, engine, _ = decider(checkpoint)
+    original, started, cancelled = engine.generate, [], []
+
+    async def generate(prompt, sp, rid):
+        started.append(rid)
+        if (
+            len(started) > 1
+        ):  # the first question answers; the others are in flight when the client leaves
+            try:
+                await asyncio.sleep(60)
+            except asyncio.CancelledError:
+                cancelled.append(rid)
+                raise
+        async for out in original(prompt, sp, rid):
+            yield out
+
+    engine.generate = generate
+
+    async def run():
+        t = asyncio.ensure_future(d.decide({"state": "x", "questions": QUESTIONS}))
+        while len(started) < 3:
+            await asyncio.sleep(0.01)
+        t.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await t
+
+    asyncio.run(run())
+    assert sorted(cancelled) == sorted(started[1:]), "every question still running was cancelled"
     d.close()
 
 
@@ -691,10 +844,10 @@ def test_the_cli_binds_loopback_by_default():
     assert a.limit_concurrency == 128 and 1 <= a.preprocess_workers <= 4
 
 
-def test_reads_stage_argument_is_found_by_name():
-    assert server.stage_argument(lambda values, r, c, d, *, stage=None, inputs=None: 0) == "stage"
-    assert server.stage_argument(lambda values, r, c, d, *, inputs=None: 0) == "inputs"
-    assert server.require_core().stage == {server.stage_argument(core.read): "probabilities"}
+def test_an_older_core_without_reads_stage_argument_is_refused_at_startup(monkeypatch):
+    monkeypatch.setattr(core, "read", lambda values, r, c, d, *, inputs=None: 0)
+    with pytest.raises(SystemExit, match=r"read\(stage=\)"):
+        server.require_core()
 
 
 def test_a_hub_checkpoint_is_read_at_one_commit(tmp_path, monkeypatch):

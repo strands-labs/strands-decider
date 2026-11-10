@@ -80,22 +80,31 @@ def parser() -> argparse.ArgumentParser:
         "--max-body-mb",
         type=float,
         default=None,
-        help="refuse request bodies larger than this, in MiB, with HTTP 413 (default: 187, four 32 MiB image files "
-        "in base64 plus 16 MiB of text; 16 for a checkpoint that takes no images)",
+        help="refuse request bodies larger than this, in MiB, with HTTP 413 (default: 93, four 16 MiB image files "
+        "in base64 plus 8 MiB of text; 8 for a checkpoint that takes no images)",
+    )
+    s.add_argument(
+        "--max-buffered-mb",
+        type=float,
+        default=None,
+        help="the most body bytes, in MiB, that requests over 1 MiB buffer at once; such a request waits, in "
+        "arrival order, until its size fits, and holds it until its images are decoded (default: 256, or "
+        "--max-body-mb if larger)",
     )
     s.add_argument(
         "--limit-concurrency",
         type=int,
         default=128,
         help="uvicorn's limit on open connections and requests, /ping and /health included; past it uvicorn answers "
-        "HTTP 503 (default 128)",
+        "HTTP 503, to /ping as well (default 128; behind SageMaker keep it above the instance's peak concurrent "
+        "invocations, README)",
     )
     s.add_argument(
         "--preprocess-workers",
         type=int,
         default=min(4, os.cpu_count() or 1),
-        help="threads that parse, render and decode requests, and so the requests decoded at once (default: 4, or "
-        "the CPU count if lower)",
+        help="threads that parse and render requests, and as many again that decode images: the most requests in "
+        "each step at once (default: 4, or the CPU count if lower)",
     )
     return ap
 
