@@ -18,6 +18,14 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from . import __version__
+from .decision import (
+    DECISION,
+    INTERMEDIATE,
+    DecisionEngine,
+    checkpoint_kind,
+    load_decision_engine,
+    refuse_intermediate,
+)
 from .infer import EngineConfig, SystemOneEngine, load_mlx
 from .modeling import StrandsDeciderModel, refuse_token_readout
 from .schema import (
@@ -94,12 +102,25 @@ def create_app(
     build_engine: Callable[[], SystemOneEngine] | None = None,
     max_concurrency: int | None = None,
 ) -> FastAPI:
-    if device_map and (vision or not device.startswith("cuda")):
-        raise ValueError("--device-map splits the text torso across CUDA GPUs: use it with cuda")
-    if vision and device == "mlx":
-        raise ValueError("--vision runs on torch devices (cuda, mps, cpu), not mlx")
     if max_concurrency is not None and max_concurrency < 1:
         raise ValueError("--max-concurrency must be at least 1")
+    # A decision checkpoint (docs/spec.md) is served by the core and a decision backend;
+    # anything else takes v1's path below, unchanged. Tests inject `build_engine` and skip this.
+    kind = checkpoint_kind(checkpoint) if build_engine is None else None
+    if kind == INTERMEDIATE:
+        raise refuse_intermediate(checkpoint)
+    decision = kind == DECISION
+    if decision and device_map:
+        raise ValueError(
+            "--device-map is for v1 checkpoints; a decision checkpoint runs on one device"
+        )
+    if not decision:
+        if device_map and (vision or not device.startswith("cuda")):
+            raise ValueError(
+                "--device-map splits the text torso across CUDA GPUs: use it with cuda"
+            )
+        if vision and device == "mlx":
+            raise ValueError("--vision runs on torch devices (cuda, mps, cpu), not mlx")
 
     # Identify the response's `model` by the checkpoint served, so multiple servers
     # on the same host cannot be confused. HF repo ids ("org/name") collapse to `name`.
@@ -113,7 +134,18 @@ def create_app(
         max_batch_tokens=max_batch_tokens,
     )
 
-    def _default_build_engine() -> SystemOneEngine:
+    def _default_build_engine() -> SystemOneEngine | DecisionEngine:
+        if decision:
+            # Images follow the checkpoint's decision_config.json `inputs`, not --vision;
+            # --no-prefix-cache runs each question as one full prompt (the spec's reference).
+            return load_decision_engine(
+                checkpoint,
+                device=device,
+                model_name=resolved_name,
+                reuse_state=use_prefix_cache,
+                max_batch=max_batch,
+                max_batch_tokens=max_batch_tokens,
+            )
         if vision:
             from .vision import load_vision_engine
 
@@ -140,7 +172,10 @@ def create_app(
             # Listener binds only after lifespan startup returns, so /health (/ping)
             # fails until this is done.
             if warmup:
-                warm_up(engine, max_batch, vision=vision)
+                if isinstance(engine, DecisionEngine):
+                    engine.warm_up()
+                else:
+                    warm_up(engine, max_batch, vision=vision)
             yield
         finally:
             # The MLX engine owns a worker thread (see mlx_engine.MLXEngine); other engines
@@ -172,6 +207,8 @@ def create_app(
     @app.get("/health")
     @app.get("/ping")
     async def health(eng: SystemOneEngine = Depends(get_engine)) -> dict:
+        if isinstance(eng, DecisionEngine):
+            return {"status": "ok", "checkpoint": checkpoint, **eng.describe()}
         return {
             "status": "ok",
             "model": eng.cfg.model_name,
