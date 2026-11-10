@@ -100,7 +100,7 @@ def serve_cmd(
         None,
         "--dtype",
         help="Decision checkpoints: float32 or bfloat16. Default: float32 on cpu, bfloat16 on "
-        "cuda and mps.",
+        "cuda and mps, and the dtype the checkpoint is stored in on mlx.",
     ),
     max_concurrency: int | None = typer.Option(
         None,
@@ -186,7 +186,7 @@ def ask_cmd(
         None,
         "--dtype",
         help="Decision checkpoints: float32 or bfloat16. Default: float32 on cpu, bfloat16 on "
-        "cuda and mps.",
+        "cuda and mps, and the dtype the checkpoint is stored in on mlx.",
     ),
 ) -> None:
     """Ask one state a set of typed questions from the command line."""
@@ -297,14 +297,22 @@ def convert_mlx_cmd(
         "--bits",
         help="Quantize the decoder to 8 or 4 bits. Omitted: bf16. The vision and audio "
         "encoders and their projections stay bf16, and the readout is copied unchanged. "
-        "A 4-bit artifact makes no conformance claim (docs/spec.md section 10).",
+        "Only formats measured against the reference (8 bits, group 64, on E2B) make a "
+        "conformance claim (docs/spec.md section 10).",
     ),
     group_size: int = typer.Option(64, "--group-size", help="Quantization group size."),
 ) -> None:
     """Write the MLX artifact of a decision checkpoint, for `--device mlx` (docs/spec.md)."""
-    from .backends.mlx_convert import convert
-
-    summary = convert(checkpoint, out, bits=bits, group_size=group_size)
+    try:
+        from .backends.mlx_convert import convert
+    except ImportError as e:
+        console.print(f"[red]error[/] {e}")
+        raise typer.Exit(1) from e
+    try:
+        summary = convert(checkpoint, out, bits=bits, group_size=group_size)
+    except (ValueError, FileNotFoundError, FileExistsError, RuntimeError) as e:
+        console.print(f"[red]error[/] {e}")
+        raise typer.Exit(1) from e
     if summary["notice"]:
         console.print(f"[yellow]note[/] {summary['notice']}")
     q = summary["quantization"]

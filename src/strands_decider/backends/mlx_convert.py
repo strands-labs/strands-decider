@@ -14,12 +14,18 @@ and everything else is copied byte for byte:
   readout is never part of the model.
 - The weights are written with an index (`model.safetensors.index.json`), which mlx-vlm needs
   to tell the model's shards from the readout.
-- The artifact is reloaded and checked: the same decision files, and no quantized module
-  outside the decoder.
+- config.json carries a marker (`mlx_format.ARTIFACT`), so that the router refuses the
+  artifact on any device but mlx: only mlx-vlm reads its layout.
+- The artifact is written into a directory beside the destination (`<dest>.partial-*`),
+  reloaded and checked (the same decision files, the marker, the decoder quantized as asked
+  and nothing else quantized), and only then renamed to the destination, with the usual
+  permissions. A conversion that fails or is rejected leaves nothing that loads; one that was
+  killed leaves its partial directory, which the next conversion to the same destination
+  removes.
 
-A quantized artifact makes no conformance claim until its bit width has been measured against
-the reference (docs/spec.md section 10; `mlx.MEASURED_BITS`): 8-bit has, 4-bit has not, and
-converting to it, or loading it, says so.
+A quantized artifact makes no conformance claim unless its format has been measured against
+the reference for that model (docs/spec.md section 10; `mlx_format.MEASURED`), and converting
+to it, or loading it, says so.
 """
 
 from __future__ import annotations
@@ -30,6 +36,7 @@ import os
 import shutil
 import tempfile
 import warnings
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
@@ -42,11 +49,10 @@ from .mlx import (
     PROCESSOR_CONFIG,
     TOKENIZER,
     VISION_MODULES,
-    bases_form,
-    conformance_notice,
     load_mlx_model,
     model_type,
 )
+from .mlx_format import ARTIFACT, ARTIFACT_KEY, bases_form, conformance, is_mlx_artifact
 
 BITS = (4, 8)
 DEFAULT_GROUP_SIZE = 64
@@ -54,6 +60,39 @@ DECODER = "language_model."
 # Copied byte for byte when present; the first five must be.
 REQUIRED = (DECISION_CONFIG, READOUT_FILE, PROCESSOR_CONFIG, TOKENIZER, "tokenizer_config.json")
 OPTIONAL = ("golden_vectors.jsonl", "LICENSE", "NOTICE", "README.md")
+PARTIAL = ".partial-"  # <dest>.partial-<random>: a conversion in progress
+OWNER = ".converting-pid"  # in a partial directory: the converting process's id
+
+
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:  # another user's live process
+        return True
+    return True
+
+
+def sweep_partials(dst: Path) -> list[Path]:
+    """Remove the partial directories that killed conversions to `dst` left: those whose
+    converting process no longer runs. Returns what it removed."""
+    removed = []
+    for p in dst.parent.glob(f"{dst.name}{PARTIAL}*"):
+        try:
+            pid = int((p / OWNER).read_text())
+        except (OSError, ValueError):
+            pid = None
+        if pid is None or not _alive(pid):
+            shutil.rmtree(p, ignore_errors=True)
+            removed.append(p)
+    return removed
+
+
+def _umask() -> int:
+    mask = os.umask(0)
+    os.umask(mask)
+    return mask
 
 
 def _sha256(path: Path) -> str:
@@ -114,16 +153,17 @@ def convert(
     id) to the new directory `dest`: bf16, or with the decoder quantized to `bits` (8 or 4)
     in groups of `group_size`. Returns a summary: the files written, their sizes, and which
     parts are quantized."""
+    if bits is not None and bits not in BITS:
+        raise ValueError(f"bits must be one of {BITS} (or none, for bf16), not {bits!r}")
+    dst = Path(dest).resolve()
+    if dst.exists() and (not dst.is_dir() or any(dst.iterdir())):
+        raise FileExistsError(f"{dst} exists and is not an empty directory")
+
     import mlx.core as mx
     from mlx_vlm.quant_utils import quantize_model
     from mlx_vlm.utils import save_config, save_weights
 
     src = _source_dir(source)
-    dst = Path(dest).resolve()
-    if bits is not None and bits not in BITS:
-        raise ValueError(f"bits must be one of {BITS} (or none, for bf16), not {bits!r}")
-    if dst.exists() and any(dst.iterdir()):
-        raise FileExistsError(f"{dst} exists and is not empty")
     missing = [f for f in REQUIRED if not (src / f).is_file()]
     if missing:
         raise FileNotFoundError(f"{src} is not a decision checkpoint: it has no {missing}")
@@ -132,18 +172,22 @@ def convert(
     model_type(src)
     with open(src / "config.json", encoding="utf-8") as f:
         config = json.load(f)
-    if "quantization" in config:
-        raise ValueError(f"{src} is already a quantized MLX artifact; convert the bf16 checkpoint")
+    if is_mlx_artifact(config):
+        raise ValueError(f"{src} is already an MLX artifact; convert the bf16 checkpoint")
     config = bases_form(config) or config  # the form mlx-vlm reads, written into the artifact
+    config[ARTIFACT_KEY] = dict(ARTIFACT)
 
-    notice = conformance_notice({"quantization": {"bits": bits}} if bits else {})
-    if notice:
-        warnings.warn(notice, stacklevel=2)
-    # Written beside `dest` and renamed into place once verified, so that a failed or rejected
-    # conversion never leaves a directory that loads like an artifact.
+    claim = conformance(
+        decision.provenance.base_model,
+        {"bits": bits, "group_size": group_size, "mode": "affine"} if bits else None,
+    )
+    if claim["notice"]:
+        warnings.warn(claim["notice"], stacklevel=2)
     dst.parent.mkdir(parents=True, exist_ok=True)
-    work = Path(tempfile.mkdtemp(prefix=f".{dst.name}.", suffix=".partial", dir=dst.parent))
+    sweep_partials(dst)
+    work = Path(tempfile.mkdtemp(prefix=f"{dst.name}{PARTIAL}", dir=dst.parent))
     try:
+        (work / OWNER).write_text(str(os.getpid()))
         model = load_mlx_model(src, keep=AUDIO_MODULES + VISION_MODULES)
         if bits is not None:
             model, config = quantize_model(
@@ -156,22 +200,28 @@ def convert(
         for name in REQUIRED + OPTIONAL:
             if (src / name).is_file():
                 shutil.copyfile(src / name, work / name)
-        summary = verify(src, work)
-        if dst.exists():
-            dst.rmdir()  # empty, as checked above
-        work.rename(dst)
+        summary = verify(src, work, bits=bits)
+        (work / OWNER).unlink()
+        # mkdtemp makes the directory 0700; an artifact gets the permissions any new
+        # directory would, so that the account that serves it can read it.
+        work.chmod(0o777 & ~_umask())
+        os.rename(work, dst)  # replaces an empty `dst`, in one step
     except BaseException:
-        shutil.rmtree(work, ignore_errors=True)
+        with suppress(OSError):
+            shutil.rmtree(work)
         raise
     summary["artifact"] = str(dst)
-    summary["notice"] = notice
+    summary["notice"] = claim["notice"]
+    summary["conformance"] = {k: v for k, v in claim.items() if k != "notice"}
     return summary
 
 
-def verify(source: Path, artifact: Path) -> dict[str, Any]:
+def verify(source: Path, artifact: Path, *, bits: int | None = None) -> dict[str, Any]:
     """Check an MLX artifact against its checkpoint: the copied files are the same bytes,
-    the decision files load, the model loads strictly with its index, and nothing outside
-    the decoder is quantized. Returns a summary."""
+    the decision files load, config.json carries the marker and, with `bits`, a quantization
+    of that width, the model loads strictly with its index, the decoder is quantized when
+    `bits` is given and not otherwise, and nothing outside the decoder is. Returns a
+    summary."""
     copied = [n for n in REQUIRED + OPTIONAL if (source / n).is_file()]
     changed = [n for n in copied if _sha256(source / n) != _sha256(artifact / n)]
     if changed:
@@ -185,9 +235,23 @@ def verify(source: Path, artifact: Path) -> dict[str, Any]:
     outside = sorted(p for p in parts if p != DECODER.rstrip("."))
     if outside:
         raise AssertionError(f"{artifact}: {outside} are quantized; only the decoder may be")
+    decoder_parts = parts.get(DECODER.rstrip("."), 0)
+    if bits is not None and not decoder_parts:
+        raise AssertionError(
+            f"{artifact}: asked for {bits} bits, and no decoder layer is quantized"
+        )
+    if bits is None and decoder_parts:
+        raise AssertionError(f"{artifact}: a bf16 artifact with {decoder_parts} quantized layers")
     with open(artifact / "config.json", encoding="utf-8") as f:
-        quantization = json.load(f).get("quantization")
-    files = sorted(os.listdir(artifact))
+        model_config = json.load(f)
+    quantization = model_config.get("quantization")
+    if model_config.get(ARTIFACT_KEY) != ARTIFACT:
+        raise AssertionError(f"{artifact}: config.json has no {ARTIFACT_KEY} marker")
+    if (quantization or {}).get("bits") != bits:
+        raise AssertionError(
+            f"{artifact}: config.json's quantization is {quantization}, not {bits} bits"
+        )
+    files = sorted(n for n in os.listdir(artifact) if n != OWNER)
     return {
         "artifact": str(artifact),
         "quantization": (

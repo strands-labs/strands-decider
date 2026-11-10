@@ -43,13 +43,13 @@ from __future__ import annotations
 
 import io
 import json
-import math
 import os
+import re
 import tempfile
 import threading
 import warnings
 from collections.abc import Sequence
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import CancelledError, ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -57,24 +57,31 @@ import numpy as np
 
 try:
     import mlx.core as mx
-    from mlx.utils import tree_map
+    from mlx.utils import tree_map_with_path
 except ImportError as e:  # pragma: no cover - depends on the platform
     raise ImportError(
-        "the MLX backend needs Apple silicon and the mlx extra: pip install 'strands-decider[mlx]'"
+        "the MLX backend needs macOS on Apple silicon, Python 3.11 or later, and the mlx extra: "
+        "pip install 'strands-decider[mlx]' (on another platform or Python the extra installs "
+        "nothing)"
     ) from e
 
 from ..core import HIDDEN, DecisionConfig, RenderedImage, attention_mask
 from ..core.config import IMAGE, TEXT
-from ..core.images import IMAGE_FORMATS, MAX_SOFT_TOKENS, PATCH_SIZE, POOLING_KERNEL_SIZE
-from ..core.readout import READOUT_FILE
+from ..core.images import (
+    IMAGE_FORMATS,
+    MAX_SOFT_TOKENS,
+    PATCH_SIZE,
+    POOLING_KERNEL_SIZE,
+    resized_size,
+)
 from ..core.request import NO_VISION
-from ..decision import RequestRefused
+from ..refusals import RequestRefused
+from .mlx_format import bases_form, check_mlx_vlm, conformance
 
-# Requests whose images are decoded at once, requests waiting for or on the worker thread,
-# and how long a request past them waits for a place before it is refused.
+# Requests whose images are decoded at once, on the callers' threads: one image may decode to
+# tens of megabytes. How many requests reach the backend at once, and how long the others
+# wait, is the decision engine's (`serve --max-concurrency`, `--queue-timeout`).
 DECODE_SLOTS = 2
-MAX_PENDING = 16
-QUEUE_TIMEOUT = 300.0
 
 # MLX keeps freed buffers for reuse, by default up to its memory limit (nearly all of RAM); v1's
 # MLX engine caps the cache at 1 GiB, and so does this backend.
@@ -84,6 +91,8 @@ DEFAULT_CACHE_LIMIT = 1 << 30
 # E4B, 26B-A4B, 31B) and Gemma4UnifiedForConditionalGeneration (12B).
 MODEL_TYPES = ("gemma4", "gemma4_unified")
 UNIFIED = "gemma4_unified"
+# A model shard's name in a checkpoint without an index.
+_SHARD = re.compile(r"model(-\d+-of-\d+)?\.safetensors")
 PROCESSOR_CONFIG = "processor_config.json"
 TOKENIZER = "tokenizer.json"
 INDEX = "model.safetensors.index.json"
@@ -114,48 +123,18 @@ def model_type(path: Path) -> str:
     return str(kind)
 
 
-def bases_form(model_config: dict[str, Any]) -> dict[str, Any] | None:
-    """config.json in the Gemma 4 bases' own form, which mlx-vlm reads, or None if it is
-    already in it. transformers 5.2x writes the full-attention layers' head size and KV heads
-    under `text_config.per_layer_config`; the bases give `global_head_dim` and
-    `num_global_key_value_heads`, and mlx-vlm, without them, builds those layers with its
-    defaults. Refused unless every entry is a full-attention layer and they agree."""
-    text = model_config.get("text_config") or {}
-    per_layer = text.get("per_layer_config")
-    if not per_layer:
-        return None
-    types = text.get("layer_types") or []
-    fields = {"head_dim": "global_head_dim", "num_key_value_heads": "num_global_key_value_heads"}
-    found: dict[str, set[Any]] = {}
-    for layer, settings in per_layer.items():
-        i = int(layer)
-        if not (0 <= i < len(types)) or types[i] != "full_attention" or set(settings) - set(fields):
-            raise ValueError(
-                f"config.json's per_layer_config {per_layer} is not what mlx-vlm can read: only "
-                "the full-attention layers' head_dim and num_key_value_heads"
-            )
-        for k, v in settings.items():
-            found.setdefault(fields[k], set()).add(v)
-    out: dict[str, Any] = json.loads(json.dumps(model_config))
-    t = out["text_config"]
-    t.pop("per_layer_config")
-    for key, values in found.items():
-        if len(values) != 1 or (key in t and t[key] not in values):
-            raise ValueError(f"config.json gives the full-attention layers {key} {sorted(values)}")
-        t[key] = values.pop()
-    return out
-
-
 def load_mlx_model(path: Path, *, keep: Sequence[str] = ()) -> Any:
     """mlx-vlm's model for the checkpoint or MLX artifact at `path`, loaded strictly and lazily
     (no tensor is read until it is evaluated). Modules named in AUDIO_MODULES and
     VISION_MODULES are dropped unless `keep` names them.
 
     mlx-vlm reads the shards its index names or, with no index, every `*.safetensors` in the
-    directory, which would take the readout for a weight file. A checkpoint without an index
-    (E2B, E4B and the 12B ship one `model.safetensors`), or whose config.json is not in the
-    bases' form (`bases_form`), is therefore loaded through a directory of links to everything
-    but the readout, with config.json rewritten in that form."""
+    directory, which would take the readout, or any stray file, for a weight file. A
+    checkpoint without an index (E2B, E4B and the 12B ship one `model.safetensors`), or whose
+    config.json is not in the bases' form (`bases_form`), is therefore loaded through a
+    directory of links to its other files and its model shards only (`model.safetensors`, or
+    `model-*-of-*.safetensors`), with config.json rewritten in that form. A failure to load
+    names the checkpoint, not the directory of links."""
     from mlx_vlm.utils import load_model
 
     # Absolute, so that the links below point at the files wherever they are resolved from:
@@ -163,18 +142,24 @@ def load_mlx_model(path: Path, *, keep: Sequence[str] = ()) -> Any:
     path = Path(path).resolve()
     with open(path / "config.json", encoding="utf-8") as f:
         rewritten = bases_form(json.load(f))
-    if (path / INDEX).exists() and rewritten is None:
-        model = load_model(path, lazy=True, strict=True)
-    else:
-        # The shards stay open once loaded, so the links may go before they are read.
-        with tempfile.TemporaryDirectory(prefix="strands-decider-mlx-") as view:
-            for entry in os.listdir(path):
-                if entry == READOUT_FILE or (entry == "config.json" and rewritten is not None):
-                    continue
-                os.symlink(path / entry, Path(view) / entry)
-            if rewritten is not None:
-                (Path(view) / "config.json").write_text(json.dumps(rewritten), encoding="utf-8")
-            model = load_model(Path(view), lazy=True, strict=True)
+    try:
+        if (path / INDEX).exists() and rewritten is None:
+            model = load_model(path, lazy=True, strict=True)
+        else:
+            # The shards stay open once loaded, so the links may go before they are read.
+            with tempfile.TemporaryDirectory(prefix="strands-decider-mlx-") as view:
+                for entry in os.listdir(path):
+                    if entry == "config.json" and rewritten is not None:
+                        continue
+                    if entry.endswith(".safetensors") and not _SHARD.fullmatch(entry):
+                        continue  # the readout, or anything else that is not the model's
+                    os.symlink(path / entry, Path(view) / entry)
+                if rewritten is not None:
+                    text = json.dumps(rewritten)
+                    (Path(view) / "config.json").write_text(text, encoding="utf-8")
+                model = load_model(Path(view), lazy=True, strict=True)
+    except (ValueError, FileNotFoundError, KeyError) as e:
+        raise ValueError(f"{path}: mlx-vlm cannot load this checkpoint: {e}") from e
     for name in AUDIO_MODULES + VISION_MODULES:
         if name not in keep and getattr(model, name, None) is not None:
             setattr(model, name, None)
@@ -208,21 +193,6 @@ def decode_image(data: bytes) -> Any:
     return img.convert("RGB")
 
 
-def resized_size(width: int, height: int) -> tuple[int, int]:
-    """(W, H): the size Gemma 4's image processor resizes a `width` x `height` image to, as
-    docs/spec.md section 3.2 gives it, in Python's double precision. Its sides are multiples
-    of 48, and N = (H / 48) * (W / 48)."""
-    side = PATCH_SIZE * POOLING_KERNEL_SIZE
-    f = math.sqrt(MAX_SOFT_TOKENS * POOLING_KERNEL_SIZE**2 * PATCH_SIZE**2 / (height * width))
-    h = math.floor(f * height / side) * side
-    w = math.floor(f * width / side) * side
-    if h == 0:
-        h, w = side, min(math.floor(width / height) * side, MAX_SOFT_TOKENS * side)
-    elif w == 0:
-        w, h = side, min(math.floor(height / width) * side, MAX_SOFT_TOKENS * side)
-    return w, h
-
-
 def image_processor(path: Path, unified: bool) -> tuple[Any | None, str]:
     """The checkpoint's image processor, from its processor_config.json, with its resize off:
     mlx-vlm's `Gemma4ImageProcessor`, or `Gemma4UnifiedImageProcessor` for the 12B. Returns
@@ -254,6 +224,11 @@ def prepare_image(image: RenderedImage, processor: Any) -> dict[str, np.ndarray]
     from PIL import Image
 
     pil = decode_image(image.data)
+    if sorted(pil.size) != sorted((image.width, image.height)):  # EXIF may swap the two
+        raise RequestRefused(
+            f"image could not be decoded: its pixels are {pil.size[0]}x{pil.size[1]}, and its "
+            f"header says {image.width}x{image.height}"
+        )
     pil = pil.resize(resized_size(*pil.size), Image.Resampling.BICUBIC)
     data, counts = processor(pil)
     if [int(n) for n in counts] != [image.tokens]:
@@ -270,26 +245,6 @@ def prepare_image(image: RenderedImage, processor: Any) -> dict[str, np.ndarray]
     return out
 
 
-# ---- quantized artifacts -----------------------------------------------------------------------
-
-# The quantized MLX formats measured against a checkpoint's reference (docs/spec.md section 10):
-# an 8-bit E2B agreed with it on 98.83% of top codes over 1,200 golden prompts. Another bit
-# width makes no conformance claim until it is measured and recorded.
-MEASURED_BITS = (8,)
-
-
-def conformance_notice(model_config: dict[str, Any]) -> str | None:
-    """The notice a quantized artifact of an unmeasured bit width carries, from its
-    config.json's `quantization`; None for bf16 and for MEASURED_BITS."""
-    q = model_config.get("quantization")
-    if not q or q.get("bits") in MEASURED_BITS:
-        return None
-    return (
-        f"a {q.get('bits')}-bit MLX artifact makes no conformance claim: no top-1 bound has "
-        f"been measured for its format (docs/spec.md section 10)"
-    )
-
-
 # ---- the backend -----------------------------------------------------------------------------
 
 
@@ -299,10 +254,6 @@ def _everything(keys: int) -> Any:
     return mx.ones((1, keys), dtype=mx.bool_)
 
 
-class BackendBusy(RuntimeError):
-    """More requests are waiting for the MLX backend than it queues."""
-
-
 class MLXBackend:
     """`strands_decider.core.Backend` on mlx-vlm: one row per question, the final-norm hidden
     state at its last token. Build one with `load_backend`.
@@ -310,9 +261,10 @@ class MLXBackend:
     Every MLX call runs on one worker thread the backend owns: MLX's arrays and Metal
     streams belong to the thread that made them, and a server calls from a pool. Images are
     decoded and prepared, as numpy, on the caller's thread, `decode_slots` requests at a
-    time: one image may decode to tens of megabytes. At most `max_pending` requests wait for
-    or run on the worker; another waits `queue_timeout` seconds for a place, then is refused
-    with `BackendBusy`."""
+    time: one image may decode to tens of megabytes. The requests that reach `forward` at once
+    queue on the worker; the decision engine bounds how many, and for how long the rest wait
+    (`serve --max-concurrency`, `--queue-timeout`). After `close`, queued requests are
+    cancelled and `forward` refuses to run."""
 
     outputs = HIDDEN
 
@@ -326,10 +278,8 @@ class MLXBackend:
         share_state: bool = True,
         image_token_id: int,
         image_problem: str | None = None,
-        quantization: dict[str, Any] | None = None,
+        description: dict[str, Any] | None = None,
         decode_slots: int = DECODE_SLOTS,
-        max_pending: int = MAX_PENDING,
-        queue_timeout: float = QUEUE_TIMEOUT,
     ) -> None:
         self.model = model
         self.processor = processor
@@ -337,18 +287,20 @@ class MLXBackend:
         # Why a checkpoint that lists images cannot take them here; the decision engine
         # refuses image requests with it.
         self.image_problem = image_problem if processor is None else None
-        self.quantization = quantization
         self.share_state = share_state
         self.unified = unified
         self.image_token_id = image_token_id
         self._executor = executor
         self._decoding = threading.BoundedSemaphore(decode_slots)
-        self._pending = threading.BoundedSemaphore(max_pending)
-        self._max_pending = max_pending
-        self._queue_timeout = queue_timeout
+        self._closed = False
         self._decoder = model.language_model.model
         # The layers that own keys and values; a KV-shared layer reads an earlier one's.
         self._owners = int(self._decoder.first_kv_shared_layer_idx)
+        # The decoder's width, which the decision engine checks the readout against.
+        self.hidden_size = int(self._decoder.embed_tokens.weight.shape[-1])
+        if hasattr(self._decoder.embed_tokens, "scales"):  # quantized: packed weight
+            self.hidden_size = int(self._decoder.config.hidden_size)
+        self._description = dict(description or {})
 
     def forward(
         self,
@@ -366,42 +318,32 @@ class MLXBackend:
                 raise ValueError(
                     f"state ids [{image.start}, {image.end}) are not an image's placeholders"
                 )
-        if not self._pending.acquire(timeout=self._queue_timeout):
-            raise BackendBusy(
-                f"the MLX backend has {self._max_pending} requests waiting or running; "
-                f"none finished within {self._queue_timeout:g} s"
-            )
+        if self._closed:
+            raise RuntimeError("the MLX backend is closed")
+        if images:
+            with self._decoding:
+                pixels = [prepare_image(image, self.processor) for image in images]
+        else:
+            pixels = []
         try:
-            if images:
-                with self._decoding:
-                    pixels = [prepare_image(image, self.processor) for image in images]
-            else:
-                pixels = []
-            return self._executor.submit(self._forward, state, questions, images, pixels).result()
-        finally:
-            self._pending.release()
+            future = self._executor.submit(self._forward, state, questions, images, pixels)
+        except RuntimeError as e:  # shut down between the check above and here
+            raise RuntimeError("the MLX backend is closed") from e
+        try:
+            return future.result()
+        except CancelledError as e:  # queued when the backend closed
+            raise RuntimeError("the MLX backend closed before this request ran") from e
 
     def describe(self) -> dict[str, Any]:
-        """What `serve`'s health check reports of the backend."""
-        from importlib.metadata import version
-
-        dtype = self._decoder.norm.weight.dtype
-        return {
-            "backend": "mlx-vlm",
-            "mlx_vlm": version("mlx-vlm"),
-            "device": "mlx",
-            "dtype": str(dtype).removeprefix("mlx.core."),
-            "quantization": (
-                {k: self.quantization[k] for k in ("bits", "group_size") if k in self.quantization}
-                if self.quantization
-                else None
-            ),
-            "reuse_state": self.share_state,
-        }
+        """What `serve`'s health check reports of the backend, computed once at load: no
+        file is read and no MLX array touched when the health check calls it."""
+        return {**self._description, "reuse_state": self.share_state}
 
     def close(self) -> None:
-        """Stop the worker thread. The backend cannot run after this."""
-        self._executor.shutdown(wait=True)
+        """Stop the worker thread, cancelling the requests queued on it; `forward` refuses to
+        run after this. Calling it again does nothing."""
+        self._closed = True
+        self._executor.shutdown(wait=True, cancel_futures=True)
 
     # -- on the worker thread --
 
@@ -498,7 +440,7 @@ class MLXBackend:
         return self._hidden(h)
 
 
-DTYPES = {"bfloat16": "bfloat16", "float32": "float32"}
+DTYPES = ("bfloat16", "float32")
 
 
 def load_backend(
@@ -514,18 +456,26 @@ def load_backend(
     """The loader `strands_decider.decision.BACKENDS` names for `--device mlx`: the MLX
     backend for the decision checkpoint or MLX artifact in the local directory `path`.
 
-    The image path is loaded when the checkpoint's `inputs` hold "image" and it carries an
-    image processor with the spec's settings; otherwise the backend takes text only, and says
-    why in `image_problem`. The weights run in the dtype they are stored in (bf16 for a
-    decision checkpoint), or `dtype` ("bfloat16" or "float32") for the parts not quantized.
-    `reuse_state=False` runs each question as its own full pass. Questions run one at a time
-    over the state, so `max_batch` and `max_batch_tokens` do not apply. `cache_limit_bytes`
-    sets MLX's process-wide buffer cache limit; None leaves it as it is."""
+    mlx-vlm must be the release tested (`mlx_format.TESTED_MLX_VLM`). The image path is
+    loaded when the checkpoint's `inputs` hold "image" and it carries an image processor with
+    the spec's settings; otherwise the backend takes text only, and says why in
+    `image_problem`. The weights run in the dtype they are stored in (bf16 for a decision
+    checkpoint), or `dtype` ("bfloat16" or "float32") for every tensor but a quantized
+    layer's scales and biases. `reuse_state=False` runs each question as its own full pass.
+    Questions run one at a time over the state, so `max_batch` and `max_batch_tokens` do not
+    apply. `cache_limit_bytes` sets MLX's process-wide buffer cache limit; None leaves it as
+    it is. A quantized artifact whose format has no recorded conformance bound warns so, and
+    `describe()` carries its claim."""
+    from importlib.metadata import version
+
     del max_batch, max_batch_tokens  # one question at a time: nothing to batch
-    if device != "mlx":
-        raise ValueError(f"the MLX backend runs on device 'mlx', not {device!r}")
+    kind_, _, index = str(device).partition(":")
+    if kind_ != "mlx" or index not in ("", "0"):
+        raise ValueError(f"the MLX backend runs on device 'mlx' (or 'mlx:0'), not {device!r}")
     if dtype is not None and dtype not in DTYPES:
-        raise ValueError(f"the MLX backend runs in {sorted(DTYPES)}, not {dtype!r}")
+        raise ValueError(f"--dtype on mlx is one of {', '.join(DTYPES)}, not {dtype!r}")
+    mlx_vlm = version("mlx-vlm")
+    check_mlx_vlm(mlx_vlm)
     root = Path(path).resolve()
     cfg = DecisionConfig.load(root)
     kind = model_type(root)
@@ -534,9 +484,9 @@ def load_backend(
     with open(root / "config.json", encoding="utf-8") as f:
         model_config = json.load(f)
     image_token_id = int(model_config["image_token_id"])
-    notice = conformance_notice(model_config)
-    if notice:
-        warnings.warn(f"{root}: {notice}", stacklevel=2)
+    claim = conformance(cfg.provenance.base_model, model_config.get("quantization"))
+    if claim["notice"]:
+        warnings.warn(f"{root}: {claim['notice']}", stacklevel=2)
     executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="mlx-backend")
 
     def build() -> MLXBackend:
@@ -544,14 +494,17 @@ def load_backend(
             mx.set_cache_limit(cache_limit_bytes)
         model = load_mlx_model(root, keep=VISION_MODULES if processor is not None else ())
         if dtype is not None:
-            target = getattr(mx, DTYPES[dtype])
-            model.update(
-                tree_map(
-                    lambda a: a.astype(target) if mx.issubdtype(a.dtype, mx.floating) else a,
-                    model.parameters(),
-                )
-            )
+            target = getattr(mx, dtype)
+
+            def cast(name: str, a: Any) -> Any:
+                if name.endswith((".scales", ".biases")) or not mx.issubdtype(a.dtype, mx.floating):
+                    return a
+                return a.astype(target)
+
+            model.update(tree_map_with_path(cast, model.parameters()))
         mx.eval(model.parameters())
+        decoder = model.language_model.model
+        stored = str(decoder.norm.weight.dtype).removeprefix("mlx.core.")
         return MLXBackend(
             model,
             processor,
@@ -560,7 +513,13 @@ def load_backend(
             share_state=reuse_state,
             image_token_id=image_token_id,
             image_problem=f"images are not supported: {why}" if why else None,
-            quantization=model_config.get("quantization"),
+            description={
+                "backend": "mlx-vlm",
+                "mlx_vlm": mlx_vlm,
+                "device": "mlx",
+                "dtype": stored,
+                "conformance": {k: v for k, v in claim.items() if k != "notice"},
+            },
         )
 
     try:
@@ -568,3 +527,6 @@ def load_backend(
     except BaseException:
         executor.shutdown(wait=True)
         raise
+
+
+load_backend.dtypes = DTYPES  # type: ignore[attr-defined]  # checked by decision.check_dtype

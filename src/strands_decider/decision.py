@@ -460,6 +460,7 @@ def load_decision_engine(
     loader = backend_loader(device)
     check_dtype(device, dtype)
     path = _local_dir(checkpoint, revision)
+    _refuse_mlx_artifact(checkpoint, path, device)
     with open(os.path.join(path, FILENAME), encoding="utf-8") as f:
         raw = json.load(f)
     if isinstance(raw, dict) and "interface" not in raw:
@@ -477,34 +478,59 @@ def load_decision_engine(
         max_batch=max_batch,
         max_batch_tokens=max_batch_tokens,
     )
-    hidden = getattr(backend, "hidden_size", None)
-    if hidden is not None and readout.weight is not None and readout.weight.shape[1] != hidden:
-        raise ValueError(
-            f"{checkpoint}: readout.safetensors `weight` is {readout.weight.shape}, not "
-            f"[255, {hidden}]: the decoder's hidden size"
+    # From here on the backend holds its weights, and a worker thread on mlx: release them if
+    # the engine cannot be built.
+    try:
+        hidden = getattr(backend, "hidden_size", None)
+        if hidden is not None and readout.weight is not None and readout.weight.shape[1] != hidden:
+            raise ValueError(
+                f"{checkpoint}: readout.safetensors `weight` is {readout.weight.shape}, not "
+                f"[255, {hidden}]: the decoder's hidden size"
+            )
+        describe = getattr(backend, "describe", None)
+        d = describe() if callable(describe) else {"device": device}
+        image_problem = getattr(backend, "image_problem", None)
+        inputs = list(config.inputs) if IMAGE in config.inputs and not image_problem else ["text"]
+        print(
+            f"[strands-decider] decision checkpoint: {d.get('backend', 'backend')} on "
+            f"{d.get('device', device)} in {d.get('dtype', 'its dtype')}, inputs {inputs}, "
+            + ("state encoded once per request" if reuse_state else "one full pass per question"),
+            file=sys.stderr,
         )
-    describe = getattr(backend, "describe", None)
-    d = describe() if callable(describe) else {"device": device}
-    image_problem = getattr(backend, "image_problem", None)
-    inputs = list(config.inputs) if IMAGE in config.inputs and not image_problem else ["text"]
-    print(
-        f"[strands-decider] decision checkpoint: {d.get('backend', 'backend')} on "
-        f"{d.get('device', device)} in {d.get('dtype', 'its dtype')}, inputs {inputs}, "
-        + ("state encoded once per request" if reuse_state else "one full pass per question"),
-        file=sys.stderr,
-    )
-    name = model_name or os.path.basename(checkpoint.rstrip("/")) or checkpoint
-    return DecisionEngine(
-        backend,
-        tokenizer,
-        config,
-        readout,
-        model_name=name,
-        max_length=max_length,
-        image_problem=image_problem,
-        max_concurrency=max_concurrency,
-        queue_timeout=queue_timeout,
-    )
+        name = model_name or os.path.basename(checkpoint.rstrip("/")) or checkpoint
+        return DecisionEngine(
+            backend,
+            tokenizer,
+            config,
+            readout,
+            model_name=name,
+            max_length=max_length,
+            image_problem=image_problem,
+            max_concurrency=max_concurrency,
+            queue_timeout=queue_timeout,
+        )
+    except BaseException:
+        close = getattr(backend, "close", None)
+        if callable(close):
+            close()
+        raise
+
+
+def _refuse_mlx_artifact(checkpoint: str, path: str, device: str) -> None:
+    """ValueError if `path` holds an MLX artifact (written by convert-mlx, or quantized by
+    mlx) and `device` is not mlx: no other backend reads mlx-vlm's layout. Checked before
+    anything else is read."""
+    if _device_kind(device) == "mlx":
+        return
+    from .backends.mlx_format import is_mlx_artifact, refuse_off_mlx
+
+    try:
+        with open(os.path.join(path, "config.json"), encoding="utf-8") as f:
+            model_config = json.load(f)
+    except (OSError, ValueError):
+        return  # the backend reports a missing or malformed config.json itself
+    if isinstance(model_config, dict) and is_mlx_artifact(model_config):
+        raise refuse_off_mlx(checkpoint, device)
 
 
 __all__ = [
