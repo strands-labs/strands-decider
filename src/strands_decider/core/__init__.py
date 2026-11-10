@@ -5,7 +5,7 @@ docs/spec.md defines the interface; this package implements its torch-free half 
 
     render(request, tokenizer, variant)    -> RenderedRequest: ids, S, codes per question,
                                               and each image's span, N and sha256
-    read(rows, readout, config, rendered, inputs=stage)
+    read(rows, readout, config, rendered, stage=stage)
                                            -> answers in v1's response schema, from the
                                               stage a runtime returns (readout.STAGES)
     DecisionConfig.load(checkpoint)        -> decision_config.json, validated

@@ -472,7 +472,7 @@ A decision checkpoint is the base model's own multimodal checkpoint, in the base
 
 | file | contents |
 | --- | --- |
-| `config.json` | the base's configuration: `architectures: ["Gemma4ForConditionalGeneration"]` and `model_type: gemma4` for E2B, E4B, 26B-A4B and 31B; `["Gemma4UnifiedForConditionalGeneration"]` and `gemma4_unified` for the 12B. It holds the base's `text_config`, `vision_config`, `audio_config` (null for 26B-A4B and 31B) and image token ids. Its `text_config.final_logit_softcapping` equals `decision_config.json`'s; a runtime takes the soft-cap from `decision_config.json` and refuses a checkpoint whose two values differ |
+| `config.json` | the base's configuration: `architectures: ["Gemma4ForConditionalGeneration"]` and `model_type: gemma4` for E2B, E4B, 26B-A4B and 31B; `["Gemma4UnifiedForConditionalGeneration"]` and `gemma4_unified` for the 12B. It holds the base's `text_config`, `vision_config`, `audio_config` (null for 26B-A4B and 31B) and image token ids. Its `text_config.final_logit_softcapping` equals `decision_config.json`'s; a runtime takes the soft-cap from `decision_config.json` and refuses a checkpoint whose `config.json` gives a different value, under `text_config` or at its top level |
 | `model.safetensors` or `model-*-of-*.safetensors` with `model.safetensors.index.json` | every tensor of the base, in bf16 under the base's names (the prefixes below), any fine-tuning merged in: no adapter. There is no `lm_head` tensor: Gemma 4 ties it to the token embedding, and the readout takes its place |
 | `processor_config.json` | the base's: its image processor, `Gemma4ImageProcessor` (`Gemma4UnifiedImageProcessor` for the 12B) with `patch_size` 16, `pooling_kernel_size` 3 and `max_soft_tokens` 280, its feature extractor and its video processor. N depends on the three settings (section 3.2), so a runtime refuses image requests for a checkpoint whose image processor has other values |
 | `tokenizer.json`, `tokenizer_config.json` | the base's tokenizer, unchanged; `tokenizer_config.json` carries no `chat_template` key |
@@ -528,7 +528,7 @@ A quantized artifact whose format has no recorded bounds makes no conformance cl
 
 A runtime runs the model. Given the state ids (positions [0, S)), the state's images with their spans, and the question ids of each question, it puts each image's vision-encoder output at its placeholders (section 11.1), runs every question as a continuation of the state under the `prefix_bidir` mask, seeing no other question, and returns one row per question, in the order of the questions. The row is one of five stages of section 7, and the runtime names which, so that nothing is applied twice:
 
-| stage (`outputs`) | a row holds | what the core still applies |
+| stage (`outputs`, `stage`) | a row holds | what the core still applies |
 | --- | --- | --- |
 | `hidden` | h, the final-norm hidden state at the question's last token, [hidden] | the bf16 GEMM, the soft-cap, the temperature, the softmax |
 | `raw_logits` | `z = W h`, before the soft-cap: the 255 codes, or the question's first k | the rounding to bf16 (which leaves a bf16 GEMM's output unchanged), the soft-cap, the temperature, the softmax |
@@ -538,7 +538,7 @@ A runtime runs the model. Given the state ids (positions [0, S)), the state's im
 
 A row of logits or probabilities holds the codes in code order, either all 255 or only the question's first k, so rows may differ in width. The core refuses capped logits beyond ±c and final logits beyond ±c / T: such a row cannot be what its stage says, which is how raw logits passed as capped usually show.
 
-`strands-decider-vllm` is a `probabilities` runtime. A completion with `allowed_token_ids` set to the question's k code ids, `logprobs` k and `temperature` 1.0, under `--logprobs-mode processed_logprobs`, returns the log-softmax of the model's final logits over exactly those k codes; their exponentials are the row. A completion with `logprobs` 255 and no `allowed_token_ids` returns the softmax over all 255 codes, which renormalises to the same row.
+`strands-decider-vllm` is a `probabilities` runtime. A completion with `allowed_token_ids` set to the question's k code ids, `logprobs` k and `temperature` 1.0, under `--logprobs-mode processed_logprobs`, returns the log-softmax of the model's final logits over exactly those k codes; their exponentials are the row. This is the form to use. vLLM refuses `logprobs` above its `--max-logprobs` setting, 20 by default, so the server needs `--max-logprobs 255` for questions of up to 255 options (`strands-decider-vllm serve` sets it). A completion with `logprobs` 255 and no `allowed_token_ids` returns the softmax over all 255 codes, which renormalises to the same row in exact arithmetic, but not always in float32: at a small temperature the question's own codes can all lie so far below a code outside the question that their probabilities underflow to 0, and the core refuses such a row (`probabilities must ... not all be 0`). The k-wide form cannot underflow so, because its largest probability is at least 1/k.
 
 This is v1's `hidden_engine.Backend`, narrowed. v1's backend returns several rows per question, one per option and one for `<answer>`, for the pointer head; the code readout needs only the row at the last token. `strands_decider.core.Backend` states the contract:
 
@@ -546,8 +546,6 @@ This is v1's `hidden_engine.Backend`, narrowed. v1's backend returns several row
 class Backend(Protocol):
     # The stage forward returns: hidden, raw_logits, capped_logits, final_logits or probabilities.
     outputs: str
-    # What forward takes: ("text",), or ("text", "image") with an image path. Absent: text only.
-    inputs: tuple[str, ...]
 
     def forward(
         self,
@@ -560,7 +558,9 @@ class Backend(Protocol):
         state's, in order, each with its file and the span of its placeholders in `state`."""
 ```
 
-`strands_decider.core.evaluate(request, tokenizer, readout, config, backend)` joins the pieces. It refuses a backend that does not name its stage, and refuses a request with images as section 11.1 says. It renders the request with the checkpoint's prompt, calls `forward` once with the shared state and every question, and with the images if there are any, reads the answers from the stage the backend names, and returns a `SystemOneResponse` as JSON. Its parts are public: `read(rows, readout, config, rendered, inputs=stage)` gives the answers and `question_probabilities` the code probabilities, from rows of any stage, where `inputs` is required; `readout_logits` is the bf16 GEMM; `answer(rendered_question, probabilities)` formats one answer. As with v1's backend, a runtime may batch, cache the state's keys and values (keyed as section 6 says), or split the work across devices, provided each question's result is what it would be alone.
+A backend may also have an `inputs` attribute, which says what `forward` takes: `("text",)`, or `("text", "image")` for a backend with an image path. A backend without it takes text only. It is not a member of the protocol, so that a text-only backend need not define it.
+
+`strands_decider.core.evaluate(request, tokenizer, readout, config, backend)` joins the pieces. It refuses a backend that does not name its stage, and refuses a request with images as section 11.1 says. It renders the request with the checkpoint's prompt and checks, before the decoder runs, everything that does not need it: the stage, that the readout's soft-cap is the checkpoint's, that a `hidden` backend has a readout weight with a row per code, and that the rendered code token ids are the checkpoint's `token_ids`. It then calls `forward` once with the shared state and every question, and with the images if there are any, reads the answers from the stage the backend names, and returns a `SystemOneResponse` as JSON. Its parts are public: `read(rows, readout, config, rendered, stage=stage)` gives the answers and `question_probabilities` the code probabilities, from rows of any stage, where `stage` is required (`inputs`, its former name, still works and warns that it is deprecated); `readout_logits` is the bf16 GEMM; `answer(rendered_question, probabilities)` formats one answer. As with v1's backend, a runtime may batch, cache the state's keys and values (keyed as section 6 says), or split the work across devices, provided each question's result is what it would be alone.
 
 ### 11.1 Images
 
