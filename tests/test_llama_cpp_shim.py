@@ -16,6 +16,7 @@ transformers, safetensors, sentencepiece and Pillow; no GPU, no download. Withou
 
 from __future__ import annotations
 
+import importlib
 import importlib.util
 import json
 import os
@@ -34,16 +35,25 @@ SCRIPT = (
 SRC = os.environ.get("STRANDS_DECIDER_LLAMA_CPP")
 LIB = os.environ.get("STRANDS_DECIDER_LLAMA_LIB")
 
+# CI sets STRANDS_DECIDER_REQUIRE_SHIM=1, so that a missing build or dependency fails the job
+# instead of skipping every test and passing.
+REQUIRED = os.environ.get("STRANDS_DECIDER_REQUIRE_SHIM") == "1"
+
 pytestmark = pytest.mark.skipif(
-    not (SRC and LIB),
+    not (SRC and LIB) and not REQUIRED,
     reason="set STRANDS_DECIDER_LLAMA_CPP and STRANDS_DECIDER_LLAMA_LIB to a build",
 )
 
 
 @pytest.fixture(scope="module")
 def result(tmp_path_factory):
+    if REQUIRED and not (SRC and LIB):
+        pytest.fail("STRANDS_DECIDER_REQUIRE_SHIM=1 but no llama.cpp build was given")
     for module in ("torch", "transformers", "safetensors", "sentencepiece", "PIL"):
-        pytest.importorskip(module)
+        if REQUIRED:
+            importlib.import_module(module)
+        else:
+            pytest.importorskip(module)
     spec = importlib.util.spec_from_file_location("shim_check", SCRIPT)
     shim_check = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(shim_check)
