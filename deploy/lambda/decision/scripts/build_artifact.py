@@ -42,8 +42,12 @@ for _parent in Path(__file__).resolve().parents:
         sys.path.insert(0, str(_parent / "src"))
         break
 
-from strands_decider.backends.llama_cpp import check_processor_config  # noqa: E402
-from strands_decider.core import DecisionConfig, Readout  # noqa: E402
+from strands_decider.core import (  # noqa: E402
+    DecisionConfig,
+    Readout,
+    check_image_processor,
+    load_tokenizer,
+)
 from strands_decider.core.config import IMAGE  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
@@ -104,8 +108,9 @@ def check(ckpt: Path) -> DecisionConfig:
     for name in FILES:
         if not (ckpt / name).is_file():
             raise SystemExit(f"{ckpt} has no {name}")
+    load_tokenizer(ckpt, config)  # its code and control token ids, as the function checks them
     if IMAGE in config.inputs:
-        check_processor_config(ckpt / "processor_config.json")
+        check_image_processor(ckpt / "processor_config.json")
     with open(ckpt / "tokenizer_config.json", encoding="utf-8") as f:
         if "chat_template" in json.load(f) or (ckpt / "chat_template.jinja").exists():
             raise SystemExit(
