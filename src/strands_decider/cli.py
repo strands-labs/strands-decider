@@ -1,4 +1,4 @@
-"""The strands-decider CLI: ask and serve.
+"""The strands-decider CLI: ask and serve, and convert-mlx for decision checkpoints.
 
 Training, evaluation, calibration and corpus-building live outside this package.
 Run them as `python -m training.train`, `python -m training.evaluate`,
@@ -286,6 +286,29 @@ def _print_answers(response: SystemOneResponse) -> None:
             )
             for lvl, p in ans.probabilities.items():
                 console.print(f"    {lvl}: {ans.legend.get(lvl, ''):<40} {p:.3f}")
+
+
+@app.command("convert-mlx")
+def convert_mlx_cmd(
+    checkpoint: str = typer.Argument(..., help="A decision checkpoint: a directory or a Hub id."),
+    out: str = typer.Argument(..., help="The new directory to write the MLX artifact to."),
+    bits: int | None = typer.Option(
+        None,
+        "--bits",
+        help="Quantize the decoder to 8 or 4 bits. Omitted: bf16. The vision and audio "
+        "encoders and their projections stay bf16, and the readout is copied unchanged.",
+    ),
+    group_size: int = typer.Option(64, "--group-size", help="Quantization group size."),
+) -> None:
+    """Write the MLX artifact of a decision checkpoint, for `--device mlx` (docs/spec.md)."""
+    from .backends.mlx_convert import convert
+
+    summary = convert(checkpoint, out, bits=bits, group_size=group_size)
+    q = summary["quantization"]
+    console.print(
+        f"[green]wrote[/] {summary['artifact']}: {summary['bytes'] / 1e9:.2f} GB, "
+        + (f"decoder at {q['bits']} bits (group {q['group_size']})" if q else "bf16")
+    )
 
 
 @app.command("info", hidden=True)
