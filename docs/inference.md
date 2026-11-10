@@ -316,13 +316,18 @@ strands-decider serve path/to/decision-checkpoint --port 8000
 The core library renders each request with the checkpoint's prompt, and the transformers
 backend (`backends/transformers.py`) runs the model: every layer under the interface's mask,
 the state encoded once when a request asks several questions, the answers read from the hidden
-state at each question's last token. CPU runs float32, CUDA and MPS bf16; the first line the
-command prints names the device and dtype. A request may carry images when the checkpoint's
-`decision_config.json` lists `image` in `inputs`; `--vision` is not needed. The 12B's image
-processor needs torchvision. `--no-prefix-cache` runs one full pass per question, the spec's
-reference; `--max-batch` and `--max-batch-tokens` bound the questions of one pass over a
-state. `/health` reports the backend, the device, the dtype and whether images are served.
-`--device-map` and `--device mlx` do not apply.
+state at each question's last token. CPU runs float32, CUDA and MPS bf16, and `--dtype float32`
+or `--dtype bfloat16` chooses; the first line the command prints names the device and dtype. A
+request may carry images when the checkpoint's `decision_config.json` lists `image` in
+`inputs`; `--vision` is not needed, and warns. Images need the `vision` extra
+(`pip install "strands-decider[vision]"`, Pillow and torchvision; the 12B's image processor
+exists only for torchvision). A request with `audio` is refused with 422: audio is not part of
+the interface. `--no-prefix-cache` runs one full pass per question (the spec's reference on
+CUDA in bf16); `--max-batch` and `--max-batch-tokens` bound the questions of one pass over a
+state. The server answers one request at a time on the model, and the others wait, so a burst
+of long or image requests cannot hold several states on the GPU together. `/health` reports
+the backend, the device, the dtype and whether images are served. `--device-map` and
+`--device mlx` do not apply.
 
 A checkpoint from before the interface, whose `decision_config.json` has no `interface`, names
 no prompt, so `ask` and `serve` refuse it; `TransformersBackend` runs it on token ids rendered

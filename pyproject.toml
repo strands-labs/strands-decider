@@ -37,7 +37,10 @@ dependencies = [
 train = ["datasets>=2.20"]
 # Image input: v1's (`serve --vision`, `ask --image`, docs/vision.md), which also needs
 # transformers >= 5.18, and the core's (strands_decider.core), which reads image headers with it.
-vision = ["pillow>=13"]
+# Decision checkpoints take images with it too; the 12B's image processor
+# (Gemma4UnifiedImageProcessor) exists only as a torchvision backend, hence torchvision
+# (0.22 pairs with torch 2.7, the floor above). v1's Qwen path stays on the PIL processor.
+vision = ["pillow>=13", "torchvision>=0.22"]
 # `--device mlx`: the torso on Apple silicon's GPU through mlx-lm
 # (src/strands_decider/mlx_engine.py).
 # mlx-lm is capped at the minor version tested: the backend uses its Qwen3.5 module layout and
