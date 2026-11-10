@@ -5,7 +5,6 @@
     "model_revision": "main",
     "decision": false,
     "checkpoint_revision": "main",
-    "snapstart": false,
-    "max_request_tokens": 24576
+    "snapstart": false
   }
 }

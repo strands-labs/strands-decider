@@ -64,7 +64,7 @@ export class DeciderFunctionStack extends Stack {
     const snapStart = flag(ctx("snapstart"), "snapstart");
     // Keeps every request inside the function's 15-minute timeout: a larger one gets a 422
     // naming its size before any work, not a timeout after 15 billed minutes.
-    const maxRequestTokens = Number(ctx("max_request_tokens"));
+    const maxRequestTokens = Number(ctx("max_request_tokens") ?? 24576);
     if (!Number.isInteger(maxRequestTokens) || maxRequestTokens < 0) {
       throw new Error(`max_request_tokens must be a whole number, 0 for no limit, not ${ctx("max_request_tokens")}`);
     }
