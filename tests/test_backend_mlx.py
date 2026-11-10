@@ -10,9 +10,11 @@ decision_config.json. Sliding windows are 4 tokens, so a window left on would sh
 
 The reference is the spec's: transformers' model in float32, one prompt per pass, the dense
 prefix_bidir mask passed for both layer types (with SDPA, which reads a boolean mask as the
-keys each token sees), and for E2B the pixels prepared by Pillow's bicubic resize and
-transformers' PIL image processor with its resize off. (The 12B's processor in transformers
-needs torchvision, so its reference takes the backend's pixels and checks the model alone.)
+keys each token sees), and for E2B the pixels prepared by the core's `resize_image` and
+transformers' PIL image processor with its resize off. The resize itself is checked apart from
+it, against the core's pixel goldens (tests/fixtures/core/image_pixels.json), which Pillow made
+without this code; the 12B's pixels are checked against a numpy port of transformers' patch
+merge and, with torchvision, against transformers' own processor.
 Through the decision engine (`decision.load_decision_engine(..., device="mlx")`) and `serve`,
 requests are checked and refused as on every backend, and the transformers backend's own tiny
 checkpoints get the same answers from both backends. Apple silicon with the mlx extra only;
@@ -1262,6 +1264,34 @@ def test_describe_is_computed_at_load_and_carries_the_claim(bf16_ckpts, tmp_path
         assert q4.describe()["conformance"]["claim"] == "none"
     finally:
         q4.close()
+    import warnings
+
+    from strands_decider.backends.mlx_format import ARTIFACT_KEY
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")  # the recorded format: no notice
+        convert(bf16_ckpts["e2b"], tmp_path / "q8", bits=8)
+        q8 = load_backend(tmp_path / "q8")
+    try:
+        claim = q8.describe()["conformance"]
+        assert (claim["claim"], claim["weight_format"], claim["size"]) == (
+            "recorded",
+            "mlx-8bit",
+            "E2B",
+        )
+        assert claim["bounds"] == {"top1": 0.98, "mean_abs_dp": 0.02, "min_questions": 1000}
+    finally:
+        q8.close()
+    unmarked = copy_of(tmp_path / "q8", tmp_path, "q8-unmarked")
+    config = json.loads((unmarked / "config.json").read_text())
+    del config[ARTIFACT_KEY]  # as mlx_vlm.convert would leave it
+    (unmarked / "config.json").write_text(json.dumps(config))
+    with pytest.warns(UserWarning, match="convert-mlx did not write it"):
+        b = load_backend(unmarked)
+    try:
+        assert b.describe()["conformance"]["claim"] == "none"
+    finally:
+        b.close()
 
 
 def test_a_failed_engine_build_closes_the_backend(ckpts, tmp_path, monkeypatch):
@@ -1353,5 +1383,60 @@ def test_pixels_are_the_spec_resize_of_the_decoded_oriented_image(backends):
         tokens=soft_tokens(80, 40),
     )
     px = prepare_image(im, b.processor)["pixel_values"][0]
-    w, h = resized_size(40, 80)
-    assert px.shape == (3, h, w) and h > w
+    # Shown 40 x 80, so resized to 528 x 1104; the header's shape would give 1104 x 528, with
+    # the same N, which a token count cannot tell apart.
+    assert resized_size(40, 80) == (528, 1104)
+    assert px.shape == (3, 1104, 528)
+
+
+def test_a_decoded_size_that_is_not_the_headers_is_refused_by_forward(backends, monkeypatch):
+    from strands_decider.backends import mlx as backend_mlx
+
+    b = backends["e2b"]
+    r = render({**REQUEST, "images": [png("red")]}, TOK, "strands-plain")
+    real = backend_mlx.decode_image
+    q = [list(r.questions["urgent"].question_ids)]
+    # Its transpose is accepted (an EXIF turn); any other size is the file's fault.
+    monkeypatch.setattr(backend_mlx, "decode_image", lambda d: real(d).resize((48, 64)))
+    assert b.forward(list(r.state_ids), q, r.images).shape == (1, 64)
+    monkeypatch.setattr(backend_mlx, "decode_image", lambda d: real(d).resize((64, 47)))
+    with pytest.raises(RequestRefused, match=r"^image could not be decoded: its pixels are 64x47"):
+        b.forward(list(r.state_ids), q, r.images)
+
+
+def test_the_resize_meets_the_cores_pixel_goldens(backends):
+    """docs/spec.md section 11.1's pixel conformance: the backend's decode of each golden image
+    is the golden's decoded pixels (exactly for PNG, GIF and lossless WebP, within 1 per channel
+    otherwise), and its resize of those decoded pixels, read back from the processor's output,
+    is the golden's resized pixels byte for byte. The goldens were made with Pillow 12.2."""
+    import hashlib
+
+    from core_support import FIXTURES
+
+    from strands_decider.core.images import image_size
+    from strands_decider.core.prompt import RenderedImage as RI
+
+    goldens = json.loads((FIXTURES / "image_pixels.json").read_text())["images"]
+    b = backends["e2b"]
+    for name, g in goldens.items():
+        ours = np.asarray(decode_image((FIXTURES / "images" / name).read_bytes()))
+        theirs = np.asarray(Image.open(FIXTURES / "pixels" / f"{name}.png").convert("RGB"))
+        assert ours.shape == theirs.shape, name
+        exact = name.endswith((".png", ".gif")) or name.startswith("lossless")
+        diff = int(np.abs(ours.astype(int) - theirs.astype(int)).max())
+        assert diff == 0 if exact else diff <= 1, (name, diff)
+        decoded = (FIXTURES / "pixels" / f"{name}.png").read_bytes()  # the golden's, not ours
+        _, w, h = image_size(decoded)
+        im = RI(
+            data=decoded,
+            format="PNG",
+            width=w,
+            height=h,
+            sha256="",
+            start=0,
+            tokens=soft_tokens(w, h),
+        )
+        px = prepare_image(im, b.processor)["pixel_values"][0]  # [3, H, W], scaled to [0, 1]
+        rgb = np.rint(px.transpose(1, 2, 0) * 255).astype(np.uint8)
+        assert [rgb.shape[1], rgb.shape[0]] == g["resized"], name
+        assert hashlib.sha256(rgb.tobytes()).hexdigest() == g["resized_sha256"], name

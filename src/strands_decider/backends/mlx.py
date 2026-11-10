@@ -20,10 +20,11 @@ The checkpoint is the Gemma 4 base's own multimodal checkpoint with the fine-tun
   token's path reaches the answer, and a question carries only its last token through them
   (mlx-vlm's `logits_to_keep=1`). That is exact. The other sizes share nothing, and run every
   layer over every question token.
-- Images. Each image is decoded as v1 decodes it, resized with Pillow's bicubic filter to the
-  size the spec gives, and prepared by the checkpoint's image processor with its own resize
-  off. The vision encoder's N vectors replace the placeholders' embeddings at the image's span
-  in the state. At those positions the per-layer embedding of E2B and E4B is token 0's, as in
+- Images. Each image is decoded as v1 decodes it, its decoded, oriented size held to its
+  header's (the core's `check_decoded_size`, which gives the size to resize to), resized by the
+  spec's bicubic resize (the core's `resize_image`: the width's pass, then the height's), and
+  prepared by the checkpoint's image processor with its own resize off. The vision encoder's N
+  vectors replace the placeholders' embeddings at the image's span in the state. At those positions the per-layer embedding of E2B and E4B is token 0's, as in
   the base model, which mlx-vlm's `get_input_embeddings` does.
 - The readout. `forward` returns the final-norm hidden state at each question's last token, as
   the bf16 decoder gives it (`outputs = "hidden"`), and the core's `Readout` applies the bf16
@@ -34,9 +35,10 @@ The checkpoint is the Gemma 4 base's own multimodal checkpoint with the fine-tun
 not part of the interface yet (spec section 12): the core refuses it, and the audio encoder and
 its projection are dropped at load and never run.
 
-mlx-vlm is pinned to the release tested (the `mlx` extra): this module calls its internals, `get_input_embeddings`, the language model's `__call__` (`inputs_embeds`,
-`per_layer_inputs`, `mask`, `cache`, `logits_to_keep`), `encode_image`, `get_image_features`
-and its processors.
+mlx-vlm is pinned to the release tested (the `mlx` extra), and another is refused at load:
+this module calls its internals, `get_input_embeddings`, the language model's `__call__`
+(`inputs_embeds`, `per_layer_inputs`, `mask`, `cache`, `logits_to_keep`), `encode_image`,
+`get_image_features` and its processors.
 """
 
 from __future__ import annotations
@@ -482,7 +484,10 @@ def load_backend(
     with open(root / "config.json", encoding="utf-8") as f:
         model_config = json.load(f)
     image_token_id = int(model_config["image_token_id"])
-    claim = conformance(cfg.provenance.base_model, model_config.get("quantization"))
+    try:
+        claim = conformance(model_config, cfg.provenance.base_model)
+    except ValueError as e:
+        raise ValueError(f"{root}: {e}") from e
     if claim["notice"]:
         warnings.warn(f"{root}: {claim['notice']}", stacklevel=2)
     executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="mlx-backend")

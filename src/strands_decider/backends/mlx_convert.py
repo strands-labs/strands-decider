@@ -178,9 +178,14 @@ def convert(
     config = bases_form(config) or config  # the form mlx-vlm reads, written into the artifact
     config[ARTIFACT_KEY] = dict(ARTIFACT)
 
-    claim = conformance(
+    claim = conformance(  # as the artifact will be: marked, its decoder quantized as asked
+        {
+            ARTIFACT_KEY: ARTIFACT,
+            "quantization": {"bits": bits, "group_size": group_size, "mode": "affine"}
+            if bits
+            else None,
+        },
         decision.provenance.base_model,
-        {"bits": bits, "group_size": group_size, "mode": "affine"} if bits else None,
     )
     if claim["notice"]:
         warnings.warn(claim["notice"], stacklevel=2)

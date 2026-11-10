@@ -8,15 +8,18 @@ the tests of these rules run everywhere:
   than mlx: an MLX artifact holds mlx-vlm's tensor layout, which no other backend reads.
 - `bases_form`: config.json in the Gemma 4 bases' own form, which mlx-vlm 0.7.12 reads, from
   the form transformers 5.2x writes.
-- `RECORDED` and `conformance`: the quantized formats docs/spec.md section 10 records bounds
-  for, and the claim an artifact may make.
+- `conformance`: the claim a checkpoint or artifact may make, from the core's `BOUNDS`
+  (docs/spec.md section 10), granted to quantized weights only when convert-mlx wrote them.
 - `TESTED_MLX_VLM` and `check_mlx_vlm`: the mlx-vlm release the backend is tested on.
 """
 
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
+
+from ..core.conformance import BF16, BOUNDS, MIN_QUESTIONS, NoRecordedBound, bounds
 
 # The mlx-vlm release the backend is tested on. It relies on behaviour no release promises (a
 # passed mask reaching every layer as it is, `logits_to_keep` through the KV-shared layers,
@@ -27,15 +30,12 @@ TESTED_MLX_VLM = "0.7.12"
 ARTIFACT_KEY = "strands_decider_artifact"
 ARTIFACT = {"format": "mlx", "written_by": "strands-decider convert-mlx"}
 
-# The conformance bounds docs/spec.md section 10 records (top-1 agreement at least, mean |dp| at
-# most), for bf16 and by quantized format: (base model, bits, group size, mode). MLX 8-bit in
-# groups of 64 has bf16's bounds at E2B, where it was measured (98.83% top-1, mean |dp| 0.0099,
-# over 1,200 prompts); no other size and no other quantized format has bounds recorded, and an
-# artifact in one makes no conformance claim.
-BF16_BOUNDS = {"top1": 0.98, "mean_dp": 0.02}
-RECORDED: dict[tuple[str, int, int, str], dict[str, float]] = {
-    ("google/gemma-4-E2B-it", 8, 64, "affine"): dict(BF16_BOUNDS),
-}
+# The weight format the core's BOUNDS records for MLX artifacts (docs/spec.md section 10):
+# convert-mlx's 8-bit, group size 64, affine, decoder only. Another width, group size or mode is
+# another format, and no bounds are recorded for it.
+MLX_8BIT = "mlx-8bit"
+_RECORDED_FORMATS = {(8, 64, "affine"): MLX_8BIT}
+_SIZE = re.compile(r"gemma-4-(E2B|E4B|12B|26B-A4B|31B)(?:-it)?", re.IGNORECASE)
 
 
 def check_mlx_vlm(found: str) -> None:
@@ -67,37 +67,90 @@ def refuse_off_mlx(checkpoint: str, device: str) -> ValueError:
     )
 
 
-def quantization_format(quantization: dict[str, Any] | None) -> tuple[int, int, str] | None:
-    """(bits, group size, mode) of config.json's `quantization`, or None for bf16."""
+def quantization_format(quantization: Any) -> tuple[int, int, str] | None:
+    """(bits, group size, mode) of config.json's `quantization`, or None for bf16. ValueError
+    for one that is not an object with integer `bits` and `group_size`."""
     if not quantization:
         return None
-    return (
-        int(quantization["bits"]),
-        int(quantization["group_size"]),
-        str(quantization.get("mode", "affine")),
-    )
+    if not isinstance(quantization, dict):
+        raise ValueError(f"config.json's quantization is {quantization!r}, not an object")
+    sizes: list[int] = []
+    for name in ("bits", "group_size"):
+        v = quantization.get(name)
+        if not (isinstance(v, int) and not isinstance(v, bool) and v > 0):
+            raise ValueError(f"config.json's quantization has {name} {v!r}, not a positive integer")
+        sizes.append(v)
+    mode = quantization.get("mode")
+    if mode is not None and not isinstance(mode, str):
+        raise ValueError(f"config.json's quantization has mode {mode!r}, not a string")
+    return sizes[0], sizes[1], mode or "affine"
 
 
-def conformance(base_model: str, quantization: dict[str, Any] | None) -> dict[str, Any]:
-    """The conformance claim an artifact of `base_model` in this quantization may make
-    (docs/spec.md section 10), for `/health` and for the notice at conversion and load:
-    `claim` is "bf16" or "recorded" with the `bounds` it must meet, or "none" with the
-    `notice` to give."""
-    fmt = quantization_format(quantization)
+def checkpoint_size(base_model: str) -> str | None:
+    """The Gemma 4 size the core's BOUNDS keys on ("E2B", ..., "31B"), from a checkpoint's
+    `provenance.base_model`; None for another base, which then has no quantized bounds."""
+    m = _SIZE.search(base_model)
+    return m.group(1).upper() if m else None
+
+
+def conformance(model_config: dict[str, Any], base_model: str) -> dict[str, Any]:
+    """The conformance claim a checkpoint or MLX artifact may make (docs/spec.md section 10),
+    for `/health` and for the notice at conversion and load, from the core's `bounds`
+    (`BOUNDS`, `NoRecordedBound`):
+
+    - bf16 weights claim bf16's bounds, at every size;
+    - quantized weights claim a recorded format's bounds only when convert-mlx wrote them (the
+      `ARTIFACT` marker: its decoder alone quantized, as the format was measured), in the
+      recorded bits, group size and mode, at a size the format is recorded for;
+    - anything else makes no claim, and `notice` says why.
+
+    `claim` is "bf16", "recorded" or "none"; `bounds` is (top-1 at least, mean |dp| at most)
+    over at least `min_questions` golden questions, or None. ValueError for a malformed
+    `quantization`."""
+    fmt = quantization_format(model_config.get("quantization"))
+    size = checkpoint_size(base_model)
     if fmt is None:
-        return {"format": "bf16", "claim": "bf16", "bounds": dict(BF16_BOUNDS), "notice": None}
+        top1, dp = bounds(BF16)
+        return {
+            "weight_format": BF16,
+            "size": size,
+            "claim": "bf16",
+            "bounds": {"top1": top1, "mean_abs_dp": dp, "min_questions": MIN_QUESTIONS},
+            "notice": None,
+        }
     bits, group, mode = fmt
-    name = f"{bits}-bit, group {group}, {mode}"
-    bounds = RECORDED.get((base_model, bits, group, mode))
-    if bounds is not None:
-        return {"format": name, "claim": "recorded", "bounds": dict(bounds), "notice": None}
+    described = f"{bits}-bit, group {group}, {mode}"
+    weight_format = _RECORDED_FORMATS.get(fmt)
+    marker = model_config.get(ARTIFACT_KEY)
+    why = None
+    if not (isinstance(marker, dict) and marker.get("format") == ARTIFACT["format"]):
+        why = "convert-mlx did not write it, so what it quantized is not known"
+    elif weight_format is None:
+        why = f"docs/spec.md section 10 records no bounds for MLX {described}"
+    else:
+        try:
+            top1, dp = bounds(weight_format, size)
+        except NoRecordedBound:
+            sizes = sorted(z for f, z in BOUNDS if f == weight_format and z is not None)
+            why = (
+                f"docs/spec.md section 10 records {weight_format} bounds at "
+                f"{', '.join(sizes)} only, not at {size or base_model}"
+            )
+        else:
+            return {
+                "weight_format": weight_format,
+                "size": size,
+                "claim": "recorded",
+                "bounds": {"top1": top1, "mean_abs_dp": dp, "min_questions": MIN_QUESTIONS},
+                "notice": None,
+            }
     return {
-        "format": name,
+        "weight_format": weight_format or f"mlx {described}",
+        "size": size,
         "claim": "none",
         "bounds": None,
         "notice": (
-            f"this MLX artifact ({name}, of {base_model}) makes no conformance claim: "
-            f"docs/spec.md section 10 records no bounds for its format at this size"
+            f"this MLX artifact ({described}, of {base_model}) makes no conformance claim: {why}"
         ),
     }
 

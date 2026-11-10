@@ -199,21 +199,47 @@ def test_an_mlx_artifact_is_refused_off_mlx_before_anything_loads(ckpt, device, 
         decision.load_decision_engine(str(ckpt), device=device)
 
 
-def test_the_conformance_claim_is_keyed_on_the_measured_format():
-    e2b = "google/gemma-4-E2B-it"
-    assert mlx_format.conformance(e2b, None)["claim"] == "bf16"
-    assert mlx_format.conformance(e2b, None)["bounds"] == {"top1": 0.98, "mean_dp": 0.02}
-    recorded = mlx_format.conformance(e2b, {"bits": 8, "group_size": 64, "mode": "affine"})
-    assert recorded["claim"] == "recorded" and not recorded["notice"]
-    assert recorded["bounds"] == {"top1": 0.98, "mean_dp": 0.02}  # bf16's, as spec 10 records
-    for base, q in (
-        ("google/gemma-4-31B-it", {"bits": 8, "group_size": 64}),  # another size
-        (e2b, {"bits": 8, "group_size": 32}),  # another group size
-        (e2b, {"bits": 4, "group_size": 64}),  # another width
+def test_the_conformance_claim_comes_from_the_core_and_the_marker():
+    from strands_decider.core import BOUNDS
+    from strands_decider.core.conformance import MIN_QUESTIONS
+
+    e2b, marked = "google/gemma-4-E2B-it", {mlx_format.ARTIFACT_KEY: dict(mlx_format.ARTIFACT)}
+    q8 = {"bits": 8, "group_size": 64, "mode": "affine"}
+    want = lambda key: {  # noqa: E731
+        "top1": BOUNDS[key][0],
+        "mean_abs_dp": BOUNDS[key][1],
+        "min_questions": MIN_QUESTIONS,
+    }
+    bf16 = mlx_format.conformance({}, e2b)
+    assert (bf16["claim"], bf16["bounds"]) == ("bf16", want(("bf16", None)))
+    assert mlx_format.conformance({}, "google/gemma-4-31B-it")["claim"] == "bf16"  # every size
+    recorded = mlx_format.conformance({**marked, "quantization": q8}, e2b)
+    assert (recorded["claim"], recorded["weight_format"], recorded["size"]) == (
+        "recorded",
+        "mlx-8bit",
+        "E2B",
+    )
+    assert recorded["bounds"] == want(("mlx-8bit", "E2B")) and not recorded["notice"]
+    for config, base, why in (
+        ({"quantization": q8}, e2b, "convert-mlx did not write it"),  # no marker
+        ({**marked, "quantization": q8}, "google/gemma-4-31B-it", "at E2B only, not at 31B"),
+        ({**marked, "quantization": {**q8, "group_size": 32}}, e2b, "records no bounds for MLX"),
+        ({**marked, "quantization": {**q8, "bits": 4}}, e2b, "records no bounds for MLX 4-bit"),
+        ({**marked, "quantization": {**q8, "mode": "mxfp8"}}, e2b, "records no bounds for MLX"),
+        ({**marked, "quantization": q8}, "someone/other-model", "not at someone/other-model"),
     ):
-        claim = mlx_format.conformance(base, q)
-        assert claim["claim"] == "none" and "makes no conformance claim" in claim["notice"]
-        assert "records no bounds for its format at this size" in claim["notice"]
+        claim = mlx_format.conformance(config, base)
+        assert claim["claim"] == "none" and claim["bounds"] is None
+        assert "makes no conformance claim" in claim["notice"] and why in claim["notice"]
+
+
+@pytest.mark.parametrize(
+    "quantization",
+    [{"bits": 8}, {"bits": "8", "group_size": 64}, {"bits": 8, "group_size": True}, [8, 64]],
+)
+def test_a_malformed_quantization_is_refused_cleanly(quantization):
+    with pytest.raises(ValueError, match=r"config\.json's quantization"):
+        mlx_format.conformance({"quantization": quantization}, "google/gemma-4-E2B-it")
 
 
 def test_only_the_tested_mlx_vlm_is_accepted():
