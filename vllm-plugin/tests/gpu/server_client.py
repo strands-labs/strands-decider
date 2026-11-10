@@ -2,14 +2,15 @@
 
 - ``images``: text and image requests are answered in v1's format; one image, two images and four images; refusals
   (five images, bad base64, a file that is not an image, a body that is not JSON) get HTTP 400 and the server keeps
-  serving; the image-content cache test: after a request with one photo, a request with a different photo of the same
-  size, the same text and the same question reuses no cached token, while a further question on the first photo
-  reuses its state; ``--text-only URL`` checks that a server of a text-only checkpoint refuses images with the
+  serving; the image-content cache test, on exact counts of cached tokens: after a request with one photo, a request
+  with a different photo of the same size, the same text and the same question reuses no cached token, a further
+  question on the first photo reuses its state's full blocks, and repeats reuse all but their last token's;
+  ``--text-only URL`` checks that a server of a text-only checkpoint refuses images with the
   specification's message and still answers text.
 - ``textonly``: only that last check, against ``--url``.
 - ``answers``: every request of ``--requests`` (System One requests, images inline) at ``--concurrency``; writes each
   question's code probabilities to ``--out``; with ``--expect`` (a ``reference.py`` output) reports top-1 agreement
-  and mean and max |dp| and gates on ``--min-top1`` and ``--max-mean-dp``.
+  and mean and max |dp| and gates on ``--min-top1``, ``--max-mean-dp`` and ``--max-dp``.
 
   python server_client.py images --url http://127.0.0.1:8200 --out images.json
   python server_client.py answers --url http://127.0.0.1:8200 --requests req.jsonl --expect ref.jsonl --out ans.jsonl
@@ -172,42 +173,78 @@ def scenario_images(a):
         check(st == 400 and want in str(r), f"{name}: HTTP {st} ({str(r)[:120]})")
         check(health(url) == 200 and post(url, good)[0] == 200, f"{name}: the server keeps serving")
 
-    # The image-content cache test. Two different photos of the same size have the same token ids.
+    # The image-content cache test, on exact counts of cached tokens. Two different photos of the same size have the
+    # same token ids. vLLM reuses a prompt's whole blocks of A tokens: for an exact repeat of an L-token prompt all
+    # but the last token's, floor((L - 1) / A) A; for a further question on a cached state of S tokens the state's,
+    # floor(S / A) A (the plugin keys the blocks inside [0, S) by the state and its images alone). A is the KV block
+    # size, or a multiple of it when the model's layers have KV pages of different sizes (vLLM aligns cache hits to
+    # their least common multiple: 32 tokens for E2B with 16-token blocks); the counts must fit one A.
+    B = a.block_size
     text = {"note": "listing photos", "items": [f"item {i} looks fine" for i in range(60)]}
     q1 = {"busy": QUESTIONS["busy"]}
     q2 = {"color": QUESTIONS["color"]}
     first, other = photo(7001, 640, 480), photo(7002, 640, 480)
     st1, r1, _ = post(url, {"state": text, "images": [first], "questions": q1})
     st2, r2, _ = post(url, {"state": text, "images": [other], "questions": q1})
-    same_ids = st1 == st2 == 200 and r1["usage"]["input_tokens"] == r2["usage"]["input_tokens"]
-    check(same_ids, "two photos of the same size: the same number of prompt tokens")
-    check(
-        st2 == 200 and r2["usage"]["cached_tokens"] == 0,
-        f"a different photo of the same size after the first: {r2['usage'].get('cached_tokens') if st2 == 200 else r2} cached tokens (want 0)",
-    )
     st3, r3, _ = post(url, {"state": text, "images": [first], "questions": q2})
-    check(
-        st3 == 200 and r3["usage"]["cached_tokens"] > 256,
-        f"the same photo, a further question: {r3['usage'].get('cached_tokens') if st3 == 200 else r3} cached tokens (want its state's full blocks)",
-    )
     st4, r4, _ = post(url, {"state": text, "images": [first], "questions": q1})
-    check(
-        st4 == 200
-        and r4["usage"]["cached_tokens"] >= r4["usage"]["input_tokens"] - a.block_size
-        and dmax(vector(r4["answers"]["busy"]), vector(r1["answers"]["busy"])) <= 0.01,
-        "the same photo and question again: every full block reused, the same answer",
-    )
     st5, r5, _ = post(url, {"state": text, "images": [other], "questions": q1})
+    # Both questions at once: input_tokens counts the state once, so S = L1 + L2 - L12.
+    st6, r6, _ = post(url, {"state": text, "images": [first], "questions": {**q1, **q2}})
+    if not check(
+        st1 == st2 == st3 == st4 == st5 == st6 == 200,
+        f"cache test requests answered: HTTP {[st1, st2, st3, st4, st5, st6]}",
+    ):
+        return {}
+    u = [r["usage"] for r in (r1, r2, r3, r4, r5, r6)]
+    L1, L2 = u[0]["input_tokens"], u[2]["input_tokens"]
+    S = L1 + L2 - u[5]["input_tokens"]
+    counts = [u[i]["cached_tokens"] for i in (2, 3, 4, 5)]
+
+    def expected(A):
+        r1_, r2_ = (L1 - 1) // A * A, (L2 - 1) // A * A
+        return [S // A * A, r1_, r1_, r1_ + r2_]
+
+    B = next((A for A in (B, 2 * B, 4 * B) if expected(A) == counts), B)
+    print(f"      cache hits aligned to {B} tokens; S = {S}, L = {L1} and {L2}", flush=True)
+    repeat = lambda n: (n - 1) // B * B  # noqa: E731
     check(
-        st5 == 200 and dmax(vector(r5["answers"]["busy"]), vector(r2["answers"]["busy"])) <= 0.01,
-        "the other photo again: its own answer, not the first photo's",
+        u[1]["input_tokens"] == L1, "two photos of the same size: the same number of prompt tokens"
+    )
+    check(
+        u[1]["cached_tokens"] == 0,
+        f"a different photo of the same size after the first: {u[1]['cached_tokens']} cached tokens (want 0)",
+    )
+    check(
+        u[2]["cached_tokens"] == S // B * B,
+        f"the same photo, a further question: {u[2]['cached_tokens']} cached tokens (want the state's full "
+        f"blocks, {S // B * B} of S = {S})",
+    )
+    d4 = dmax(vector(r4["answers"]["busy"]), vector(r1["answers"]["busy"]))
+    check(
+        u[3]["cached_tokens"] == repeat(L1) and d4 <= a.same_tol,
+        f"the same photo and question again: {u[3]['cached_tokens']} cached tokens (want {repeat(L1)}), "
+        f"|dp| vs cold {d4:.2e} (tolerance {a.same_tol})",
+    )
+    d5 = dmax(vector(r5["answers"]["busy"]), vector(r2["answers"]["busy"]))
+    check(
+        u[4]["cached_tokens"] == repeat(L1) and d5 <= a.same_tol,
+        f"the other photo again: {u[4]['cached_tokens']} cached tokens (want {repeat(L1)}), its own answer, "
+        f"|dp| vs its cold one {d5:.2e}",
+    )
+    check(
+        u[5]["cached_tokens"] == repeat(L1) + repeat(L2),
+        f"both questions again: {u[5]['cached_tokens']} cached tokens (want {repeat(L1) + repeat(L2)})",
     )
     out = {
         "cache": {
-            "other_photo_cached": r2["usage"].get("cached_tokens") if st2 == 200 else None,
-            "further_question_cached": r3["usage"].get("cached_tokens") if st3 == 200 else None,
-            "repeat_cached": r4["usage"].get("cached_tokens") if st4 == 200 else None,
-            "input_tokens": r1["usage"]["input_tokens"] if st1 == 200 else None,
+            "state_tokens": S,
+            "input_tokens": L1,
+            "other_photo_cached": u[1]["cached_tokens"],
+            "further_question_cached": u[2]["cached_tokens"],
+            "repeat_cached": u[3]["cached_tokens"],
+            "repeat_dp": d4,
+            "other_repeat_dp": d5,
         }
     }
     if a.text_only:
@@ -304,9 +341,12 @@ def scenario_answers(a):
             }
         )
         check(
-            top1 >= a.min_top1 and summary["mean_dp"] <= a.max_mean_dp,
+            top1 >= a.min_top1
+            and summary["mean_dp"] <= a.max_mean_dp
+            and summary["max_dp"] <= a.max_dp,
             f"reference: top-1 {top1:.4f} over {len(dps)} questions (gate {a.min_top1}), "
-            f"mean |dp| {summary['mean_dp']:.4f} (gate {a.max_mean_dp}), max |dp| {summary['max_dp']:.4f}",
+            f"mean |dp| {summary['mean_dp']:.4f} (gate {a.max_mean_dp}), max |dp| {summary['max_dp']:.4f} "
+            f"(gate {a.max_dp})",
         )
     print(json.dumps(summary), flush=True)
     return summary
@@ -325,8 +365,15 @@ def main():
     ap.add_argument("--concurrency", type=int, default=8)
     ap.add_argument("--min-top1", type=float, default=0.98)
     ap.add_argument("--max-mean-dp", type=float, default=1.0, help="answers: the gate on mean |dp|")
+    ap.add_argument("--max-dp", type=float, default=1.0, help="answers: the gate on max |dp|")
     ap.add_argument(
         "--block-size", type=int, default=16, help="the server's KV block size (images)"
+    )
+    ap.add_argument(
+        "--same-tol",
+        type=float,
+        default=0.01,
+        help="images: max |dp| of a cached answer against the same request's cold one",
     )
     ap.add_argument("--out")
     a = ap.parse_args()

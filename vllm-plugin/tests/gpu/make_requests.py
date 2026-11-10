@@ -1,7 +1,7 @@
 """Requests for the GPU checks, without a dataset: System One requests with synthetic photos, or rendered text rows.
 
-    python requests.py images OUT.jsonl [--n 24] [--seed 0]
-    python requests.py rows TOKENIZER.json OUT.jsonl [--n 48] [--variant strands-chat]
+    python make_requests.py images OUT.jsonl [--n 24] [--seed 0]
+    python make_requests.py rows TOKENIZER.json OUT.jsonl [--n 48] [--variant strands-chat]
 
 ``images``: requests with 0 to 4 images each, of mixed sizes and aspect ratios (from 64 x 48 to 1600 x 1200, panoramas
 and tall strips), in PNG, JPEG, WebP and GIF; noul, choice and score questions; short, empty and long state text.

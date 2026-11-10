@@ -183,9 +183,10 @@ def run_malformed(srv, row, p0, cases):
         check(ok, f"{name}: HTTP {st} (want {expected}) {text[:160] if st != 200 else ''}")
         check(srv.health() == 200, f"{name}: server healthy afterwards")
         st2, _, p = ask(srv, row)
+        d = dmax(p, p0) if st2 == 200 and p is not None else None
         check(
-            st2 == 200 and p is not None and dmax(p, p0) <= TOL["repeat"],
-            f"{name}: the next valid request is answered as before",
+            d is not None and d <= TOL["repeat"],
+            f"{name}: the next valid request is answered as before (|dp| {d if d is None else f'{d:.2e}'})",
         )
 
 
@@ -211,9 +212,10 @@ def scenario_requests(srv, rows, a):
 
     # Without allowed_token_ids, logprobs 255 returns every code; renormalized, the same answer.
     st_a, _, p_a = ask(srv, row, allowed_token_ids=DROP, logprobs=255, cache_salt="baseline")
+    d_a = dmax(p_a, p0) if st_a == 200 else float("inf")
     check(
-        st_a == 200 and dmax(p_a, p0) <= TOL["repeat"],
-        "logprobs 255 without allowed_token_ids gives the same answer",
+        d_a <= TOL["repeat"],
+        f"logprobs 255 without allowed_token_ids gives the same answer (|dp| {d_a:.2e})",
     )
 
     # The prefix cache: an exact repeat, a further question on the same state, another S, against cold answers.
@@ -221,9 +223,17 @@ def scenario_requests(srv, rows, a):
     _, _, cold = ask(srv, row, cache_salt=salt + "a")
     ask(srv, row)
     _, rr, rep = ask(srv, row)
+    L, B = len(row["token_ids"]), a.block_size
+    # vLLM reuses every whole block of A tokens but the last token's: floor((L - 1) / A) A. A is the block size, or a
+    # multiple of it when the layers' KV pages differ in size (vLLM aligns cache hits to their least common multiple).
+    if B:
+        B = next((A for A in (B, 2 * B, 4 * B) if cached(rr) == (L - 1) // A * A), B)
+    want = (L - 1) // B * B if B else None
     check(
-        cached(rr) and dmax(rep, cold) <= TOL["same"] and argmax(rep) == argmax(cold),
-        f"exact repeat: {cached(rr)} of {len(row['token_ids'])} tokens cached, max|dp| vs cold {dmax(rep, cold):.4f}",
+        (cached(rr) == want if B else bool(cached(rr)))
+        and dmax(rep, cold) <= TOL["same"]
+        and argmax(rep) == argmax(cold),
+        f"exact repeat: {cached(rr)} of {L} tokens cached (want {want}), max|dp| vs cold {dmax(rep, cold):.2e}",
     )
     _, ro, _ = ask(srv, row, vllm_xargs={"prefix_end": row["prefix_end"] - 1})
     check(cached(ro) == 0, f"same tokens with another S: {cached(ro)} tokens cached (want 0)")
@@ -235,9 +245,11 @@ def scenario_requests(srv, rows, a):
     )
     _, rf, pf = ask(srv, further)
     _, _, pfc = ask(srv, further, cache_salt=salt + "f")
+    S = further["prefix_end"]
+    want = S // B * B if B else None  # the state's full blocks
     check(
-        0 < (cached(rf) or 0) <= further["prefix_end"] and dmax(pf, pfc) <= TOL["same"],
-        f"further question: {cached(rf)} of S = {further['prefix_end']} tokens cached, max|dp| vs cold {dmax(pf, pfc):.4f}",
+        (cached(rf) == want if B else 0 < (cached(rf) or 0) <= S) and dmax(pf, pfc) <= TOL["same"],
+        f"further question: {cached(rf)} of S = {S} tokens cached (want {want}), max|dp| vs cold {dmax(pf, pfc):.2e}",
     )
 
     # Mixed batches: decision requests of different lengths at once, each against its own answer alone.
@@ -254,7 +266,7 @@ def scenario_requests(srv, rows, a):
     worst = max(dmax(res[i][2], solo[i]) for i in range(len(group)) if res[i][0] == 200)
     check(
         all(res[i][0] == 200 for i in range(len(group))) and worst <= TOL["same"],
-        f"mixed batch of {len(group)}: all answered, worst max|dp| vs alone {worst:.4f}",
+        f"mixed batch of {len(group)}: all answered, worst max|dp| vs alone {worst:.2e}",
     )
 
     # Answers for every row (and, with reference probabilities, agreement with the reference).
@@ -292,9 +304,12 @@ def scenario_requests(srv, rows, a):
             "max_dp": max(dps),
         }
         check(
-            top1 >= a.min_top1,
+            top1 >= a.min_top1
+            and out["reference"]["mean_dp"] <= a.max_mean_dp
+            and out["reference"]["max_dp"] <= a.max_dp,
             f"reference: top-1 {top1:.4f} (gate {a.min_top1}), mean|dp| "
-            f"{out['reference']['mean_dp']:.4f}, max|dp| {out['reference']['max_dp']:.4f} over {len(dps)} rows",
+            f"{out['reference']['mean_dp']:.4f} (gate {a.max_mean_dp}), max|dp| {out['reference']['max_dp']:.4f} "
+            f"(gate {a.max_dp}) over {len(dps)} rows",
         )
     out["answers"] = [answers.get(i) for i in range(min(a.n, len(rows)))]
     check(srv.health() == 200, "server healthy at the end")
@@ -332,7 +347,9 @@ def scenario_compare(srv, rows, a):
         if argmax(p) != argmax(expect[i]):
             top = sorted(expect[i], reverse=True)
             # --tie-gap: a flip where the other server's top two are that close is a near-tie, not a flip.
-            if len(top) > 1 and top[0] - top[1] <= a.tie_gap:
+            gap = top[0] - top[1] if len(top) > 1 else 1.0
+            log(f"      row {i}: top-1 flip; the other server's top-2 gap {gap:.4f}")
+            if gap <= a.tie_gap:
                 tie_flips += 1
             else:
                 flips += 1
@@ -426,6 +443,16 @@ def main():
         type=float,
         default=0.0,
         help="compare: a top-1 flip where the other server's top two are within this gap is not counted",
+    )
+    ap.add_argument(
+        "--max-mean-dp", type=float, default=1.0, help="requests: the gate on mean |dp|"
+    )
+    ap.add_argument("--max-dp", type=float, default=1.0, help="requests: the gate on max |dp|")
+    ap.add_argument(
+        "--block-size",
+        type=int,
+        default=0,
+        help="the server's KV block size: the cache checks then want exact counts of cached tokens",
     )
     ap.add_argument("--out")
     a = ap.parse_args()
