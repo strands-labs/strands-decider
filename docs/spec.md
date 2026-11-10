@@ -1,12 +1,12 @@
 # The Strands Decider decision interface
 
-This document defines the Strands Decider decision interface, which the Strands Decider v2 models use. It specifies how a request becomes token ids, how the decoder attends over them, how its output becomes answers, which files a checkpoint carries, and what a runtime must do to conform. Any runtime that follows it, in any language, gives answers within section 10's bounds of the reference's for the same checkpoint: PyTorch, vLLM, MLX, llama.cpp, or numpy behind a remote decoder.
+This document defines the Strands Decider decision interface, which the Strands Decider v2 models use. It specifies how a request, its text and its images, becomes token ids, how the decoder attends over them, how its output becomes answers, which files a checkpoint carries, and what a runtime must do to conform. Any runtime that follows it, in any language, gives answers within section 10's bounds of the reference's for the same checkpoint: PyTorch, vLLM, MLX, llama.cpp, or numpy behind a remote decoder.
 
-The reference implementation of the torch-free half is `strands_decider.core` (`src/strands_decider/core/`). It needs only `tokenizers`, numpy and the Python standard library. The `strands-decider` distribution declares both, but it also requires torch and transformers for v1's engines, so installing it installs torch. A torch-free install, for AWS Lambda for one, needs a separate distribution or an extra without torch; which one is not yet decided (section 12). Its tests are `tests/test_core_prompt.py`, `tests/test_core_readout.py` and `tests/test_core_config.py`, and the render goldens are `tests/fixtures/core/render_goldens.json`. The core sits beside the v1 engines (`infer.py`, `hidden_engine.py`, `mlx_engine.py`); they and their checkpoints are unchanged.
+The reference implementation of the torch-free half is `strands_decider.core` (`src/strands_decider/core/`). It needs only `tokenizers`, numpy and the Python standard library; it reads images from their file headers and needs no imaging library. The `strands-decider` distribution declares both, but it also requires torch and transformers for v1's engines, so installing it installs torch. A torch-free install, for AWS Lambda for one, needs a separate distribution or an extra without torch; which one is not yet decided (section 12). Its tests are `tests/test_core_prompt.py`, `tests/test_core_readout.py`, `tests/test_core_config.py` and `tests/test_core_images.py`, and the render goldens are `tests/fixtures/core/render_goldens.json`. The core sits beside the v1 engines (`infer.py`, `hidden_engine.py`, `mlx_engine.py`); they and their checkpoints are unchanged.
 
-The interface keeps v1's request and response: the same `POST /v1/systemone` body, the same three question types and limits, and the same answer fields and confidence formulas. Three things change. Options are labelled with letter codes instead of numbers, and the readout scores the codes from the hidden state at the prompt's last token, where v1's pointer head compared the answer position with each option's last token. The state is encoded bidirectionally, and each question sees the whole prompt bidirectionally (the `prefix_bidir` mask). The decoder is Gemma 4, merged to one set of bf16 weights.
+The interface keeps v1's request and response: the same `POST /v1/systemone` body, the same three question types and limits, and the same answer fields and confidence formulas. Three things change. Options are labelled with letter codes instead of numbers, and the readout scores the codes from the hidden state at the prompt's last token, where v1's pointer head compared the answer position with each option's last token. The state is encoded bidirectionally, and each question sees the whole prompt bidirectionally (the `prefix_bidir` mask). The model is Gemma 4, merged to one set of bf16 weights. A request may also carry images, as v1's may. The base model's own vision encoder reads them, and they go first inside `<state>`, laid out as v1 lays out images for Gemma 4 (strands-decider pull request 67).
 
-Paths are relative to the repository root. Token ids are those of Gemma 4's tokenizer, which every Gemma 4 size ships unchanged: `tokenizer.json` with sha256 `cc8d3a0ce36466ccc1278bf987df5f71db1719b9ca6b4118264f45cb627bfe0f`, as in `google/gemma-4-E2B-it` at revision `3e22461f65e89153144f8adb70e3b8c2cc9845a7`.
+Paths are relative to the repository root. Token ids are those of Gemma 4's tokenizer: `tokenizer.json` with sha256 `cc8d3a0ce36466ccc1278bf987df5f71db1719b9ca6b4118264f45cb627bfe0f`, as in `google/gemma-4-E2B-it` at revision `3e22461f65e89153144f8adb70e3b8c2cc9845a7` (section 12 notes that some sizes' repositories now ship a slightly different file).
 
 ## 1. The request
 
@@ -14,10 +14,10 @@ A request is v1's (`src/strands_decider/schema.py`, `SystemOneRequest`):
 
 ```
 POST /v1/systemone
-{"state": ..., "model": "strands-decider-latest", "questions": {"<name>": {...}, ...}}
+{"state": ..., "images": [...], "model": "strands-decider-latest", "questions": {"<name>": {...}, ...}}
 ```
 
-`state` is required. It is a string, a JSON object or a JSON array, and it may be empty when the questions carry the whole task. `questions` maps a name to a question and holds at least one. `model` is an optional string. `images` is optional and, as in v1, a list of strings (base64 or `data:` URIs); null or any other type is an error. A text-only runtime refuses a non-empty list with v1's error, `this engine has no vision tower; images are not supported`. Other fields are ignored, as v1 ignores them.
+`state` is required. It is a string, a JSON object or a JSON array, and it may be empty when the questions or the images carry the whole task. `questions` maps a name to a question and holds at least one. `model` is an optional string. `images` is optional: a list of at most 4 strings, each a base64 image file, PNG, JPEG, WebP or GIF, which may carry a `data:image/...;base64,` prefix. The images are part of the state, in the order given (section 3.2). Null, or anything but a list of strings, is an error, as in v1. A runtime that cannot take images refuses a non-empty list before it decodes any image (section 11). Other fields are ignored, as v1 ignores them.
 
 A question has a `type`, `instructions` (a string, object or array) and `criteria`:
 
@@ -28,6 +28,26 @@ A question has a `type`, `instructions` (a string, object or array) and `criteri
 | `score` | array of 2 to 10 level descriptions (strings), lowest level first | one per level, named `0` to `L-1` |
 
 A noul's criteria replace its default descriptions. A key that is absent keeps its default (`false`: "the statement does not hold for this state"; `true`: "the statement holds for this state"). A key given as null renders as a bare label. As in v1, a question may omit `type`: it is a noul when its criteria are absent or an object whose keys are a subset of `true` and `false`, a choice when they are any other object, and a score when they are an array. `strands_decider.core.parse_request` accepts and refuses exactly what v1's pydantic models accept and refuse, and `tests/test_core_prompt.py` checks it against them.
+
+### 1.1 Images
+
+After the request's types are checked, its images are checked as v1's image engine checks them (`src/strands_decider/vision.py`, `decode_image`), in this order and with v1's messages:
+
+1. More than 4 images: `{n} images; this server takes at most 4`. The count is checked before any image is decoded.
+2. Each string loses its leading and trailing whitespace (Python's `str.strip`), then a prefix that matches `^data:image/[\w.+-]+;base64,`, whatever subtype it names. The rest must be standard base64 (RFC 4648, section 4) with its padding and nothing else: no whitespace or line break inside, no URL-safe alphabet, no padding at the start and nothing after it. This is what Python's `base64.b64decode(s, validate=True)` accepts on Python 3.11 and later; like Python, a runtime accepts non-zero bits before the padding. Otherwise: `image is not valid base64: {reason}`.
+3. The decoded file is a PNG, JPEG, WebP or GIF file, by its signature, whose header gives its width and height by the rules below. Otherwise: `image could not be read as PNG/JPEG/WEBP/GIF: {reason}`. A width or a height of 0 is an error.
+4. Its width times its height is at most 4096 × 4096 = 16,777,216 pixels. Otherwise: `image is {w}x{h}; at most 16,777,216 pixels are accepted`.
+
+The reasons after the colons are Python's for base64 and the core's own for headers, where v1 passes on Pillow's. The header gives the width and height:
+
+| format | signature | width and height |
+| --- | --- | --- |
+| PNG | `89 50 4E 47 0D 0A 1A 0A` | The first 8 data bytes of the IHDR chunk: width, then height, 4-byte big-endian. The chunks are walked from byte 8 up to the first IDAT, which must be reached. Each chunk has a type of four ASCII letters, lies within the file, and has a matching CRC-32. IHDR has at least 13 data bytes. It may come anywhere before IDAT, and a later IHDR replaces an earlier one (the PNG specification puts IHDR first; Pillow does not insist). |
+| JPEG | `FF D8 FF` | The last frame header before the first scan (SOS, `FFDA`) or the file's end: SOF0 to SOF3, SOF5 to SOF7, SOF9 to SOF11, SOF13 to SOF15, or DHP (`FFDE`). After its 2-byte length come the sample precision, which must be 8, then the height and the width, 2-byte big-endian, then the number of components, which must be 1, 3 or 4. Markers are read from byte 2 as Pillow reads them. A byte other than `FF` between segments is skipped, `FF FF` is fill, and `FF 00` is skipped. Markers `C8`, `D0` to `D9` and `F0` to `FD` carry no length. Every other marker in `C0` to `CF`, `DA` to `DF`, `E0` to `EF` and `FE` carries a 2-byte big-endian length that counts itself, and any other marker is an error. |
+| WebP | `RIFF`, 4 bytes, `WEBP`, then a first chunk `VP8 `, `VP8L` or `VP8X` | The RIFF size (bytes 4 to 7, little-endian) is at least 12, and at most the file's length less 8. The first chunk's size (bytes 16 to 19) is at most the RIFF size less 12. `VP8 ` (lossy) checks its 3-byte little-endian frame tag at byte 20: bit 0 is 0 (a key frame), bits 1 to 3 (the profile) are at most 3, bit 4 (shown) is 1, and bits 5 to 23 (the first partition's size) are less than the chunk's size. The start code `9D 01 2A` follows at byte 23, then the width and the height, each the low 14 bits of a 2-byte little-endian integer, at bytes 26 and 28. `VP8L` (lossless) has the signature `2F` at byte 20, then a 4-byte little-endian integer whose bits 0 to 13 are the width less 1, bits 14 to 27 the height less 1, and bits 29 to 31 (the version) 0. `VP8X` (extended) has a chunk size of at least 10, and the canvas width less 1 and height less 1 as 3-byte little-endian integers at bytes 24 and 27. |
+| GIF | `GIF87a` or `GIF89a` | The logical screen's width and height, 2-byte little-endian at bytes 6 and 8, each enlarged to cover the first image: its left offset plus its width, and its top offset plus its height, from the first image descriptor (`2C`). Before the descriptor come the global colour table, 3 × 2^(1 + (byte 10 & 7)) bytes if bit 7 of byte 10 is set, then extension blocks (`21`, a label, then data sub-blocks up to an empty one), which are skipped; any other byte between blocks is skipped too. Reaching the trailer (`3B`) or the file's end before a descriptor is an error. The descriptor, its local colour table and the byte after them must lie within the file. |
+
+These are the fields Pillow reads when v1 opens an image, and `tests/test_core_images.py` checks that, wherever the core and Pillow both read a file, they read the same format and size; that files cut short are accepted and refused alike; and that the core never refuses a file Pillow opens. Pillow, through libwebp and its JPEG plugin, checks some fields past the size as well, so a corrupted file can pass these rules and still fail when the runtime opens or decodes it. The runtime then refuses the request with v1's message, `image could not be read as PNG/JPEG/WEBP/GIF: {reason}` or `image could not be decoded: {reason}`. `strands_decider.core.decode_image` implements the four checks without decoding any pixel, and `tests/test_core_images.py` checks it against v1's `decode_image` where Pillow and torch are installed.
 
 ## 2. The codes
 
@@ -74,7 +94,7 @@ IR=3359 IS=2249 IT=1768 IU=87317 IV=3767
 
 ## 3. The prompt template
 
-Strands defines the template. It keeps v1's layout (`src/strands_decider/prompting.py`): a `<state>` block, then a `<question>` block holding the instructions and an `<options>` list, then the answer cue. Each option line starts with its code.
+Strands defines the template. It keeps v1's layout (`src/strands_decider/prompting.py`): a `<state>` block, which holds the images first, then a `<question>` block holding the instructions and an `<options>` list, then the answer cue. Each option line starts with its code.
 
 ### 3.1 Rendering content
 
@@ -87,6 +107,30 @@ A state, an instruction or a description renders as text by v1's `render_content
 ```
 
 With an empty state the content line is left out: `<state>\n</state>\n`. `\n` is one line feed (U+000A); there are no carriage returns.
+
+Images come first, one line each in the request's order, then the state's line. This is v1's layout for Gemma 4 images:
+
+```
+<state>
+<|image><|image|>...<|image|><image|>
+{state}
+</state>
+```
+
+With n images the block is `<state>\n{image 1}\n{image 2}\n...{image n}\n{state}\n</state>\n`. An image's line is `<|image>`, then N copies of `<|image|>`, then `<image|>`, with nothing between them. With images and an empty state, the state's line is left out and the last image's line is followed by `\n</state>\n`: `<state>\n{image 1}\n...{image n}\n</state>\n`. A state is empty by the rule of section 3.1. Without images the block is as above, and the question part is the same with images as without them. The three image tokens are control tokens, emitted by id (section 3.6).
+
+N is the number of soft tokens Gemma 4's image processor gives the image (`num_soft_tokens_per_image`), one placeholder for each vector the vision encoder puts in the prompt. It depends only on the image's width w and height h, from its header (section 1.1), and on three settings of the processor, which every Gemma 4 base's `processor_config.json` sets alike: `patch_size` 16, `pooling_kernel_size` 3 and `max_soft_tokens` 280, which is also its `image_seq_length`. The processor resizes the image, keeping its aspect ratio, to the largest size whose sides are multiples of 48 pixels (3 × 16) and whose area is at most 645,120 pixels (280 × 3² × 16²). It then pools each 3 × 3 group of 16-pixel patches into one soft token. In IEEE 754 double precision, each operation rounded to nearest, as Python's floats, `math.sqrt` and `math.floor` give it:
+
+```
+f = sqrt(645120 / (h × w))          h × w is exact; the quotient, then its square root
+H = floor((f × h) / 48) × 48        the resized height
+W = floor((f × w) / 48) × 48        the resized width
+if H = 0:     H = 48,  W = min(floor(w / h) × 48, 13440)
+else if W = 0: W = 48, H = min(floor(h / w) × 48, 13440)
+N = (H / 48) × (W / 48)
+```
+
+The two branches apply only to images more than 280 times as wide as they are tall, or as tall as they are wide, and both give N = 280; 13440 is 280 × 48. N is at most 280. Every square image has N = 256, a 64 × 48 image 266, a 300 × 40 image 270, and a 1 × 100 image 167. Swapping w and h leaves N unchanged, so EXIF orientation does not change it, although v1 applies the orientation before the processor sees the image and so may swap the two. These are the steps of `get_aspect_ratio_preserving_size` in transformers' `Gemma4ImageProcessor`, which E2B, E4B, 26B-A4B and 31B use, and `Gemma4UnifiedImageProcessor`, which the 12B uses. The two processors give the vision encoder different inputs: 16-pixel patches with their positions, padded to 2,520, against 3 × 3 groups merged into 48-pixel patches, padded to 280. But they size the image with the same function and settings, and so count N alike, and one rule serves every size. `strands_decider.core.soft_tokens` implements it. `tests/fixtures/core/image_soft_tokens.json` holds N as both processors gave it for 3,200 sizes, from 1 × 1 to 1 × 16,777,216: a grid of common and boundary sides, both sides of the 280:1 ratio, every size whose area makes f exactly 1, and random sizes. `tests/test_core_images.py` checks the core against the table and, where transformers is installed, against both processors on random sizes.
 
 ### 3.3 The question block
 
@@ -158,13 +202,18 @@ The chat template is where `strands-chat` comes from, not how it is rendered. A 
 
 ### 3.6 From text to token ids
 
-A prompt is a sequence of control tokens and text runs. Control tokens come only from the template and are emitted by id:
+A prompt is a sequence of control tokens and text runs. Control tokens come only from the template and from the request's images, and are emitted by id:
 
-| control token | id |
-| --- | --- |
-| `<bos>` | 2 |
-| `<\|turn>` | 105 |
-| `<turn\|>` | 106 |
+| control token | id | where |
+| --- | --- | --- |
+| `<bos>` | 2 | the template |
+| `<\|turn>` | 105 | the template (chat) |
+| `<turn\|>` | 106 | the template (chat) |
+| `<\|image>` | 255999 | an image's line, first |
+| `<\|image\|>` | 258880 | an image's line, N times |
+| `<image\|>` | 258882 | an image's line, last |
+
+The image ids are also `config.json`'s `boi_token_id`, `image_token_id` and `eoi_token_id` in every Gemma 4 base.
 
 Each text run is encoded on its own by the tokenizer as plain text: special-token matching off (in Hugging Face `tokenizers`, `encode_special_tokens = True`) and `add_special_tokens=False`. Gemma 4's tokenizer adds no tokens of its own; its post-processor adds no BOS, which is why the template emits `<bos>` itself. Text from the request therefore never produces any of the tokenizer's 24 special tokens, its added tokens, all marked special:
 
@@ -174,7 +223,7 @@ Each text run is encoded on its own by the tokenizer as plain text: special-toke
 <|image|> <|audio|> <image|> <audio|> <|video|>
 ```
 
-A state containing the characters `<turn|>`, or any other of the 24 strings, encodes them as text. The only special tokens in a prompt are the template's. `strands_decider.core.render` encodes with a private copy of the tokenizer whose settings never change, so this holds when several threads render with one tokenizer, or use it for other things, at the same time.
+A state containing the characters `<turn|>`, `<|image|>`, or any other of the 24 strings, encodes them as text. The only special tokens in a prompt are the template's and, in the state, each image's line. `strands_decider.core.render` encodes with a private copy of the tokenizer whose settings never change, so this holds when several threads render with one tokenizer, or use it for other things, at the same time.
 
 The pieces of each variant, with S marking the state boundary of section 4:
 
@@ -183,7 +232,15 @@ plain:  [<bos>] "<state>\n...</state>\n" S "<question ...>...</question>\n<answe
 chat:   [<bos>] [<|turn>] "user\n<state>\n...</state>\n" S "<question ...>...</question>" [<turn|>] "\n" [<|turn>] "model\n"
 ```
 
-For a request whose text contains none of the 24 special-token strings, the ids equal what one call on the whole rendered string gives with special-token matching on, which is how Hugging Face's `apply_chat_template(tokenize=True)` encodes. `tests/test_core_prompt.py` checks this on the goldens and on randomly generated requests, and, where transformers is installed, against `apply_chat_template(tokenize=True)` itself with each Gemma 4 template given. It also checks that requests holding all 24 strings, in every place text can go, produce none of them.
+With images, the state block's run is cut at each image's line. With two images, in the plain variant (in the chat variant the first run is `"user\n<state>\n"`, after `[<bos>] [<|turn>]`, as above):
+
+```
+[<bos>] "<state>\n" [<|image>] [<|image|>] × N1 [<image|>] "\n" [<|image>] [<|image|>] × N2 [<image|>] "\n{state}\n</state>\n" S ...
+```
+
+With an empty state the last run is `"\n</state>\n"`.
+
+For a request whose text contains none of the 24 special-token strings, the ids equal what one call on the whole rendered string gives with special-token matching on, which is how Hugging Face's `apply_chat_template(tokenize=True)` encodes. With images they also equal what Hugging Face's `Gemma4Processor`, and the 12B's `Gemma4UnifiedProcessor`, give for the same string with each image's line replaced by one `<|image|>`, which the processor expands into the line. `tests/test_core_prompt.py` checks this on the goldens and on randomly generated requests, with and without images, and, where transformers is installed, against `apply_chat_template(tokenize=True)` itself with each Gemma 4 template given. `tests/test_core_images.py` checks it against both processors, where transformers, Pillow and torchvision are installed. `tests/test_core_prompt.py` also checks that requests holding all 24 strings, in every place text can go, produce none of them beyond the template's and the images' lines.
 
 ### 3.7 Examples
 
@@ -261,11 +318,28 @@ question ids [25, 99): the plain variant's first 69 question ids (through `</que
 code token ids:      A 236776, B 236799, C 236780 (billing, technical, sales)
 ```
 
-The goldens hold every question type in both variants, with structured content, an empty state, 28 options (codes to `AB`), special-token strings in the state, a ten-level score, and choice options with empty names, one with a description (`A. — no preference yet`) and one without (`B.`).
+A request with one image (`one_image` in the goldens): a 64 × 48 PNG, so N = 266, and the state `Checkout page after the user tapped Pay.`. Its state part in `strands-plain` is 287 tokens, S = 287, and the image's placeholders are state ids [6, 272):
+
+```
+<bos><state>
+<|image><|image|>...(266 in all)...<|image|><image|>
+Checkout page after the user tapped Pay.
+</state>
+```
+
+```
+state ids [0, 6):     2 236820 3255 236813 107 255999
+state ids [6, 272):   258880, 266 times
+state ids [272, 287): 258882 107 77524 3104 1308 506 2430 74060 9762 236761 107 954 3255 236813 107
+```
+
+In `strands-chat` the same state part is 290 tokens, `2 105 2364 107` before `236820 3255 236813 107 255999`, and the placeholders are [9, 275). The question parts are the text-only ones.
+
+The goldens hold every question type in both variants, with structured content, an empty state, 28 options (codes to `AB`), special-token strings in the state, a ten-level score, and choice options with empty names, one with a description (`A. — no preference yet`) and one without (`B.`). They hold requests with images: one image; two of different sizes and formats, a JPEG (N = 270) and a WebP behind a `data:` prefix (N = 266); and a GIF (N = 256) with an empty state.
 
 ## 4. The state boundary S
 
-S is the number of tokens in the state part. Tokens [0, S) are the state part and [S, L) the question part, where L is the prompt's length. The state part is everything up to and including the line feed that ends `</state>\n`; the question part starts with `<question`. Everything before S is identical for every question about the state: `<bos>`, in the chat variant `<|turn>user\n`, and the state block. A runtime encodes it once and shares it across the request's questions.
+S is the number of tokens in the state part. Tokens [0, S) are the state part and [S, L) the question part, where L is the prompt's length. The state part is everything up to and including the line feed that ends `</state>\n`; the question part starts with `<question`. Everything before S is identical for every question about the state: `<bos>`, in the chat variant `<|turn>user\n`, and the state block, its images' lines included. A runtime encodes it once and shares it across the request's questions.
 
 The rule: the state part and the question part are encoded separately, as section 3.6 describes, and the prompt's ids are their concatenation. No token can straddle S, because no encoding call crosses it. A runtime must use the ids of the two parts and must not re-encode the joined text.
 
@@ -275,7 +349,7 @@ For Gemma 4's tokenizer the rule costs nothing: the separate encodings equal the
 2. The normalizer replaces each space with U+2581 and does nothing else; it maps characters one to one and sees no context. The pre-tokenizer splits on spaces, which no longer exist after normalization (and a split could only add boundaries). The post-processor adds no tokens, and BPE runs without dropout.
 3. So no merge across S is ever possible. BPE applies merges in rank order, and merges on one side of S never create or remove a candidate pair on the other, so each side ends with the merges it makes alone.
 
-`tests/test_core_prompt.py` proves this in two ways. `test_tokenizer_cannot_merge_across_a_line_end` checks the premises of steps 1 and 2 against the tokenizer file itself. `test_s_is_a_token_boundary` encodes 120 random requests in both variants with the two text runs at S joined into one, including requests full of special-token strings, line ends, tabs, non-ASCII text and option-like text, and gets the same ids as the rule. A rendered prompt always has `</state>\n` before S and `<question` after it, so the test also varies the characters next to S directly: 1,200 random pairs of a run ending in one to three line feeds after any character and a run starting with any character but a line feed, special-token strings included, encode the same joined as apart. `test_ids_match_one_call_encoding` checks that a token starts at exactly S's character offset in the one-call encoding. A future tokenizer that fails these premises keeps the rule well defined (separate encoding), but its ids may then differ from those a text-only tool produces, so this spec would need a new seam for it.
+`tests/test_core_prompt.py` proves this in two ways. `test_tokenizer_cannot_merge_across_a_line_end` checks the premises of steps 1 and 2 against the tokenizer file itself. `test_s_is_a_token_boundary` encodes 160 random requests in both variants with the two text runs at S joined into one, including requests full of special-token strings, line ends, tabs, non-ASCII text and option-like text; 40 of them carry one to four images. It gets the same ids as the rule. (With images the state's last run still ends with `</state>\n`.) A rendered prompt always has `</state>\n` before S and `<question` after it, so the test also varies the characters next to S directly: 1,200 random pairs of a run ending in one to three line feeds after any character and a run starting with any character but a line feed, special-token strings included, encode the same joined as apart. `test_ids_match_one_call_encoding` checks that a token starts at exactly S's character offset in the one-call encoding. A future tokenizer that fails these premises keeps the rule well defined (separate encoding), but its ids may then differ from those a text-only tool produces, so this spec would need a new seam for it.
 
 ## 5. Where the answer is read
 
@@ -290,7 +364,9 @@ i < S:   j < S        (the state sees the state, in both directions, and never a
 i >= S:  j < L        (a question sees the whole prompt, in both directions)
 ```
 
-The mask applies on every layer, sliding-window layers included, and replaces their window: no layer limits attention by distance. Positions are the token indices, 0 to L - 1, so every question's first token sits at position S. Each question is its own sequence over the shared state; no question sees another. Because the state never attends to a question, its keys and values are the same for every question and can be computed once. `strands_decider.core.attention_mask(S, L)` gives the mask as booleans, row i for token i. It is an illustration of the rule, for tests and small examples: a dense L × L array, O(L²) in memory (64 MB at L = 8,192). A runtime builds the form its attention kernel takes, such as the state's length and each question's span.
+The mask applies on every layer, sliding-window layers included, and replaces their window: no layer limits attention by distance. Positions are the token indices, 0 to L - 1, so every question's first token sits at position S. An image's placeholders are state tokens like any other: one position each, as Gemma 4's one-dimensional rotary positions count them, and the mask lets them see the whole state and be seen by it. So a runtime adds no image mask of its own; the bidirectional attention that some Gemma 4 sizes give the tokens of one image is contained in this one. Each question is its own sequence over the shared state; no question sees another. Because the state never attends to a question, its keys and values are the same for every question and can be computed once.
+
+A runtime that reuses a state's keys and values beyond one request, in a prefix cache for one, keys them on the state's token ids and, in order, on the sha256 of each image's file (the bytes decoded from base64, `RenderedImage.sha256`). The placeholder ids give only an image's number of soft tokens, so two different images with the same N give the same ids, and a cache keyed on the ids alone would answer one image's questions from another image's keys and values. The same holds for any part of the state a runtime caches, down to a block of the placeholders: the key covers the files of the images whose placeholders it holds or follows. `strands_decider.core.attention_mask(S, L)` gives the mask as booleans, row i for token i. It is an illustration of the rule, for tests and small examples: a dense L × L array, O(L²) in memory (64 MB at L = 8,192). A runtime builds the form its attention kernel takes, such as the state's length and each question's span.
 
 ## 7. The readout
 
@@ -330,23 +406,26 @@ Confidence uses v1's formulas, unchanged and shared as code (`src/strands_decide
 
 ## 8. The `decision_config.json` schema
 
-`decision_config.json` holds what a runtime needs, beyond the decoder weights and the tokenizer, to serve a checkpoint. Format version 1:
+`decision_config.json` holds what a runtime needs, beyond the model's weights, its tokenizer and its image processor's configuration, to serve a checkpoint. Format version 1:
 
 | field | type | meaning |
 | --- | --- | --- |
 | `interface` | string, `strands-decider` | names the file as this interface's; any other value, or none, is an error |
 | `format_version` | integer, 1 | this layout |
 | `prompt` | string | the template the checkpoint was trained with: `strands-plain` or `strands-chat` |
+| `inputs` | array of distinct strings from `text` and `image`, holding `text` | what a request to the checkpoint may carry: `["text"]`, or `["text", "image"]` for a checkpoint that serves images |
 | `codes` | array of 255 strings | the codes of section 2, in order; anything else is an error |
 | `token_ids` | array of 255 distinct non-negative integers | each code's token id, in code order |
 | `temperature` | number, finite and above 0 | the divisor of section 7 |
 | `final_logit_softcapping` | number, finite and above 0 | the soft-cap c of section 7: the decoder's `final_logit_softcapping`, 30.0 for every Gemma 4 size |
 | `attention_mode` | string, `prefix_bidir` | the mask of section 6 |
 | `pooling` | string, `last` | the readout position of section 5 |
-| `max_length_validated` | positive integer | the longest prompt, in tokens (S plus the question's tokens), at which the checkpoint was validated |
-| `provenance` | object, optional (absent, never null) | public origin of the checkpoint; fields below |
+| `max_length_validated` | positive integer | the longest prompt, in tokens (S, image placeholders included, plus the question's tokens), at which the checkpoint was validated |
+| `provenance` | object | public origin of the checkpoint; fields below |
 
-`provenance` has four optional string fields and no others: `base_model`, a Hub id such as `google/gemma-4-E2B-it`; `base_revision`, the base model's 40-character commit; `release`, the released model's name or Hub id; and `source`, an https URL of the public code and recipe that trained it. A checkpoint without provenance leaves the field out; `"provenance": null` is an error. `DecisionConfig` checks only these formats. Keeping private paths and hosts out of a released checkpoint is the job of the release's export checks, not of this file's loader.
+`inputs` names what the checkpoint was validated on beyond text: a checkpoint with `image` in it has image requests among its model goldens (section 10). The array's order carries no meaning. A runtime refuses a request with images unless `image` is in it (section 11); audio would add `audio` (section 12).
+
+`provenance` has four string fields and no others. `base_model`, a Hub id such as `google/gemma-4-E2B-it`, and `base_revision`, the base model's 40-character commit, are required: the checkpoint's `config.json`, `processor_config.json` and tokenizer files are the base's at that revision, and so is every part of the model that was not fine-tuned (section 9). `release`, the released model's name or Hub id, and `source`, an https URL of the public code and recipe that trained it, are optional. `"provenance": null` is an error. `DecisionConfig` checks only these formats. Keeping private paths and hosts out of a released checkpoint is the job of the release's export checks, not of this file's loader.
 
 `interface` is the discriminator. Other formats use the same file names: llama.cpp's pplx-decider loader, for one, claims any directory that holds `decision_config.json` and `readout.safetensors`. A runtime or converter therefore identifies a decision checkpoint by `"interface": "strands-decider"`, never by its file names, and a runtime refuses a `decision_config.json` without it before it reads any other field.
 
@@ -361,6 +440,7 @@ An example (codes and token ids shortened):
   "interface": "strands-decider",
   "format_version": 1,
   "prompt": "strands-chat",
+  "inputs": ["text", "image"],
   "codes": ["A", "B", "C", "...", "IV"],
   "token_ids": [236776, 236799, 236780, "...", 3767],
   "temperature": 1.0,
@@ -377,31 +457,46 @@ An example (codes and token ids shortened):
 
 ## 9. The checkpoint layout
 
-A decision checkpoint is a directory that holds:
+A decision checkpoint is the base model's own multimodal checkpoint, in the base's layout, with its fine-tuning merged in, and the files of this interface beside it. Training may fine-tune the decoder and, with image data, the vision encoder's projection into the decoder or the encoder itself. Whatever was trained is merged into the base's tensors, under the base's names, and the rest is the base's at `provenance.base_revision`. No tensor is required to equal the base's; the model card says which parts were trained. A checkpoint is a directory that holds:
 
 | file | contents |
 | --- | --- |
-| `config.json` | the decoder's configuration, for the decoder's loader: `architectures: ["Gemma4TextModel"]`, `model_type: gemma4_text`. Its `final_logit_softcapping` equals `decision_config.json`'s; a runtime takes the soft-cap from `decision_config.json` and refuses a checkpoint whose two values differ |
-| `model.safetensors` or `model-*-of-*.safetensors` with `model.safetensors.index.json` | the Gemma 4 text decoder in bf16, any fine-tuning merged in: no adapter, no vision or audio tower, no language-model head |
-| `tokenizer.json`, `tokenizer_config.json` | Gemma 4's tokenizer, unchanged; `tokenizer_config.json` carries no `chat_template` key |
+| `config.json` | the base's configuration: `architectures: ["Gemma4ForConditionalGeneration"]` and `model_type: gemma4` for E2B, E4B, 26B-A4B and 31B; `["Gemma4UnifiedForConditionalGeneration"]` and `gemma4_unified` for the 12B. It holds the base's `text_config`, `vision_config`, `audio_config` (null for 26B-A4B and 31B) and image token ids. Its `text_config.final_logit_softcapping` equals `decision_config.json`'s; a runtime takes the soft-cap from `decision_config.json` and refuses a checkpoint whose two values differ |
+| `model.safetensors` or `model-*-of-*.safetensors` with `model.safetensors.index.json` | every tensor of the base, in bf16 under the base's names (the prefixes below), any fine-tuning merged in: no adapter. There is no `lm_head` tensor: Gemma 4 ties it to the token embedding, and the readout takes its place |
+| `processor_config.json` | the base's: its image processor, `Gemma4ImageProcessor` (`Gemma4UnifiedImageProcessor` for the 12B) with `patch_size` 16, `pooling_kernel_size` 3 and `max_soft_tokens` 280, its feature extractor and its video processor. N depends on the three settings (section 3.2), so a runtime refuses image requests for a checkpoint whose image processor has other values |
+| `tokenizer.json`, `tokenizer_config.json` | the base's tokenizer, unchanged; `tokenizer_config.json` carries no `chat_template` key |
 | `readout.safetensors` | one tensor, `weight`, shape [255, hidden], bf16; a runtime that reads an f32 or f16 tensor rounds it to bf16 (section 7.1) |
 | `decision_config.json` | section 8 |
 | `golden_vectors.jsonl` | the model goldens of section 10 |
-| `LICENSE`, `NOTICE`, `README.md` | the terms and the model card |
+| `LICENSE`, `NOTICE`, `README.md` | the terms and the model card, which says which parts of the model were trained |
+
+The base's tensors fall under these prefixes, and no others:
+
+| part | E2B, E4B | 12B | 26B-A4B, 31B |
+| --- | --- | --- | --- |
+| the decoder, with its token embedding | `model.language_model.` | `model.language_model.` | `model.language_model.` |
+| the vision encoder | `model.vision_tower.` | `model.vision_embedder.` | `model.vision_tower.` |
+| the vision encoder's projection into the decoder | `model.embed_vision.` | `model.embed_vision.` | `model.embed_vision.` |
+| the audio encoder | `model.audio_tower.` | none | none |
+| the audio projection into the decoder | `model.embed_audio.` | `model.embed_audio.` | none |
+
+These are the names in the bases' own files: the 26B-A4B's and 31B's `model.safetensors.index.json`, and the safetensors header of the single `model.safetensors` that E2B, E4B and the 12B ship without an index. They were read from `google/gemma-4-E2B-it` at `4adf15748de9e1a0097b6274cee9c15836c41c37` (and at `3e22461f65e89153144f8adb70e3b8c2cc9845a7`, with the same names), `google/gemma-4-E4B-it` at `4ecc2ba63bcac23ba4a767fc87025b1450f84c9c`, `google/gemma-4-12B-it` at `43c9d014b231474fa7212dbb48a762566c2b255d`, `google/gemma-4-26B-A4B-it` at `4d7ae4984b7db7de8f8457170b3f1a419ee76d52`, and `google/gemma-4-31B-it` at `842da3794eaa0b77d5f08bae87a17459d91ff475`. The 12B has no vision tower and no audio tower (transformers' `Gemma4UnifiedModel` is encoder-free). Its `model.vision_embedder.` is a patch embedder of a few layers, and its audio input, raw waveform frames, passes through `model.embed_audio.` alone. Transformers renames the 12B's vision tensors when it loads them (`vision_embedder.patch_dense` to `embed_vision.patch_dense`, and so on); the files keep the base's names.
+
+A text-only runtime loads the tensors under `model.language_model.` and nothing else. With that prefix removed they are the tensors of transformers' `Gemma4TextModel` (`Gemma4UnifiedTextModel` for the 12B), configured by `config.json`'s `text_config`. Such a runtime refuses image requests (section 11).
 
 A checkpoint carries no code. Runtimes implement this spec; they do not import code shipped inside a checkpoint.
 
-A checkpoint carries no chat template either: no `chat_template.jinja`, unlike the Gemma 4 base models, and no `chat_template` in `tokenizer_config.json`. A template beside the weights would be applied by tools that look for one, such as a chat-completions endpoint or a GGUF converter that embeds it, and section 3.5 explains why no template gives these prompts. Shipping a Strands template that renders `strands-chat` for every size was considered and not chosen: it would still leave the body, the plain variant and the encoding of special-token strings to the spec, and invite the one-call tokenization that gets the last wrong.
+A checkpoint carries no chat template either: no `chat_template.jinja`, unlike the Gemma 4 base models, and no `chat_template` in `tokenizer_config.json` or `processor_config.json`. A template beside the weights would be applied by tools that look for one, such as a chat-completions endpoint or a GGUF converter that embeds it, and section 3.5 explains why no template gives these prompts. Shipping a Strands template that renders `strands-chat` for every size was considered and not chosen: it would still leave the body, the plain variant and the encoding of special-token strings to the spec, and invite the one-call tokenization that gets the last wrong.
 
-A converted artifact for another runtime, such as an MLX model or a GGUF file, carries the decoder in that runtime's format and the same `readout.safetensors` and `decision_config.json`, unchanged, beside it. The readout stays in safetensors, outside the converted decoder, so that every format reads the same rows. The artifact needs no `config.json`: everything the readout needs beyond its weight, the soft-cap included, is in `decision_config.json`. `strands_decider.core.Readout.load` reads the weight and the soft-cap from those two files.
+A converted artifact for another runtime carries the model in that runtime's format: for llama.cpp a GGUF file of the decoder and a multimodal projector file (mmproj) of the vision encoder and its projection, and for MLX a model that holds both. Beside them it carries the same `readout.safetensors` and `decision_config.json`, unchanged, and the image processor's settings, as `processor_config.json` or in the converted format's own fields. An artifact without the vision encoder serves text only, and its runtime refuses images. The readout stays in safetensors, outside the converted decoder, so that every format reads the same rows. The artifact needs no `config.json`: everything the readout needs beyond its weight, the soft-cap included, is in `decision_config.json`. `strands_decider.core.Readout.load` reads the weight and the soft-cap from those two files.
 
 ## 10. Golden vectors and conformance
 
 Two kinds of golden data pin the interface.
 
-Render goldens fix the prompt. `tests/fixtures/core/render_goldens.json` holds, for each case and variant, the request, the state text, S, the state ids, and for each question its text, ids, codes, code token ids and bound options. They depend only on the tokenizer. A conforming runtime reproduces them exactly: the same ids, the same S, the same codes. There is no tolerance.
+Render goldens fix the prompt. `tests/fixtures/core/render_goldens.json` holds, for each case and variant, the request, the state text, S, the state ids, for a request with images each image's format, width, height, sha256, N and span, and for each question its text, ids, codes, code token ids and bound options. They depend only on the tokenizer and, through N, on the image processor's three settings. A conforming runtime reproduces them exactly: the same ids, the same S, the same spans, the same codes. There is no tolerance. Their images are small synthetic files in `tests/fixtures/core/images`, drawn deterministically by `tests/core_support.py` and checked in, and the goldens carry them in their requests as base64.
 
-Model goldens fix the answers of one checkpoint. Each checkpoint release publishes `golden_vectors.jsonl` in its directory. Each line holds a request, its rendered ids per question, and the reference code probabilities per question, computed by the reference runtime: the decoder in bf16, weights and activations, one prompt per forward pass under the `prefix_bidir` mask, then the readout in section 7.1's precision regime. The reference runtime is the PyTorch decoder with the `prefix_bidir` mask behind `strands_decider.core.evaluate`; it is not part of this torch-free core. The set covers every question type, both short and long states up to `max_length_validated`, and choices with many options.
+Model goldens fix the answers of one checkpoint. Each checkpoint release publishes `golden_vectors.jsonl` in its directory. Each line holds a request, with its images as base64, its rendered ids per question and each image's span, and the reference code probabilities per question, computed by the reference runtime: the model in bf16, weights and activations, one prompt per forward pass under the `prefix_bidir` mask, then the readout in section 7.1's precision regime. For images the reference runtime prepares the pixels as section 11.1 says, with `Gemma4ImageProcessorPil` (`Gemma4UnifiedImageProcessor` for the 12B), and runs the checkpoint's vision encoder and projection in bf16. The reference runtime is the PyTorch model with the `prefix_bidir` mask behind `strands_decider.core.evaluate`; it is not part of this torch-free core. The set covers every question type, both short and long states up to `max_length_validated`, and choices with many options. For a checkpoint whose `inputs` hold `image` it also covers image requests: one image; up to four of different sizes, formats and aspect ratios, extreme ones included; an image with an empty state; and images beside a long state.
 
 A runtime conforms for a checkpoint when, on that checkpoint's model goldens:
 
@@ -418,7 +513,7 @@ A quantized artifact whose format has no recorded bound makes no conformance cla
 
 ## 11. The runtime interface
 
-A runtime runs the decoder. Given the state ids (positions [0, S)) and the question ids of each question, it runs every question as a continuation of the state under the `prefix_bidir` mask, seeing no other question, and returns one row per question, in the order of the questions. The row is one of five stages of section 7, and the runtime names which, so that nothing is applied twice:
+A runtime runs the model. Given the state ids (positions [0, S)), the state's images with their spans, and the question ids of each question, it puts each image's vision-encoder output at its placeholders (section 11.1), runs every question as a continuation of the state under the `prefix_bidir` mask, seeing no other question, and returns one row per question, in the order of the questions. The row is one of five stages of section 7, and the runtime names which, so that nothing is applied twice:
 
 | stage (`outputs`) | a row holds | what the core still applies |
 | --- | --- | --- |
@@ -438,15 +533,33 @@ This is v1's `hidden_engine.Backend`, narrowed. v1's backend returns several row
 class Backend(Protocol):
     # The stage forward returns: hidden, raw_logits, capped_logits, final_logits or probabilities.
     outputs: str
+    # What forward takes: ("text",), or ("text", "image") with an image path. Absent: text only.
+    inputs: tuple[str, ...]
 
     def forward(
-        self, state: list[int], questions: list[list[int]]
+        self,
+        state: list[int],
+        questions: list[list[int]],
+        images: Sequence[RenderedImage] = (),
     ) -> np.ndarray | Sequence[np.ndarray]:
         """One row per question, in order, of the stage `outputs` names: each question run
-        under prefix_bidir after the shared state, read at its last token."""
+        under prefix_bidir after the shared state, read at its last token. `images` are the
+        state's, in order, each with its file and the span of its placeholders in `state`."""
 ```
 
-`strands_decider.core.evaluate(request, tokenizer, readout, config, backend)` joins the pieces. It refuses a backend that does not name its stage, renders the request with the checkpoint's prompt, calls `forward` once with the shared state and every question, reads the answers from the stage the backend names, and returns a `SystemOneResponse` as JSON. Its parts are public: `read(rows, readout, config, rendered, inputs=stage)` gives the answers and `question_probabilities` the code probabilities, from rows of any stage, where `inputs` is required; `readout_logits` is the bf16 GEMM; `answer(rendered_question, probabilities)` formats one answer. As with v1's backend, a runtime may batch, cache the state's keys and values, or split the work across devices, provided each question's result is what it would be alone.
+`strands_decider.core.evaluate(request, tokenizer, readout, config, backend)` joins the pieces. It refuses a backend that does not name its stage, and refuses a request with images as section 11.1 says. It renders the request with the checkpoint's prompt, calls `forward` once with the shared state and every question, and with the images if there are any, reads the answers from the stage the backend names, and returns a `SystemOneResponse` as JSON. Its parts are public: `read(rows, readout, config, rendered, inputs=stage)` gives the answers and `question_probabilities` the code probabilities, from rows of any stage, where `inputs` is required; `readout_logits` is the bf16 GEMM; `answer(rendered_question, probabilities)` formats one answer. As with v1's backend, a runtime may batch, cache the state's keys and values (keyed as section 6 says), or split the work across devices, provided each question's result is what it would be alone.
+
+### 11.1 Images
+
+A runtime refuses a request with a non-empty `images` list, before it decodes any image, when the checkpoint's `inputs` lack `image` (`this checkpoint does not take images: its decision_config.json inputs are ["text"]`), and when the runtime has no image path: no vision encoder loaded, as with a text-only loader or an artifact without the encoder. The second refusal uses v1's text-only message, `this engine has no vision tower; images are not supported`. It also refuses image requests for a checkpoint whose image processor's settings differ from section 3.2's (section 9).
+
+`render` gives, for each image in order, its file (`data`, the bytes decoded from base64), its format, width and height from the header, the sha256 of its file, N, and its span: state ids [`start`, `end`) are its N placeholders, with `<|image>` at `start` - 1 and `<image|>` at `end` (`strands_decider.core.RenderedImage`). The core does not decode pixels. The runtime does, and prepares them:
+
+1. It decodes the file as v1 does (`vision.decode_image`): the first frame of an animated file, its EXIF orientation applied, transparent areas composited onto white, as RGB. A file that fails here is refused with v1's message (section 1.1).
+2. It prepares the pixels with the checkpoint's image processor, configured by its `processor_config.json`, exactly as Gemma's processor prepares them: resized to the size of section 3.2 with bicubic resampling, scaled to [0, 1] and not normalised, and cut into 16-pixel patches with their positions, which the 12B's processor merges in 3 × 3 groups. The processor's count of soft tokens must be the core's N, and a runtime checks that it is.
+3. The vision encoder and its projection turn the patches into N vectors, which take the place of the placeholders' token embeddings at the image's span, in order.
+
+The reference runtime uses `Gemma4ImageProcessorPil` for E2B, E4B, 26B-A4B and 31B, the PIL backend v1 pins: transformers' torchvision backend gives slightly different pixels, enough in v1's measurements to flip some answers. The 12B's `Gemma4UnifiedImageProcessor` has only a torchvision backend. Other preprocessing counts against section 10's bounds like any other difference. Hugging Face's image processors take the decoded image as a PIL image, or as an array with its channel layout given (`input_data_format`). From an array 1 or 3 pixels high or wide they cannot tell which axis holds the channels, and they count a 100 × 1 array as 192 soft tokens, not 167.
 
 ## 12. Open questions
 
@@ -459,3 +572,5 @@ These are not yet decided, and the training A/B or the first release should sett
 5. Whether `ordinal_smoothing`, which v1 kept in its head configuration, belongs in `decision_config.json`.
 6. The quantized-format bounds of section 10.
 7. How to install the torch-free core without torch (release task E1): a separate distribution, such as `strands-decider-core`, or an extra of `strands-decider` with torch and transformers moved out of its base requirements. Until then `pip install strands-decider` installs torch, and a torch-free runtime installs the core's modules with `tokenizers` and numpy by other means.
+8. Audio, the next input. E2B and E4B have an audio encoder (`model.audio_tower.`, with `model.embed_audio.`); the 12B projects raw waveform frames through `model.embed_audio.` alone; 26B-A4B and 31B take no audio. Audio would follow the image pattern, as v1's Gemma 4 audio input does for E2B and E4B (strands-decider pull request 67). A request would carry `audio`, a list of base64 clips (WAV, FLAC, OGG or MP3, at most 30 s each). `inputs` would add `audio`. Each clip's line, `<|audio>`, N copies of `<|audio|>` (id 258881) and `<audio|>`, would follow the images' lines in the state. N would come from the clip's header, its sample rate and its length, and the cache key would include each clip's sha256. N's rule differs between the processors. For E2B and E4B it is the feature extractor's valid mel frames (10 ms hop) after two stride-2 convolutions, capped at 750: about one token per 40 ms. For the 12B it is one token per 640 samples at 16 kHz, also 40 ms, with no cap in the processor. Until then `audio` is not part of this interface. v1's pull request refuses audio on engines without an encoder rather than ignore it; whether a runtime here should refuse a non-empty `audio` before audio lands, rather than ignore it as an unknown field, is open.
+9. Which tokenizer revision a checkpoint carries. The tokenizer pinned in this spec (sha256 `cc8d3a0c...` above) is what `google/gemma-4-E2B-it` shipped at `3e22461f65e89153144f8adb70e3b8c2cc9845a7`, and what `google/gemma-4-26B-A4B-it` ships at `4d7ae4984b7db7de8f8457170b3f1a419ee76d52`. At the revisions section 9 lists, the E2B, E4B and 12B repositories ship tokenizers with 239 to 267 fewer merges (514,639, 514,653 and 514,667, against 514,906), and E2B's vocabulary differs in two entries. Every render golden's text, and every code, encodes to the same ids with all three. A checkpoint carries its base's tokenizer at `base_revision` (section 9), so the release should fix one revision per size and check that its tokenizer gives the render goldens' ids.
