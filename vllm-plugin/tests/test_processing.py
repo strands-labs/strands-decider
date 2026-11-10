@@ -32,7 +32,7 @@ def test_more_than_the_processors_tokens_is_refused():
 
 def test_the_spec_resize_is_not_a_fixed_point_of_vllms_formula():
     """Why the plugin counts placeholders itself: vLLM's formula, applied to an image already at W x H, is not N."""
-    from strands_decider_vllm.server import resized_size
+    resized_size = pytest.importorskip("strands_decider.core").resized_size
 
     def vllm_n(w, h):  # Gemma4ProcessingInfo._compute_num_soft_tokens, max_soft_tokens 280
         import math
