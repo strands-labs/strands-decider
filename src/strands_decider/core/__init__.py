@@ -18,7 +18,7 @@ untouched: the core sits beside them.
 from __future__ import annotations
 
 from .codes import CODES, MAX_CODES, codes_for
-from .config import FORMAT_VERSION, INTERFACE, DecisionConfig, Provenance
+from .config import FORMAT_VERSION, INPUTS, INTERFACE, DecisionConfig, Provenance
 from .prompt import (
     CHAT,
     PLAIN,
@@ -56,6 +56,7 @@ __all__ = [
     "FINAL_LOGITS",
     "FORMAT_VERSION",
     "HIDDEN",
+    "INPUTS",
     "INTERFACE",
     "MAX_CODES",
     "PLAIN",

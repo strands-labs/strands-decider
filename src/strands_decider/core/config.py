@@ -4,7 +4,9 @@ The schema is docs/spec.md's (The decision_config.json schema). Validation is st
 file without `"interface": "strands-decider"`, a missing required field, an unknown
 field, a value of the wrong type, and a prompt this runtime does not implement are all
 errors. The file carries the soft-cap, so a converted decoder (GGUF, MLX) needs no
-`config.json` beside it.
+`config.json` beside it. It names the inputs the checkpoint takes (`inputs`: text, and
+images where it serves them), and its provenance is required: the image processor, the
+tokenizer and any part not fine-tuned come from the base model at `base_revision`.
 """
 
 from __future__ import annotations
@@ -27,11 +29,16 @@ INTERFACE = "strands-decider"
 FORMAT_VERSION = 1
 ATTENTION_MODES = ("prefix_bidir",)
 POOLINGS = ("last",)
+# The inputs a checkpoint may take (`inputs`); every checkpoint takes text.
+TEXT = "text"
+IMAGE = "image"
+INPUTS = (TEXT, IMAGE)
 
 REQUIRED = (
     "interface",
     "format_version",
     "prompt",
+    "inputs",
     "codes",
     "token_ids",
     "temperature",
@@ -39,8 +46,11 @@ REQUIRED = (
     "attention_mode",
     "pooling",
     "max_length_validated",
+    "provenance",
 )
-OPTIONAL = ("provenance",)
+OPTIONAL: tuple[str, ...] = ()
+# The provenance fields every checkpoint gives; `release` and `source` are optional.
+PROVENANCE_REQUIRED = ("base_model", "base_revision")
 
 # The readout's soft-cap and temperature act in float32 (docs/spec.md, The readout), so
 # each must be a normal float32: a value past these bounds would become inf or lose precision.
@@ -79,28 +89,30 @@ def _wrong_interface(interface: Any) -> str:
 
 @dataclass(frozen=True)
 class Provenance:
-    """Where a checkpoint came from, in public terms. Every field is optional.
+    """Where a checkpoint came from, in public terms. `base_model` and `base_revision` are
+    required: the checkpoint's image processor, tokenizer and any part not fine-tuned are
+    the base's at that revision.
 
     base_model: the Hub id of the base model, such as `google/gemma-4-E2B-it`.
     base_revision: the base model's 40-character commit on the Hub.
-    release: the released model's name or Hub id.
-    source: an https URL of the public code and recipe that trained it.
+    release: optional, the released model's name or Hub id.
+    source: optional, an https URL of the public code and recipe that trained it.
     """
 
-    base_model: str | None = None
-    base_revision: str | None = None
+    base_model: str
+    base_revision: str
     release: str | None = None
     source: str | None = None
 
     def __post_init__(self) -> None:
         for name, value in asdict(self).items():
-            if value is None:
+            if value is None and name not in PROVENANCE_REQUIRED:
                 continue
             if not isinstance(value, str) or not value:
                 raise ValueError(f"provenance.{name} must be a non-empty string")
-        if self.base_model is not None and not _HUB_ID.match(self.base_model):
+        if not _HUB_ID.match(self.base_model):
             raise ValueError(f"provenance.base_model must be a Hub id, not {self.base_model!r}")
-        if self.base_revision is not None and not _COMMIT.match(self.base_revision):
+        if not _COMMIT.match(self.base_revision):
             raise ValueError("provenance.base_revision must be a 40-character commit hash")
         if self.release is not None and not _RELEASE.match(self.release):
             raise ValueError(f"provenance.release must be a model name, not {self.release!r}")
@@ -115,6 +127,9 @@ class Provenance:
         unknown = sorted(set(d) - known)
         if unknown:
             raise ValueError(f"provenance has unknown fields {unknown}; known: {sorted(known)}")
+        missing = [k for k in PROVENANCE_REQUIRED if k not in d]
+        if missing:
+            raise ValueError(f"provenance is missing required fields {missing}")
         return cls(**d)
 
     def to_dict(self) -> dict[str, str]:
@@ -126,6 +141,7 @@ class DecisionConfig:
     interface: str
     format_version: int
     prompt: str
+    inputs: tuple[str, ...]
     codes: tuple[str, ...]
     token_ids: tuple[int, ...]
     temperature: float
@@ -133,7 +149,7 @@ class DecisionConfig:
     attention_mode: str
     pooling: str
     max_length_validated: int
-    provenance: Provenance | None = None
+    provenance: Provenance
 
     def __post_init__(self) -> None:
         if self.interface != INTERFACE:
@@ -147,6 +163,18 @@ class DecisionConfig:
             raise ValueError(
                 f"prompt {self.prompt!r} is not implemented; this runtime implements {VARIANTS}"
             )
+        inputs = self.inputs
+        if (
+            not isinstance(inputs, (list, tuple))
+            or not all(isinstance(i, str) and i in INPUTS for i in inputs)
+            or len(set(inputs)) != len(inputs)
+            or TEXT not in inputs
+        ):
+            raise ValueError(
+                f"inputs must be an array of distinct strings from {list(INPUTS)} that holds "
+                f"{TEXT!r}, not {inputs!r}"
+            )
+        object.__setattr__(self, "inputs", tuple(inputs))
         if tuple(self.codes) != CODES:
             raise ValueError(
                 "codes must be the 255 answer codes, A through IV without GZ, in order"
@@ -166,7 +194,7 @@ class DecisionConfig:
             raise ValueError(f"pooling {self.pooling!r} is not supported; expected {POOLINGS}")
         if not _is_int(self.max_length_validated) or self.max_length_validated <= 0:
             raise ValueError("max_length_validated must be a positive integer")
-        if self.provenance is not None and not isinstance(self.provenance, Provenance):
+        if not isinstance(self.provenance, Provenance):
             raise ValueError("provenance must be a Provenance")
 
     @classmethod
@@ -188,13 +216,13 @@ class DecisionConfig:
         for k in ("codes", "token_ids"):
             if not isinstance(d[k], list):
                 raise ValueError(f"{k} must be a list")
-        if "provenance" in d and d["provenance"] is None:
-            raise ValueError("provenance must be an object; leave the field out instead of null")
-        prov = d.get("provenance")
+        if not isinstance(d["inputs"], list):
+            raise ValueError(f"inputs must be an array, not {d['inputs']!r}")
         return cls(
             interface=d["interface"],
             format_version=d["format_version"],
             prompt=d["prompt"],
+            inputs=tuple(d["inputs"]),
             codes=tuple(d["codes"]),
             token_ids=tuple(d["token_ids"]),
             temperature=d["temperature"],
@@ -202,7 +230,7 @@ class DecisionConfig:
             attention_mode=d["attention_mode"],
             pooling=d["pooling"],
             max_length_validated=d["max_length_validated"],
-            provenance=None if prov is None else Provenance.from_dict(prov),
+            provenance=Provenance.from_dict(d["provenance"]),
         )
 
     @classmethod
@@ -219,6 +247,7 @@ class DecisionConfig:
             "interface": self.interface,
             "format_version": self.format_version,
             "prompt": self.prompt,
+            "inputs": list(self.inputs),
             "codes": list(self.codes),
             "token_ids": list(self.token_ids),
             "temperature": self.temperature,
@@ -226,7 +255,6 @@ class DecisionConfig:
             "attention_mode": self.attention_mode,
             "pooling": self.pooling,
             "max_length_validated": self.max_length_validated,
+            "provenance": self.provenance.to_dict(),
         }
-        if self.provenance is not None:
-            d["provenance"] = self.provenance.to_dict()
         return d
