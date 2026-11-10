@@ -472,17 +472,20 @@ copied byte for byte. The artifact is written into `OUT.partial-*` beside `OUT`,
 checked, and only then renamed to `OUT` with the usual permissions; a killed conversion's
 partial directory is removed by the next conversion to the same `OUT`. `mlx_vlm.convert` alone
 would lose the readout and quantize the audio projection. A quantized artifact makes a
-conformance claim only for a format whose bounds the spec records at that size (section 10):
-so far MLX 8-bit in groups of 64 at E2B, held to bf16's bounds (at least 98% top-1, mean |Δp|
-at most 0.02) from the measurement below. Any other, 4-bit or another size included, says at
-conversion and at load that it makes none, and `/health` reports the claim and its bounds.
+conformance claim only when `convert-mlx` wrote it (its marker: only the decoder quantized, as
+the format was measured) in a format whose bounds the core records at that size
+(`strands_decider.core.BOUNDS`, spec section 10): so far MLX 8-bit in groups of 64 at E2B, held
+to bf16's bounds (at least 98% top-1 and mean |Δp| at most 0.02, over at least 1,000
+questions) from the measurement below. Any other, 4-bit, another size, or an 8-bit model that
+`convert-mlx` did not write included, says at conversion and at load that it makes none, and
+`/health` reports the claim and its bounds.
 
-Measured on an M4 Pro (48 GB) with an intermediate Strands Decider v2 E2B checkpoint in the
+Measured on an M4 Pro (48 GB) with a pre-release Strands Decider v2 E2B checkpoint in the
 multimodal layout, against reference outputs computed with transformers in bf16 on a GPU, one
 masked pass per prompt:
 
-- Text. On the reference's 1,200 golden prompts (200 to 7,987 tokens, 300 in each of four length
-  buckets, given as the reference's own token ids), bf16 agrees on the top code for 99.25% of
+- Text. On the reference's 1,200 prompts (300 in each of four length buckets, about 256 to 8K
+  tokens; given as the reference's own token ids), bf16 agrees on the top code for 99.25% of
   questions (98.67% to 99.67% per bucket), with mean |Δp| 0.0065 and at most 0.086. Every
   disagreement is a near-tie, with the reference's top two at most 0.084 apart. The 8-bit
   artifact agrees on 98.83% (98.00% to 99.67% per bucket), with mean |Δp| 0.0099 and at most
