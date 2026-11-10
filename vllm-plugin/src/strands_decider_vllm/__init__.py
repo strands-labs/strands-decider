@@ -123,6 +123,11 @@ def register() -> None:
         AttentionBackendEnum.FLASH_ATTN,
         "strands_decider_vllm.attention.SplitFlashAttentionBackend",
     )
+    # The same split on vLLM's CPU attention, for CPU builds of vLLM (the tests' CPU tier).
+    register_backend(
+        AttentionBackendEnum.CPU_ATTN,
+        "strands_decider_vllm.attention_cpu.SplitCPUAttentionBackend",
+    )
     # Gemma 4's config hooks (FA4 for both head sizes on Hopper) are looked up by architecture name.
     from vllm.model_executor.models.config import MODELS_CONFIG_MAP
 
