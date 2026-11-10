@@ -563,9 +563,7 @@ def test_the_resized_size_comes_from_the_decoded_size():
         assert soft_tokens(*decoded) == image.tokens == (resized[0] // 48) * (resized[1] // 48)
     rotated = goldens["images"]["rotated-80x40.jpg"]
     assert rotated["decoded"] == [40, 80] and rotated["resized"] == [528, 1104]
-    assert (
-        resized_size(80, 40) == (1104, 528) and soft_tokens(80, 40) == soft_tokens(40, 80) == 253
-    )
+    assert resized_size(80, 40) == (1104, 528) and soft_tokens(80, 40) == soft_tokens(40, 80) == 253
     image = decode_image(image_b64("rotated-80x40.jpg"))
     assert check_decoded_size(image, 80, 40) == (1104, 528)  # as the header says, unturned
     for w, h in ((41, 80), (40, 81), (80, 80), (1, 1)):
