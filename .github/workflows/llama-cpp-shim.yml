@@ -51,6 +51,7 @@ jobs:
           PYTHONPATH: src
           STRANDS_DECIDER_LLAMA_CPP: ${{ runner.temp }}/llama.cpp
           STRANDS_DECIDER_LLAMA_LIB: ${{ runner.temp }}/llama-build/libdecision.so
+          STRANDS_DECIDER_REQUIRE_SHIM: "1"
         run: python -m pytest -q -rs -s tests/test_llama_cpp_shim.py
 
   cdk:
