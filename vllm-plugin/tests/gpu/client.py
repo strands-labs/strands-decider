@@ -27,6 +27,10 @@ import urllib.error
 import urllib.request
 
 FAILURES: list[str] = []
+#: Same-server tolerances on max |dp|: a request answered again (repeat) and a cached or batched answer against a cold
+#: one (same). Measured on the released checkpoints; a tiny random-weight model's bf16 noise needs looser ones
+#: (tests/gpu/ci.sh passes them).
+TOL = {"repeat": 2e-3, "same": 0.01}
 
 
 def log(*x):
@@ -180,7 +184,7 @@ def run_malformed(srv, row, p0, cases):
         check(srv.health() == 200, f"{name}: server healthy afterwards")
         st2, _, p = ask(srv, row)
         check(
-            st2 == 200 and p is not None and dmax(p, p0) <= 2e-3,
+            st2 == 200 and p is not None and dmax(p, p0) <= TOL["repeat"],
             f"{name}: the next valid request is answered as before",
         )
 
@@ -208,7 +212,7 @@ def scenario_requests(srv, rows, a):
     # Without allowed_token_ids, logprobs 255 returns every code; renormalized, the same answer.
     st_a, _, p_a = ask(srv, row, allowed_token_ids=DROP, logprobs=255, cache_salt="baseline")
     check(
-        st_a == 200 and dmax(p_a, p0) <= 2e-3,
+        st_a == 200 and dmax(p_a, p0) <= TOL["repeat"],
         "logprobs 255 without allowed_token_ids gives the same answer",
     )
 
@@ -218,7 +222,7 @@ def scenario_requests(srv, rows, a):
     ask(srv, row)
     _, rr, rep = ask(srv, row)
     check(
-        cached(rr) and dmax(rep, cold) <= 0.01 and argmax(rep) == argmax(cold),
+        cached(rr) and dmax(rep, cold) <= TOL["same"] and argmax(rep) == argmax(cold),
         f"exact repeat: {cached(rr)} of {len(row['token_ids'])} tokens cached, max|dp| vs cold {dmax(rep, cold):.4f}",
     )
     _, ro, _ = ask(srv, row, vllm_xargs={"prefix_end": row["prefix_end"] - 1})
@@ -232,7 +236,7 @@ def scenario_requests(srv, rows, a):
     _, rf, pf = ask(srv, further)
     _, _, pfc = ask(srv, further, cache_salt=salt + "f")
     check(
-        0 < (cached(rf) or 0) <= further["prefix_end"] and dmax(pf, pfc) <= 0.01,
+        0 < (cached(rf) or 0) <= further["prefix_end"] and dmax(pf, pfc) <= TOL["same"],
         f"further question: {cached(rf)} of S = {further['prefix_end']} tokens cached, max|dp| vs cold {dmax(pf, pfc):.4f}",
     )
 
@@ -249,7 +253,7 @@ def scenario_requests(srv, rows, a):
     [t.join() for t in threads]
     worst = max(dmax(res[i][2], solo[i]) for i in range(len(group)) if res[i][0] == 200)
     check(
-        all(res[i][0] == 200 for i in range(len(group))) and worst <= 0.01,
+        all(res[i][0] == 200 for i in range(len(group))) and worst <= TOL["same"],
         f"mixed batch of {len(group)}: all answered, worst max|dp| vs alone {worst:.4f}",
     )
 
@@ -380,7 +384,7 @@ def scenario_resume(srv, rows, a):
     for (st, r, _), x, p in zip(res, group, solo, strict=True):
         if st == 200:
             worst = max(worst, dmax(probs(r, x["label_token_ids"]), p))
-    check(worst <= 0.01, f"first-token answers vs cold: worst max|dp| {worst:.4f}")
+    check(worst <= TOL["same"], f"first-token answers vs cold: worst max|dp| {worst:.4f}")
     check(srv.health() == 200, "server healthy at the end")
     return {"preemptions": preempted, "worst_dp": worst}
 
@@ -397,8 +401,24 @@ def main():
         "--min-top1", type=float, default=0.95, help="gate on reference agreement (requests)"
     )
     ap.add_argument("--expect", help="a requests run's --out (compare)")
+    ap.add_argument(
+        "--repeat-tol", type=float, default=TOL["repeat"], help="max |dp| of an answer asked again"
+    )
+    ap.add_argument(
+        "--same-server-tol",
+        type=float,
+        default=TOL["same"],
+        help="max |dp| of cached and batched answers",
+    )
+    ap.add_argument(
+        "--cross-server-tol", type=float, default=None, help="compare: max |dp| (default 0.03)"
+    )
     ap.add_argument("--out")
     a = ap.parse_args()
+    TOL.update(repeat=a.repeat_tol, same=a.same_server_tol)
+    if a.cross_server_tol is not None:
+        global CROSS_SERVER_MAX_DP
+        CROSS_SERVER_MAX_DP = a.cross_server_tol
     rows = [json.loads(line) for line in open(a.rows) if line.strip()]
     srv = Server(a.url)
     fn = {
