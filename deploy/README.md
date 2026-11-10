@@ -21,4 +21,6 @@ removes it. See
 Serverless, on arm64 CPUs: no GPU, no instance to reserve, nothing standing between requests.
 One CDK stack builds an image with the 2B Qwen3.5 model in it, quantized for llama.cpp, in AWS
 CodeBuild, and creates a function behind an IAM-authenticated Function URL; requests take
-seconds. With `-c vision=true`, it answers over images too. See [lambda/README.md](lambda/README.md).
+seconds. With `-c vision=true`, it answers over images too. With `-c decision=true` it deploys a
+Strands Decider v2 decision checkpoint instead, Gemma 4 E2B with text and images. See
+[lambda/README.md](lambda/README.md).
