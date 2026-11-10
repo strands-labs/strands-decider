@@ -138,7 +138,7 @@ def create_app(
                 stacklevel=2,
             )
     elif build_engine is None:
-        # v1's engines take neither (#128 brings --max-concurrency to them on main).
+        # v1's engines take none of these.
         for flag, value in (
             ("--dtype", dtype),
             ("--max-concurrency", max_concurrency),

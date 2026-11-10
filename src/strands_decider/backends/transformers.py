@@ -68,6 +68,7 @@ import torch
 
 from ..core import (
     CODES,
+    CONTROL_TOKEN_IDS,
     HIDDEN,
     DecisionConfig,
     Readout,
@@ -481,6 +482,8 @@ def _check_readout_width(ckpt: Checkpoint) -> None:
     config.json (`text_config.hidden_size`, or the top level for a bare decoder)."""
     cfg = ckpt.model_config
     hidden = (cfg.get("text_config") or cfg).get("hidden_size")
+    if not isinstance(hidden, int) or isinstance(hidden, bool) or hidden < 1:
+        raise ValueError(f"{ckpt.path}: config.json gives no hidden_size for the decoder")
     weight = ckpt.readout.weight
     shape = None if weight is None else tuple(weight.shape)
     if shape != (len(CODES), hidden):
@@ -599,7 +602,7 @@ class TransformersBackend:
         if images and IMAGE in ckpt.inputs:
             problem = image_processor_problem(ckpt.processor_config(), ckpt.unified)
             if problem is None:
-                problem = _tokenizer_problem(ckpt)
+                problem = _image_ids_problem(ckpt)
             if problem is None:
                 try:
                     processor = load_image_processor(ckpt.path, ckpt.unified)
@@ -644,7 +647,8 @@ class TransformersBackend:
 
     def prepare_pixels(self, images: Sequence[RenderedImage]) -> dict[str, torch.Tensor]:
         """The vision encoder's inputs for `images` (section 11.1), on the device: each file
-        decoded as v1 decodes it, resized with Pillow's bicubic filter, then through the
+        decoded as v1 decodes it, its decoded size checked against its header, resized by the
+        spec's bicubic resize (`resize` here, the core's `resize_image`), then through the
         checkpoint's image processor with its own resize off. Checks that the processor counts
         each image's N. The model runs its encoder on them in the pass that holds the state,
         and puts each image's N vectors at its placeholders, in order."""
@@ -803,10 +807,11 @@ class TransformersBackend:
         if images and self.image_processor is None:
             raise ValueError(self.image_problem or NO_VISION)
         self._check_media(state, qs, images)
+        # Decoded and resized on the CPU first; only the copy to the device takes turns on MPS.
+        # The reference reruns the vision encoder in each prompt's pass, as one prompt per pass
+        # does; with the state reused it runs once, in the state's pass.
+        pixels = self.prepare_pixels(images) if images else None
         with self._turns, torch.inference_mode():
-            # The reference reruns the vision encoder in each prompt's pass, as one prompt per
-            # pass does; with the state reused it runs once, in the state's pass.
-            pixels = self.prepare_pixels(images) if images else None
             # One question gains nothing from a shared state and would pay a second pass (as
             # v1's engine measured; here E2B on an H100 took 324 ms against 174 ms).
             if self.reuse_state and len(qs) > 1:
@@ -845,21 +850,20 @@ DTYPES = ("float32", "bfloat16")
 load_backend.dtypes = DTYPES  # type: ignore[attr-defined]
 
 
-def _tokenizer_problem(ckpt: Checkpoint) -> str | None:
-    """Why the checkpoint's tokenizer and config.json disagree on the image tokens, or None:
-    the prompt's placeholders must be the ids the model replaces."""
-    tok = ckpt.tokenizer()
+def _image_ids_problem(ckpt: Checkpoint) -> str | None:
+    """Why config.json's image token ids are not the interface's, or None: the model replaces
+    the ids config.json names, and the prompt's placeholders are the interface's
+    (`CONTROL_TOKEN_IDS`, which the checkpoint's tokenizer is held to by `load_tokenizer`)."""
     cfg = ckpt.model_config
     for name, key in (
         (IMAGE_OPEN, "boi_token_id"),
         (IMAGE_SOFT, "image_token_id"),
         (IMAGE_CLOSE, "eoi_token_id"),
     ):
-        ours, theirs = tok.token_to_id(name), cfg.get(key)
-        if ours is None or ours != theirs:
+        if cfg.get(key) != CONTROL_TOKEN_IDS[name]:
             return (
-                f"the tokenizer maps {name} to {ours}, and config.json's {key} is {theirs}, so "
-                "image requests are refused"
+                f"config.json's {key} is {cfg.get(key)}, not the interface's id for {name}, "
+                f"{CONTROL_TOKEN_IDS[name]}, so image requests are refused"
             )
     return None
 

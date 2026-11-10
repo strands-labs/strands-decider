@@ -357,36 +357,94 @@ def test_hub_detection_takes_only_missing_files_and_repos_for_v1(hub):
         RevisionNotFoundError,
     )
 
-    state, _, _, _ = hub
+    state, _, dc, _ = hub
     for missing in (RemoteEntryNotFoundError, RepositoryNotFoundError, RevisionNotFoundError):
         state["download"] = _hub_error(missing)
         assert checkpoint_kind("org/repo") is None, missing
-    # An authorization error, and what hf_hub_download makes of a rate limit, a 5xx or the
-    # network being down: raised, never taken for a v1 checkpoint.
-    for error in (_hub_error(HfHubHTTPError, "401"), _hub_error(LocalEntryNotFoundError, "503")):
+    # An authorization error, and a rate limit or a 5xx, which hf_hub_download raises as a
+    # LocalEntryNotFoundError caused by the Hub's answer: raised, never taken for v1.
+    answered = _hub_error(LocalEntryNotFoundError, "the Hub answered 503")
+    answered.__cause__ = _hub_error(HfHubHTTPError, "503 Service Unavailable")
+    state["snapshot"] = str(__import__("pathlib").Path(dc).parent)  # even with a cache
+    for error in (_hub_error(HfHubHTTPError, "401"), answered):
         state["download"] = error
         with pytest.raises(type(error)):
             checkpoint_kind("org/repo")
 
 
-def test_hub_detection_raises_the_network_through_the_real_download(monkeypatch, tmp_path):
-    """No mock of hf_hub_download: its metadata request fails as the network does, and the
-    error it raises reaches the caller with the network's failure as its cause."""
+def _hub_cache(root, repo: str, files: dict[str, str], commit: str = "c" * 40) -> None:
+    """A Hugging Face cache holding `repo`'s snapshot at `main` with `files`."""
+    folder = root / ("models--" + repo.replace("/", "--"))
+    (folder / "refs").mkdir(parents=True)
+    (folder / "refs" / "main").write_text(commit)
+    snapshot = folder / "snapshots" / commit
+    snapshot.mkdir(parents=True)
+    for name, text in files.items():
+        (snapshot / name).write_text(text)
+
+
+@pytest.fixture
+def unreachable_hub(monkeypatch, tmp_path):
+    """The real hf_hub_download and snapshot_download over a cache in `tmp_path`, online, with
+    their metadata request failing: as the network does (ConnectError), or with the Hub's
+    answer when the test sets `answer` to a status code."""
     import huggingface_hub.file_download as fd
     from huggingface_hub import constants
-    from huggingface_hub.errors import LocalEntryNotFoundError
+    from huggingface_hub.errors import HfHubHTTPError
 
     httpx = getattr(fd, "httpx2", None) or fd.httpx
+    cache = tmp_path / "hub"
+    cache.mkdir()
     monkeypatch.setattr(constants, "HF_HUB_OFFLINE", False)
-    monkeypatch.setattr(constants, "HF_HUB_CACHE", str(tmp_path / "hub"))
+    monkeypatch.setattr(constants, "HF_HUB_CACHE", str(cache))
+    answer = {"status": None}
 
-    def down(*_a, **_k):
-        raise httpx.ConnectError("the network is down")
+    def fail(url, *_a, **_k):
+        if answer["status"] is None:
+            raise httpx.ConnectError("the network is down")
+        response = httpx.Response(answer["status"], request=httpx.Request("HEAD", url))
+        raise HfHubHTTPError(f"{answer['status']} from the Hub", response=response)
 
-    monkeypatch.setattr(fd, "get_hf_file_metadata", down)
+    monkeypatch.setattr(fd, "get_hf_file_metadata", fail)
+    return cache, answer, httpx
+
+
+def test_hub_detection_with_the_network_down_raises_when_nothing_is_cached(unreachable_hub):
+    """No mock of hf_hub_download: its error reaches the caller, caused by the network's."""
+    from huggingface_hub.errors import LocalEntryNotFoundError
+
+    _, _, httpx = unreachable_hub
     with pytest.raises(LocalEntryNotFoundError) as e:
         checkpoint_kind("org/decision-repo")
     assert isinstance(e.value.__cause__, httpx.ConnectError)
+
+
+def test_hub_detection_with_the_network_down_reads_the_cached_snapshot(unreachable_hub):
+    """With the Hub out of reach, a cached snapshot decides, as v1's loader then uses it: a
+    cached v1 checkpoint stays v1, and a cached decision checkpoint a decision one."""
+    cache, _, _ = unreachable_hub
+    _hub_cache(cache, "org/v1-model", {"strands_decider_config.json": "{}"})
+    _hub_cache(
+        cache,
+        "org/decision-model",
+        {"decision_config.json": json.dumps({"interface": "strands-decider"})},
+    )
+    assert checkpoint_kind("org/v1-model") is None
+    assert checkpoint_kind("org/decision-model") == DECISION
+
+
+def test_hub_detection_raises_the_hubs_answer_even_with_a_cache(unreachable_hub):
+    """A Hub that answers, with a 503 or a 429, is not out of reach: its error is raised, and
+    the cache does not decide."""
+    from huggingface_hub.errors import HfHubHTTPError, LocalEntryNotFoundError
+
+    cache, answer, _ = unreachable_hub
+    _hub_cache(cache, "org/v1-model", {"strands_decider_config.json": "{}"})
+    for status in (503, 429):
+        answer["status"] = status
+        with pytest.raises(LocalEntryNotFoundError) as e:
+            checkpoint_kind("org/v1-model")
+        assert isinstance(e.value.__cause__, HfHubHTTPError)
 
 
 def test_a_mistyped_path_keeps_v1s_message(tmp_path):

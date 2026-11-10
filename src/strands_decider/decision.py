@@ -31,7 +31,6 @@ from .core import (
     Readout,
     RenderedRequest,
     load_tokenizer,
-    plain_text_tokenizer,
     read,
     render,
 )
@@ -73,17 +72,21 @@ def _decision_file(checkpoint: str, revision: str | None) -> str | None:
     A directory is read as it is. A string that is neither a directory nor a valid repo id
     (a mistyped path) is None, so v1's loader reports it as before. For a Hub repo:
     - offline, or at a pinned commit, the cache answers, a cached "no such file" included;
-      offline with nothing cached for the file, the cached snapshot decides;
     - otherwise the Hub is asked: one small request, which the cache serves when it is
       current, so that a repo republished in another format is not judged by an old commit.
-    Only "no such file in this repo", "no such repo" (gated included) and "no such revision"
-    mean None, and v1's loader then reports the last two itself. Any other failure, an
-    authorization error, a rate limit, the Hub's or the network's, is raised."""
+    When the Hub cannot be reached (offline, or a connection error or timeout), the cached
+    snapshot decides, as v1's loader then uses it: with decision_config.json it is a decision
+    checkpoint, without it a v1 one; with nothing cached the failure is raised (None offline,
+    so that v1's loader reports it, as it did). "No such file in this repo", "no such repo"
+    (gated included) and "no such revision" mean None, and v1's loader then reports the last
+    two itself. An error the Hub answers with, an authorization error, a rate limit or a
+    5xx, is raised."""
     if os.path.isdir(checkpoint):
         path = os.path.join(checkpoint, FILENAME)
         return path if os.path.isfile(path) else None
-    from huggingface_hub import hf_hub_download, snapshot_download, try_to_load_from_cache
+    from huggingface_hub import hf_hub_download, try_to_load_from_cache
     from huggingface_hub.errors import (
+        HfHubHTTPError,
         HFValidationError,
         LocalEntryNotFoundError,
         RemoteEntryNotFoundError,
@@ -100,17 +103,40 @@ def _decision_file(checkpoint: str, revision: str | None) -> str | None:
             if cached is not None:  # the cache knows this commit has no such file
                 return None
         if offline:
-            try:
-                snapshot = snapshot_download(checkpoint, revision=revision, local_files_only=True)
-            except LocalEntryNotFoundError:  # nothing cached: v1's loader reports it
-                return None
-            path = os.path.join(snapshot, FILENAME)
-            return path if os.path.isfile(path) else None
-        return str(hf_hub_download(checkpoint, FILENAME, revision=revision))
+            snapshot = _cached_snapshot(checkpoint, revision)
+            return None if snapshot is None else _file_in(snapshot)
+        try:
+            return str(hf_hub_download(checkpoint, FILENAME, revision=revision))
+        except LocalEntryNotFoundError as e:
+            # The Hub was not reached, or answered with an error, and the file is not cached
+            # on its own: a v1 repo never has it. An answer is raised; an unreachable Hub
+            # leaves the decision to the cached snapshot, if there is one.
+            if isinstance(e.__cause__, HfHubHTTPError):
+                raise
+            snapshot = _cached_snapshot(checkpoint, revision)
+            if snapshot is None:
+                raise
+            return _file_in(snapshot)
     except HFValidationError:  # not a repo id: a local path that does not exist
         return None
     except (RemoteEntryNotFoundError, RepositoryNotFoundError, RevisionNotFoundError):
         return None
+
+
+def _cached_snapshot(checkpoint: str, revision: str | None) -> str | None:
+    """The cached snapshot of the repo at `revision`, or None when none is cached."""
+    from huggingface_hub import snapshot_download
+    from huggingface_hub.errors import LocalEntryNotFoundError
+
+    try:
+        return str(snapshot_download(checkpoint, revision=revision, local_files_only=True))
+    except LocalEntryNotFoundError:
+        return None
+
+
+def _file_in(snapshot: str) -> str | None:
+    path = os.path.join(snapshot, FILENAME)
+    return path if os.path.isfile(path) else None
 
 
 def _local_dir(checkpoint: str, revision: str | None) -> str:
@@ -166,8 +192,11 @@ class DecisionEngine:
     agree). At most `max_concurrency` requests run on the backend at once. One at a time, the
     default, keeps a burst of long or image requests from holding several states' keys and
     values on the device together. The others wait up to `queue_timeout` seconds (None: no
-    limit) and then get `EngineBusy`. Refusals, decided before a request waits, raise
-    `RequestRefused`; a failure on a request that was accepted raises RuntimeError."""
+    limit) and then get `EngineBusy`. Refusals raise `RequestRefused`, and every refusal the
+    core makes is decided before a request waits. An image file that its header accepts but
+    that does not decode is found by the backend, which decodes it once it has a slot: under
+    load such a request may wait, or get `EngineBusy`, before its refusal. A failure on a
+    request that was accepted raises RuntimeError."""
 
     def __init__(
         self,
@@ -429,9 +458,9 @@ def load_decision_engine(
         raise refuse_intermediate(checkpoint)
     config = DecisionConfig.from_dict(raw)
     readout = Readout.load(path, config)
-    # Its control and code ids checked before any weight loads, then handed to the core, which
-    # renders with it directly instead of keeping a private copy (about 170 MB for Gemma 4's).
-    tokenizer = plain_text_tokenizer(load_tokenizer(path, config))
+    # Its control and code ids checked before any weight loads, and handed to the core as it is
+    # checked, so that neither the check nor render keeps a copy (about 170 MB for Gemma 4's).
+    tokenizer = load_tokenizer(path, config, hand_over=True)
     backend = loader(
         path,
         device=device,
