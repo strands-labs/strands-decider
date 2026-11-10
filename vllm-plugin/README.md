@@ -69,7 +69,7 @@ The server passes each image file's sha256 as vLLM's per-item id, so vLLM's mult
 - a request without `allowed_token_ids` whose `logprobs` is below 255: its top-n would rank all 255 codes and could leave out some of the question's own;
 - images for a checkpoint whose `inputs` lack `"image"`;
 - more than 4 images, media other than images, and an image whose tokens do not lie inside the state `[1, S)`;
-- images on an engine that `strands-decider-vllm serve` did not start. vLLM's own endpoints let a client name an image by an id of its choosing (`multi_modal_uuids`, or the pre-hashed `features` of `/inference/v1/generate`), which vLLM then uses as the image's cache key. With it, two different images could share cached state. The server marks its engines in vLLM's `additional_config`.
+- images on an engine that `strands-decider-vllm serve` did not start. vLLM's own endpoints let a client name an image by an id of its choosing (`multi_modal_uuids`, or the pre-hashed `features` of `/inference/v1/generate`), which vLLM then uses as the image's cache key. With it, two different images could share cached state. The server marks its engines in vLLM's `additional_config` under `strands_decider_server`. The mark is trust at the operator's level, not a security boundary: it says that every request reaching the engine names each image by its file's sha256. An operator who sets it for `vllm serve` (`--additional-config`) lets that server's clients make two images share cached state.
 
 **Refused at startup.** The plugin refuses to start with settings under which it would serve the mask incorrectly, or under which one request could stop the engine, and names each setting:
 
@@ -83,8 +83,8 @@ The server passes each image file's sha256 as vLLM's per-item id, so vLLM's mult
 **Other models in the same environment.** As a general plugin it loads in every vLLM process of the environment it is installed in. On vLLM 0.33.x it:
 
 - registers its three architectures and Gemma 4's config hooks for them;
-- replaces the `FLASH_ATTN` backend with a subclass whose `forward` is vLLM's own unless the plugin's model state has attached a split, which only a Strands Decider model does;
-- wraps three engine-core functions (the block-hash extra keys, `EngineCore.preprocess_add_request` and the scheduler's encoder-input step), which act only on engines or requests of a Strands Decider model.
+- replaces the `FLASH_ATTN` backend, and on a CPU build of vLLM the `CPU_ATTN` backend, with a subclass whose `forward` is vLLM's own unless the plugin's model state has attached a split, which only a Strands Decider model does;
+- wraps engine-core functions: the block-hash extra keys, `EngineCore.preprocess_add_request`, and the scheduler's `__init__` (to read the checkpoint's `decision_config.json` at startup), `schedule` and encoder-input step. Each acts only on engines or requests of a Strands Decider model.
 
 Other models therefore keep vLLM's attention, cache keys, scheduling and request handling. On any other vLLM release the plugin logs a warning and registers nothing, so the environment's other models are unaffected and the plugin's architectures are unavailable.
 
@@ -95,7 +95,7 @@ Other models therefore keep vLLM's attention, cache keys, scheduling and request
 - NVIDIA H100 80 GB is the only GPU tested. vLLM selects FlashAttention 4 for Gemma 4's two head sizes on Hopper. On Ampere or Ada GPUs vLLM's Gemma 4 hook picks Triton attention for the real checkpoints instead, which the plugin refuses; FlashAttention 2 there is untested.
 - vLLM's x86 CPU build runs the plugin too, on vLLM's CPU attention, for the tests' CPU tier (below). It is not a serving target: the checkpoints are bf16, and the tier runs tiny checkpoints in float32, which a CPU build of vLLM also accepts.
 - Python 3.10 or later.
-- For the server: the core library, `strands_decider.core` (the `strands-decider` distribution, from PR #129 on), with `tokenizers`.
+- For the server: the core library, `strands_decider.core` (the `strands-decider` distribution, from PR #129 on: `strands-decider>=0.3.1.dev0,<0.5`, the `serve` extra), with `tokenizers`. A checkout installs as a `0.3.1.dev` version only when git can see its tags (`fetch-depth: 0` in GitHub Actions). The server checks the core's functions at startup, before the engine starts, and names what is missing.
 
 ## Install
 
@@ -113,23 +113,23 @@ vLLM 0.33 has no endpoint that takes a rendered prompt with images and keys its 
 - The chat endpoints render a chat template, which the specification forbids for these prompts (section 3.5).
 - `/inference/v1/generate` takes token ids with images, but it lets a client name an image by an id of its choosing, and the client would also have to collapse each image's placeholders the way vLLM's Gemma 4 processor expects.
 
-So the plugin ships a server that takes v1's request and does the rest in process. It renders the request with the core library and the checkpoint's prompt template. It decodes and resizes each image as the specification says. For each question it sends vLLM the prompt with each image's line collapsed to the one `<|image|>` that vLLM expands, the images, their sha256 and S. It checks that vLLM's expanded prompt is the rendered one, token for token, and answers in v1's response format. The first question of a request runs alone and the others then together, so that they reuse the state's cached blocks.
+So the plugin ships a server that takes v1's request and does the rest in process. It renders the request with the core library and the checkpoint's prompt template. It decodes and resizes each image as the specification says, with the core's `check_decoded_size` and `resize_image` (Pillow's bicubic resize, the width's pass and then the height's, which gives the specification's pixels on every Pillow version). For each question it sends vLLM the prompt with each image's line collapsed to the one `<|image|>` that vLLM expands, the images, their sha256 and S. It checks that vLLM's expanded prompt is the rendered one, token for token, and answers in v1's response format. The first question of a request runs alone and the others then together, so that they reuse the state's cached blocks.
 
 ```
 CUDA_VISIBLE_DEVICES=0 strands-decider-vllm serve /path/to/checkpoint --port 8000
 ```
 
-`python -m strands_decider_vllm serve ...` does the same. Run it with the vLLM environment's `bin` directory on `PATH`, because vLLM's JIT kernel builds need its `ninja`. The server binds 127.0.0.1 by default, with vLLM's internal sockets on loopback (it sets `VLLM_HOST_IP`, `GLOO_SOCKET_IFNAME` and `NCCL_SOCKET_IFNAME` unless they are set). It has no authentication. Reach it from another machine through an SSH port forward. To expose it beyond the machine, put the deployment's own authentication in front of it: SageMaker's IAM-signed endpoint (the server answers SageMaker's `/invocations` and `/ping`), or an authenticating proxy. A `--host` other than loopback starts with a warning that says so.
+`python -m strands_decider_vllm serve ...` does the same. Run it with the vLLM environment's `bin` directory on `PATH`, because vLLM's JIT kernel builds need its `ninja`. The server binds 127.0.0.1 by default. vLLM's internal sockets stay on loopback whatever `--host` is: it sets `VLLM_HOST_IP`, `GLOO_SOCKET_IFNAME` and `NCCL_SOCKET_IFNAME` unless they are set. It has no authentication. Reach it from another machine through an SSH port forward. To expose it beyond the machine, put the deployment's own authentication in front of it: SageMaker's IAM-signed endpoint (the server answers SageMaker's `/invocations` and `/ping`), or an authenticating proxy. A `--host` other than loopback starts with a warning that says so.
 
-It starts vLLM with the flags of the next section for the checkpoint's layout: the plugin's architecture, the override that turns the base's "vision" mode off, at most 4 images and no video or audio per prompt (no images for an `inputs: ["text"]` checkpoint), `sha256` prefix-cache hashes, and a step budget of `--max-model-len` tokens. Its flags:
+It starts vLLM with the flags of the next section for the checkpoint's layout: the plugin's architecture, the override that turns the base's "vision" mode off, at most 4 images and no video or audio per prompt (no images for an `inputs: ["text"]` checkpoint), `sha256` prefix-cache hashes, and a step budget of `--max-model-len` tokens. For a Hub repo it resolves the revision to a commit once and reads every file, and the weights, at that commit. Its flags:
 
 | Flag | Default | |
 |---|---|---|
 | `MODEL` | | the checkpoint directory or Hub repo id; `--revision` for the Hub |
 | `--host`, `--port` | `127.0.0.1`, 8000 | |
 | `--served-model-name` | `strands-decider` | the `model` of each response |
-| `--max-model-len` | `max_length_validated` | the engine's context |
 | `--max-length` | `max_length_validated` | longer prompts are refused (HTTP 400), never truncated; raising it past the validated length is the operator's decision |
+| `--max-model-len` | `--max-length` + 1 | the engine's context. vLLM 0.33 refuses a prompt that fills the context, because the answer token needs one more position, so it must be above `--max-length`; the server refuses to start otherwise |
 | `--max-num-batched-tokens`, `--max-num-seqs` | `--max-model-len`, vLLM's | the step's budget (at least `--max-model-len`) and its request limit |
 | `--gpu-memory-utilization`, `--tensor-parallel-size` | 0.90, 1 | the 31B with 8,192-token contexts fits one H100 at 0.95; 26B-A4B wants 0.92 |
 | `--no-enable-prefix-caching` | caching on | |
@@ -137,8 +137,13 @@ It starts vLLM with the flags of the next section for the checkpoint's layout: t
 | `--block-size` | vLLM's | the KV-cache block size |
 | `--dtype` | `bfloat16` | `float32` is accepted on a CPU build of vLLM only, for tests |
 | `--enforce-eager` | off | no CUDA graphs |
+| `--max-body-mb` | 187 (16 for a text-only checkpoint) | larger request bodies get HTTP 413, by `Content-Length` before reading and by size while reading. The default holds four 32 MiB image files in base64 (more than a 4,096 × 4,096 photo takes as JPEG, WebP or compressed PNG) and 16 MiB of text |
+| `--limit-concurrency` | 128 | uvicorn's limit on open connections and requests; past it uvicorn answers HTTP 503. `/ping` and `/health` count toward it, so set it above the clients' concurrency |
+| `--preprocess-workers` | 4, or the CPU count if lower | threads that parse, render and decode requests, and so the most requests decoded at once; the others wait without holding a thread |
 
-The server reads `decision_config.json` with the core's strict loader and refuses at startup a checkpoint that does not meet the specification's schema. An intermediate checkpoint has no `prompt` field and is served with `vllm serve` and pre-rendered token ids (next section). The server refuses image requests if the checkpoint's `processor_config.json` sets other values than the specification's `patch_size` 16, `pooling_kernel_size` 3 and `max_soft_tokens` 280.
+The server reads `decision_config.json` with the core's strict loader and the tokenizer with the core's `check_tokenizer`, and refuses at startup a checkpoint that does not meet the specification's schema. An intermediate checkpoint has no `prompt` field and is served with `vllm serve` and pre-rendered token ids (next section). The server refuses image requests if the checkpoint's `processor_config.json` sets other values than the specification's `patch_size` 16, `pooling_kernel_size` 3 and `max_soft_tokens` 280 (the core's `check_image_processor`).
+
+Parsing, rendering and image decoding run on the `--preprocess-workers` threads, never on the event loop, so `/ping` and `/health` answer while images are decoded. vLLM runs its own image preprocessing on its renderer's thread.
 
 ### Requests
 
@@ -171,14 +176,15 @@ The server reads `decision_config.json` with the core's strict loader and refuse
 
 These are refused with HTTP 400 and `{"detail": "..."}`, with the messages of v1 and the specification, and the server keeps serving:
 
+- a body that is not a JSON object;
 - a malformed request or question;
 - more than 4 images;
-- an image that is not base64, not one of the four formats, too large, or not decodable;
+- an image that is not base64, not one of the four formats, too large, or not decodable, or whose decoded size is neither its header's nor its transpose;
 - images for a text-only checkpoint (`this checkpoint does not take images: its decision_config.json inputs are ["text"]`), before any image is decoded;
 - a prompt longer than `--max-length`;
-- any refusal of the engine's request checks.
+- any refusal of the engine's request checks (`VLLMValidationError`, which `AsyncLLM.generate` raises for a request vLLM's input processing or the plugin's engine-core checks refuse).
 
-A prompt whose expansion by vLLM differs from the rendered one gets HTTP 500, never an answer. `GET /health` and `GET /ping` answer 200 with the model's name, inputs and prompt while the engine is healthy, and 503 when it is not.
+A body over `--max-body-mb` gets HTTP 413. Anything else that fails, a prompt whose expansion by vLLM differs from the rendered one included, is logged with its traceback and gets HTTP 500 with `{"detail": "internal server error", "error_id": "..."}`, the id in the log line, never an answer and never the failure's own text. If one question of a request fails, its other questions' engine requests are cancelled. `GET /health` and `GET /ping` answer 200 with the model's name, inputs, prompt and limits while the engine is healthy, and 503 when it is not.
 
 ## Serving token ids: `vllm serve`
 
@@ -190,7 +196,7 @@ VLLM_HOST_IP=127.0.0.1 GLOO_SOCKET_IFNAME=lo NCCL_SOCKET_IFNAME=lo \
 vllm serve /path/to/checkpoint --host 127.0.0.1 --port 8000 --served-model-name m --dtype bfloat16 --seed 0 \
   --hf-overrides '{"architectures": ["StrandsDeciderForConditionalGeneration"], "text_config": {"use_bidirectional_attention": null}}' \
   --limit-mm-per-prompt '{"image": 0, "video": 0, "audio": 0}' \
-  --max-model-len 32768 --max-num-batched-tokens 32768 --no-enable-chunked-prefill --enable-prefix-caching \
+  --max-model-len 32769 --max-num-batched-tokens 32769 --no-enable-chunked-prefill --enable-prefix-caching \
   --enable-prompt-tokens-details --prefix-cache-retention-interval None --generation-config vllm \
   --logprobs-mode processed_logprobs --max-logprobs 255 --gpu-memory-utilization 0.90
 ```
@@ -198,7 +204,7 @@ vllm serve /path/to/checkpoint --host 127.0.0.1 --port 8000 --served-model-name 
 The architecture is `StrandsDeciderUnifiedForConditionalGeneration` for the 12B, and `StrandsDeciderForCausalLM` with `"use_bidirectional_attention": null` at the top level of `--hf-overrides` for an intermediate decoder checkpoint (without `--limit-mm-per-prompt`). With `--limit-mm-per-prompt` at 0, vLLM builds no vision or audio encoder. Image requests are refused on this server (see the request checks); use `strands-decider-vllm serve` for them. Per size:
 
 - 26B-A4B: `--gpu-memory-utilization 0.95`.
-- 31B on one GPU: `--max-model-len 12288 --max-num-batched-tokens 12288 --gpu-memory-utilization 0.95`.
+- 31B on one GPU: `--max-model-len 12289 --max-num-batched-tokens 12289 --gpu-memory-utilization 0.95`.
 - 31B on two GPUs (needed for contexts above 12,288 tokens): `CUDA_VISIBLE_DEVICES=0,1` and `--tensor-parallel-size 2 --disable-custom-all-reduce --gpu-memory-utilization 0.92`.
 - Without prefix caching: `--no-enable-prefix-caching` instead of `--enable-prefix-caching`.
 - From the Hub: the repo id in place of `/path/to/checkpoint`.
@@ -211,6 +217,7 @@ The flags:
 | `--hf-overrides` `architectures` | Selects the plugin's architecture for the layout. Required. |
 | `--hf-overrides` `use_bidirectional_attention: null` | Turns off the base's "vision" mode, which `prefix_bidir` replaces (above). Required for the 12B, 26B-A4B and 31B, harmless for the others. |
 | `--no-enable-chunked-prefill`, `--max-num-batched-tokens` >= `--max-model-len` | A prompt's state and question tokens attend to keys across their whole part, so a prompt must be computed in one step. Required. |
+| `--max-model-len` one above the longest prompt | vLLM 0.33 refuses a prompt of exactly `--max-model-len` tokens (the answer token needs a position), so 32,769 serves prompts of up to 32,768. |
 | `--logprobs-mode processed_logprobs`, `--max-logprobs 255` | The codes' probabilities are the logprobs taken after `allowed_token_ids` is applied, for up to all 255 codes. Required (`processed_logits` also works). The default, `raw_logprobs`, is taken before `allowed_token_ids`, so a question's codes can be missing from the top-n. |
 | `--generation-config vllm` | Optional. No Strands Decider checkpoint ships a `generation_config.json`, so it changes nothing for them. It keeps vLLM from applying one if a checkpoint ever does; requests whose defaulted sampling would drop codes would then be refused. |
 | `--enable-prefix-caching`, `--prefix-cache-retention-interval None` | Optional. The plugin's sliding layers still form vLLM sliding-window KV groups (with a window of `--max-model-len`). By default vLLM keeps prefix-cache checkpoints for such groups only at some blocks; `None` keeps them at every block. All measured runs used both flags. |
@@ -271,25 +278,26 @@ Several questions about one state are separate requests with the same state toke
 - 31B on one 80 GB H100: the bf16 weights take 57.9 GiB as a decoder and 59.0 GiB with the vision encoder. At about 0.9 MB of KV cache per token (60 layers, no windows), one GPU serves contexts up to 12,288 tokens as a decoder and, with the encoder, 8,192 tokens (16,662 tokens of KV cache at `--gpu-memory-utilization 0.95`). 16K and 32K contexts need TP=2, which holds 90,865 tokens. The KV capacities of the other sizes on one GPU, at the flags above: E2B 3,348,843 tokens, E4B 927,147, 12B 134,173, 26B-A4B 100,705.
 - Answers were checked against the reference only up to 8,192 tokens, the reference's limit. Longer prompts run the same code path but were not compared.
 - The first requests after startup compile FlashAttention 4's non-causal kernels inside an engine step, because vLLM's own warm-up compiles causal kernels only. Send a few requests before measuring latency.
+- A prompt with images is scheduled whole or not at all. When the encoder's budget or cache cannot take one of its images this step, vLLM would compute the part in front of that image; the plugin holds the whole prompt back instead, and for the rest of that step also holds back every later request with an image to compute, so that smaller image requests cannot keep taking the room it needs. It is scheduled as soon as the steps in flight have been processed (one step with asynchronous scheduling). `tests/test_scheduling.py` drives vLLM's own scheduler to show both: a 4-image request behind a stream of 1-image requests is scheduled within two steps, and without the rule never.
 - Streaming input is not supported: the engine core refuses a streaming-input (resumable) request to a Strands Decider model. A later chunk would extend the prompt after its boundary and cache digests were fixed.
 - Audio and video are not served: the engine core refuses them, and the server starts vLLM with neither.
-- The plugin relies on vLLM internals that are not a public API and can change in any release: `get_model_state_cls` and `DefaultModelState.prepare_attn` (Model Runner V2); the `InputBatch` and `NewRequestData` fields; `FlashAttentionImpl.forward` and the `FlashAttentionMetadata` dataclass; `register_backend` over `FLASH_ATTN`; `compilation_config.static_forward_context`; `MODELS_CONFIG_MAP`; a temporary patch of `gemma4.Attention` while the model is built; the default loader's `secondary_weights`; the Gemma 4 multimodal classes' constructors, weight mappers and processing info, and `Gemma4MultiModalProcessor._get_prompt_updates`; and wrappers around `vllm.v1.core.kv_cache_utils.generate_block_hash_extra_keys`, `EngineCore.preprocess_add_request` and `Scheduler._try_schedule_encoder_inputs`. This is why it accepts vLLM 0.33.x only.
+- The plugin relies on vLLM internals that are not a public API and can change in any release: `get_model_state_cls` and `DefaultModelState.prepare_attn` (Model Runner V2); the `InputBatch` and `NewRequestData` fields; `FlashAttentionImpl.forward` and the `FlashAttentionMetadata` dataclass; `register_backend` over `FLASH_ATTN`; `compilation_config.static_forward_context`; `MODELS_CONFIG_MAP`; a temporary patch of `gemma4.Attention` while the model is built; the default loader's `secondary_weights`; the Gemma 4 multimodal classes' constructors, weight mappers and processing info, and `Gemma4MultiModalProcessor._get_prompt_updates`; and wrappers around `vllm.v1.core.kv_cache_utils.generate_block_hash_extra_keys`, `EngineCore.preprocess_add_request`, and the `Scheduler`'s `__init__`, `schedule` and `_try_schedule_encoder_inputs` (whose return value it rebuilds from vLLM's own). This is why it accepts vLLM 0.33.x only.
 - KV-cache events (`--kv-events-config`), if enabled, report vLLM's own extra keys for each stored block, without the plugin's digests. vLLM's block pool imports that function by name, so the wrapper does not reach it.
 
 **Stock-attention control.** `tools/causal_control/` holds a separate diagnostic plugin that is not part of the package. It registers the architecture `StrandsDeciderCausalControlForCausalLM`, which keeps Gemma 4's own causal, sliding-window layers and reads them with the trained readout. That is what stock vLLM would compute from a repackaged checkpoint, and it measured the 57.5% to 91.3% agreement without the mask quoted under Parity. To run it, install it into the same environment (`pip install --no-deps ./tools/causal_control`). Serve an intermediate decoder checkpoint with `"architectures": ["StrandsDeciderCausalControlForCausalLM"]` in `--hf-overrides` and the other flags above, and send requests without `prefix_end`. The control ignores a `prefix_end` and logs a warning, and the plugin's request checks do not apply to it. Installed, it only adds that architecture name; the plugin's architectures are unaffected. Remove it with `pip uninstall strands-decider-causal-control`.
 
 ## Tests
 
-Three tiers. The CPU tier runs on any machine, in CI. The GPU tier and the conformance tier run on the team's GPU cluster, and together with `tests/gpu/run.sh` they are the release gate: a release passes all three first.
+Three tiers. The CPU tier runs on any machine, in CI. The GPU tier and the conformance tier run on a GPU cluster, and together with `tests/gpu/run.sh` they are the release gate: a release passes all three first. No tier's tolerance is wider than a measured difference with headroom, and `tests/gpu/ci.sh` gives the measurement behind each one beside it. Checks of the prefix cache are exact counts of cached tokens.
 
 **CPU tier.** `pip install '.[test,serve]'`, then `pytest` from this directory. It needs no GPU, and a test that does need one is marked `requires_cuda` and skips itself.
 
-- Without vLLM, these run: the request and image checks, the segment plan, the cache keys and their digests, `decision_config.json` for both layouts, the scheduler and engine-core wrappers on stand-ins, and the version gate.
-- With vLLM 0.33 installed (its CUDA wheel is enough), these run too: the model classes and the readout's arithmetic, the model state, the attention backend, the image processing, vLLM's own block hasher with images, and the server's whole request path against a stand-in engine. That path covers rendering, the collapsed prompt, Pillow's resize, the v1 response and the HTTP refusals; it needs the core library and Pillow.
+- Without vLLM, these run: the request and image checks, the segment plan, the cache keys and their digests, `decision_config.json` for both layouts, the scheduler and engine-core wrappers on stand-ins, the reading of golden lines, and the version gate.
+- With vLLM 0.33 installed (its CUDA wheel or its CPU build), these run too: the model classes and the readout's arithmetic, the model state, the attention backend, the image processing, vLLM's own block hasher with images, vLLM's own scheduler driven step by step with a full encoder cache (a prompt cut before an image is held back whole, and a held-back 4-image request is not starved), and the server's whole request path against a stand-in engine. That path covers rendering, the collapsed prompt, the resize, the v1 response, the HTTP refusals, the body limit, the generic 500, `/ping` answering while an image is decoded, and the cancellation of a failed request's other questions; it needs the core library and Pillow.
 - With `STRANDS_DECIDER_TEST_CHECKPOINT` set to a checkpoint directory (only its `config.json` and tokenizer are read, in either layout), the startup checks also run, on configs vLLM itself builds.
 - With `STRANDS_DECIDER_GEMMA4_TOKENIZER` set to Gemma 4's `tokenizer.json`, the tests that need the real tokenizer run.
 
-On the cluster's CPUs, with vLLM 0.33.0 and the core installed, these tests ran in about 2 minutes.
+On 4 cores with the CPU build of vLLM 0.33.0 and the core installed, 454 tests pass and 42 skip (those that need a checkpoint) in 51 s; with the CUDA wheel on 8 cores of a GPU node (no GPU used) and both variables set, 495 pass and 1 skips in under 2 minutes.
 
 The CPU tier's second half runs the plugin end to end with no GPU: `tests/cpu/ci.sh OUT_DIR` on a CPU build of vLLM, which is `tests/gpu/ci.sh` (next) with `DEVICE=cpu`. On vLLM's CPU attention it serves tiny random-weight checkpoints of every layout and checks the answers against the transformers reference, in float32. The CPU build's attention (`CPU_ATTN`) runs paged KV for causal and non-causal sequences alike, and the plugin runs its split there as on FlashAttention (`attention_cpu.py`). Its KV blocks are 128 tokens by default; the tier serves with 32-token blocks, so that the cache checks see reuse. The CPU build of vLLM 0.33.0 is a separate wheel, for glibc 2.39 or later (Ubuntu 24.04), with torch's CPU build:
 
@@ -300,15 +308,17 @@ sudo apt-get install -y libnuma1   # vLLM's CPU kernels; g++ for torch's compile
 pip install --no-deps '.[test,serve]'
 ```
 
-The wheel is 153 MiB and the environment 1.7 GB; the install took 97 s from a cold cache. Its `vllm.__version__` is `0.33.0`, which the plugin's version gate accepts. On 4 cores of an AMD EPYC 7R13 (AVX2, no AVX-512), in a `python:3.12-slim-trixie` container with 16 GB, the tier took 14 minutes with vLLM's compile caches warm: about 100 s for the tiny checkpoints, 100 s for the references, and 190 to 210 s to start each of its three servers, which is mostly compilation. Keep `VLLM_CACHE_ROOT`, `TORCHINDUCTOR_CACHE_DIR` and `TRITON_CACHE_DIR` between runs (about 30 MB); a cold server start takes about 500 s. Against the float32 reference the answers agree exactly, to the response's four decimals (the gate: 98% top-1 and a mean |Δp| of at most 0.005).
+The wheel is 153 MiB and the environment 1.7 GB; the install took 97 s from a cold cache. Its `vllm.__version__` is `0.33.0`, which the plugin's version gate accepts. On 4 cores of an x86 server CPU with AVX2 and no AVX-512, in a `python:3.12-slim-trixie` container with 16 GB, the tier took CPU_TIER_TIME with vLLM's compile caches warm, most of it starting its three servers (190 to 310 s each, mostly compilation). Keep `VLLM_CACHE_ROOT`, `TORCHINDUCTOR_CACHE_DIR` and `TRITON_CACHE_DIR` between runs (about 30 MB); a cold server start takes about 500 s. In float32 the checks are exact: a cached, repeated or batched answer equals the cold one bit for bit (tolerance 1e-6), and the answers agree with the float32 reference on every top-1 code with a mean |Δp| of at most 0.0001 (gates: top-1 1.0, mean 0.001, max 0.005).
 
-**GPU tier.** `tests/gpu/ci.sh OUT_DIR` runs the plugin end to end on one GPU of 24 GB or more, in bf16 as it serves, with no dataset and no real weights. It generates tiny random-weight checkpoints in the real layouts, with the real tokenizer and image processor (`tests/gpu/tiny.py`): multimodal, multimodal text-only, unified (the 12B's class) and a bare decoder. Their attention's q/k norms are scaled at initialization so that a random model's attention is smooth: with Gemma 4's norms at their initial weight, a random model's bf16 answers differ from its own float32 answers on 15% of questions, which would make it useless as a test. It writes requests with synthetic photos (`tests/gpu/requests.py`) and computes the transformers reference on each checkpoint (`tests/gpu/reference.py`). Then it serves them:
-- `strands-decider-vllm serve` on the multimodal and unified checkpoints: text and image requests, the refusals with the server still serving, the image-content cache test and state reuse (`tests/gpu/server_client.py`), then every answer against the reference;
-- `vllm serve` on the bare decoder: the `/v1/completions` checks of `tests/gpu/client.py`, against the reference and against a second server without prefix caching.
+**GPU tier.** `tests/gpu/ci.sh OUT_DIR` runs the plugin end to end on one GPU of 24 GB or more, in bf16 as it serves, with no dataset and no real weights. It generates tiny random-weight checkpoints in the real layouts, with the real tokenizer and image processor (`tests/gpu/tiny.py`): multimodal, multimodal text-only, unified (the 12B's class) and a bare decoder. Their attention's q/k norms are scaled at initialization so that a random model's attention is smooth: with Gemma 4's norms at their initial weight, a random model's bf16 answers differ from its own float32 answers on 15% of questions, which would make it useless as a test. It writes requests with synthetic photos (`tests/gpu/make_requests.py`) and computes the transformers reference on each checkpoint (`tests/gpu/reference.py`). Then:
 
-It fetches the four base files it needs (`config.json`, `processor_config.json`, `tokenizer.json`, `tokenizer_config.json`) from the Hub at pinned revisions, or takes them from `STRANDS_DECIDER_GEMMA4_BASE` and `STRANDS_DECIDER_GEMMA4_UNIFIED_BASE`. With `STRANDS_DECIDER_SMOKE_CHECKPOINT` it also smoke-tests a real checkpoint. In bf16 a tiny model's answers carry rounding noise of their own (a mean |Δp| of 0.003 to 0.009 between its bf16 and float32 answers), while the wrong mask moves them by a mean of 0.15 to 0.36, so the tier gates on 95% top-1 and a mean |Δp| of at most 0.02. Its same-server and cross-server tolerances are looser than `run.sh`'s for the same reason: a cached, repeated or batched answer runs other attention kernels than a cold one, which on a tiny model in bf16 moves it by up to about 0.015 (0.007 on the released E2B). On one H100 the multimodal and unified checkpoints agreed with the reference on 89 and 90 of 90 top-1 codes, within a mean |Δp| of 0.0068 and 0.0040, and the tier took 22 minutes, most of it starting six servers (150 to 225 s each). FlashAttention 2, on Ampere and Ada GPUs, is untested: the cluster has H100s only. With one head size (the tiny models') vLLM picks FlashAttention 3 on Hopper and 2 elsewhere, which the plugin runs; the real checkpoints' two head sizes need FlashAttention 4, which only Hopper has.
+- `strands-decider-vllm serve` on the multimodal and unified checkpoints: text and image requests, the refusals with the server still serving, the image-content cache test and state reuse on exact counts of cached tokens (`tests/gpu/server_client.py`), every answer against the reference, and the conformance check (`tests/gpu/conformance.py`) on goldens written from that reference (`tests/gpu/goldens.py`);
+- the server's request path in process on a real engine (`tests/gpu/engine_checks.py`): a prompt of exactly `--max-length` tokens is answered, one token more is refused, vLLM refuses a prompt that fills the context, and a request the engine core refuses raises `VLLMValidationError` from `AsyncLLM.generate`, which the server answers with HTTP 400;
+- `vllm serve` on the bare decoder: the `/v1/completions` checks of `tests/gpu/client.py`, with exact cache counts, against the reference and against a second server without prefix caching.
 
-**Conformance tier.** `tests/gpu/conformance.sh OUT_DIR CKPT_E2B CKPT_E4B CKPT_12B CKPT_26B_A4B CKPT_31B` serves every size on one 8-GPU node (the 31B on two GPUs) and checks each against its own `golden_vectors.jsonl` (specification, section 10): the rendered ids and image spans exactly, and 98% top-1 agreement in bf16. It is meant for nightly and release runs. #129 fixes what a golden line holds but not yet its field names. `tests/gpu/conformance.py` reads them in one function and exits with STUB (code 3) on a checkpoint without goldens or with goldens it cannot read, so the tier reports STUB, never PASS, until the goldens exist.
+It fetches the four base files it needs (`config.json`, `processor_config.json`, `tokenizer.json`, `tokenizer_config.json`) from the Hub at pinned revisions, or takes them from `STRANDS_DECIDER_GEMMA4_BASE` and `STRANDS_DECIDER_GEMMA4_UNIFIED_BASE`. With `STRANDS_DECIDER_SMOKE_CHECKPOINT` it also smoke-tests a real checkpoint. In bf16 a tiny model's answers carry rounding noise of their own (a mean |Δp| of 0.003 to 0.009 between its bf16 and float32 answers), while the wrong mask moves them by a mean of 0.15 to 0.36, so the tier gates on 95% top-1 and a mean |Δp| of at most 0.015. A cached, repeated or batched answer runs other attention kernels than a cold one, which on a tiny model in bf16 moved it by at most 0.0149 over four runs (0.007 on the released E2B), and two servers by at most 0.0273; the tolerances are 0.02 and 0.035. On one H100 the multimodal and unified checkpoints agreed with the reference on 90 of 90 top-1 codes, within a mean |Δp| of 0.0065 and 0.0040, and the tier took GPU_TIER_TIME, most of it starting seven engines (150 to 225 s each). FlashAttention 2, on Ampere and Ada GPUs, is untested: the measurements are on H100s. With one head size (the tiny models') vLLM picks FlashAttention 3 on Hopper and 2 elsewhere, which the plugin runs; the real checkpoints' two head sizes need FlashAttention 4, which only Hopper has.
+
+**Conformance tier.** `tests/gpu/conformance.sh OUT_DIR CKPT_E2B CKPT_E4B CKPT_12B CKPT_26B_A4B CKPT_31B` serves every size on one 8-GPU node (the 31B on two GPUs) and checks each against its own `golden_vectors.jsonl`, by section 10's fields and criteria: the rendering exactly (variant, state ids, image hashes and spans, each question's ids and codes), then the core's `agreement` against the reference, at least 98% top-1 and a mean |Δp| of at most 0.02 in bf16 on at least 1,000 questions (`Agreement.conforms`). It is meant for nightly and release runs. `tests/gpu/conformance.py` exits with STUB (code 3) on a checkpoint without goldens or with lines it cannot read, so the tier reports STUB, never PASS, until the released checkpoints publish their goldens. The GPU and CPU tiers run the same check on tiny goldens, with the minimum lowered to their 90 questions.
 
 **Node checks.** `tests/gpu/run.sh MODEL_DIR ROWS OUT_DIR` checks a server on one node with 6 to 8 GPUs, with vLLM and the plugin installed. `ROWS` is a JSON Lines file of rendered requests (`token_ids`, `prefix_end`, `label_token_ids`, and optionally a reference's `probabilities`) of about 1K tokens each. The script starts one loopback-bound server per check:
 
@@ -320,7 +330,7 @@ It fetches the four base files it needs (`config.json`, `processor_config.json`,
 - each refused setting stops the server at startup with the plugin's message;
 - with `MM_MODEL` (the checkpoint in the multimodal layout) and `MM_TEXT_MODEL` (one with `inputs: ["text"]`), a second phase: `strands-decider-vllm serve` with text, one, two and four images, the refusals, and the image-content cache test; the text-only server's refusal of images; and `vllm serve` on the multimodal layout answering `MODEL_DIR`'s text rows alike.
 
-On one 8-GPU H100 node, with E2B as the decoder checkpoint and in both multimodal checkpoints, `run.sh` passed every check in 21 minutes.
+On one 8-GPU H100 node, with E2B as the decoder checkpoint and in both multimodal checkpoints, `run.sh` passed every check in 20.5 minutes.
 
 `tests/gpu/reference.py` is also the image parity runs' reference (see Parity). `tests/gpu/dump_pixels/` is a test-only hook that records the pixel values vLLM's encoder receives, to compare them with the reference's.
 
@@ -328,7 +338,7 @@ On one 8-GPU H100 node, with E2B as the decoder checkpoint and in both multimoda
 
 ### Text
 
-The reference is the specification's reference implementation, run offline in PyTorch: bf16, SDPA attention, one request per forward pass, prompts up to 8,192 tokens. The parity set has 1,200 prompts per model: 300 each of about 256, 1K and 4K tokens, and 300 real states of 6,144 to 8,000 tokens. Every server answered all 1,200 at client concurrency 8 with the flags above, on vLLM 0.33.0 and one H100 per server unless TP=2. Top-1 agreement compares the argmax over the question's options. |Δp| is the largest absolute probability difference over a question's options, averaged or maximized over questions. The gate is at least 98% top-1.
+The reference is the specification's reference implementation, run offline in PyTorch: bf16, SDPA attention, one request per forward pass, prompts up to 8,192 tokens. The parity set has 1,200 prompts per model: 300 each of about 256, 1K and 4K tokens, and 300 real states of 6,144 to 8,000 tokens. Every server answered all 1,200 at client concurrency 8 with the flags above, on vLLM 0.33.0 and one H100 per server unless TP=2. Top-1 agreement compares the argmax over the question's options. |Δp| is the largest absolute probability difference over a question's options, averaged or maximized over questions. Section 10's bounds for bf16 are at least 98% top-1 and a mean |Δp| of at most 0.02; every size meets both.
 
 | Model | Top-1 agreement | Mean \|Δp\| | Max \|Δp\| | Top-1 by prompt length: 256 / 1K / 4K / 6K to 8K |
 |---|---|---|---|---|
@@ -349,17 +359,19 @@ No checkpoint has been trained on images yet. The test checkpoints are the Gemma
 
 The image set has 300 requests of 1 to 4 real photographs each (125, 83, 47 and 45 requests), 900 questions: 160 COCO val2017 photos and 40 crops of them resized to between 64 × 48 and 4,000 × 1,000 pixels, from 1:4 to 4:1, in JPEG, PNG, WebP and GIF (N from 252 to 280), with a choice of 2 to 8 options, a noul and a score of 2 to 4 levels, and short, empty or long (up to about 4,500 tokens) state text. Every server answered all 300 at concurrency 8 (`strands-decider-vllm serve`, one H100, 8,192-token context).
 
-| Model | Top-1 agreement | Mean \|Δp\| | Max \|Δp\| | Top-1 by images: 1 / 2 / 3 / 4 | Reference with torchvision's resize: top-1, mean \|Δp\| |
+| Model | Top-1 agreement | Mean \|Δp\| | Max \|Δp\| | Top-1 by images: 1 / 2 / 3 / 4 | Within section 10's bf16 bounds |
 |---|---|---|---|---|---|
-| E2B | 99.11% | 0.0048 | 0.061 | 98.67% / 99.20% / 100.00% / 99.26% | 99.22%, 0.0048 |
-| E4B | 98.44% | 0.0048 | 0.062 | 98.40% / 98.39% / 100.00% / 97.04% | not run |
-| 12B | 98.56% | 0.0139 | 0.162 | 98.40% / 97.59% / 99.29% / 100.00% | 97.78%, 0.0142 |
-| 26B-A4B | 96.11% | 0.0354 | 0.527 | 96.27% / 97.99% / 95.74% / 92.59% | 95.78%, 0.0374 |
-| 31B | 97.33% | 0.0235 | 0.577 | 98.40% / 96.79% / 96.45% / 96.30% | 97.33%, 0.0269 |
+| E2B | 99.33% | 0.0049 | 0.061 | 98.67% / 100.00% / 100.00% / 99.26% | yes |
+| E4B | 98.33% | 0.0048 | 0.062 | 98.67% / 97.99% / 99.29% / 97.04% | yes |
+| 12B | 98.00% | 0.0138 | 0.170 | 97.60% / 97.19% / 99.29% / 99.26% | yes, at the top-1 bound |
+| 26B-A4B | 96.11% | 0.0346 | 0.527 | 96.27% / 97.99% / 95.74% / 92.59% | no |
+| 31B | 97.00% | 0.0243 | 0.669 | 98.13% / 96.79% / 95.04% / 96.30% | no |
 
-E2B, E4B and the 12B pass the 98% gate; 26B-A4B and the 31B do not, and the shortfall is bf16's, not the plugin's. The same reference in float32 (`--dtype float32`) agrees with the bf16 reference on only 95.9% of the questions at 26B-A4B and 97.0% at the 31B. vLLM agrees with the float32 answers on 96.8% and 97.0%, as closely as the bf16 reference does or more so (at E2B, 98.9% for the bf16 reference and 99.3% for vLLM). vLLM also differs from itself when only the batching changes: 26B-A4B's answers at client concurrency 1 and 8 agree on 98.3% (mean |Δp| 0.014, max 0.36). On every question where the 26B-A4B reference is confident (top probability above 0.9, 591 of 900), vLLM gives the same answer, and every disagreement at E2B, E4B and the 12B is a near-tie in the reference (top-2 gap at most 0.051, 0.013 and 0.14). These checkpoints were never trained on images, and their answers about images are this sensitive to bf16 rounding; a trained checkpoint's image goldens (section 10) will show whether the gate holds for it.
+**Image serving ships at all five sizes, but the image conformance bound is not set yet.** Section 10's bounds (98% top-1 and a mean |Δp| of at most 0.02 in bf16) will be checked for images on image-trained checkpoints and their image goldens; none exists yet. Against this image-untrained reference, 26B-A4B and the 31B currently fall short on both counts, and E2B, E4B and the 12B meet them, the 12B with no margin. The tiers' tolerances were not widened for this.
 
-The pixels vLLM's encoder receives are the reference's, bit for bit: at every size the bf16 pixel values of all 612 images of the set, as the reference's processor prepares them, are among those vLLM encodes (the test hook `tests/gpu/dump_pixels`). vLLM casts them to bf16 before the encoder, as the reference does. The last column is the reference's own change when transformers' torchvision backend resizes the decoded image instead of Pillow, which is what stock vLLM would do: pixels move by up to 2/255, and the answers move by about as much as vLLM's differ from the reference, more than the gate allows at the 12B.
+The measurements point to bf16 rounding, not the plugin. The same reference in float32 (`--dtype float32`) agrees with the bf16 reference on only 95.9% of the questions at 26B-A4B and 97.0% at the 31B. vLLM agrees with the float32 answers on 96.8% and 97.0%, as closely as the bf16 reference does or more so (at E2B, 98.9% for the bf16 reference and 99.3% for vLLM). vLLM also differs from itself when only the batching changes: 26B-A4B's answers at client concurrency 1 and 8 agree on 98.3% (mean |Δp| 0.014, max 0.36). Where the reference is confident (top probability above 0.9), vLLM gives the same answer on all 588 such questions at 26B-A4B and 509 of 510 at the 31B, and every disagreement at E2B, E4B and the 12B is a near-tie in the reference (top-2 gap at most 0.022, 0.048 and 0.14). These checkpoints were never trained on images, and their answers about images are this sensitive to bf16 rounding.
+
+The pixels vLLM's encoder receives are the reference's, bit for bit: at every size the bf16 pixel values of all 612 images of the set, as the reference's processor prepares them, are among those vLLM encodes (the test hook `tests/gpu/dump_pixels`). Both sides resize with the core's `resize_image`, and on Pillow 12.2.0 and 13.0.0 alike the 612 images' pixels are the same, at E2B's processor and the 12B's. A single `resize((W, H))` call on Pillow 13 would change 12 of them (the 600 × 2,400 crops) by up to 2 levels. vLLM casts the pixels to bf16 before the encoder, as the reference does. Resizing with transformers' torchvision backend instead of Pillow, which is what stock vLLM would do, moves pixels by up to 2/255; measured on an earlier run of this set, the reference's own answers then move by about as much as vLLM's differ from it (top-1 99.22%, 97.78%, 95.78% and 97.33% at E2B, the 12B, 26B-A4B and the 31B), more than the bound allows at the 12B.
 
 The cache keys hold on real photos too (`tests/gpu/server_client.py images`, at E2B): after a request with one photo, a request with a different photo of the same size and the same text reused no cached token, while a further question on the first photo reused its state's full blocks.
 
@@ -369,9 +381,9 @@ E2B on one H100, `strands-decider-vllm serve` with prefix caching, one noul ques
 
 | Request | p50, concurrency 1 | Requests/s, 1 | Requests/s, 16 |
 |---|---|---|---|
-| text, about 330 tokens, new each time | 27 ms | 36.5 | 202 |
-| one new 640 × 480 photo (266 tokens) and a short text | 82 ms | 12.1 | 42 |
-| a photo the encoder cache holds, with a new text | 40 ms | 24.9 | 72.5 |
-| a photo and text already cached, a new question | 29 ms | 33.6 | 72.5 |
+| text, about 330 tokens, new each time | 27 ms | 36.0 | 199 |
+| one new 640 × 480 photo (266 tokens) and a short text | 88 ms | 11.3 | 43 |
+| a photo the encoder cache holds, with a new text | 41 ms | 24.5 | 143 |
+| a photo and text already cached, a new question | 30 ms | 33.4 | 152 |
 
-The vision encoder costs about 42 ms per photo, and the photo's 266 tokens through the decoder about 11 ms. vLLM's encoder cache keeps an image's encoder output while the cache has room, so a photo sent again skips the encoder even when its state's text, and so its KV, is new; the prefix cache then also skips the state. Without prefix caching the last row costs what the one above it does (40 ms). At concurrency 16 cached image requests stop at about 72 per second, against 202 for text: the server decodes and resizes each image, and vLLM's processor prepares it, in the server's one process.
+The vision encoder costs about 47 ms per photo, and the photo's 266 tokens through the decoder about 11 ms. vLLM's encoder cache keeps an image's encoder output while the cache has room, so a photo sent again skips the encoder even when its state's text, and so its KV, is new; the prefix cache then also skips the state. Without prefix caching the last row costs what the one above it does (40 ms). At concurrency 16 cached image requests reach about 150 per second: the server decodes and resizes images on its `--preprocess-workers` threads, off the event loop, which doubled this figure from the 72 per second of a server that did it on the loop. Requests with a new photo reach about 43 per second; what bounds them (the encoder, or vLLM's one renderer thread that prepares each image) was not measured.
