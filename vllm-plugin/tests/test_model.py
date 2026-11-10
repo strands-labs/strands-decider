@@ -336,3 +336,18 @@ def test_the_readout_is_bf16_whatever_the_decoder_runs_in(tmp_path):
     )
     Cls._init_readout(m, vc)
     assert m.readout.weight.dtype == torch.bfloat16
+
+
+def test_a_readout_turned_float32_after_construction_is_refused_at_load(decoder_loads):
+    m = loadable()
+    m.readout.float()  # as a later model.to(torch.float32) would
+    with pytest.raises(ValueError, match="must stay a bf16 GEMM"):
+        m.load_weights([("readout.weight", torch.zeros(255, 4))])
+
+
+def test_compute_logits_feeds_the_readout_bf16_whatever_its_input():
+    m = readout_model(torch.randn(255, 4))
+    seen = []
+    m.readout.register_forward_pre_hook(lambda mod, args: seen.append(args[0].dtype))
+    m.compute_logits(torch.randn(2, 4, dtype=torch.float32))
+    assert seen == [torch.bfloat16]
