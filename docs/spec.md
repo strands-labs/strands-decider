@@ -554,7 +554,7 @@ A question's |Δp| is the largest absolute difference between the runtime's prob
 | MLX 8-bit, group size 64, at E2B | at least 98.83% | at most 0.0099 |
 | other quantized formats (for example MLX 4-bit, GGUF Q8_0 or Q4_K_M), and MLX 8-bit at other sizes | set from measurement when the format is first published, and recorded here | the same |
 
-The MLX 8-bit bounds are its measurement against the reference on E2B's 1,200 golden prompts: 98.83% top-1 agreement and a mean |Δp| of 0.0099. They were measured at E2B only, and hold for E2B only; no other size, and no other quantized format, has a recorded bound yet. A quantized artifact whose format and size have no recorded bounds makes no conformance claim.
+The MLX 8-bit bounds are its measurement against the reference at E2B, on 1,200 prompts: 98.83% top-1 agreement and a mean |Δp| of 0.0099. They were measured at E2B only, and hold for E2B only; no other size, and no other quantized format, has a recorded bound yet. A quantized artifact whose format and size have no recorded bounds makes no conformance claim.
 
 ## 11. The runtime interface
 
