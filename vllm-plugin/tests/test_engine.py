@@ -11,9 +11,11 @@ from strands_decider_vllm import ARCH, ARCH_MULTIMODAL, ARCH_UNIFIED, SERVER_CON
 from strands_decider_vllm import engine as engine_mod
 from strands_decider_vllm.engine import (
     Policy,
+    policy,
     serves_decider,
     started_by_server,
     wrap_preprocess_add_request,
+    wrap_scheduler_init,
 )
 
 
@@ -154,12 +156,14 @@ def test_serves_decider_is_computed_once():
 
 def test_install_wraps_vllms_engine_core_once():
     core = pytest.importorskip("vllm.v1.engine.core")
+    sched = pytest.importorskip("vllm.v1.core.sched.scheduler")
     from strands_decider_vllm.engine import install_request_validation
 
     install_request_validation()
-    wrapped_fn = core.EngineCore.preprocess_add_request
+    wrapped_fn, init = core.EngineCore.preprocess_add_request, sched.Scheduler.__init__
     install_request_validation()
     assert core.EngineCore.preprocess_add_request is wrapped_fn
+    assert sched.Scheduler.__init__ is init and init._strands_decider
     assert wrapped_fn._strands_decider
     # The engine core's input thread calls it on every ADD and turns VLLMValidationError into a per-request error.
     import inspect
@@ -239,6 +243,65 @@ def test_the_boundary_is_checked_before_the_images(wrapped):
     with pytest.raises(ValidationError) as err:
         wrapped(core, engine_request(prefix_end="9", mm_features=[image("a")]))
     assert err.value.parameter == "vllm_xargs.prefix_end"
+
+
+def test_a_request_without_mm_features_fails_loudly(wrapped):
+    # Were vLLM to rename the attribute, the image checks and digests must not be skipped silently.
+    req = engine_request(prefix_end=9)
+    del req.mm_features
+    with pytest.raises(AttributeError):
+        wrapped(FakeEngineCore([ARCH_MULTIMODAL], policy=SERVER), req)
+
+
+def test_an_unreadable_policy_refuses_the_image_request_and_the_engine_keeps_serving(
+    wrapped, monkeypatch
+):
+    def unreadable(vllm_config):
+        raise OSError("decision_config.json: connection reset")
+
+    monkeypatch.setattr(engine_mod, "compute_policy", unreadable)
+    core = FakeEngineCore([ARCH_MULTIMODAL])
+    with pytest.raises(ValidationError, match="could not be read") as err:
+        wrapped(core, engine_request(prefix_end=9, mm_features=[image("a")]))
+    assert err.value.parameter == "multi_modal_data" and core.calls == 0
+    assert wrapped(core, engine_request(prefix_end=9, request_id="r2"))[0], "text is served"
+
+
+class FakeScheduler:
+    def __init__(self, vllm_config):
+        self.vllm_config = vllm_config
+
+
+def test_the_policy_is_computed_when_the_engine_builds_its_scheduler(monkeypatch):
+    seen = []
+    monkeypatch.setattr(
+        engine_mod, "compute_policy", lambda vc: seen.append(vc) or Policy(True, True)
+    )
+    init = wrap_scheduler_init(FakeScheduler.__init__)
+    decider = SimpleNamespace(model_config=SimpleNamespace(architectures=[ARCH_MULTIMODAL]))
+    other = SimpleNamespace(model_config=SimpleNamespace(architectures=["Gemma4ForCausalLM"]))
+    s = FakeScheduler.__new__(FakeScheduler)
+    init(s, decider)
+    assert seen == [decider] and s.__dict__[engine_mod._POLICY] == Policy(True, True)
+    o = FakeScheduler.__new__(FakeScheduler)
+    init(o, other)
+    assert seen == [decider] and engine_mod._POLICY not in o.__dict__
+    # The engine core reads the scheduler's policy instead of computing it again.
+    core = FakeEngineCore([ARCH_MULTIMODAL])
+    core.scheduler = s
+    monkeypatch.setattr(engine_mod, "compute_policy", lambda vc: pytest.fail("computed again"))
+    assert policy(core) == Policy(True, True)
+
+
+def test_a_policy_that_cannot_be_computed_at_startup_stops_the_engine(monkeypatch):
+    def unreadable(vllm_config):
+        raise ValueError("strands-decider: decision_config.json: inputs is required")
+
+    monkeypatch.setattr(engine_mod, "compute_policy", unreadable)
+    init = wrap_scheduler_init(FakeScheduler.__init__)
+    vc = SimpleNamespace(model_config=SimpleNamespace(architectures=[ARCH_MULTIMODAL]))
+    with pytest.raises(ValueError, match="inputs is required"):
+        init(FakeScheduler.__new__(FakeScheduler), vc)
 
 
 def test_a_text_request_never_reads_the_policy(wrapped, monkeypatch):
