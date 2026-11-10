@@ -297,8 +297,8 @@ def convert_mlx_cmd(
         "--bits",
         help="Quantize the decoder to 8 or 4 bits. Omitted: bf16. The vision and audio "
         "encoders and their projections stay bf16, and the readout is copied unchanged. "
-        "Only formats measured against the reference (8 bits, group 64, on E2B) make a "
-        "conformance claim (docs/spec.md section 10).",
+        "Only formats whose bounds docs/spec.md section 10 records (8 bits, group 64, at "
+        "E2B) make a conformance claim.",
     ),
     group_size: int = typer.Option(64, "--group-size", help="Quantization group size."),
 ) -> None:

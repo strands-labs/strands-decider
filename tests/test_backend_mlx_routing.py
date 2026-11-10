@@ -202,8 +202,10 @@ def test_an_mlx_artifact_is_refused_off_mlx_before_anything_loads(ckpt, device, 
 def test_the_conformance_claim_is_keyed_on_the_measured_format():
     e2b = "google/gemma-4-E2B-it"
     assert mlx_format.conformance(e2b, None)["claim"] == "bf16"
-    measured = mlx_format.conformance(e2b, {"bits": 8, "group_size": 64, "mode": "affine"})
-    assert measured["claim"] == "measured" and measured["top1"] == 0.9883 and not measured["notice"]
+    assert mlx_format.conformance(e2b, None)["bounds"] == {"top1": 0.98, "mean_dp": 0.02}
+    recorded = mlx_format.conformance(e2b, {"bits": 8, "group_size": 64, "mode": "affine"})
+    assert recorded["claim"] == "recorded" and not recorded["notice"]
+    assert recorded["bounds"] == {"top1": 0.98, "mean_dp": 0.02}  # bf16's, as spec 10 records
     for base, q in (
         ("google/gemma-4-31B-it", {"bits": 8, "group_size": 64}),  # another size
         (e2b, {"bits": 8, "group_size": 32}),  # another group size
@@ -211,7 +213,7 @@ def test_the_conformance_claim_is_keyed_on_the_measured_format():
     ):
         claim = mlx_format.conformance(base, q)
         assert claim["claim"] == "none" and "makes no conformance claim" in claim["notice"]
-        assert "no top-1 agreement has been recorded" in claim["notice"]
+        assert "records no bounds for its format at this size" in claim["notice"]
 
 
 def test_only_the_tested_mlx_vlm_is_accepted():

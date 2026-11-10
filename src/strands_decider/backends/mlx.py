@@ -65,15 +65,17 @@ except ImportError as e:  # pragma: no cover - depends on the platform
         "nothing)"
     ) from e
 
-from ..core import HIDDEN, DecisionConfig, RenderedImage, attention_mask
-from ..core.config import IMAGE, TEXT
-from ..core.images import (
-    IMAGE_FORMATS,
-    MAX_SOFT_TOKENS,
-    PATCH_SIZE,
-    POOLING_KERNEL_SIZE,
-    resized_size,
+from ..core import (
+    HIDDEN,
+    DecisionConfig,
+    RenderedImage,
+    attention_mask,
+    check_decoded_size,
+    check_image_processor,
+    resize_image,
 )
+from ..core.config import IMAGE, TEXT
+from ..core.images import IMAGE_FORMATS
 from ..core.request import NO_VISION
 from ..refusals import RequestRefused
 from .mlx_format import bases_form, check_mlx_vlm, conformance
@@ -96,12 +98,6 @@ _SHARD = re.compile(r"model(-\d+-of-\d+)?\.safetensors")
 PROCESSOR_CONFIG = "processor_config.json"
 TOKENIZER = "tokenizer.json"
 INDEX = "model.safetensors.index.json"
-# The image processor settings N depends on (spec section 3.2), as every Gemma 4 base sets them.
-IMAGE_SETTINGS = {
-    "patch_size": PATCH_SIZE,
-    "pooling_kernel_size": POOLING_KERNEL_SIZE,
-    "max_soft_tokens": MAX_SOFT_TOKENS,
-}
 # Modules of the base the runtime never runs: audio is not part of the interface.
 AUDIO_MODULES = ("audio_tower", "embed_audio")
 VISION_MODULES = ("vision_tower", "vision_embedder", "embed_vision")
@@ -196,15 +192,18 @@ def decode_image(data: bytes) -> Any:
 def image_processor(path: Path, unified: bool) -> tuple[Any | None, str]:
     """The checkpoint's image processor, from its processor_config.json, with its resize off:
     mlx-vlm's `Gemma4ImageProcessor`, or `Gemma4UnifiedImageProcessor` for the 12B. Returns
-    (None, why) when the checkpoint has none, or one whose settings give another N."""
+    (None, why) when the checkpoint has none, or one whose settings give another N (the
+    core's `check_image_processor`)."""
     p = path / PROCESSOR_CONFIG
     if not p.exists():
         return None, f"it has no {PROCESSOR_CONFIG}"
     with open(p, encoding="utf-8") as f:
-        settings = json.load(f).get("image_processor") or {}
-    theirs = {k: settings.get(k) for k in IMAGE_SETTINGS}
-    if theirs != IMAGE_SETTINGS:
-        return None, f"its image processor has {theirs}, not {IMAGE_SETTINGS}"
+        config = json.load(f)
+    try:
+        check_image_processor(config)
+    except ValueError as e:  # its message names the settings, never a path
+        return None, str(e)
+    settings = config.get("image_processor", config)
     from mlx_vlm.models.gemma4.processing_gemma4 import Gemma4ImageProcessor
     from mlx_vlm.models.gemma4_unified.processing_gemma4_unified import (
         Gemma4UnifiedImageProcessor,
@@ -218,18 +217,17 @@ def image_processor(path: Path, unified: bool) -> tuple[Any | None, str]:
 
 def prepare_image(image: RenderedImage, processor: Any) -> dict[str, np.ndarray]:
     """One image's pixels for the vision encoder (docs/spec.md section 11.1): decoded as v1
-    decodes it, resized with Pillow's bicubic filter to the size of section 3.2, then
-    prepared by the image processor with its own resize off. The processor's count of soft
-    tokens must be the prompt's N."""
-    from PIL import Image
-
+    decodes it; its decoded, oriented size held to its header's (`check_decoded_size`, which
+    gives the size to resize to); resized by the spec's bicubic resize (`resize_image`: the
+    width's pass, then the height's, the same on every Pillow); then prepared by the image
+    processor with its own resize off. The processor's count of soft tokens must be the
+    prompt's N."""
     pil = decode_image(image.data)
-    if sorted(pil.size) != sorted((image.width, image.height)):  # EXIF may swap the two
-        raise RequestRefused(
-            f"image could not be decoded: its pixels are {pil.size[0]}x{pil.size[1]}, and its "
-            f"header says {image.width}x{image.height}"
-        )
-    pil = pil.resize(resized_size(*pil.size), Image.Resampling.BICUBIC)
+    try:
+        width, height = check_decoded_size(image, *pil.size)
+    except ValueError as e:  # the file's fault: v1's "image could not be decoded"
+        raise RequestRefused(str(e)) from e
+    pil = resize_image(pil, width, height)
     data, counts = processor(pil)
     if [int(n) for n in counts] != [image.tokens]:
         raise ValueError(

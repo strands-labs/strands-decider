@@ -42,13 +42,13 @@ pytest.importorskip("PIL")
 if not hasattr(transformers, "Gemma4UnifiedForConditionalGeneration"):
     pytest.skip("this transformers has no Gemma 4", allow_module_level=True)
 
+import decision_support  # noqa: E402
 from core_support import (  # noqa: E402
     IMAGE_FILES,
     SOFT_TOKENS,
     decision_config_fixture,
     image_b64,
     image_bytes,
-    toy_tokenizer,
 )
 from PIL import Image  # noqa: E402
 from typer.testing import CliRunner  # noqa: E402
@@ -58,7 +58,6 @@ from strands_decider.backends.mlx import (  # noqa: E402
     decode_image,
     load_backend,
     prepare_image,
-    resized_size,
 )
 from strands_decider.backends.mlx_convert import convert, quantized_parts  # noqa: E402
 from strands_decider.core import (  # noqa: E402
@@ -68,6 +67,8 @@ from strands_decider.core import (  # noqa: E402
     Readout,
     question_probabilities,
     render,
+    resize_image,
+    resized_size,
     round_to_bf16,
     soft_tokens,
 )
@@ -75,16 +76,18 @@ from strands_decider.decision import DecisionEngine, load_decision_engine  # noq
 from strands_decider.refusals import RequestRefused  # noqa: E402
 from strands_decider.schema import NoulQuestion, SystemOneRequest, SystemOneResponse  # noqa: E402
 
-V = 512  # vocabulary: the toy tokenizer's ids, and room for the audio and video tokens
-TOK = toy_tokenizer()
+# The toy tokenizer with Gemma 4's control tokens at their ids (the core's check_tokenizer), and
+# a vocabulary that reaches them and Gemma 4's audio and video tokens.
+TOK = decision_support.tokenizer()
+V = 258885
 IMAGE_IDS = {
     "boi_token_id": TOK.token_to_id("<|image>"),
     "image_token_id": TOK.token_to_id("<|image|>"),
     "eoi_token_id": TOK.token_to_id("<image|>"),
-    "audio_token_id": V - 1,
-    "boa_token_id": V - 2,
-    "eoa_token_index": V - 3,
-    "video_token_id": V - 4,
+    "audio_token_id": 258881,
+    "boa_token_id": 256000,
+    "eoa_token_index": 258883,
+    "video_token_id": 258884,
 }
 LAYERS = ["sliding_attention", "sliding_attention", "full_attention"] * 2
 ROPE = {
@@ -256,9 +259,19 @@ def mlx_engine(path: Path, **kw) -> DecisionEngine:
     return load_decision_engine(str(path), device="mlx", **kw)
 
 
+def _link_or_copy(src: str, dst: str) -> None:
+    """Weights hard-linked (they are never written), everything else copied (it may be)."""
+    import os
+
+    if src.endswith(".safetensors"):
+        os.link(src, dst)
+    else:
+        shutil.copy2(src, dst)
+
+
 def copy_of(ckpt: Path, tmp_path: Path, name: str = "copy") -> Path:
     dst = tmp_path / name
-    shutil.copytree(ckpt, dst)
+    shutil.copytree(ckpt, dst, copy_function=_link_or_copy)
     return dst
 
 
@@ -315,7 +328,7 @@ def _torch_pixels(path: Path, images, backend) -> dict:
     pils = []
     for im in images:
         pil = decode_image(im.data)
-        pils.append(pil.resize(resized_size(*pil.size), Image.Resampling.BICUBIC))
+        pils.append(resize_image(pil, *resized_size(*pil.size)))
     if backend.unified:
         ref = [_unified_reference_pixels(pil, settings) for pil in pils]
         # The backend's pixels must be these, before the model sees either.
@@ -584,7 +597,7 @@ def test_answers_are_the_cores_readout_of_the_reference(kind, ckpts):
             for q in rendered.questions.values()
         ]
         expect = question_probabilities(
-            np.stack(refs), engine.readout, engine.config, rendered, inputs=HIDDEN
+            np.stack(refs), engine.readout, engine.config, rendered, stage=HIDDEN
         )
         team = out["answers"]["team"]["probabilities"]
         for name, p in zip(["billing", "technical", "sales"], expect["team"], strict=True):
@@ -633,8 +646,10 @@ def test_other_processor_settings_leave_no_image_path(ckpts, tmp_path):
     engine = mlx_engine(path)
     try:
         assert engine.backend.inputs == ("text",) and not engine.takes_images
-        assert engine.backend.image_problem.startswith("images are not supported: its image")
-        with pytest.raises(RequestRefused, match="images are not supported: its image processor"):
+        assert engine.backend.image_problem.startswith(
+            "images are not supported: the checkpoint's image processor has {'max_soft_tokens': 70}"
+        )
+        with pytest.raises(RequestRefused, match="the checkpoint's image processor has"):
             engine.evaluate({**REQUEST, "images": [png("red")]})
         with pytest.raises(ValueError, match="images are not supported"):  # the backend alone
             r = render({**REQUEST, "images": [png("red")]}, TOK, "strands-plain")
@@ -880,7 +895,7 @@ def test_a_relative_path_loads_and_converts(bf16_ckpts, tmp_path, monkeypatch):
     finally:
         b.close()
     monkeypatch.chdir(tmp_path)
-    shutil.copytree(src, tmp_path / "ckpt")
+    shutil.copytree(src, tmp_path / "ckpt", copy_function=_link_or_copy)
     summary = convert("ckpt", "mlx")
     assert summary["artifact"] == str(tmp_path / "mlx")
     c = load_backend("mlx")
@@ -1159,7 +1174,7 @@ def test_undecodable_images_are_422_over_http(ckpts, monkeypatch):
         r = client.post("/v1/systemone", json={**REQUEST, "images": [png("red")]})
         assert r.status_code == 422
         assert r.json()["detail"] == (
-            "image could not be decoded: its pixels are 10x10, and its header says 64x48"
+            "image could not be decoded: its pixels are 10x10, and its header gives 64x48"
         )
 
 
@@ -1250,11 +1265,19 @@ def test_describe_is_computed_at_load_and_carries_the_claim(bf16_ckpts, tmp_path
 
 
 def test_a_failed_engine_build_closes_the_backend(ckpts, tmp_path, monkeypatch):
+    """The engine checks the readout against the loaded decoder's width; when that fails,
+    the backend it loaded is closed, its worker thread and weights released."""
+    from safetensors.torch import save_file
+
     from strands_decider import decision
     from strands_decider.backends import mlx as backend_mlx
 
     path = copy_of(ckpts["e2b"], tmp_path)
-    (path / "tokenizer.json").unlink()  # read after the backend is loaded
+    (path / "readout.safetensors").unlink()  # a link: replaced, not written through
+    save_file(
+        {"weight": torch.zeros(len(CODES), 32, dtype=torch.bfloat16)},
+        str(path / "readout.safetensors"),
+    )
     built = []
 
     def loader(p, **kw):
@@ -1263,7 +1286,7 @@ def test_a_failed_engine_build_closes_the_backend(ckpts, tmp_path, monkeypatch):
 
     monkeypatch.setattr(decision, "_LOADERS", {**decision._LOADERS})
     decision.register_backend(["mlx"], loader)
-    with pytest.raises(Exception, match="No such file"):  # tokenizers names no path
+    with pytest.raises(ValueError, match=r"not \[255, 64\]: the decoder's hidden size"):
         load_decision_engine(str(path), device="mlx")
     [b] = built
     assert b._closed and b._executor._shutdown
@@ -1283,3 +1306,52 @@ def test_device_indices(ckpts):
     engine.close()
     with pytest.raises(ValueError, match=r"'mlx' \(or 'mlx:0'\), not 'mlx:1'"):
         load_decision_engine(str(ckpts["e2b"]), device="mlx:1")
+
+
+# ---- the core's resize ---------------------------------------------------------------------------
+
+
+def test_pixels_are_the_spec_resize_of_the_decoded_oriented_image(backends):
+    """A tall image downscaled hard (where Pillow 13's single resize call does the height
+    first) gets the core's two-pass resize, and an EXIF-turned image is resized to its decoded
+    shape, not its header's."""
+    import io
+
+    from strands_decider.core.prompt import RenderedImage as RI
+
+    b = backends["e2b"]
+    rng = np.random.default_rng(0)
+    tall = Image.fromarray(rng.integers(0, 255, (3000, 200, 3), dtype=np.uint8))
+    buf = io.BytesIO()
+    tall.save(buf, "PNG")
+    data = buf.getvalue()
+    im = RI(
+        data=data,
+        format="PNG",
+        width=200,
+        height=3000,
+        sha256="",
+        start=0,
+        tokens=soft_tokens(200, 3000),
+    )
+    px = prepare_image(im, b.processor)["pixel_values"][0]
+    w, h = resized_size(200, 3000)
+    expect = (
+        np.asarray(resize_image(decode_image(data), w, h), dtype=np.float32).transpose(2, 0, 1)
+        / 255
+    )
+    np.testing.assert_allclose(px, expect, atol=1e-6)
+
+    rotated = image_bytes("rotated-80x40.jpg")  # header 80 x 40, EXIF orientation 6
+    im = RI(
+        data=rotated,
+        format="JPEG",
+        width=80,
+        height=40,
+        sha256="",
+        start=0,
+        tokens=soft_tokens(80, 40),
+    )
+    px = prepare_image(im, b.processor)["pixel_values"][0]
+    w, h = resized_size(40, 80)
+    assert px.shape == (3, h, w) and h > w

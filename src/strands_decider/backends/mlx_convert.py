@@ -23,9 +23,9 @@ and everything else is copied byte for byte:
   killed leaves its partial directory, which the next conversion to the same destination
   removes.
 
-A quantized artifact makes no conformance claim unless its format has been measured against
-the reference for that model (docs/spec.md section 10; `mlx_format.MEASURED`), and converting
-to it, or loading it, says so.
+A quantized artifact makes no conformance claim unless docs/spec.md section 10 records bounds
+for its format at that size (`mlx_format.RECORDED`: MLX 8-bit, group 64, at E2B), and
+converting to it, or loading it, says so.
 """
 
 from __future__ import annotations
@@ -40,7 +40,7 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
-from ..core import DecisionConfig, Readout
+from ..core import DecisionConfig, Readout, load_tokenizer
 from ..core.config import FILENAME as DECISION_CONFIG
 from ..core.readout import READOUT_FILE
 from .mlx import (
@@ -169,6 +169,7 @@ def convert(
         raise FileNotFoundError(f"{src} is not a decision checkpoint: it has no {missing}")
     decision = DecisionConfig.load(src)
     Readout.load(src, decision)  # the readout's shape and soft-cap agree with the config
+    load_tokenizer(src, decision)  # its control and code ids are the interface's
     model_type(src)
     with open(src / "config.json", encoding="utf-8") as f:
         config = json.load(f)

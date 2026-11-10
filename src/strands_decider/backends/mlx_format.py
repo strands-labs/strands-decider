@@ -8,8 +8,8 @@ the tests of these rules run everywhere:
   than mlx: an MLX artifact holds mlx-vlm's tensor layout, which no other backend reads.
 - `bases_form`: config.json in the Gemma 4 bases' own form, which mlx-vlm 0.7.12 reads, from
   the form transformers 5.2x writes.
-- `MEASURED` and `conformance`: which quantized formats have been measured against a
-  checkpoint's reference (docs/spec.md section 10), and the claim an artifact may make.
+- `RECORDED` and `conformance`: the quantized formats docs/spec.md section 10 records bounds
+  for, and the claim an artifact may make.
 - `TESTED_MLX_VLM` and `check_mlx_vlm`: the mlx-vlm release the backend is tested on.
 """
 
@@ -27,11 +27,14 @@ TESTED_MLX_VLM = "0.7.12"
 ARTIFACT_KEY = "strands_decider_artifact"
 ARTIFACT = {"format": "mlx", "written_by": "strands-decider convert-mlx"}
 
-# Quantized formats measured against a checkpoint's reference: (base model, bits, group size,
-# mode) -> top-1 agreement over its golden prompts. An 8-bit E2B agreed on 98.83% of 1,200.
-# bf16 holds the spec's 98% bound; any other format makes no conformance claim.
-MEASURED: dict[tuple[str, int, int, str], float] = {
-    ("google/gemma-4-E2B-it", 8, 64, "affine"): 0.9883,
+# The conformance bounds docs/spec.md section 10 records (top-1 agreement at least, mean |dp| at
+# most), for bf16 and by quantized format: (base model, bits, group size, mode). MLX 8-bit in
+# groups of 64 has bf16's bounds at E2B, where it was measured (98.83% top-1, mean |dp| 0.0099,
+# over 1,200 prompts); no other size and no other quantized format has bounds recorded, and an
+# artifact in one makes no conformance claim.
+BF16_BOUNDS = {"top1": 0.98, "mean_dp": 0.02}
+RECORDED: dict[tuple[str, int, int, str], dict[str, float]] = {
+    ("google/gemma-4-E2B-it", 8, 64, "affine"): dict(BF16_BOUNDS),
 }
 
 
@@ -78,22 +81,23 @@ def quantization_format(quantization: dict[str, Any] | None) -> tuple[int, int, 
 def conformance(base_model: str, quantization: dict[str, Any] | None) -> dict[str, Any]:
     """The conformance claim an artifact of `base_model` in this quantization may make
     (docs/spec.md section 10), for `/health` and for the notice at conversion and load:
-    `claim` is "bf16", "measured" or "none"; `notice` is the warning to give, or None."""
+    `claim` is "bf16" or "recorded" with the `bounds` it must meet, or "none" with the
+    `notice` to give."""
     fmt = quantization_format(quantization)
     if fmt is None:
-        return {"format": "bf16", "claim": "bf16", "notice": None}
+        return {"format": "bf16", "claim": "bf16", "bounds": dict(BF16_BOUNDS), "notice": None}
     bits, group, mode = fmt
     name = f"{bits}-bit, group {group}, {mode}"
-    top1 = MEASURED.get((base_model, bits, group, mode))
-    if top1 is not None:
-        return {"format": name, "claim": "measured", "top1": top1, "notice": None}
+    bounds = RECORDED.get((base_model, bits, group, mode))
+    if bounds is not None:
+        return {"format": name, "claim": "recorded", "bounds": dict(bounds), "notice": None}
     return {
         "format": name,
         "claim": "none",
+        "bounds": None,
         "notice": (
-            f"this MLX artifact ({name}, of {base_model}) makes no conformance claim: no "
-            f"top-1 agreement has been recorded for its format at this size (docs/spec.md "
-            f"section 10)"
+            f"this MLX artifact ({name}, of {base_model}) makes no conformance claim: "
+            f"docs/spec.md section 10 records no bounds for its format at this size"
         ),
     }
 
