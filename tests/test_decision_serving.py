@@ -129,3 +129,164 @@ def test_ask_refuses_an_intermediate_checkpoint(tmp_path, monkeypatch):
         cli.app, ["ask", str(path), "--state", "x", "--noul", "y?", "--device", "cpu"]
     )
     assert result.exit_code == 2 and "intermediate" in result.output  # a usage error
+
+
+def test_serve_refuses_audio_rather_than_dropping_it(ckpt):
+    """v1's request model has no `audio` field; the decision engine reads the JSON the client
+    sent, so the core's refusal holds on the wire too."""
+    with TestClient(server.create_app(str(ckpt), device="cpu", warmup=False)) as client:
+        r = client.post("/v1/systemone", json={**request(), "audio": ["UklGRiQAAABXQVZF"]})
+        assert r.status_code == 422 and r.json()["detail"] == "audio input is not supported"
+        assert client.post("/v1/systemone", json={**request(), "audio": []}).status_code == 200
+
+
+def test_serve_reports_a_runtime_failure_as_500(ckpt, monkeypatch):
+    app = server.create_app(str(ckpt), device="cpu", warmup=False)
+    with TestClient(app, raise_server_exceptions=False) as client:
+
+        def fails(*_a, **_k):
+            raise ValueError("an internal check")
+
+        monkeypatch.setattr(app.state.engine.backend, "forward", fails)
+        assert client.post("/v1/systemone", json=request()).status_code == 500
+
+
+def test_serve_answers_concurrent_requests_alike(ckpt):
+    from concurrent.futures import ThreadPoolExecutor
+
+    body = request([image_b64(64, 48)])
+    with TestClient(server.create_app(str(ckpt), device="cpu", warmup=False)) as client:
+        assert client.get("/health").json()["max_concurrency"] == 1
+        with ThreadPoolExecutor(max_workers=6) as pool:
+            got = list(pool.map(lambda _: client.post("/v1/systemone", json=body), range(6)))
+    assert all(r.status_code == 200 for r in got)
+    assert len({json.dumps(r.json()["answers"], sort_keys=True) for r in got}) == 1
+
+
+def test_flags_that_do_not_apply_are_named(ckpt, tmp_path, monkeypatch):
+    from typer.testing import CliRunner
+
+    with pytest.warns(UserWarning, match="--vision is for v1"):
+        server.create_app(str(ckpt), device="cpu", vision=True, warmup=False)
+    with pytest.raises(ValueError, match="cpu, cuda or mps"):
+        server.create_app(str(ckpt), device="mlx")
+    with pytest.raises(ValueError, match="--dtype is for decision checkpoints"):
+        server.create_app(str(tmp_path), device="cpu", dtype="bfloat16")
+    monkeypatch.setattr(cli, "_exit_fast", False)
+    for args, hint in (
+        (["--device", "mlx"], "--device"),
+        (["--device", "cpu", "--dtype", "float16"], "--dtype"),
+    ):
+        out = CliRunner().invoke(cli.app, ["ask", str(ckpt), "--state", "x", "--noul", "y?", *args])
+        assert out.exit_code == 2 and hint in out.output, out.output
+    out = CliRunner().invoke(
+        cli.app,
+        [
+            "ask",
+            str(ckpt),
+            "--state",
+            "x",
+            "--noul",
+            "y?",
+            "--device",
+            "cpu",
+            "--dtype",
+            "bfloat16",
+            "--json",
+        ],
+    )
+    assert out.exit_code == 0, out.output
+
+
+def test_serve_takes_a_dtype(ckpt):
+    app = server.create_app(str(ckpt), device="cpu", dtype="bfloat16", warmup=False)
+    with TestClient(app) as client:
+        assert client.get("/health").json()["dtype"] == "bfloat16"
+
+
+# ---- finding a decision checkpoint on the Hub ----------------------------------------------
+
+
+def _hub_error(cls, message="x"):
+    """A huggingface_hub error without an HTTP response behind it."""
+    e = cls.__new__(cls)
+    Exception.__init__(e, message)
+    return e
+
+
+@pytest.fixture
+def hub(monkeypatch, tmp_path):
+    """huggingface_hub's cache lookup and downloads, recorded; none reaches the network."""
+    import huggingface_hub
+
+    calls = []
+    state = {"cache": None, "download": None, "snapshot": None}
+
+    def outcome(name, value):
+        calls.append(name)
+        if isinstance(value, BaseException):
+            raise value
+        return value
+
+    monkeypatch.setattr(
+        huggingface_hub,
+        "try_to_load_from_cache",
+        lambda repo, fn, revision=None, **_: outcome(("cache", repo, fn, revision), state["cache"]),
+    )
+    monkeypatch.setattr(
+        huggingface_hub,
+        "hf_hub_download",
+        lambda repo, fn, revision=None, **_: outcome(
+            ("download", repo, fn, revision), state["download"]
+        ),
+    )
+    monkeypatch.setattr(
+        huggingface_hub,
+        "snapshot_download",
+        lambda repo, revision=None, local_files_only=False, **_: outcome(
+            ("snapshot", repo, revision, local_files_only), state["snapshot"]
+        ),
+    )
+    dc = tmp_path / "snap" / "decision_config.json"
+    dc.parent.mkdir()
+    dc.write_text(json.dumps({"interface": "strands-decider"}))
+    return state, calls, str(dc)
+
+
+def test_hub_detection_reads_the_cache_first(hub):
+    state, calls, dc = hub
+    state["cache"] = dc
+    assert checkpoint_kind("org/repo", revision="abc") == DECISION
+    assert calls == [("cache", "org/repo", "decision_config.json", "abc")]  # no Hub request
+    calls.clear()
+    state["cache"] = object()  # the cache's record that the repo has no such file
+    assert checkpoint_kind("org/repo") is None and len(calls) == 1
+
+
+def test_hub_detection_asks_the_hub_once_and_lets_real_errors_through(hub):
+    from huggingface_hub.errors import (
+        HfHubHTTPError,
+        LocalEntryNotFoundError,
+        RemoteEntryNotFoundError,
+        RepositoryNotFoundError,
+    )
+
+    state, calls, dc = hub
+    state["download"] = dc
+    assert checkpoint_kind("org/repo", revision="abc") == DECISION
+    assert calls[-1] == ("download", "org/repo", "decision_config.json", "abc")
+    state["download"] = _hub_error(RemoteEntryNotFoundError)  # a v1 repo: no such file
+    assert checkpoint_kind("org/repo") is None
+    state["download"] = _hub_error(RepositoryNotFoundError)  # v1's loader reports it
+    assert checkpoint_kind("org/repo") is None
+    state["download"] = _hub_error(HfHubHTTPError, "401 Unauthorized")
+    with pytest.raises(HfHubHTTPError, match="401"):
+        checkpoint_kind("org/repo")
+    # Offline, with the file not cached on its own: the cached snapshot decides.
+    state["download"] = _hub_error(LocalEntryNotFoundError)
+    state["snapshot"] = str(__import__("pathlib").Path(dc).parent)
+    calls.clear()
+    assert checkpoint_kind("org/repo", revision="abc") == DECISION
+    assert calls[-1] == ("snapshot", "org/repo", "abc", True)
+    state["snapshot"] = _hub_error(LocalEntryNotFoundError)
+    assert checkpoint_kind("org/repo") is None

@@ -5,10 +5,11 @@ repo, whose `decision_config.json` says `"interface": "strands-decider"` is a de
 checkpoint (section 8: the interface field, never the file names, tells it apart), and
 `load_decision_engine` serves it; anything else takes v1's pointer path, unchanged.
 
-`DecisionEngine` answers a v1 `SystemOneRequest` with the core: `strands_decider.core.evaluate`
-renders it with the checkpoint's prompt, a backend runs the decoder, and the core reads the
-answers. On a torch device (cpu, cuda, mps) the backend is the transformers one
-(`backends/transformers.py`).
+`DecisionEngine` answers a v1 request with the core: `strands_decider.core.evaluate` renders
+it with the checkpoint's prompt, a backend runs the decoder, and the core reads the answers.
+It takes the request as the JSON the client sent, so that fields v1's request model does not
+know, such as `audio`, reach the core's checks and are refused rather than dropped. On a torch
+device (cpu, cuda, mps) the backend is the transformers one (`backends/transformers.py`).
 """
 
 from __future__ import annotations
@@ -16,13 +17,14 @@ from __future__ import annotations
 import json
 import os
 import sys
+import threading
 import time
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
-from .core import DecisionConfig, Readout, evaluate
+from .core import DecisionConfig, Readout, evaluate, render
 from .core.config import FILENAME, IMAGE, INTERFACE
-from .core.request import has_images
+from .core.request import NO_VISION, has_images
 from .schema import (
     ChoiceQuestion,
     Content,
@@ -40,34 +42,63 @@ if TYPE_CHECKING:
 
 DECISION = "decision"  # decision_config.json with "interface": "strands-decider"
 INTERMEDIATE = "intermediate"  # decision_config.json from before the interface field
+DTYPES = ("float32", "bfloat16")
 
 
-def _decision_config(checkpoint: str) -> Any:
-    """The parsed decision_config.json of a local directory or Hub repo, or None when it has
-    none. Only that file is fetched from the Hub; any failure to fetch it is None too, so a v1
-    checkpoint, or one the Hub cannot serve, takes v1's path and v1's errors."""
+class RequestRefused(ValueError):
+    """A request the decision interface refuses: the caller's error (HTTP 422). Any other
+    failure while answering an accepted request is the runtime's (HTTP 500)."""
+
+
+def _decision_file(checkpoint: str, revision: str | None) -> str | None:
+    """The local path of the checkpoint's decision_config.json, or None when it has none.
+
+    A directory is read as it is. For a Hub repo the cache is asked first, so a v1 checkpoint
+    costs at most one Hub request, the first time: the cache then records that the file does
+    not exist. Only "no such file in this repo" and "no such repo" (gated included) mean None;
+    v1's loader then reports the second itself. Any other failure, such as an authorization
+    error, a rate limit or the network, is raised. Offline, with nothing cached for the file,
+    the cached snapshot decides."""
     if os.path.isdir(checkpoint):
         path = os.path.join(checkpoint, FILENAME)
-        if not os.path.isfile(path):
-            return None
-    else:
-        try:
-            from huggingface_hub import hf_hub_download
+        return path if os.path.isfile(path) else None
+    from huggingface_hub import hf_hub_download, snapshot_download, try_to_load_from_cache
+    from huggingface_hub.errors import (
+        LocalEntryNotFoundError,
+        RemoteEntryNotFoundError,
+        RepositoryNotFoundError,
+        RevisionNotFoundError,
+    )
 
-            path = hf_hub_download(checkpoint, FILENAME)
-        except Exception:
-            return None
-    try:
-        with open(path, encoding="utf-8") as f:
-            return json.load(f)
-    except (OSError, ValueError):
+    cached = try_to_load_from_cache(checkpoint, FILENAME, revision=revision)
+    if isinstance(cached, str):
+        return cached
+    if cached is not None:  # the cache knows the repo has no such file
         return None
+    try:
+        return str(hf_hub_download(checkpoint, FILENAME, revision=revision))
+    except RemoteEntryNotFoundError:
+        return None
+    except (RepositoryNotFoundError, RevisionNotFoundError):
+        return None
+    except LocalEntryNotFoundError:
+        try:
+            snapshot = snapshot_download(checkpoint, revision=revision, local_files_only=True)
+        except Exception:  # nothing cached either: v1's loader reports it
+            return None
+        path = os.path.join(snapshot, FILENAME)
+        return path if os.path.isfile(path) else None
 
 
-def checkpoint_kind(checkpoint: str) -> str | None:
+def checkpoint_kind(checkpoint: str, *, revision: str | None = None) -> str | None:
     """`DECISION` for a decision checkpoint, `INTERMEDIATE` for a decision_config.json made
-    before the `interface` field, None for anything else (a v1 checkpoint)."""
-    dc = _decision_config(checkpoint)
+    before the `interface` field, None for anything else (a v1 checkpoint, or another
+    format's decision_config.json)."""
+    path = _decision_file(checkpoint, revision)
+    if path is None:
+        return None
+    with open(path, encoding="utf-8") as f:
+        dc = json.load(f)
     if not isinstance(dc, dict):
         return None
     if dc.get("interface") == INTERFACE:
@@ -87,8 +118,14 @@ def refuse_intermediate(checkpoint: str) -> ValueError:
 
 
 class DecisionEngine:
-    """A decision checkpoint, answering v1 requests: `evaluate` takes a `SystemOneRequest`
-    and returns a `SystemOneResponse`, as v1's engines do, so `serve` and `ask` use either."""
+    """A decision checkpoint, answering v1 requests: `evaluate` takes a `SystemOneRequest`, or
+    the JSON object a client sent, and returns a `SystemOneResponse`, as v1's engines do, so
+    `serve` and `ask` use either.
+
+    At most `max_concurrency` requests run on the backend at once; the others wait. One at a
+    time, the default, keeps a burst of long or image requests from holding several states'
+    keys and values on the device together. Refusals raise `RequestRefused`; a failure on a
+    request that was accepted raises RuntimeError."""
 
     def __init__(
         self,
@@ -100,7 +137,10 @@ class DecisionEngine:
         model_name: str,
         max_length: int | None = None,
         image_problem: str | None = None,
+        max_concurrency: int = 1,
     ):
+        if max_concurrency < 1:
+            raise ValueError("max_concurrency must be at least 1")
         self.backend = backend
         self.tokenizer = tokenizer
         self.config = config
@@ -108,25 +148,59 @@ class DecisionEngine:
         self.model_name = model_name
         self.max_length = max_length
         self.image_problem = image_problem
+        self.max_concurrency = max_concurrency
+        self._slots = threading.BoundedSemaphore(max_concurrency)
 
     @property
     def takes_images(self) -> bool:
         return IMAGE in self.config.inputs and IMAGE in tuple(getattr(self.backend, "inputs", ()))
 
+    def _refusals(self, payload: Any) -> None:
+        """What the core refuses before the backend runs, in its order: images the checkpoint
+        or the backend cannot take, before any is decoded; then the request's schema, its
+        images' files and audio, and the prompt's length, by rendering it."""
+        if has_images(payload):
+            if IMAGE not in self.config.inputs:
+                raise RequestRefused(
+                    "this checkpoint does not take images: its decision_config.json inputs "
+                    "are " + json.dumps(list(self.config.inputs))
+                )
+            if self.image_problem:
+                raise RequestRefused(self.image_problem)
+            if IMAGE not in tuple(getattr(self.backend, "inputs", ())):
+                raise RequestRefused(NO_VISION)
+        try:
+            render(
+                payload,
+                self.tokenizer,
+                self.config.prompt,
+                max_length=self.max_length or self.config.max_length_validated,
+            )
+        except ValueError as e:
+            raise RequestRefused(str(e)) from e
+
     def evaluate(self, request: SystemOneRequest | Mapping[str, Any]) -> SystemOneResponse:
         payload = request.model_dump() if isinstance(request, SystemOneRequest) else request
-        if self.image_problem and IMAGE in self.config.inputs and has_images(payload):
-            raise ValueError(self.image_problem)
-        out = evaluate(
-            payload,
-            self.tokenizer,
-            self.readout,
-            self.config,
-            self.backend,
-            model_name=self.model_name,
-            max_length=self.max_length,
-        )
-        return SystemOneResponse.model_validate(out)
+        self._refusals(payload)
+        with self._slots:
+            try:
+                out = evaluate(
+                    payload,
+                    self.tokenizer,
+                    self.readout,
+                    self.config,
+                    self.backend,
+                    model_name=self.model_name,
+                    max_length=self.max_length,
+                )
+            except RequestRefused:
+                raise  # an image file the backend cannot decode
+            except ValueError as e:
+                raise RuntimeError(f"answering an accepted request failed: {e}") from e
+        try:
+            return SystemOneResponse.model_validate(out)
+        except ValueError as e:
+            raise RuntimeError(f"the answers do not fit the response schema: {e}") from e
 
     def ask(
         self, state: Content, questions: dict[str, Question], images: Sequence[str] = ()
@@ -147,6 +221,7 @@ class DecisionEngine:
             "max_length": self.max_length or self.config.max_length_validated,
             "temperature": self.config.temperature,
             "images": self.takes_images,
+            "max_concurrency": self.max_concurrency,
             **info,
         }
 
@@ -181,6 +256,11 @@ def warm_up_requests(*, images: bool) -> list[SystemOneRequest]:
     return out
 
 
+def check_device(device: str) -> None:
+    if str(device).split(":", 1)[0] not in ("cpu", "cuda", "mps"):
+        raise ValueError(f"decision checkpoints run on cpu, cuda or mps here, not {device!r}")
+
+
 def load_decision_engine(
     checkpoint: str,
     *,
@@ -190,20 +270,28 @@ def load_decision_engine(
     max_batch: int = 32,
     max_batch_tokens: int | None = None,
     max_length: int | None = None,
+    dtype: str | None = None,
+    max_concurrency: int = 1,
+    revision: str | None = None,
 ) -> DecisionEngine:
     """A decision checkpoint on `device`. Torch devices (cpu, cuda, mps) run the transformers
-    backend in the dtype `DEVICE_DTYPES` gives the device. `reuse_state=False` runs each
-    question as one full prompt, the reference of docs/spec.md section 10."""
-    if str(device).split(":", 1)[0] not in ("cpu", "cuda", "mps"):
-        raise ValueError(f"decision checkpoints run on cpu, cuda or mps here, not {device!r}")
+    backend, in `dtype` (`DTYPES`) or the device's own (`DEVICE_DTYPES`: float32 on CPU,
+    bfloat16 on CUDA and MPS). `reuse_state=False` runs each question as one full prompt;
+    on CUDA in bfloat16 that is the reference of docs/spec.md section 10."""
+    check_device(device)
+    if dtype is not None and dtype not in DTYPES:
+        raise ValueError(f"dtype must be one of {DTYPES}, not {dtype!r}")
+    import torch
+
     from .backends.transformers import MAX_BATCH_TOKENS, Checkpoint, TransformersBackend
 
-    ckpt = Checkpoint.open(checkpoint)
+    ckpt = Checkpoint.open(checkpoint, revision=revision)
     if ckpt.config is None:
         raise refuse_intermediate(checkpoint)
     backend = TransformersBackend.load(
         ckpt,
         device=device,
+        dtype=getattr(torch, dtype) if dtype else None,
         reuse_state=reuse_state,
         max_batch=max_batch,
         max_batch_tokens=max_batch_tokens or MAX_BATCH_TOKENS,
@@ -224,13 +312,17 @@ def load_decision_engine(
         model_name=name,
         max_length=max_length,
         image_problem=backend.image_problem,
+        max_concurrency=max_concurrency,
     )
 
 
 __all__ = [
     "DECISION",
+    "DTYPES",
     "INTERMEDIATE",
     "DecisionEngine",
+    "RequestRefused",
+    "check_device",
     "checkpoint_kind",
     "load_decision_engine",
     "refuse_intermediate",

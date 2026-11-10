@@ -11,7 +11,9 @@ import contextlib
 import os
 import threading
 import time
+import warnings
 from collections.abc import AsyncIterator, Callable
+from typing import Any
 
 import anyio
 from fastapi import Depends, FastAPI, HTTPException, Request
@@ -22,6 +24,7 @@ from .decision import (
     DECISION,
     INTERMEDIATE,
     DecisionEngine,
+    check_device,
     checkpoint_kind,
     load_decision_engine,
     refuse_intermediate,
@@ -101,6 +104,7 @@ def create_app(
     warmup: bool = True,
     build_engine: Callable[[], SystemOneEngine] | None = None,
     max_concurrency: int | None = None,
+    dtype: str | None = None,
 ) -> FastAPI:
     if max_concurrency is not None and max_concurrency < 1:
         raise ValueError("--max-concurrency must be at least 1")
@@ -110,10 +114,25 @@ def create_app(
     if kind == INTERMEDIATE:
         raise refuse_intermediate(checkpoint)
     decision = kind == DECISION
-    if decision and device_map:
-        raise ValueError(
-            "--device-map is for v1 checkpoints; a decision checkpoint runs on one device"
-        )
+    if decision:
+        if device_map:
+            raise ValueError(
+                "--device-map is for v1 checkpoints; a decision checkpoint runs on one device"
+            )
+        check_device(device)
+        if vision:
+            warnings.warn(
+                "--vision is for v1 checkpoints: a decision checkpoint takes images when its "
+                "decision_config.json inputs list them",
+                stacklevel=2,
+            )
+        if attn_implementation:
+            warnings.warn(
+                "attn_implementation is for v1 checkpoints: a decision checkpoint runs SDPA",
+                stacklevel=2,
+            )
+    elif dtype:
+        raise ValueError("--dtype is for decision checkpoints")
     if not decision:
         if device_map and (vision or not device.startswith("cuda")):
             raise ValueError(
@@ -145,6 +164,7 @@ def create_app(
                 reuse_state=use_prefix_cache,
                 max_batch=max_batch,
                 max_batch_tokens=max_batch_tokens,
+                dtype=dtype,
             )
         if vision:
             from .vision import load_vision_engine
@@ -200,6 +220,14 @@ def create_app(
         engine: SystemOneEngine = request.app.state.engine
         return engine
 
+    async def decision_body(request: Request) -> Any:
+        """The JSON the client sent, for a decision engine, which checks it with the core:
+        v1's request model drops fields it does not know, `audio` among them, which the
+        interface refuses. None for v1 engines, which take the parsed request as before."""
+        if isinstance(request.app.state.engine, DecisionEngine):
+            return await request.json()
+        return None
+
     # SageMaker and AgentCore Runtime call /ping and /invocations; each is the same
     # handler as the path above it. /ping is async: a sync handler would wait for a free
     # thread in the pool that /invocations fills (40 threads), and SageMaker allows a
@@ -230,12 +258,15 @@ def create_app(
     @app.post("/v1/systemone", response_model=SystemOneResponse)
     @app.post("/invocations", response_model=SystemOneResponse)
     async def systemone(
-        request: SystemOneRequest, http: Request, eng: SystemOneEngine = Depends(get_engine)
+        request: SystemOneRequest,
+        http: Request,
+        eng: SystemOneEngine = Depends(get_engine),
+        body: Any = Depends(decision_body),
     ) -> JSONResponse:
         started = time.perf_counter()
         try:
             response = await anyio.to_thread.run_sync(
-                evaluate, eng, request, limiter=http.app.state.limiter
+                evaluate, eng, request if body is None else body, limiter=http.app.state.limiter
             )
         except ValueError as exc:
             # Malformed permutation, etc. -- caller error.
@@ -262,6 +293,7 @@ def serve(
     device_map: str | None = None,
     warmup: bool = True,
     max_concurrency: int | None = None,
+    dtype: str | None = None,
 ) -> None:
     import uvicorn
 
@@ -276,6 +308,7 @@ def serve(
         device_map=device_map,
         warmup=warmup,
         max_concurrency=max_concurrency,
+        dtype=dtype,
     )
     # Single worker: the model owns the GPU, and forking more would just duplicate it.
     uvicorn.run(app, host=host, port=port, workers=1)

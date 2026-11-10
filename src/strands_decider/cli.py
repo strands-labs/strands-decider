@@ -67,7 +67,7 @@ def serve_cmd(
         False,
         "--no-prefix-cache",
         help="Encode each question with its own copy of the state; for a decision checkpoint, "
-        "one full pass per question, the spec's reference.",
+        "one full pass per question (the spec's reference on CUDA in bfloat16).",
     ),
     model_name: str | None = typer.Option(
         None,
@@ -103,6 +103,12 @@ def serve_cmd(
         help="Run at most N requests on the model at once; the rest wait without a thread or GPU "
         "memory. Default: no cap beyond the 40-thread worker pool.",
     ),
+    dtype: str | None = typer.Option(
+        None,
+        "--dtype",
+        help="Decision checkpoints: float32 or bfloat16. Default: float32 on cpu, bfloat16 on "
+        "cuda and mps.",
+    ),
     warmup: bool = typer.Option(
         True,
         "--warmup/--no-warmup",
@@ -127,6 +133,7 @@ def serve_cmd(
         device_map=device_map,
         max_concurrency=max_concurrency,
         warmup=warmup,
+        dtype=dtype,
     )
 
 
@@ -154,6 +161,12 @@ def ask_cmd(
         "Auto-detected when omitted: cuda > mps > cpu; mlx only when asked for.",
     ),
     as_json: bool = typer.Option(False, "--json", help="Print the raw API response."),
+    dtype: str | None = typer.Option(
+        None,
+        "--dtype",
+        help="Decision checkpoints: float32 or bfloat16. Default: float32 on cpu, bfloat16 on "
+        "cuda and mps.",
+    ),
 ) -> None:
     """Ask one state a set of typed questions from the command line."""
     from .infer import EngineConfig, load_engine
@@ -187,10 +200,18 @@ def ask_cmd(
     if kind == DECISION:
         # A decision checkpoint (docs/spec.md): images go in the request, and the checkpoint's
         # decision_config.json says whether it takes them.
-        from .decision import load_decision_engine
+        from .decision import DTYPES, check_device, load_decision_engine
 
-        engine = load_decision_engine(checkpoint, device=selected_device)
+        try:
+            check_device(selected_device)
+        except ValueError as e:
+            raise typer.BadParameter(str(e), param_hint="--device") from e
+        if dtype is not None and dtype not in DTYPES:
+            raise typer.BadParameter(f"one of {DTYPES}", param_hint="--dtype")
+        engine = load_decision_engine(checkpoint, device=selected_device, dtype=dtype)
         response = engine.ask(state, questions, _base64_files(image))
+    elif dtype is not None:
+        raise typer.BadParameter("--dtype is for decision checkpoints", param_hint="--dtype")
     elif image:
         from .vision import load_vision_engine
 
