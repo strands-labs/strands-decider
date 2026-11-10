@@ -183,7 +183,9 @@ step "4. the server's request path on a real engine, in process"
 mkdir -p "$OUT/engine"
 python "$HERE/engine_checks.py" serve "$C/mm" --max-length 1024 --dtype $DTYPE --block-size $BLOCK --enforce-eager \
   ${MEM[@]+"${MEM[@]}"} > "$OUT/engine/server.log" 2>&1
-result $? "engine checks: the length boundary, the engine's refusal, images off the loop ($(grep -c '^PASS' "$OUT/engine/server.log") passed)"
+rc=$?  # the multimodal checkpoint takes images, so the image check must have run, not been skipped
+grep -q "image preprocessing ran off the event loop" "$OUT/engine/server.log" || rc=1
+result $rc "engine checks: the length boundary, the engine's refusal, images off the loop ($(grep -c '^PASS' "$OUT/engine/server.log") passed)"
 grep -E '^(PASS|FAIL)' "$OUT/engine/server.log"
 
 step "5. vllm serve on the bare decoder: /v1/completions"

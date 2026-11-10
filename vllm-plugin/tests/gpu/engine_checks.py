@@ -234,7 +234,14 @@ def main() -> None:
 
         async def checks():  # one event loop: AsyncLLM's output handler lives on the loop it started on
             await run(d, a.max_length, max_model_len)
-            if d.takes_images and not d.image_problem:
+            if not d.takes_images:
+                print("SKIP  images off the loop: the checkpoint takes no images", flush=True)
+            elif d.image_problem:  # a checkpoint that should take images must not skip the check
+                check(
+                    False,
+                    f"images off the loop: skipped, the server refuses images ({d.image_problem})",
+                )
+            else:
                 await images_off_the_loop(d)
 
         asyncio.run(checks())
