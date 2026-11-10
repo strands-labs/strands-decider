@@ -24,8 +24,7 @@ transformers = pytest.importorskip("transformers")
 if not hasattr(transformers, "Gemma4ForConditionalGeneration"):
     pytest.skip("this transformers has no Gemma 4", allow_module_level=True)
 
-from strands_decider.core import CODES, CONTROL_TOKEN_IDS  # noqa: E402
-from strands_decider.core.tokenizer import CODE_TOKEN_IDS  # noqa: E402
+from strands_decider.core import CODE_TOKEN_IDS, CODES, CONTROL_TOKEN_IDS  # noqa: E402
 
 GEMMA4 = "gemma4"  # E2B's design: per-layer embeddings, KV-shared layers
 # 26B-A4B's and 31B's: the same class, with bidirectional image blocks ("vision"), no per-layer

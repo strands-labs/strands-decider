@@ -538,13 +538,25 @@ def test_a_prompt_past_max_length_validated_is_refused(tmp_path):
         evaluate(request(), ck.tokenizer(), ck.readout, ck.config, backend)
 
 
-def test_the_tokenizer_must_agree_with_config_json_on_image_tokens(tmp_path):
+def test_config_json_must_name_the_interfaces_image_tokens(tmp_path, monkeypatch):
+    """The model replaces config.json's image ids; the prompt's are the interface's. The
+    backend compares the two without reading the tokenizer, which the engine checks."""
     path = decision_checkpoint(tmp_path / "k", GEMMA4)
     cfg = json.loads((path / "config.json").read_text())
     (path / "config.json").write_text(json.dumps({**cfg, "image_token_id": 3}))
-    with pytest.warns(UserWarning, match="image_token_id"):
+    monkeypatch.setattr(tb.Checkpoint, "tokenizer", lambda self: pytest.fail("read the tokenizer"))
+    with pytest.warns(UserWarning, match=r"image_token_id is 3, not the interface.s id"):
         backend = tb.TransformersBackend.load(str(path))
     assert backend.inputs == ("text",)
+
+
+def test_a_config_json_without_a_hidden_size_is_named(tmp_path):
+    path = decision_checkpoint(tmp_path / "h", GEMMA4)
+    cfg = json.loads((path / "config.json").read_text())
+    del cfg["text_config"]["hidden_size"]
+    (path / "config.json").write_text(json.dumps(cfg))
+    with pytest.raises(ValueError, match=r"config\.json gives no hidden_size"):
+        tb.TransformersBackend.load(str(path))
 
 
 # ---- pixels -------------------------------------------------------------------------------
