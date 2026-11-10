@@ -454,9 +454,11 @@ classes, unpatched:
   the dense mask instead.
 - On E2B and E4B, whose last layers read an earlier layer's keys and values, a question carries
   only its last token through those layers, which is exact.
-- An image is decoded as v1 decodes it, resized with Pillow's bicubic filter to the spec's size,
-  prepared by the checkpoint's image processor with its resize off, and encoded in bf16; its
-  vectors replace the placeholders at its span in the state.
+- An image is decoded as v1 decodes it, its decoded, oriented size held to its header's, resized
+  to the spec's size for that decoded shape by the core's `resize_image` (the width's bicubic
+  pass, then the height's, the same on every Pillow), prepared by the checkpoint's image
+  processor with its resize off, and encoded in bf16; its vectors replace the placeholders at
+  its span in the state.
 - The backend hands the core the final-norm hidden state, and the core's `Readout` applies the
   readout in the spec's precision regime.
 
@@ -470,9 +472,10 @@ copied byte for byte. The artifact is written into `OUT.partial-*` beside `OUT`,
 checked, and only then renamed to `OUT` with the usual permissions; a killed conversion's
 partial directory is removed by the next conversion to the same `OUT`. `mlx_vlm.convert` alone
 would lose the readout and quantize the audio projection. A quantized artifact makes a
-conformance claim only for a format measured against the reference at that size: so far 8
-bits in groups of 64 at E2B (below). Any other, 4-bit or another size included, says at
-conversion and at load that it makes none, and `/health` reports the claim.
+conformance claim only for a format whose bounds the spec records at that size (section 10):
+so far MLX 8-bit in groups of 64 at E2B, held to bf16's bounds (at least 98% top-1, mean |Δp|
+at most 0.02) from the measurement below. Any other, 4-bit or another size included, says at
+conversion and at load that it makes none, and `/health` reports the claim and its bounds.
 
 Measured on an M4 Pro (48 GB) with an intermediate Strands Decider v2 E2B checkpoint in the
 multimodal layout, against reference outputs computed with transformers in bf16 on a GPU, one
