@@ -112,12 +112,13 @@ Every setting is a CDK context value. Change it in `cdk.json`, or pass `-c key=v
 | --- | --- | --- |
 | `model` | `StrandsAgents/strands-decider-2B-qwen3.5-v1-2610` | The strands-decider model, a Hugging Face Hub id. Any Qwen3.5 model with a pointer head works. It names the stack. |
 | `model_revision` | `main` | The model's revision. Use a release's date tag (`YYMMDD`) to pin it ([docs/inference.md, Model artifact](../../docs/inference.md#model-artifact)). |
-| `snapstart` | `false` | `true` turns SnapStart on: new execution environments answer in about 6 s instead of up to 30 s, for about $39.50 a month while the stack exists ([What it costs](#what-it-costs)) |
+| `snapstart` | `false` | `true` turns SnapStart on: new execution environments answer in about 6 s instead of up to 30 s, for about $39.50 a month while the stack exists ([What it costs](#what-it-costs)). Not for a decision checkpoint. |
 | `max_request_tokens` | `24576`, `16384` for a decision checkpoint | The most tokens one request may forward, the state once plus every question; `0` for no limit ([Limits](#limits)) |
 | `decision` | `false` | `true` deploys a decision checkpoint, `checkpoint`, instead of `model` ([Decision checkpoints](#decision-checkpoints)) |
 | `checkpoint` | none | The decision checkpoint: a Hugging Face Hub id, or an `s3://bucket/prefix/` URI of a checkpoint directory in the same account. It names the stack. |
-| `checkpoint_revision` | `main` | The checkpoint's Hub revision |
-| `stack_name` | from the model | The stack's name, instead of one made from `model` or `checkpoint` |
+| `checkpoint_revision` | `main` | The checkpoint's Hub revision; the build resolves it to a commit and records it |
+| `checkpoint_digest` | none | The checkpoint's manifest digest ([What the build does](#what-the-build-does)); the build refuses a checkpoint with another |
+| `stack_name` | from the model | The stack's name, instead of one made from `model` or `checkpoint` (an `s3://` checkpoint's name gets 8 hex digits of its URI's sha256, so checkpoints of one name in different places get stacks of their own) |
 
 ## What it costs
 
@@ -195,7 +196,8 @@ trained readout beside it. The function answers the same `POST /v1/systemone`, w
 invocation too.
 
 ```bash
-npx cdk deploy -c decision=true -c checkpoint=<Hub id, or s3://bucket/prefix/>
+npx cdk deploy -c decision=true -c checkpoint=<Hub id, or s3://bucket/prefix/> \
+  [-c checkpoint_revision=<Hub revision>] [-c checkpoint_digest=<sha256>]
 ```
 
 Lambda serves E2B, with text and images. E4B does not fit with its vision tower: its text model
@@ -211,13 +213,27 @@ model's own vision tower. The readout and its soft-cap come from the checkpoint'
 `readout.safetensors` and `decision_config.json`; a checkpoint without the soft-cap there, or with
 another value under `config.json`'s `text_config`, is refused.
 
+The GGUF Q8_0 decoder meets the conformance bound docs/spec.md section 10 records for that format,
+at least 98% top-1 agreement and a mean |Δp| of at most 0.02: at E2B, through this runtime on x86,
+99.08% and 0.0104 on 1,200 prompts.
+
 ### What the build does
 
-The image builds llama.cpp at a pinned commit with the two patches in `decision/patches`, and
-`decision/shim.c` against it, for Graviton2 and later (no i8mm). It then reads the checkpoint, from
-the Hugging Face Hub or, for an `s3://` URI, with the CodeBuild project's role, which the stack
-grants read access to that prefix only. `decision/scripts/build_artifact.py` checks it as the
-function will, then converts it with llama.cpp's own `convert_hf_to_gguf.py`:
+`decision/scripts/build_native.sh` fetches llama.cpp at the commit in `decision/LLAMA_CPP_REV`,
+checks and applies each of the two patches in `decision/patches`, stopping at one that does not
+apply, and builds it and `decision/shim.c` for Graviton2 and later; the build fails if the library
+is not arm64 or holds an instruction Graviton2 lacks (i8mm, bf16, SVE). `decision/scripts/
+shim_check.py` then runs that library against transformers on a tiny random Gemma 4 checkpoint
+(tests/test_llama_cpp_shim.py runs the same check), and the build fails unless the `prefix_bidir`
+mask, state reuse, the image rows and the answers are the reference's.
+
+The build then reads the checkpoint, from the Hugging Face Hub at the commit `checkpoint_revision`
+resolves to, each LFS file checked against the sha256 the Hub records, or, for an `s3://` URI,
+with the CodeBuild project's role, which the stack grants read access to that prefix only. It
+records the checkpoint's manifest digest, the sha256 of the lines `<sha256>  <file>` for its files
+sorted by name (in the checkpoint's directory, `sha256sum * | sort -k 2 | sha256sum`), and with
+`checkpoint_digest` refuses any other. `decision/scripts/build_artifact.py` checks the checkpoint as
+the function will, then converts it with llama.cpp's own `convert_hf_to_gguf.py`:
 
 - the decoder to BF16, then Q8_0 with `llama-quantize`, the lowest type that keeps the
   reference's answers: 4.95 GB for E2B;
@@ -227,6 +243,9 @@ function will, then converts it with llama.cpp's own `convert_hf_to_gguf.py`:
   reference.
 
 The arm64 build's files are byte-identical to an x86 build's. The build takes about 10 minutes.
+`artifact.json` in the image records every file it serves with its sha256, and the GGUFs' 16 MiB
+chunks too; the function checks them when it loads, as it reads the files, and does not start on a
+mismatch.
 
 ### After each deploy, warm the function
 
@@ -238,6 +257,10 @@ returns as a 502; the next environments took 6 to 10 minutes. Later ones read th
 cached the image still takes 6 to 8 minutes. So after each deploy, call `GET /health` until it
 answers, before sending traffic.
 
+SnapStart is not offered for decision checkpoints (`snapstart=true` is refused): it has not been
+measured with a load that reads 5 GB from a lazily loaded image, and the page-cache drop below
+assumes the environment read the files itself.
+
 ### Limits
 
 - A prompt, the state with its image placeholders plus one question, may be at most the
@@ -245,12 +268,14 @@ answers, before sending traffic.
 - At most 4 images per request, PNG, JPEG, WebP or GIF, each at most 4096 x 4096 pixels. They go
   first in the state, each as up to 280 tokens.
 - A request may forward at most `max_request_tokens` tokens, the state once plus every question,
-  16,384 by default. That keeps the slowest request inside the 15-minute timeout on Graviton2,
+  16,384 by default, and the function applies the same limit when `DECIDER_MAX_REQUEST_TOKENS` is
+  unset; `0` lifts it. That keeps the slowest request inside the 15-minute timeout on Graviton2,
   the slowest host Lambda gives: 4 images and an 8,000-token state, then 137 questions up to the
   limit, took 557 s there, and with the shortest questions, 121 of them, 499 s on Graviton3, about
   640 s on Graviton2. A question after a long state costs about as much as 50 state tokens, so v1's
   24,576 is too many here: the same request at 24,540 tokens ran past the timeout on Graviton2.
-- Every limit is checked before any image is decoded or any token is run.
+- Every limit is checked before any image is decoded or any token is run. A request that breaks one,
+  or carries an image that cannot be read, gets a 422 that says why; anything else is a 500.
 - A Function URL request is at most 6 MB, base64 images included.
 
 ### Measurements

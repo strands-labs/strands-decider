@@ -1,15 +1,10 @@
-From 92a2c04f152070b838e389848cbb317ece04d0aa Mon Sep 17 00:00:00 2001
-From: Jonathan Buck <jonathan.j.buck@gmail.com>
-Date: Tue, 10 Nov 2026 00:37:15 +0000
-Subject: [PATCH 1/2] llama: optional attention.non_causal_type key to choose
- which layers llama_set_causal_attn(false) makes non-causal
+Subject: llama: optional attention.non_causal_type key
 
----
- gguf-py/gguf/constants.py |  1 +
- src/llama-arch.cpp        |  1 +
- src/llama-arch.h          |  1 +
- src/llama-model.cpp       | 12 ++++++++++++
- 4 files changed, 15 insertions(+)
+Adds an optional GGUF key, {arch}.attention.non_causal_type, read after each architecture's
+own hyperparameters, that chooses which layers llama_set_causal_attn(ctx, false) makes
+non-causal (llama_non_causal_type). Gemma 4 hard-codes LLAMA_NON_CAUSAL_TYPE_SWA_ONLY, which
+keeps its full-attention layers causal; the shim sets the key to 0 (ALL) by a load-time
+override. Without the key set, nothing changes.
 
 diff --git a/gguf-py/gguf/constants.py b/gguf-py/gguf/constants.py
 index 5f9cbf1e3..556fecfa9 100644
@@ -70,6 +65,3 @@ index 72639b155..7f99e4589 100644
      pimpl->n_bytes = ml.n_bytes;
  
      pimpl->desc_str = arch_name() + " " + type_name() + " " + ml.ftype_name();
--- 
-2.34.1
-
