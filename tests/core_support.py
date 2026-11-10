@@ -463,7 +463,7 @@ def reference_resize(img, width: int, height: int):
 def _write_pixel_goldens() -> None:
     import PIL
 
-    from strands_decider.core import resize_target
+    from strands_decider.core import resized_size
 
     assert PIL.__version__ == PIXELS_PILLOW, (
         f"the pixel goldens are made with Pillow {PIXELS_PILLOW}"
@@ -471,7 +471,7 @@ def _write_pixel_goldens() -> None:
     rows = {}
     for name in IMAGE_FILES:
         decoded = reference_pixels(image_bytes(name))
-        w, h = resize_target(*decoded.size)
+        w, h = resized_size(*decoded.size)
         resized = reference_resize(decoded, w, h)
         rows[name] = {
             "decoded": list(decoded.size),

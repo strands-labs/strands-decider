@@ -52,7 +52,7 @@ from strands_decider.core import (
     image_size,
     parse_request,
     render,
-    resize_target,
+    resized_size,
     soft_tokens,
 )
 from strands_decider.core.images import (
@@ -549,7 +549,7 @@ def _pixel_goldens() -> dict:
     return json.loads(PIXELS.read_text(encoding="utf-8"))
 
 
-def test_the_resize_target_comes_from_the_decoded_size():
+def test_the_resized_size_comes_from_the_decoded_size():
     """W and H are the decoded, oriented image's, never the header's: the rotated JPEG's
     header says 80 x 40 and its pixels are 40 x 80, so it is resized to 528 x 1104, where the
     header's shape would give 1104 x 528 with the same N."""
@@ -559,12 +559,12 @@ def test_the_resize_target_comes_from_the_decoded_size():
         image = decode_image(image_b64(name))
         decoded, resized = tuple(g["decoded"]), tuple(g["resized"])
         assert decoded in ((image.width, image.height), (image.height, image.width)), name
-        assert resized == resize_target(*decoded) == check_decoded_size(image, *decoded), name
+        assert resized == resized_size(*decoded) == check_decoded_size(image, *decoded), name
         assert soft_tokens(*decoded) == image.tokens == (resized[0] // 48) * (resized[1] // 48)
     rotated = goldens["images"]["rotated-80x40.jpg"]
     assert rotated["decoded"] == [40, 80] and rotated["resized"] == [528, 1104]
     assert (
-        resize_target(80, 40) == (1104, 528) and soft_tokens(80, 40) == soft_tokens(40, 80) == 253
+        resized_size(80, 40) == (1104, 528) and soft_tokens(80, 40) == soft_tokens(40, 80) == 253
     )
     image = decode_image(image_b64("rotated-80x40.jpg"))
     assert check_decoded_size(image, 80, 40) == (1104, 528)  # as the header says, unturned
@@ -633,7 +633,7 @@ def test_pillow_13_resizes_a_tall_image_height_first():
     from PIL import Image
 
     w, h = 1080, 2400
-    tw, th = resize_target(w, h)
+    tw, th = resized_size(w, h)
     yy, xx = np.mgrid[0:h, 0:w]
     a = np.stack([(xx * 7 + yy * 3) % 256, (xx ^ yy) % 256, (xx // 9 + yy // 13) % 2 * 255], -1)
     img = Image.fromarray(a.astype(np.uint8), "RGB")

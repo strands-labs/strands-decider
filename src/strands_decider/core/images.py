@@ -64,7 +64,7 @@ IMAGE_SOFT = "<|image|>"
 IMAGE_CLOSE = "<image|>"
 
 
-def resize_target(
+def resized_size(
     width: int,
     height: int,
     *,
@@ -80,8 +80,11 @@ def resize_target(
     (`get_aspect_ratio_preserving_size` in transformers' Gemma4ImageProcessor and
     Gemma4UnifiedImageProcessor, which size alike).
 
-    The width and height are the decoded image's, after its EXIF orientation: swapping them
-    swaps W and H (`check_decoded_size`)."""
+    A runtime resizes to it before the processor, with the processor's own resize off
+    (docs/spec.md, section 11.1), and calls it with the decoded image's width and height,
+    after its EXIF orientation, not the header's: swapping them swaps W and H.
+    `check_decoded_size` checks the decoded size against the header and calls it so;
+    `soft_tokens` counts its soft tokens, which do not swap."""
     if not (isinstance(width, int) and isinstance(height, int)) or width < 1 or height < 1:
         raise ValueError(f"an image is at least 1 x 1 pixels, not {width!r} x {height!r}")
     max_patches = max_soft_tokens * pooling_kernel_size**2
@@ -110,10 +113,10 @@ def soft_tokens(
     pooling_kernel_size: int = POOLING_KERNEL_SIZE,
 ) -> int:
     """N, the soft tokens Gemma 4's image processor gives a `width` x `height` image: it
-    resizes the image to `resize_target`'s W x H, then pools each 3 x 3 group of 16-pixel
+    resizes the image to `resized_size`'s W x H, then pools each 3 x 3 group of 16-pixel
     patches into one soft token, so N = (W / 48) (H / 48). N lies in [1, max_soft_tokens],
     and swapping width and height leaves it unchanged."""
-    w, h = resize_target(
+    w, h = resized_size(
         width,
         height,
         max_soft_tokens=max_soft_tokens,
@@ -137,7 +140,7 @@ def check_decoded_size(image: Any, width: int, height: int) -> tuple[int, int]:
             f"image could not be decoded: its pixels are {width}x{height}, and its header "
             f"gives {header[0]}x{header[1]}"
         )
-    return resize_target(width, height)
+    return resized_size(width, height)
 
 
 def check_image_processor(processor_config: Mapping[str, Any] | str | os.PathLike[str]) -> None:
