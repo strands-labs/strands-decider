@@ -11,8 +11,11 @@ requires-python = ">=3.10"
 dependencies = ["vllm>=0.33.0,<0.34"]
 
 [project.optional-dependencies]
-# The server renders requests with the core library (strands_decider.core, PR #129).
-serve = ["strands-decider"]
+# The server renders requests with the core library, strands_decider.core (server.CORE_REQUIREMENT). 0.3.0, the
+# last release, predates it: the floor admits the development versions after it (a checkout installs as 0.3.1.devN
+# when git can see its tags) and becomes the first release with the core once that is tagged. The server checks the
+# core's functions at startup either way.
+serve = ["strands-decider>=0.3.1.dev0,<0.5"]
 test = ["pytest"]
 
 [project.scripts]
