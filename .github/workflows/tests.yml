@@ -151,11 +151,14 @@ jobs:
           echo "available=true" >> "$GITHUB_OUTPUT"
           echo "dir=$dir" >> "$GITHUB_OUTPUT"
       # No torch. pydantic, jinja2 and transformers (which runs without torch) un-skip the
-      # v1-parity, chat-template and apply_chat_template tests.
+      # v1-parity, chat-template and apply_chat_template tests; Pillow with transformers
+      # un-skips the image header checks against Pillow and N against Gemma4ImageProcessor.
+      # The checks that need torchvision or torch (the 12B's processor, Gemma4Processor,
+      # v1's decode_image) skip here.
       - if: steps.fetch.outputs.available == 'true'
         run: |
           python -m pip install --no-deps -e .
-          python -m pip install numpy tokenizers pytest pydantic jinja2 "transformers>=5.15,<6"
+          python -m pip install numpy tokenizers pytest pydantic jinja2 "transformers>=5.15,<6" "pillow>=10"
       - if: steps.fetch.outputs.available == 'true'
         env:
           HF_HUB_OFFLINE: "1"
@@ -163,7 +166,7 @@ jobs:
           STRANDS_DECIDER_GEMMA4_TEMPLATES: ${{ steps.fetch.outputs.dir }}/chat_template.jinja
         run: |
           python -c "import importlib.util as u, sys; sys.exit(u.find_spec('torch') is not None)"
-          python -m pytest -q -rs tests/test_core_prompt.py tests/test_core_readout.py tests/test_core_config.py
+          python -m pytest -q -rs tests/test_core_prompt.py tests/test_core_readout.py tests/test_core_config.py tests/test_core_images.py
 
   lint:
     name: lint
