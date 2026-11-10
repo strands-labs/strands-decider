@@ -13,10 +13,13 @@ from __future__ import annotations
 
 import json
 import math
+import numbers
 import os
 import re
 from dataclasses import asdict, dataclass
 from typing import Any
+
+import numpy as np
 
 from .codes import CODES
 from .prompt import VARIANTS
@@ -56,24 +59,51 @@ PROVENANCE_REQUIRED = ("base_model", "base_revision")
 # each must be a normal float32: a value past these bounds would become inf or lose precision.
 F32_MAX = 3.4028234663852886e38
 F32_MIN_NORMAL = 1.1754943508222875e-38
+# Token ids and max_length_validated fit a signed 32-bit integer, so that every runtime can
+# hold them (docs/spec.md, The decision_config.json schema).
+INT32_MAX = 2**31 - 1
+
+
+def _real(v: Any) -> float | None:
+    """`v` as a float if it is a real number (Python's or numpy's, not a bool) that a
+    double holds finite; otherwise None. An int past a double's range is not one."""
+    if isinstance(v, (bool, np.bool_)) or not isinstance(v, numbers.Real):
+        return None
+    try:
+        f = float(v)
+    except (OverflowError, ValueError):
+        return None
+    return f if math.isfinite(f) else None
 
 
 def check_float32_scale(name: str, v: Any) -> float:
     """`v` as a float, if it is a finite number above 0 that float32 holds as a normal
     number (about 1.2e-38 to 3.4e38); otherwise ValueError. For the soft-cap and the
-    temperature, which divide the readout logits in float32."""
-    ok = isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
-    if not ok or not F32_MIN_NORMAL <= v <= F32_MAX:
+    temperature, which divide the readout logits in float32. numpy scalars count as numbers;
+    bools and strings do not, and neither does an integer too large for a double."""
+    f = _real(v)
+    if f is None or not F32_MIN_NORMAL <= f <= F32_MAX:
         raise ValueError(
             f"{name} must be a finite number above 0 within float32's normal range "
-            f"({F32_MIN_NORMAL:.3g} to {F32_MAX:.3g}), not {v!r}"
+            f"({F32_MIN_NORMAL:.3g} to {F32_MAX:.3g}), not {_shown(v)}"
         )
-    return float(v)
+    return f
 
 
-_HUB_ID = re.compile(r"^[A-Za-z0-9][\w.-]*/[\w.-]+$")
-_RELEASE = re.compile(r"^([A-Za-z0-9][\w.-]*/)?[A-Za-z0-9][\w.-]*$")
-_COMMIT = re.compile(r"^[0-9a-f]{40}$")
+def _shown(v: Any) -> str:
+    """`v` for a message: an integer past a double's range by its size, since its digits may
+    be too many to print."""
+    if isinstance(v, int) and not isinstance(v, bool) and abs(v).bit_length() > 1024:
+        return f"an integer of {abs(v).bit_length()} bits"
+    return repr(v)
+
+
+# The provenance formats (docs/spec.md, The decision_config.json schema), ASCII and whole.
+_HUB_NAME = r"[A-Za-z0-9][A-Za-z0-9_.-]*"
+_HUB_ID = re.compile(rf"{_HUB_NAME}/[A-Za-z0-9_.-]+", re.ASCII)
+_RELEASE = re.compile(rf"({_HUB_NAME}/)?{_HUB_NAME}", re.ASCII)
+_COMMIT = re.compile(r"[0-9a-f]{40}", re.ASCII)
+_HTTPS_URL = re.compile(r"https://[!-~]+", re.ASCII)
 
 
 def _is_int(v: Any) -> bool:
@@ -84,6 +114,13 @@ def _wrong_interface(interface: Any) -> str:
     return (
         f"not a Strands Decider decision config: {FILENAME} needs "
         f'"interface": "{INTERFACE}", and has {interface!r}'
+    )
+
+
+def _unsupported_version(version: Any) -> str:
+    return (
+        f"format_version {_shown(version)} is not supported; this runtime reads "
+        f"format_version {FORMAT_VERSION}"
     )
 
 
@@ -110,17 +147,19 @@ class Provenance:
                 continue
             if not isinstance(value, str) or not value:
                 raise ValueError(f"provenance.{name} must be a non-empty string")
-        if not _HUB_ID.match(self.base_model):
+        if not _HUB_ID.fullmatch(self.base_model):
             raise ValueError(f"provenance.base_model must be a Hub id, not {self.base_model!r}")
-        if not _COMMIT.match(self.base_revision):
+        if not _COMMIT.fullmatch(self.base_revision):
             raise ValueError("provenance.base_revision must be a 40-character commit hash")
-        if self.release is not None and not _RELEASE.match(self.release):
+        if self.release is not None and not _RELEASE.fullmatch(self.release):
             raise ValueError(f"provenance.release must be a model name, not {self.release!r}")
-        if self.source is not None and not self.source.startswith("https://"):
+        if self.source is not None and not _HTTPS_URL.fullmatch(self.source):
             raise ValueError("provenance.source must be an https URL")
 
     @classmethod
     def from_dict(cls, d: Any) -> Provenance:
+        """From the file's `provenance` object. A field given as null is an error: an
+        optional field that does not apply is left out."""
         if not isinstance(d, dict):
             raise ValueError("provenance must be an object")
         known = {f for f in cls.__dataclass_fields__}
@@ -130,6 +169,12 @@ class Provenance:
         missing = [k for k in PROVENANCE_REQUIRED if k not in d]
         if missing:
             raise ValueError(f"provenance is missing required fields {missing}")
+        nulls = [k for k in d if d[k] is None]
+        if nulls:
+            raise ValueError(
+                f"provenance.{nulls[0]} is null; a provenance field is a string, and an "
+                "optional one that does not apply is left out"
+            )
         return cls(**d)
 
     def to_dict(self) -> dict[str, str]:
@@ -155,10 +200,7 @@ class DecisionConfig:
         if self.interface != INTERFACE:
             raise ValueError(_wrong_interface(self.interface))
         if not _is_int(self.format_version) or self.format_version != FORMAT_VERSION:
-            raise ValueError(
-                f"format_version {self.format_version!r} is not supported; this runtime "
-                f"reads format_version {FORMAT_VERSION}"
-            )
+            raise ValueError(_unsupported_version(self.format_version))
         if not isinstance(self.prompt, str) or self.prompt not in VARIANTS:
             raise ValueError(
                 f"prompt {self.prompt!r} is not implemented; this runtime implements {VARIANTS}"
@@ -180,20 +222,31 @@ class DecisionConfig:
                 "codes must be the 255 answer codes, A through IV without GZ, in order"
             )
         ids = tuple(self.token_ids)
-        if len(ids) != len(CODES) or not all(_is_int(i) and i >= 0 for i in ids):
-            raise ValueError(f"token_ids must be {len(CODES)} non-negative integers")
+        if len(ids) != len(CODES) or not all(_is_int(i) and 0 <= i <= INT32_MAX for i in ids):
+            raise ValueError(
+                f"token_ids must be {len(CODES)} non-negative integers, each at most {INT32_MAX}"
+            )
         if len(set(ids)) != len(ids):
             raise ValueError("token_ids must be distinct: one token per code")
-        check_float32_scale("temperature", self.temperature)
-        check_float32_scale("final_logit_softcapping", self.final_logit_softcapping)
+        t = check_float32_scale("temperature", self.temperature)
+        c = check_float32_scale("final_logit_softcapping", self.final_logit_softcapping)
+        # The readout's largest final logit is c / T in float32; it must be finite there.
+        with np.errstate(over="ignore"):
+            if not np.isfinite(np.float32(c) / np.float32(t)):
+                raise ValueError(
+                    f"final_logit_softcapping / temperature ({c!r} / {t!r}) overflows float32, "
+                    "where the readout divides the capped logits by the temperature"
+                )
         if self.attention_mode not in ATTENTION_MODES:
             raise ValueError(
                 f"attention_mode {self.attention_mode!r} is not supported; expected {ATTENTION_MODES}"
             )
         if self.pooling not in POOLINGS:
             raise ValueError(f"pooling {self.pooling!r} is not supported; expected {POOLINGS}")
-        if not _is_int(self.max_length_validated) or self.max_length_validated <= 0:
-            raise ValueError("max_length_validated must be a positive integer")
+        if not _is_int(self.max_length_validated) or not 0 < self.max_length_validated <= INT32_MAX:
+            raise ValueError(
+                f"max_length_validated must be a positive integer, at most {INT32_MAX}"
+            )
         if not isinstance(self.provenance, Provenance):
             raise ValueError("provenance must be a Provenance")
 
@@ -201,9 +254,13 @@ class DecisionConfig:
     def from_dict(cls, d: Any) -> DecisionConfig:
         if not isinstance(d, dict):
             raise ValueError(f"{FILENAME} must hold a JSON object")
-        # First, so that another format's file gets this message, not a list of fields.
+        # First, so that another format's file gets this message, not a list of fields; then
+        # the version, so that a later layout's file is named as one, not as unknown fields.
         if d.get("interface") != INTERFACE:
             raise ValueError(_wrong_interface(d.get("interface", "<missing>")))
+        version = d.get("format_version")
+        if "format_version" in d and (not _is_int(version) or version != FORMAT_VERSION):
+            raise ValueError(_unsupported_version(version))
         missing = [k for k in REQUIRED if k not in d]
         if missing:
             raise ValueError(f"{FILENAME} is missing required fields {missing}")
