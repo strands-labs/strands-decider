@@ -98,8 +98,8 @@ def test_serve_refuses_an_intermediate_checkpoint_and_a_device_map(ckpt, tmp_pat
         server.create_app(str(intermediate_checkpoint(tmp_path / "mid")), device="cpu")
     with pytest.raises(ValueError, match="device-map"):
         server.create_app(str(ckpt), device="cuda", device_map="auto")
-    with pytest.raises(ValueError, match="decision checkpoints run on cpu, cuda, mps here"):
-        load_decision_engine(str(ckpt), device="mlx")
+    with pytest.raises(ValueError, match="decision checkpoints run on cpu, cuda, mlx, mps here"):
+        load_decision_engine(str(ckpt), device="tpu")
 
 
 def test_ask_on_a_decision_checkpoint(ckpt, tmp_path, monkeypatch):
@@ -159,13 +159,13 @@ def test_flags_that_do_not_apply_are_named(ckpt, tmp_path, monkeypatch):
 
     with pytest.warns(UserWarning, match="--vision is for v1"):
         server.create_app(str(ckpt), device="cpu", vision=True, warmup=False)
-    with pytest.raises(ValueError, match="decision checkpoints run on cpu, cuda, mps here"):
-        server.create_app(str(ckpt), device="mlx")
+    with pytest.raises(ValueError, match="decision checkpoints run on cpu, cuda, mlx, mps here"):
+        server.create_app(str(ckpt), device="tpu")
     with pytest.raises(ValueError, match="--dtype is for decision checkpoints"):
         server.create_app(str(tmp_path), device="cpu", dtype="bfloat16")
     monkeypatch.setattr(cli, "_exit_fast", False)
     for args, hint in (
-        (["--device", "mlx"], "--device"),
+        (["--device", "tpu"], "--device"),
         (["--device", "cpu", "--dtype", "float16"], "--dtype"),
     ):
         out = CliRunner().invoke(cli.app, ["ask", str(ckpt), "--state", "x", "--noul", "y?", *args])

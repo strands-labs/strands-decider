@@ -13,7 +13,10 @@ prefix_bidir mask passed for both layer types (with SDPA, which reads a boolean 
 keys each token sees), and for E2B the pixels prepared by Pillow's bicubic resize and
 transformers' PIL image processor with its resize off. (The 12B's processor in transformers
 needs torchvision, so its reference takes the backend's pixels and checks the model alone.)
-Apple silicon with the mlx extra only; nothing is downloaded.
+Through the decision engine (`decision.load_decision_engine(..., device="mlx")`) and `serve`,
+requests are checked and refused as on every backend, and the transformers backend's own tiny
+checkpoints get the same answers from both backends. Apple silicon with the mlx extra only;
+nothing is downloaded. tests/test_backend_mlx_routing.py checks the routing on any platform.
 """
 
 from __future__ import annotations
@@ -51,12 +54,9 @@ from PIL import Image  # noqa: E402
 from typer.testing import CliRunner  # noqa: E402
 
 from strands_decider import cli  # noqa: E402
-from strands_decider.backends import is_decision_checkpoint  # noqa: E402
 from strands_decider.backends.mlx import (  # noqa: E402
-    MLXEngine,
     decode_image,
     load_backend,
-    load_engine,
     prepare_image,
     resized_size,
 )
@@ -71,7 +71,7 @@ from strands_decider.core import (  # noqa: E402
     round_to_bf16,
     soft_tokens,
 )
-from strands_decider.core.request import NO_VISION  # noqa: E402
+from strands_decider.decision import DecisionEngine, RequestRefused, load_decision_engine  # noqa: E402
 from strands_decider.schema import NoulQuestion, SystemOneRequest, SystemOneResponse  # noqa: E402
 
 V = 512  # vocabulary: the toy tokenizer's ids, and room for the audio and video tokens
@@ -250,6 +250,11 @@ def backends(ckpts):
         b.close()
 
 
+def mlx_engine(path: Path, **kw) -> DecisionEngine:
+    """The decision engine `ask` and `serve` build for `--device mlx`."""
+    return load_decision_engine(str(path), device="mlx", **kw)
+
+
 def copy_of(ckpt: Path, tmp_path: Path, name: str = "copy") -> Path:
     dst = tmp_path / name
     shutil.copytree(ckpt, dst)
@@ -311,24 +316,27 @@ def _torch_pixels(path: Path, images, backend) -> dict:
         pil = decode_image(im.data)
         pils.append(pil.resize(resized_size(*pil.size), Image.Resampling.BICUBIC))
     if backend.unified:
-        try:  # transformers' own 12B processor needs torchvision
-            import torchvision  # noqa: F401
-
-            processor = transformers.Gemma4UnifiedImageProcessor(**{**settings, "do_resize": False})
-            out = processor(images=pils, return_tensors="pt")
-            return {k: v for k, v in out.items() if k != "num_soft_tokens_per_image"}
-        except ImportError:
-            pass
         ref = [_unified_reference_pixels(pil, settings) for pil in pils]
-        # The backend's own pixels must be these, before the model sees either.
+        # The backend's pixels must be these, before the model sees either.
         for im, (pv, pos) in zip(images, ref, strict=True):
             ours = prepare_image(im, backend.processor)
             np.testing.assert_allclose(ours["pixel_values"][0], pv, atol=1e-6)
             np.testing.assert_array_equal(ours["image_position_ids"][0], pos)
-        return {
-            "pixel_values": torch.tensor(np.stack([pv for pv, _ in ref])),
-            "image_position_ids": torch.tensor(np.stack([pos for _, pos in ref])),
-        }
+        try:  # transformers' own 12B processor needs torchvision
+            import torchvision  # noqa: F401
+        except ImportError:
+            return {
+                "pixel_values": torch.tensor(np.stack([pv for pv, _ in ref])),
+                "image_position_ids": torch.tensor(np.stack([pos for _, pos in ref])),
+            }
+        processor = transformers.Gemma4UnifiedImageProcessor(**{**settings, "do_resize": False})
+        out = processor(images=pils, return_tensors="pt")
+        for (pv, pos), tpv, tpos in zip(
+            ref, out["pixel_values"], out["image_position_ids"], strict=True
+        ):
+            np.testing.assert_allclose(tpv.numpy(), pv, atol=1e-6)
+            np.testing.assert_array_equal(tpos.numpy(), pos)
+        return {k: v for k, v in out.items() if k != "num_soft_tokens_per_image"}
     processor = transformers.Gemma4ImageProcessorPil(**{**settings, "do_resize": False})
     out = processor(images=pils, return_tensors="pt")
     assert [int(n) for n in out["num_soft_tokens_per_image"]] == [im.tokens for im in images]
@@ -563,10 +571,10 @@ def test_the_image_not_its_ids_decides(kind, backends):
 def test_answers_are_the_cores_readout_of_the_reference(kind, ckpts):
     """End to end: render, the backend, and the core's readout give the probabilities the
     core reads from the reference's hidden states."""
-    engine = load_engine(ckpts[kind])
+    engine = mlx_engine(ckpts[kind])
     try:
         request = {**REQUEST, "images": [image_b64("stripes-300x40.jpg")]}
-        out = engine.answer(request)
+        out = engine.evaluate(request).model_dump()
         rendered = render(request, TOK, engine.config.prompt)
         refs = [
             reference(
@@ -607,13 +615,13 @@ def test_a_bf16_checkpoint_hands_over_bf16_hidden_states(tmp_path):
 def test_a_text_only_checkpoint_refuses_images_before_decoding_them(ckpts, tmp_path):
     path = copy_of(ckpts["e2b"], tmp_path)
     edit_json(path, "decision_config.json", inputs=["text"])
-    engine = load_engine(path)
+    engine = mlx_engine(path)
     try:
         assert engine.backend.inputs == ("text",) and not engine.takes_images
         assert engine.backend.model.vision_tower is None  # not loaded
-        with pytest.raises(ValueError, match=r'does not take images: .* \["text"\]'):
-            engine.answer({**REQUEST, "images": ["not base64 at all!"]})
-        assert engine.answer(REQUEST)["answers"]["urgent"]["type"] == "noul"
+        with pytest.raises(RequestRefused, match=r'does not take images: .* \["text"\]'):
+            engine.evaluate({**REQUEST, "images": ["not base64 at all!"]})
+        assert engine.evaluate(REQUEST).answers["urgent"].type == "noul"
     finally:
         engine.close()
 
@@ -621,12 +629,17 @@ def test_a_text_only_checkpoint_refuses_images_before_decoding_them(ckpts, tmp_p
 def test_other_processor_settings_leave_no_image_path(ckpts, tmp_path):
     path = copy_of(ckpts["e2b"], tmp_path)
     edit_json(path, "processor_config.json", **{"image_processor.max_soft_tokens": 70})
-    with pytest.warns(UserWarning, match="images are not supported"):
-        engine = load_engine(path)
+    engine = mlx_engine(path)
     try:
-        assert engine.backend.inputs == ("text",)
-        with pytest.raises(ValueError, match=NO_VISION):
-            engine.answer({**REQUEST, "images": [png("red")]})
+        assert engine.backend.inputs == ("text",) and not engine.takes_images
+        assert engine.backend.image_problem.startswith("images are not supported: its image")
+        with pytest.raises(RequestRefused, match="images are not supported: its image processor"):
+            engine.evaluate({**REQUEST, "images": [png("red")]})
+        with pytest.raises(ValueError, match="images are not supported"):  # the backend alone
+            r = render({**REQUEST, "images": [png("red")]}, TOK, "strands-plain")
+            engine.backend.forward(
+                list(r.state_ids), [list(r.questions["urgent"].question_ids)], r.images
+            )
     finally:
         engine.close()
 
@@ -647,7 +660,7 @@ def test_refuses_checkpoints_it_cannot_serve(ckpts, tmp_path, name, changes, mes
     path = copy_of(ckpts["e2b"], tmp_path)
     edit_json(path, name, **changes)
     with pytest.raises(ValueError, match=message):
-        load_engine(path)
+        mlx_engine(path)
 
 
 def test_refuses_an_image_it_cannot_decode(ckpts, backends):
@@ -674,10 +687,10 @@ def test_refuses_a_span_that_is_not_placeholders(backends):
 def test_refuses_a_prompt_past_the_validated_length(ckpts, tmp_path):
     path = copy_of(ckpts["e2b"], tmp_path)
     edit_json(path, "decision_config.json", max_length_validated=40)
-    engine = load_engine(path)
+    engine = mlx_engine(path)
     try:
-        with pytest.raises(ValueError, match="exceeds the limit of 40 tokens"):
-            engine.answer(REQUEST)
+        with pytest.raises(RequestRefused, match="exceeds the limit of 40 tokens"):
+            engine.evaluate(REQUEST)
     finally:
         engine.close()
 
@@ -773,15 +786,10 @@ def test_convert_refuses_what_it_cannot_write(bf16_ckpts, tmp_path):
 # ---- serve and ask -------------------------------------------------------------------------------
 
 
-def test_the_engine_serves_v1s_request_and_response(ckpts):
-    from strands_decider.infer import EngineConfig, load_mlx
-
-    assert is_decision_checkpoint(ckpts["e2b"])
-    assert not is_decision_checkpoint(ckpts["e2b"] / "config.json")
-    assert not is_decision_checkpoint("/no/such/checkpoint")
-    engine = load_mlx(str(ckpts["e2b"]), EngineConfig(device="mlx", model_name="tiny"))
+def test_the_decision_engine_serves_v1s_request_and_response_on_mlx(ckpts):
+    engine = mlx_engine(ckpts["e2b"], model_name="tiny")
     try:
-        assert isinstance(engine, MLXEngine) and engine.takes_images
+        assert isinstance(engine, DecisionEngine) and engine.takes_images
         engine.warm_up()
         response = engine.evaluate(
             SystemOneRequest(
@@ -792,12 +800,46 @@ def test_the_engine_serves_v1s_request_and_response(ckpts):
         )
         assert isinstance(response, SystemOneResponse)
         assert response.model == "tiny" and response.usage.output_tokens == 1
-        assert engine.model.config.base_model == "google/gemma-4-E2B-it"
-        assert (
-            engine.model.config.max_length == DecisionConfig.load(ckpts["e2b"]).max_length_validated
-        )
+        info = engine.describe()
+        assert (info["backend"], info["device"], info["images"]) == ("mlx-vlm", "mlx", True)
+        assert info["base_model"] == "google/gemma-4-E2B-it"
+        assert info["max_length"] == DecisionConfig.load(ckpts["e2b"]).max_length_validated
     finally:
         engine.close()
+
+
+def test_serve_on_mlx_over_http(ckpts, tmp_path):
+    """Through create_app and HTTP on --device mlx: the health check, an image request, and
+    the refusals with 422 and the interface's messages: audio, five images, and images on a
+    text-only checkpoint. The worker thread stops with the app."""
+    from fastapi.testclient import TestClient
+
+    from strands_decider import server
+
+    img = png("red")
+    app = server.create_app(str(ckpts["e2b"]), device="mlx", model_name="tiny")  # warm-up too
+    with TestClient(app) as client:
+        health = client.get("/health").json()
+        assert (health["backend"], health["device"], health["images"]) == ("mlx-vlm", "mlx", True)
+        r = client.post("/v1/systemone", json={**REQUEST, "images": [img]})
+        assert r.status_code == 200, r.text
+        assert set(r.json()["answers"]) == {"urgent", "team", "mood"}
+        r = client.post("/v1/systemone", json={**REQUEST, "audio": ["UklGRiQAAABXQVZF"]})
+        assert r.status_code == 422 and r.json()["detail"] == "audio input is not supported"
+        r = client.post("/v1/systemone", json={**REQUEST, "images": [img] * 5})
+        assert r.status_code == 422
+        assert r.json()["detail"] == "5 images; this server takes at most 4"
+        assert (
+            client.post("/v1/systemone", json={**REQUEST, "images": [img] * 4}).status_code == 200
+        )
+        backend = app.state.engine.backend
+    assert backend._executor._shutdown  # closed with the app
+    text_only = copy_of(ckpts["e2b"], tmp_path)
+    edit_json(text_only, "decision_config.json", inputs=["text"])
+    with TestClient(server.create_app(str(text_only), device="mlx", warmup=False)) as client:
+        r = client.post("/v1/systemone", json={**REQUEST, "images": [img]})
+        assert r.status_code == 422
+        assert r.json()["detail"].startswith("this checkpoint does not take images")
 
 
 def test_cli_ask_and_convert(bf16_ckpts, tmp_path, monkeypatch):
@@ -808,7 +850,7 @@ def test_cli_ask_and_convert(bf16_ckpts, tmp_path, monkeypatch):
     args = ["ask", str(bf16_ckpts["e2b"]), "--device", "mlx", "--state", "a photo", "--json"]
     result = runner.invoke(cli.app, [*args, "--noul", "Is it red ?", "--image", str(image)])
     assert result.exit_code == 0, result.output
-    answer = json.loads(result.output)["answers"]["noul_0"]
+    answer = json.loads(result.stdout)["answers"]["noul_0"]
     assert answer["type"] == "noul" and 0 <= answer["noul"] <= 1
     out = tmp_path / "mlx8"
     result = runner.invoke(
@@ -819,7 +861,7 @@ def test_cli_ask_and_convert(bf16_ckpts, tmp_path, monkeypatch):
     args[1] = str(out)  # the artifact, through the CLI
     result = runner.invoke(cli.app, [*args, "--choice", "Which colour ?=red,blue"])
     assert result.exit_code == 0, result.output
-    assert set(json.loads(result.output)["answers"]["choice_0"]["probabilities"]) == {"red", "blue"}
+    assert set(json.loads(result.stdout)["answers"]["choice_0"]["probabilities"]) == {"red", "blue"}
 
 
 # ---- paths, conversion failures, bounds, notices -------------------------------------------------
@@ -963,3 +1005,31 @@ def test_image_decoding_and_the_queue_are_bounded(backends, monkeypatch):
         b.forward(STATE, QUESTIONS[:1])
     gate.set()
     first.join()
+
+
+# ---- against the transformers backend ---------------------------------------------------------
+
+
+@pytest.mark.parametrize("kind", ["gemma4", "gemma4-vision", "unified"])
+def test_answers_as_the_transformers_backend_does(kind, tmp_path):
+    """The transformers backend's own tiny checkpoints (tests/decision_support.py: E2B's,
+    the 31B's and the 12B's designs, a 2-token window, config.json as transformers 5.2x
+    writes it) give the same answers on both backends in float32, with images."""
+    import decision_support as ds
+
+    path = ds.decision_checkpoint(tmp_path / kind, kind)
+    req = ds.request([ds.image_b64(64, 48), ds.image_b64(90, 120, "JPEG")])
+    out = {}
+    for device in ("cpu", "mlx"):
+        engine = load_decision_engine(str(path), device=device, dtype="float32")
+        try:
+            out[device] = engine.evaluate(req).model_dump()
+        finally:
+            engine.close()
+    assert out["cpu"]["usage"] == out["mlx"]["usage"]
+    for name, a in out["cpu"]["answers"].items():
+        b = out["mlx"]["answers"][name]
+        pa = a.get("probabilities") or {"p": a["noul"]}
+        pb = b.get("probabilities") or {"p": b["noul"]}
+        assert pa.keys() == pb.keys()
+        assert max(abs(pa[k] - pb[k]) for k in pa) < 2e-3, (name, pa, pb)
