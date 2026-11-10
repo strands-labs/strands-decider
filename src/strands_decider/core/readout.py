@@ -123,11 +123,12 @@ def round_to_bf16(x: Any) -> np.ndarray:
     value past bf16's largest finite becomes inf, as in torch and CUDA's conversion. NaN
     stays NaN.
     """
-    a = np.asarray(x, dtype=np.float32)
-    u = np.atleast_1d(a).view(np.uint32).astype(np.uint64)  # 64 bits: the add cannot wrap
+    # Annotated as plain arrays: numpy's stubs type these operations differently by version.
+    a: np.ndarray = np.asarray(x, dtype=np.float32)
+    u: np.ndarray = np.atleast_1d(a).view(np.uint32).astype(np.uint64)  # the add cannot wrap
     u = (u + ((u >> np.uint64(16)) & np.uint64(1)) + np.uint64(0x7FFF)) & np.uint64(0xFFFF0000)
-    out = u.astype(np.uint32).view(np.float32).reshape(a.shape)
-    out = np.where(np.isnan(a), np.float32(np.nan), out).astype(np.float32)
+    rounded: np.ndarray = u.astype(np.uint32).view(np.float32).reshape(a.shape)
+    out: np.ndarray = np.where(np.isnan(a), np.float32(np.nan), rounded).astype(np.float32)
     return out
 
 
