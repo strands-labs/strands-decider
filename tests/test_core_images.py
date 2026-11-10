@@ -56,6 +56,7 @@ from strands_decider.core.images import (
 )
 
 COULD_NOT_READ = "image could not be read as PNG/JPEG/WEBP/GIF: "
+NOT_BASE64 = "image is not valid base64: "
 
 
 def _b64(data: bytes) -> str:
@@ -462,8 +463,9 @@ def test_headers_match_pillow():
 
 def test_validation_matches_v1():
     """The same requests accepted and refused as by v1's `vision.decode_image`, which opens
-    and decodes the image with Pillow, with v1's messages: exactly for base64 and the pixel
-    limit, and up to v1's prefix where v1 passes on Pillow's own words."""
+    and decodes the image with Pillow, with v1's messages: exactly for the pixel limit, and
+    up to v1's prefix where v1 passes on Python's or Pillow's own words, for base64 (whose
+    reasons are the core's own, by the spec's rule) and for headers."""
     pytest.importorskip("PIL")
     pytest.importorskip("torch")
     try:
@@ -494,6 +496,8 @@ def test_validation_matches_v1():
             pass  # the header is sound and the pixels are not: the runtime finds that out
         elif v1_error.startswith(COULD_NOT_READ):
             assert error is not None and error.startswith(COULD_NOT_READ), (data[:40], error)
+        elif v1_error.startswith(NOT_BASE64):
+            assert error is not None and error.startswith(NOT_BASE64), (data[:40], error)
         else:
             assert error == v1_error, data[:40]
 
