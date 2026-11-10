@@ -71,7 +71,8 @@ def test_register_on_another_vllm_warns_and_registers_nothing(monkeypatch, caplo
     (record,) = [r for r in caplog.records if r.name == "vllm.strands_decider"]
     assert record.levelno == logging.WARNING
     message = record.getMessage()
-    assert repr(version) in message and "registered nothing" in message and plugin.ARCH in message
+    assert repr(version) in message and "registered nothing" in message
+    assert all(arch in message for arch in plugin.ARCHS)
 
 
 def test_installed_vllm_is_supported():

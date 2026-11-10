@@ -1,5 +1,5 @@
 """Startup checks on real vLLM configs: engine settings under which prefix_bidir would be served incorrectly, or under
-which one request could stop the engine, are refused.
+which one request could stop the engine, are refused, for either layout (the checkpoint's config.json decides which).
 
 The configs are built by vLLM's own ``EngineArgs.create_engine_config`` from a checkpoint directory (only its
 config.json and tokenizer are read), so ``check_config`` reads the attributes vLLM really sets: a renamed attribute
@@ -15,14 +15,33 @@ import os
 import pytest
 
 model = pytest.importorskip("strands_decider_vllm.model")
-from strands_decider_vllm import ARCH  # noqa: E402
+import json  # noqa: E402
+from pathlib import Path  # noqa: E402
+
+from strands_decider_vllm import ARCH_FOR_BASE  # noqa: E402
 
 CHECKPOINT = os.environ.get("STRANDS_DECIDER_TEST_CHECKPOINT")
 pytestmark = pytest.mark.skipif(not CHECKPOINT, reason="STRANDS_DECIDER_TEST_CHECKPOINT is not set")
 
+
+def _layout():
+    """The plugin's architecture for the checkpoint, and the --hf-overrides that turn the base's "vision" mode off:
+    nested under text_config for the multimodal layout, at the top level for a bare decoder."""
+    if not CHECKPOINT:
+        return None, {}
+    cfg = json.loads((Path(CHECKPOINT) / "config.json").read_text())
+    arch = ARCH_FOR_BASE[cfg["architectures"][0]]
+    if "text_config" in cfg:
+        return arch, {"text_config": {"use_bidirectional_attention": None}}, cfg["text_config"]
+    return arch, {"use_bidirectional_attention": None}, cfg
+
+
+ARCH_, VISION_OFF, TEXT_CONFIG = _layout() if CHECKPOINT else (None, {}, {})
+MULTIMODAL = ARCH_ is not None and "text_config" in VISION_OFF
+
 #: The README's serving flags, at an 8,192-token context.
 BASE = dict(
-    hf_overrides={"architectures": [ARCH], "use_bidirectional_attention": None},
+    hf_overrides={"architectures": [ARCH_], **VISION_OFF},
     dtype="bfloat16",
     seed=0,
     max_model_len=8192,
@@ -154,6 +173,36 @@ def test_model_runner_v1_is_refused(monkeypatch):
 def test_every_problem_is_reported_at_once():
     message = refused(engine_config(enable_chunked_prefill=True, logprobs_mode="raw_logprobs"))
     assert message.count("\n  - ") == 2
+
+
+@pytest.mark.skipif(
+    TEXT_CONFIG.get("use_bidirectional_attention") != "vision",
+    reason='the checkpoint\'s base has no "vision" mode (12B, 26B-A4B and 31B do)',
+)
+def test_the_bases_vision_mode_left_on_is_refused_with_the_override_to_add():
+    config = engine_config(hf_overrides={"architectures": [ARCH_]})
+    problem = refused(config)
+    want = (
+        '"text_config": {"use_bidirectional_attention": null}'
+        if MULTIMODAL
+        else '"use_bidirectional_attention": null'
+    )
+    assert "multimodal PrefixLM mode is on" in problem and want in problem
+
+
+@pytest.mark.skipif(not MULTIMODAL, reason="the checkpoint is not in the multimodal layout")
+def test_the_multimodal_layout_serves_with_images_and_without():
+    for limits in ({"image": 4, "video": 0, "audio": 0}, {"image": 0, "video": 0, "audio": 0}):
+        config = engine_config(limit_mm_per_prompt=limits)
+        model.check_config(config)
+        assert not config.model_config.is_mm_prefix_lm
+
+
+@pytest.mark.skipif(not MULTIMODAL, reason="the checkpoint is not in the multimodal layout")
+def test_an_encoder_cache_connector_is_refused():
+    config = engine_config()
+    set_attr(config, "ec_transfer_config", object())
+    assert "encoder-cache connectors" in refused(config)
 
 
 def test_xxhash_is_allowed_without_prefix_caching():
