@@ -1,0 +1,30 @@
+From 6b03d38d8291854f21a773f1eed96e7435440198 Mon Sep 17 00:00:00 2001
+From: Jonathan Buck <jonathan.j.buck@gmail.com>
+Date: Tue, 10 Nov 2026 00:37:32 +0000
+Subject: [PATCH 2/2] convert : do not take Strands Decider checkpoints for
+ pplx-decider ones
+
+---
+ conversion/pplx_decider.py | 6 ++++--
+ 1 file changed, 4 insertions(+), 2 deletions(-)
+
+diff --git a/conversion/pplx_decider.py b/conversion/pplx_decider.py
+index b71bd8a3a..f560ef695 100644
+--- a/conversion/pplx_decider.py
++++ b/conversion/pplx_decider.py
+@@ -19,8 +19,10 @@ def _is_pplx_decider_checkpoint(dir_model: Path) -> bool:
+     if not all((dir_model / name).is_file() for name in ("decision_config.json", "readout.safetensors", "config.json")):
+         return False
+     with open(dir_model / "decision_config.json", encoding="utf-8") as f:
+-        # the same layout with a format_id is a vllm-d3 checkpoint
+-        return "format_id" not in json.load(f)
++        decision = json.load(f)
++    # the same layout with a format_id is a vllm-d3 checkpoint, and with interface "strands-decider" a
++    # Strands Decider checkpoint, whose own config.json names its architecture
++    return "format_id" not in decision and decision.get("interface") != "strands-decider"
+ 
+ 
+ @ModelBase.register_hparams_loader(_is_pplx_decider_checkpoint)
+-- 
+2.34.1
+
