@@ -16,7 +16,15 @@ from typing import TYPE_CHECKING
 from .codes import CODES
 from .config import DecisionConfig
 from .images import IMAGE_CLOSE, IMAGE_OPEN, IMAGE_SOFT
-from .prompt import BOS, TURN_CLOSE, TURN_OPEN, _make_plain_text_copy, plain_text_tokenizer
+from .prompt import (
+    BOS,
+    TURN_CLOSE,
+    TURN_OPEN,
+    _make_plain_text_copy,
+    _restore_settings,
+    plain_text_tokenizer,
+    release_plain_text_tokenizer,
+)
 
 if TYPE_CHECKING:
     from tokenizers import Tokenizer
@@ -102,12 +110,21 @@ def check_tokenizer(
         )
     # Encoded as request text is: plain text, special-token matching off, by a fresh copy,
     # which also refuses a tokenizer with added tokens that are not special.
-    copy = plain_text_tokenizer(tokenizer) if hand_over else _make_plain_text_copy(tokenizer)
+    if hand_over:
+        saved = (tokenizer.encode_special_tokens, tokenizer.padding, tokenizer.truncation)
+        copy = plain_text_tokenizer(tokenizer)
+    else:
+        copy = _make_plain_text_copy(tokenizer)
     encoded = [list(e.ids) for e in copy.encode_batch(list(CODES), add_special_tokens=False)]
     bad = [
         c for c, ids, want in zip(CODES, encoded, config.token_ids, strict=True) if ids != [want]
     ]
     if bad:
+        if hand_over:
+            # A hand-over whose check fails changes nothing: the core lets go of the
+            # tokenizer and its settings are restored.
+            release_plain_text_tokenizer(tokenizer)
+            _restore_settings(tokenizer, *saved)
         shown = {c: encoded[CODES.index(c)] for c in bad[:5]}
         raise ValueError(
             f"the tokenizer does not encode codes {bad[:5]}{'...' if len(bad) > 5 else ''} as "

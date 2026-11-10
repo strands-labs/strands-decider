@@ -1630,6 +1630,38 @@ def test_the_checkpoints_tokenizer_is_checked_at_load(tmp_path):
     prompt.release_plain_text_tokenizer(handed)
 
 
+def test_a_hand_over_whose_code_check_fails_changes_nothing(monkeypatch):
+    """check_tokenizer(..., hand_over=True) hands the tokenizer over before it checks how the
+    codes encode. If that check fails, the core lets go of it and its settings are restored,
+    so a failed load pins no tokenizer and leaves the caller's as it was."""
+    from tokenizers import Tokenizer
+
+    from strands_decider.core import DecisionConfig
+    from strands_decider.core import tokenizer as core_tokenizer
+    from strands_decider.core.prompt import _OWNED
+
+    tok = gemma4_tokenizer()
+    cfg = DecisionConfig.from_dict(decision_config_fixture())
+    own = Tokenizer.from_str(tok.to_str())
+    before = (own.encode_special_tokens, own.padding, own.truncation)
+    real = core_tokenizer.plain_text_tokenizer
+
+    class WrongCodes:
+        """The handed-over tokenizer, encoding every code as the wrong id."""
+
+        def __init__(self, t):
+            self.t = t
+
+        def encode_batch(self, texts, add_special_tokens=False):
+            return [type("E", (), {"ids": [0]})() for _ in texts]
+
+    monkeypatch.setattr(core_tokenizer, "plain_text_tokenizer", lambda t: WrongCodes(real(t)))
+    with pytest.raises(ValueError, match="does not encode codes"):
+        core_tokenizer.check_tokenizer(own, cfg, hand_over=True)
+    assert id(own) not in _OWNED
+    assert (own.encode_special_tokens, own.padding, own.truncation) == before
+
+
 # ---- conformance with Gemma 4's chat templates, and with v1 ---------------------------------
 
 # sha256 of each Gemma 4 base model's chat_template.jinja seen, and what its generation prompt
