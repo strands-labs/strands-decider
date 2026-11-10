@@ -32,10 +32,8 @@ from collections.abc import Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Any
 
-from tokenizers import Tokenizer
-
 from strands_decider.backends.llama_cpp import LlamaCppBackend
-from strands_decider.core import DecisionConfig, Readout, evaluate
+from strands_decider.core import DecisionConfig, Readout, evaluate, load_tokenizer
 from strands_decider.core.config import IMAGE
 
 log = logging.getLogger("decider")
@@ -86,10 +84,11 @@ class Model:
     def __init__(self, model_dir: str, max_request_tokens: int | None):
         started = time.perf_counter()
         # The checkpoint's own files, validated before the model loads: a decision_config.json
-        # without `"interface": "strands-decider"`, or without the soft-cap, is refused here.
+        # without `"interface": "strands-decider"`, or without the soft-cap, is refused here, and
+        # so is a tokenizer that does not give the config's code and control token ids.
         self.config = DecisionConfig.load(model_dir)
         self.readout = Readout.load(model_dir, self.config)
-        self.tokenizer = Tokenizer.from_file(os.path.join(model_dir, "tokenizer.json"))
+        self.tokenizer = load_tokenizer(model_dir, self.config)
         with open(os.path.join(model_dir, "artifact.json"), encoding="utf-8") as f:
             self.artifact = json.load(f)
         self.name = str(self.artifact["model_name"])

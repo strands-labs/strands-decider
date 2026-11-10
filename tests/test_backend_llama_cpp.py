@@ -11,54 +11,29 @@ from __future__ import annotations
 
 import base64
 import ctypes
+import hashlib
 import io
 import json
 
 import numpy as np
 import pytest
-from core_support import IMAGE_FILES, SOFT_TOKENS, image_bytes
+from core_support import FIXTURES, IMAGE_FILES, image_bytes
 
 from strands_decider.backends import llama_cpp
 from strands_decider.backends.llama_cpp import (
     CONTROL_IDS,
     LlamaCppBackend,
-    check_processor_config,
     decode_pixels,
     prepare_pixels,
-    target_size,
 )
-from strands_decider.core import HIDDEN, RenderedImage, decode_image, soft_tokens
+from strands_decider.core import HIDDEN, RenderedImage, decode_image, resized_size, soft_tokens
 
 Image = pytest.importorskip("PIL.Image")
 BOI, SOFT, EOI = CONTROL_IDS["<|image>"], CONTROL_IDS["<|image|>"], CONTROL_IDS["<image|>"]
 N_EMBD, N_EMBD_INP = 6, 4
 
 
-# ---- the image's size and pixels ------------------------------------------------------------
-
-
-def test_target_size_gives_the_cores_soft_tokens_for_every_tabled_size():
-    rows = json.loads(SOFT_TOKENS.read_text(encoding="utf-8"))["rows"]
-    assert len(rows) >= 3000
-    for w, h, n, _ in rows:  # width, height, then N from the two processors, which agree
-        tw, th = target_size(w, h)
-        assert tw % 48 == 0 and th % 48 == 0 and tw * th <= 645120, (w, h)
-        assert (tw // 48) * (th // 48) == n == soft_tokens(w, h), (w, h)
-
-
-@pytest.mark.parametrize(
-    ("w", "h", "size"),
-    [(448, 448, (768, 768)), (64, 48, (912, 672)), (640, 480, (912, 672)), (1, 100, (48, 8016)),
-     (100000, 1, (13440, 48)), (4096, 4096, (768, 768))],
-)  # fmt: skip
-def test_target_size_examples(w, h, size):
-    assert target_size(w, h) == size
-    assert target_size(h, w) == size[::-1]
-
-
-def test_target_size_refuses_an_empty_image():
-    with pytest.raises(ValueError):
-        target_size(0, 10)
+# ---- the image's pixels -----------------------------------------------------------------------
 
 
 def _encode(img, fmt: str, **kw) -> bytes:
@@ -67,23 +42,56 @@ def _encode(img, fmt: str, **kw) -> bytes:
     return buf.getvalue()
 
 
+def _request_image(data: bytes) -> RenderedImage:
+    e = decode_image(base64.b64encode(data).decode())
+    return RenderedImage(data, e.format, e.width, e.height, e.sha256, 1, e.tokens)
+
+
 @pytest.mark.parametrize("name", sorted(IMAGE_FILES))
-def test_prepare_pixels_is_pillows_bicubic_resize_to_the_processors_size(name):
+def test_prepared_pixels_are_the_goldens(name):
+    """Decoded and resized to the bytes of tests/fixtures/core/image_pixels.json (docs/spec.md,
+    Images): the decode, the orientation, and Pillow's bicubic resize to resized_size's size."""
+    golden = json.loads((FIXTURES / "image_pixels.json").read_text(encoding="utf-8"))["images"][
+        name
+    ]
     data = image_bytes(name)
-    img = decode_pixels(data)
-    prepared = prepare_pixels(data)
-    assert prepared.mode == "RGB" and prepared.size == target_size(*img.size)
-    want = img.resize(prepared.size, Image.Resampling.BICUBIC)
-    assert prepared.tobytes() == want.tobytes()
-    # The soft tokens of the prepared size are the core's N for the file, whatever its orientation.
+    decoded = decode_pixels(data)
+    assert list(decoded.size) == golden["decoded"]
+    assert hashlib.sha256(decoded.tobytes()).hexdigest() == golden["decoded_sha256"]
+    prepared = prepare_pixels(_request_image(data))
+    assert prepared.mode == "RGB" and list(prepared.size) == golden["resized"]
+    assert prepared.size == resized_size(*decoded.size)
+    assert hashlib.sha256(prepared.tobytes()).hexdigest() == golden["resized_sha256"]
     w, h = prepared.size
-    assert (w // 48) * (h // 48) == decode_image(base64.b64encode(data).decode()).tokens
+    assert (w // 48) * (h // 48) == _request_image(data).tokens
+
+
+@pytest.mark.parametrize("size", [(1080, 2400), (2400, 1080), (3000, 2000), (640, 40)])
+def test_the_resize_is_the_width_then_the_height(size):
+    """Each pass its own call, as the spec's rule says: Pillow 13 does the height's pass first,
+    in one call, when the height shrinks by more than twice as much as the width."""
+    img = Image.new("RGB", size)
+    img.putdata(
+        [
+            ((x * 7 + y) % 256, (x * y) % 256, (x + 3 * y) % 256)
+            for y in range(size[1])
+            for x in range(size[0])
+        ]
+    )
+    prepared = prepare_pixels(_request_image(_encode(img, "PNG")))
+    w, h = resized_size(*size)
+    want = img.resize((w, size[1]), Image.Resampling.BICUBIC).resize(
+        (w, h), Image.Resampling.BICUBIC
+    )
+    assert prepared.size == (w, h) and prepared.tobytes() == want.tobytes()
 
 
 def test_decode_pixels_applies_the_exif_orientation():
     raw = Image.open(io.BytesIO(image_bytes("rotated-80x40.jpg")))
     assert raw.size == (80, 40)
     assert decode_pixels(image_bytes("rotated-80x40.jpg")).size == (40, 80)
+    # Resized to the decoded shape, not the header's.
+    assert prepare_pixels(_request_image(image_bytes("rotated-80x40.jpg"))).size == (528, 1104)
 
 
 def test_decode_pixels_puts_transparency_on_white_and_takes_the_first_frame():
@@ -106,18 +114,15 @@ def test_decode_pixels_refuses_with_v1s_messages():
         decode_pixels(cut)
 
 
-def test_check_processor_config(tmp_path):
-    good = {"image_processor": {"patch_size": 16, "pooling_kernel_size": 3, "max_soft_tokens": 280}}
-    (tmp_path / "ok.json").write_text(json.dumps(good))
-    check_processor_config(tmp_path / "ok.json")
-    for key, value in [("patch_size", 14), ("pooling_kernel_size", 2), ("max_soft_tokens", 70)]:
-        bad = {"image_processor": {**good["image_processor"], key: value}}
-        (tmp_path / "bad.json").write_text(json.dumps(bad))
-        with pytest.raises(ValueError, match=key):
-            check_processor_config(tmp_path / "bad.json")
-    (tmp_path / "none.json").write_text(json.dumps({"image_processor": None}))
-    with pytest.raises(ValueError, match="no image processor"):
-        check_processor_config(tmp_path / "none.json")
+def test_a_decoded_size_that_is_not_the_headers_is_refused():
+    small, large = (
+        _encode(Image.new("RGB", (16, 8)), "PNG"),
+        _encode(Image.new("RGB", (32, 8)), "PNG"),
+    )
+    forged = RenderedImage(large, "PNG", 16, 8, "0" * 64, 1, soft_tokens(16, 8))
+    assert prepare_pixels(_request_image(small)).size == resized_size(16, 8)
+    with pytest.raises(ValueError, match=r"^image could not be decoded: its pixels are 32x8"):
+        prepare_pixels(forged)
 
 
 # ---- the backend over a stand-in shim --------------------------------------------------------
@@ -298,13 +303,13 @@ def test_images_reach_the_shim_prepared_and_in_order(shim, processor_config):
     assert call["rows"] == [im.tokens for im in images] == [266, soft_tokens(80, 40), 266]
     # Each distinct file is prepared and encoded once, at the processor's size, the EXIF
     # orientation applied (the JPEG is shown 40 x 80); its rows go in the images' order.
-    assert shim.encoded == [target_size(64, 48), target_size(40, 80)]
+    assert shim.encoded == [resized_size(64, 48), resized_size(40, 80)]
     rows = np.array(call["embd"], dtype=np.float32).reshape(-1, N_EMBD_INP)
     second = 266 + soft_tokens(80, 40)
     assert rows[0, 0] == 1000 and rows[266, 0] == 2000 and rows[second, 0] == 1000
     assert [t["size"] for t in backend.last_timings["images"]] == [
-        list(target_size(64, 48)),
-        list(target_size(40, 80)),
+        list(resized_size(64, 48)),
+        list(resized_size(40, 80)),
     ]
 
 

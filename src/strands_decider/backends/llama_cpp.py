@@ -15,9 +15,10 @@ each question's last token. The core's readout does the rest:
     evaluate(request, tokenizer, readout, config, backend)
 
 Images are prepared as section 11.1 says: decoded as v1 decodes them (first frame, EXIF
-orientation, transparency onto white, RGB), resized with Pillow's bicubic resampling to section
-3.2's size, and handed to the vision tower at that size, which mtmd then copies unchanged and
-scales to [0, 1]. Its count of soft tokens is checked against the core's N.
+orientation, transparency onto white, RGB), resized with Pillow's bicubic resampling, width then
+height, to the size the image processor gives the decoded image, and handed to the vision tower at
+that size, which mtmd then copies unchanged and scales to [0, 1]. Its count of soft tokens is
+checked against the core's N.
 
 Torch-free: numpy, the standard library and, for images only, Pillow.
 """
@@ -26,8 +27,6 @@ from __future__ import annotations
 
 import ctypes
 import io
-import json
-import math
 import os
 import threading
 import time
@@ -45,6 +44,8 @@ from ..core.images import (
     MAX_SOFT_TOKENS,
     PATCH_SIZE,
     POOLING_KERNEL_SIZE,
+    check_decoded_size,
+    check_image_processor,
 )
 from ..core.readout import HIDDEN
 
@@ -55,13 +56,6 @@ if TYPE_CHECKING:
 
 # The three image control tokens by id (docs/spec.md, From text to token ids).
 CONTROL_IDS = {IMAGE_OPEN: 255999, IMAGE_SOFT: 258880, IMAGE_CLOSE: 258882}
-# The image processor settings N depends on (docs/spec.md, The state block), which a checkpoint's
-# processor_config.json must give for this runtime to take images (The checkpoint layout).
-PROCESSOR_SETTINGS = {
-    "patch_size": PATCH_SIZE,
-    "pooling_kernel_size": POOLING_KERNEL_SIZE,
-    "max_soft_tokens": MAX_SOFT_TOKENS,
-}
 # v1's messages for a file that passes the header checks but not Pillow (vision.decode_image).
 NOT_READABLE = f"image could not be read as {'/'.join(IMAGE_FORMATS)}: {{}}"
 NOT_DECODABLE = "image could not be decoded: {}"
@@ -93,24 +87,6 @@ _ENCODE_ERRORS = {
 }
 
 
-def target_size(width: int, height: int) -> tuple[int, int]:
-    """(W, H): the size Gemma 4's image processor resizes a `width` x `height` image to, keeping
-    its aspect ratio, with sides multiples of 48 and at most 280 soft tokens (docs/spec.md, The
-    state block). `strands_decider.core.soft_tokens` gives (W / 48) * (H / 48) for the same size."""
-    if not (isinstance(width, int) and isinstance(height, int)) or width < 1 or height < 1:
-        raise ValueError(f"an image is at least 1 x 1 pixels, not {width!r} x {height!r}")
-    side = POOLING_KERNEL_SIZE * PATCH_SIZE
-    target_px = MAX_SOFT_TOKENS * POOLING_KERNEL_SIZE**2 * PATCH_SIZE**2
-    f = math.sqrt(target_px / (height * width))
-    h = math.floor(f * height / side) * side
-    w = math.floor(f * width / side) * side
-    if h == 0:
-        h, w = side, min(math.floor(width / height) * side, MAX_SOFT_TOKENS * side)
-    elif w == 0:
-        w, h = side, min(math.floor(height / width) * side, MAX_SOFT_TOKENS * side)
-    return w, h
-
-
 def decode_pixels(data: bytes) -> Image.Image:
     """An image file as v1 decodes it (`strands_decider.vision.decode_image`): the first frame of
     an animated file, its EXIF orientation applied, transparent areas composited onto white, as RGB.
@@ -133,31 +109,22 @@ def decode_pixels(data: bytes) -> Image.Image:
     return img.convert("RGB")
 
 
-def prepare_pixels(data: bytes) -> Image.Image:
-    """An image file, decoded (`decode_pixels`) and resized with Pillow's bicubic resampling to
-    the size the image processor gives it (`target_size`): what the vision tower reads (docs/spec.md,
-    Images, steps 1 and 2)."""
+def prepare_pixels(image: RenderedImage) -> Image.Image:
+    """A request image's file, decoded (`decode_pixels`), its decoded size checked against its
+    header (`strands_decider.core.check_decoded_size`), and resized with Pillow's bicubic
+    resampling to the W x H the image processor gives the decoded size: what the vision tower
+    reads (docs/spec.md, Images, steps 1 and 2). The resize is the spec's two passes, the width's
+    and then the height's, each a call of its own: Pillow 13 does the height's first, in one
+    call, when the height shrinks by more than twice as much as the width."""
     from PIL import Image
 
-    img = decode_pixels(data)
-    size = target_size(*img.size)
-    return img if img.size == size else img.resize(size, Image.Resampling.BICUBIC)
-
-
-def check_processor_config(path: str | os.PathLike[str]) -> None:
-    """Refuse a processor_config.json whose image processor sets patch_size, pooling_kernel_size
-    or max_soft_tokens other than docs/spec.md's: N would then differ from the core's."""
-    with open(path, encoding="utf-8") as f:
-        cfg = json.load(f)
-    image = cfg.get("image_processor", cfg) if isinstance(cfg, dict) else None
-    if not isinstance(image, dict):
-        raise ValueError(f"{os.fspath(path)} has no image processor")
-    wrong = {k: image.get(k) for k, v in PROCESSOR_SETTINGS.items() if image.get(k) != v}
-    if wrong:
-        raise ValueError(
-            f"{os.fspath(path)}: the image processor sets {wrong}; this runtime counts soft "
-            f"tokens for {PROCESSOR_SETTINGS}"
-        )
+    img = decode_pixels(image.data)
+    w, h = check_decoded_size(image, *img.size)
+    if img.width != w:
+        img = img.resize((w, img.height), Image.Resampling.BICUBIC)
+    if img.height != h:
+        img = img.resize((w, h), Image.Resampling.BICUBIC)
+    return img
 
 
 def _ints(xs: Sequence[int]) -> Any:
@@ -192,7 +159,7 @@ class LlamaCppBackend:
         if mmproj is not None:
             if processor_config is None:
                 raise ValueError("a vision tower needs the checkpoint's processor_config.json")
-            check_processor_config(processor_config)
+            check_image_processor(processor_config)
         lib = ctypes.CDLL(os.fspath(library))
         lib.sd_load.argtypes = [ctypes.c_char_p, ctypes.c_int, _I]
         lib.sd_load.restype = ctypes.c_void_p
@@ -283,7 +250,7 @@ class LlamaCppBackend:
         for im in images:
             started = time.perf_counter()
             if im.sha256 not in cache:
-                pixels = prepare_pixels(im.data)
+                pixels = prepare_pixels(im)
                 prepared = (time.perf_counter() - started) * 1000
                 w, h = pixels.size
                 side = POOLING_KERNEL_SIZE * PATCH_SIZE
