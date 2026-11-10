@@ -27,14 +27,18 @@ A question has a `type`, `instructions` (a string, object or array) and `criteri
 | `choice` | object of option name to description (string, object, array or null) | 2 to 255, in the object's order |
 | `score` | array of 2 to 10 level descriptions (strings), lowest level first | one per level, named `0` to `L-1` |
 
-A noul's criteria replace its default descriptions. A key that is absent keeps its default (`false`: "the statement does not hold for this state"; `true`: "the statement holds for this state"). A key given as null renders as a bare label. As in v1, a question may omit `type`: it is a noul when its criteria are absent or an object whose keys are a subset of `true` and `false`, a choice when they are any other object, and a score when they are an array. `strands_decider.core.parse_request` accepts and refuses exactly what v1's pydantic models accept and refuse, except that it refuses a non-empty `audio` field, which v1 ignores; `tests/test_core_prompt.py` checks it against them.
+A noul's criteria replace its default descriptions. A key that is absent keeps its default (`false`: "the statement does not hold for this state"; `true`: "the statement holds for this state"). A key given as null renders as a bare label. As in v1, a question may omit `type`: it is a noul when its criteria are absent or an object whose keys are a subset of `true` and `false`, a choice when they are any other object, and a score when they are an array.
+
+The request is JSON, read as Python's `json.loads` reads it. A key that appears twice in an object keeps its last value, at the place of its first appearance. Beyond v1's checks, a request is refused when its state, an instruction, an option's name or a description holds what the template cannot render alike in every runtime (section 3.1): a number that is not finite (`NaN`, `Infinity` and `-Infinity`, which Python's parser reads), an integer of more than 4,300 digits, a string with a lone surrogate (a `\uD800` to `\uDFFF` escape that is not half of a pair, which has no UTF-8 form to tokenize), an object key that is not a string, a value that is not JSON (from a caller that builds the request in code), or nesting more than 100 levels deep. A scalar is at level 0, and an object or an array is one level deeper than the deepest value in it, so `[[1]]` is 2 levels deep. v1 renders `NaN` and `Infinity` as those words, which are not JSON; Python 3.10.7 and later refuse such integers already; and v1 renders deeper nesting until, past about 1,000 levels, it fails with a `RecursionError` (an HTTP 500). The fixed lower limit is one every runtime can meet.
+
+`strands_decider.core.parse_request` accepts and refuses exactly what v1's pydantic models accept and refuse, except for the refusals of the paragraph above and a non-empty `audio` field, which v1 ignores; `tests/test_core_prompt.py` checks it against them.
 
 ### 1.1 Images
 
 After the request's types are checked, its images are checked as v1's image engine checks them (`src/strands_decider/vision.py`, `decode_image`), in this order and with v1's messages, except for base64 (step 2):
 
 1. More than 4 images: `{n} images; this server takes at most 4`. The count is checked before any image is decoded.
-2. Each string loses its leading and trailing whitespace (Python's `str.strip`), then a prefix that matches `^data:image/[\w.+-]+;base64,`, whatever subtype it names. The rest must be standard base64 (RFC 4648, section 4) and nothing else: only the 64 characters `A`–`Z`, `a`–`z`, `0`–`9`, `+` and `/`, in groups of four, the last group padded with `=` or `==` when it is short, with no whitespace or line break inside and no URL-safe alphabet. Non-zero bits before the padding are accepted. Otherwise: `image is not valid base64: {reason}`, where the reason is `a character that is not ASCII`, `a character outside the standard base64 alphabet` or `its length or padding is wrong`. This rule does not follow Python's `base64.b64decode(s, validate=True)`, which accepts different strings, and gives different messages, on Python 3.10, 3.11, 3.12 and 3.13; it is what 3.12 accepts.
+2. Each string loses its leading and trailing whitespace (section 3.1's 29 code points, which are Python's `str.strip`'s), then a prefix that matches `^data:image/[A-Za-z0-9_.+-]+;base64,`, whatever subtype it names. v1's prefix is `[\w.+-]+`, whose `\w` follows the interpreter's Unicode tables, so the two differ for a subtype that is not ASCII, which the core does not strip. The rest must be standard base64 (RFC 4648, section 4) and nothing else: only the 64 characters `A`–`Z`, `a`–`z`, `0`–`9`, `+` and `/`, in groups of four, the last group padded with `=` or `==` when it is short, with no whitespace or line break inside and no URL-safe alphabet. Non-zero bits before the padding are accepted. Otherwise: `image is not valid base64: {reason}`, where the reason is `a character that is not ASCII`, `a character outside the standard base64 alphabet` or `its length or padding is wrong`. This rule does not follow Python's `base64.b64decode(s, validate=True)`, which accepts different strings, and gives different messages, on Python 3.10, 3.11, 3.12 and 3.13; it is what 3.12 accepts.
 3. The decoded file is a PNG, JPEG, WebP or GIF file, by its signature, whose header gives its width and height by the rules below. Otherwise: `image could not be read as PNG/JPEG/WEBP/GIF: {reason}`. A width or a height of 0 is an error.
 4. Its width times its height is at most 4096 × 4096 = 16,777,216 pixels. Otherwise: `image is {w}x{h}; at most 16,777,216 pixels are accepted`.
 
@@ -98,7 +102,19 @@ Strands defines the template. It keeps v1's layout (`src/strands_decider/prompti
 
 ### 3.1 Rendering content
 
-A state, an instruction or a description renders as text by v1's `render_content`. A string is stripped of leading and trailing whitespace. An object or array becomes JSON from `json.dumps(value, indent=2, ensure_ascii=False, sort_keys=False)`: one item per line with a two-space indent per level, `,` ending every item but the last, `: ` after each key, keys in the request's order, and non-ASCII characters kept. Null renders as the empty string. A state is empty when it renders as the empty string: `""`, or a string of whitespace. `{}` and `[]` render as `{}` and `[]` and are not empty.
+A state, an instruction or a description renders as text by v1's `render_content`. A string is stripped of leading and trailing whitespace, and nothing else in it changes: a carriage return inside it, for one, stays. Null renders as the empty string. A state is empty when it renders as the empty string: `""`, or a string of whitespace. `{}` and `[]` render as `{}` and `[]` and are not empty.
+
+Whitespace, here and wherever this spec collapses it, is these 29 code points, which are Python's `str.isspace` on every Python from 3.10 to 3.13: U+0009 to U+000D, U+001C to U+001F, U+0020, U+0085, U+00A0, U+1680, U+2000 to U+200A, U+2028, U+2029, U+202F, U+205F and U+3000. U+200B ZERO WIDTH SPACE and U+FEFF (a byte order mark) are not whitespace and are kept.
+
+An object or an array becomes JSON as Python's `json.dumps(value, indent=2, ensure_ascii=False)` writes it:
+
+- **Layout.** An empty object is `{}` and an empty array `[]`. Otherwise the opening bracket ends its line, each member or item has a line of its own, indented two spaces per level of nesting, every member or item but the last ends with `,`, and the closing bracket has a line of its own at its container's indent. A member is its key as a string, then `: `, then its value. Keys keep the request's order.
+- **Strings**, keys included, are quoted with `"`. Seven characters are escaped by name: `"` as `\"`, `\` as `\\`, U+0008 as `\b`, U+0009 as `\t`, U+000A as `\n`, U+000C as `\f` and U+000D as `\r`. Every other code point below U+0020 is escaped as `\u00` and two lowercase hex digits (U+001F as `\u001f`). Nothing else is escaped: `/`, U+007F, U+2028, U+2029 and all non-ASCII text are written as they are.
+- **Literals** are `true`, `false` and `null`.
+- **Integers.** A JSON number written without a fraction or an exponent is an integer, written in decimal with a `-` when it is negative: `-0` is written `0`.
+- **Doubles.** Any other JSON number is a double, the IEEE 754 binary64 value nearest the number as written, ties to even, and is written as Python's `repr` writes a float: the shortest digits that read back as the same double, `d₁d₂…dₙ × 10^e` with d₁ not 0. When -4 ≤ e < 16 they are written in positional notation with at least one digit after the point: `1.0`, `1000000000000000.0`, `0.0001`, `0.30000000000000004`, `-0.0`. Otherwise they are written as d₁, then `.` and the other digits if there are any, then `e`, the exponent's sign and at least two digits of it: `1e-05`, `1.5e+16`, `1e+300`. So `1e3` is written `1000.0`, and `1.0` stays `1.0`.
+
+The requests' refusals (section 1) leave out what these rules cannot write: numbers that are not finite, integers past 4,300 digits and lone surrogates.
 
 ### 3.2 The state block
 
@@ -106,7 +122,7 @@ A state, an instruction or a description renders as text by v1's `render_content
 <state>\n{state}\n</state>\n
 ```
 
-With an empty state the content line is left out: `<state>\n</state>\n`. `\n` is one line feed (U+000A); there are no carriage returns.
+With an empty state the content line is left out: `<state>\n</state>\n`. `\n` is one line feed (U+000A). As for carriage returns, the template adds none; request text is kept as sent.
 
 Images come first, one line each in the request's order, then the state's line. This is v1's layout for Gemma 4 images:
 
@@ -176,7 +192,7 @@ Name and description each have every run of whitespace, newlines included, repla
 | empty | not empty | `{c}. — {description}` |
 | empty | empty | `{c}.` |
 
-The name is the noul label (`false`, `true`), the choice option's name, or the score level's index (`0`, `1`, ...). The description is the noul's criterion (or its default), the choice option's description, or the score level's rubric text, rendered by section 3.1. A structured description therefore becomes JSON flattened to one line: `{"from": "e1"}` gives `{ "from": "e1" }`.
+The name is the noul label (`false`, `true`), the choice option's name, or the score level's index (`0`, `1`, ...). The description is the noul's criterion (or its default), the choice option's description, or the score level's rubric text, rendered by section 3.1. A structured description therefore becomes JSON flattened to one line: `{"from": "e1"}` gives `{ "from": "e1" }`. The collapsing applies to the whole rendered text, so it reaches inside the JSON's strings: `{"a": "x  y"}` gives `{ "a": "x y" }`. A character that the JSON escapes, such as U+001F written `\u001f`, is no longer whitespace there.
 
 ### 3.5 The two variants
 
@@ -348,7 +364,7 @@ state ids [272, 287): 258882 107 77524 3104 1308 506 2430 74060 9762 236761 107 
 
 In `strands-chat` the same state part is 290 tokens, `2 105 2364 107` before `236820 3255 236813 107 255999`, and the placeholders are [9, 275). The question parts are the text-only ones.
 
-The goldens hold every question type in both variants, with structured content, an empty state, 28 options (codes to `AB`), special-token strings in the state, a ten-level score, and choice options with empty names, one with a description (`A. — no preference yet`) and one without (`B.`). They hold requests with images: one image; two of different sizes and formats, a JPEG (N = 270) and a WebP behind a `data:` prefix (N = 266); and a GIF (N = 256) with an empty state.
+The goldens hold every question type in both variants, with structured content, an empty state, 28 options (codes to `AB`), special-token strings in the state, a ten-level score, and choice options with empty names, one with a description (`A. — no preference yet`) and one without (`B.`). They hold requests with images: one image; two of different sizes and formats, a JPEG (N = 270) and a WebP behind a `data:` prefix (N = 266); and a GIF (N = 256) with an empty state. They pin section 3.1's JSON with a float, both exponent forms, a large integer, `-0.0`, `true`, `false`, `null`, every kind of escape, `/`, non-ASCII text, U+2028 and nested empty containers, in a state, in instructions and flattened in descriptions; and its whitespace with NBSP, U+2028, U+001F and U+FEFF at the edges of a state and inside options.
 
 ## 4. The state boundary S
 

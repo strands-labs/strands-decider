@@ -15,6 +15,7 @@ from __future__ import annotations
 import hashlib
 import inspect
 import json
+import math
 import os
 import random
 import subprocess
@@ -177,6 +178,71 @@ CASES: dict[str, dict] = {
         "state": "",
         "images": [image_b64("dots-50x50.gif")],
         "questions": {"dots": {"type": "noul", "instructions": "Are there dots in the image?"}},
+    },
+    # JSON as docs/spec.md writes it: numbers (a float, a whole float, both exponent forms, a
+    # large integer, -0.0), true, false, null, every kind of escape, `/`, non-ASCII text and
+    # separators kept, and empty containers nested; in the state, in instructions, and
+    # flattened to one line in a description, where whitespace collapses inside strings.
+    "json_rendering": {
+        "state": {
+            "float": 1.5,
+            "whole": 1.0,
+            "thousand": 1000.0,
+            "sum": 0.1 + 0.2,
+            "small": 0.0001,
+            "smaller": 1e-05,
+            "large": 1e15,
+            "larger": 1.5e16,
+            "huge": 1e300,
+            "negative_zero": -0.0,
+            "integer": 12345678901234567890123,
+            "negative": -42,
+            "yes": True,
+            "no": False,
+            "nothing": None,
+            "quote": 'say "hi"',
+            "backslash": "C:\\temp\\new",
+            "controls": "tab\tline\nreturn\rback\bfeed\fbell\x07unit\x1fnul\x00",
+            "delete": "del\x7f",
+            "slash": "a/b </script>",
+            "non_ascii": "café 日本語 🙂",
+            "separators": "line\u2028paragraph\u2029next\x85",
+            "empty_object": {},
+            "empty_array": [],
+            "nested": {"a": [[], {}, [1, [2.5, {}]]], "b": {"c": []}},
+        },
+        "questions": {
+            "pick": {
+                "type": "choice",
+                "instructions": {"steps": [1, 2.0, "three"], "note": "tabs\tand\nnewlines"},
+                "criteria": {
+                    "spaced": {"text": "x  y\u00a0\u00a0z", "escaped": "\u001f\t", "n": 3e-07},
+                    "listed": [True, None, [], {"k": "/"}],
+                    "plain": None,
+                },
+            }
+        },
+    },
+    # Whitespace is the spec's 29 code points: NBSP, U+2028 and U+001F are stripped from the
+    # state's edges and collapsed inside an option; U+FEFF is not whitespace and stays.
+    "whitespace_edges": {
+        "state": "\u00a0\u2028\u001f\ufeff Hello\u00a0\u00a0world\r\n \ufeff\u001f\u2028\u00a0",
+        "questions": {
+            "tone": {
+                "type": "choice",
+                "instructions": "\u2028 Which tone?\u00a0\u2028still the instructions \u001f",
+                "criteria": {
+                    "\u00a0warm\u2028\u2028and\u001fkind\u00a0": "\u001f\u00a0 friendly\u2028 tone \u00a0",
+                    "\ufeffcold\ufeff": "\u2028\u001f",
+                    "\u00a0\u2028\u001f": "\ufeff",
+                },
+            },
+            "level": {
+                "type": "score",
+                "instructions": "",
+                "criteria": ["\u0085low\u0085", "high\u3000\u3000end\u200b"],
+            },
+        },
     },
 }
 IMAGE_CASES = [n for n in CASES if CASES[n].get("images")]
@@ -341,6 +407,267 @@ def test_structured_content_follows_v1_render_content():
         '<state>\n{\n  "order": 1182,\n  "items": [\n    "lamp",\n    "cable"\n  ],\n'
         '  "status": "delivered late"\n}\n</state>\n'
     )
+
+
+# ---- JSON and whitespace, as docs/spec.md spells them out ---------------------------------
+
+
+def _spec_float(x: float) -> str:
+    """A double as the spec writes it, built from its rule rather than from repr: the
+    shortest digits that read back as the same double; positional with at least one digit
+    after the point when its first digit's decimal exponent e is in [-4, 16), else
+    d.ddde+XX with at least two exponent digits."""
+    if x == 0:
+        return "-0.0" if math.copysign(1.0, x) < 0 else "0.0"
+    for p in range(1, 18):
+        mantissa, exp = f"{abs(x):.{p - 1}e}".split("e")
+        if float(f"{mantissa}e{exp}") == abs(x):
+            break
+    digits, e = mantissa.replace(".", ""), int(exp)
+    digits = digits.rstrip("0") or "0"
+    sign = "-" if x < 0 else ""
+    if -4 <= e < 16:
+        if e >= 0:
+            whole, frac = digits[: e + 1].ljust(e + 1, "0"), digits[e + 1 :]
+        else:
+            whole, frac = "0", "0" * (-e - 1) + digits
+        return f"{sign}{whole}.{frac or '0'}"
+    head = digits[0] + ("." + digits[1:] if len(digits) > 1 else "")
+    return f"{sign}{head}e{'-' if e < 0 else '+'}{abs(e):02d}"
+
+
+_ESCAPES = {
+    '"': '\\"',
+    "\\": "\\\\",
+    "\b": "\\b",
+    "\t": "\\t",
+    "\n": "\\n",
+    "\f": "\\f",
+    "\r": "\\r",
+}
+
+
+def _spec_string(s: str) -> str:
+    return (
+        '"' + "".join(_ESCAPES.get(c, f"\\u{ord(c):04x}" if ord(c) < 0x20 else c) for c in s) + '"'
+    )
+
+
+def _spec_json(v, level: int = 0) -> str:
+    """docs/spec.md's JSON, written from its rules, independently of the json module."""
+    pad, inner = "  " * level, "  " * (level + 1)
+    if v is None:
+        return "null"
+    if v is True or v is False:
+        return "true" if v else "false"
+    if isinstance(v, int):
+        return str(v)
+    if isinstance(v, float):
+        return _spec_float(v)
+    if isinstance(v, str):
+        return _spec_string(v)
+    if not v:
+        return "{}" if isinstance(v, dict) else "[]"
+    if isinstance(v, dict):
+        items = [f"{inner}{_spec_string(k)}: {_spec_json(x, level + 1)}" for k, x in v.items()]
+        return "{\n" + ",\n".join(items) + "\n" + pad + "}"
+    return "[\n" + ",\n".join(inner + _spec_json(x, level + 1) for x in v) + "\n" + pad + "]"
+
+
+def _random_json(rng: random.Random, depth: int = 0):
+    r = rng.random()
+    if depth < 3 and r < 0.2:
+        return {
+            "".join(rng.choice('ab"\\/\n\x01é') for _ in range(3)): _random_json(rng, depth + 1)
+            for _ in range(rng.randint(0, 3))
+        }
+    if depth < 3 and r < 0.35:
+        return [_random_json(rng, depth + 1) for _ in range(rng.randint(0, 3))]
+    kind = rng.randrange(6)
+    if kind == 0:
+        return rng.choice([True, False, None])
+    if kind == 1:
+        return rng.choice([0, -1, 7, 2**64, -(10**30), rng.randint(-(10**9), 10**9)])
+    if kind == 2:
+        return struct_float(rng)
+    if kind == 3:
+        return rng.choice(
+            [
+                0.0,
+                -0.0,
+                1.0,
+                0.1,
+                1e-4,
+                9.999e-5,
+                1e15,
+                9.999e15,
+                1e16,
+                5e-324,
+                1.7976931348623157e308,
+            ]
+        )
+    alphabet = [
+        "a",
+        " ",
+        "\t",
+        "\n",
+        "\r",
+        "\x00",
+        "\x1f",
+        "\x7f",
+        '"',
+        "\\",
+        "/",
+        "é",
+        "日",
+        "\u2028",
+        "\U0001f642",
+        "\ufeff",
+    ]
+    return "".join(rng.choice(alphabet) for _ in range(rng.randint(0, 8)))
+
+
+def struct_float(rng: random.Random) -> float:
+    """A double from random bits, finite."""
+    import struct as _struct
+
+    while True:
+        x = _struct.unpack("<d", rng.getrandbits(64).to_bytes(8, "little"))[0]
+        if math.isfinite(x):
+            return x
+
+
+def test_json_renders_by_the_spec_rules():
+    """The core's JSON is the spec's, checked against an implementation of its rules that
+    does not use the json module, on random values: every kind of number, escape and
+    nesting."""
+    from strands_decider.core import render_content
+
+    rng = random.Random(31)
+    for _ in range(3000):
+        v = {"k": _random_json(rng)} if rng.random() < 0.5 else [_random_json(rng)]
+        assert render_content(v) == _spec_json(v), v
+    for x in (1e-4, 1e-5, 1e15, 1e16, 1e21, 123456789.0, 1.5e-7, -2.5e300, 0.30000000000000004):
+        assert render_content([x]) == f"[\n  {_spec_float(x)}\n]" == f"[\n  {x!r}\n]"
+    # A JSON number with a fraction or an exponent is a double; without one, an integer.
+    assert (
+        render_content(json.loads("[1e3, 1.0, -0, 100, 1E-2]"))
+        == "[\n  1000.0,\n  1.0,\n  0,\n  100,\n  0.01\n]"
+    )
+    # A key given twice keeps its last value, at the place of its first, as json.loads reads it.
+    assert render_content(json.loads('{"a": 1, "b": 2, "a": 3}')) == '{\n  "a": 3,\n  "b": 2\n}'
+
+
+def test_whitespace_is_the_specs_29_code_points():
+    """WHITESPACE is Python's str.isspace set, which is the same on every Python the core
+    runs on; stripping and collapsing by it are str.strip and str.split's."""
+    from strands_decider.core.prompt import render_content
+    from strands_decider.core.text import WHITESPACE, one_line
+
+    assert len(WHITESPACE) == 29 == len(set(WHITESPACE))
+    assert set(WHITESPACE) == {chr(c) for c in range(sys.maxunicode + 1) if chr(c).isspace()}
+    assert "\u200b" not in WHITESPACE and "\ufeff" not in WHITESPACE
+    rng = random.Random(9)
+    pool = [*WHITESPACE, "a", "b", "\u200b", "\ufeff", "é"]
+    for _ in range(2000):
+        t = "".join(rng.choice(pool) for _ in range(rng.randint(0, 12)))
+        assert render_content(t) == t.strip() and one_line(t) == " ".join(t.split()), ascii(t)
+    # Request text is kept as sent: a carriage return inside it stays.
+    s, _ = render_text({"state": "a\r\nb\r", "questions": {"q": {"instructions": "x"}}}, PLAIN)
+    assert s == BOS + "<state>\na\r\nb\n</state>\n"
+
+
+def _nested(depth: int, leaf=1):
+    v = leaf
+    for i in range(depth):
+        v = [v] if i % 2 else {"k": v}
+    return v
+
+
+@pytest.mark.parametrize(
+    ("where", "make"),
+    [
+        ("state", lambda v: {"state": {"v": v}, "questions": {"q": {"instructions": "x"}}}),
+        ("instructions", lambda v: {"state": "s", "questions": {"q": {"instructions": [v]}}}),
+        (
+            "option",
+            lambda v: {
+                "state": "s",
+                "questions": {
+                    "q": {"type": "choice", "instructions": "x", "criteria": {"a": [v], "b": None}}
+                },
+            },
+        ),
+        (
+            "option",
+            lambda v: {
+                "state": "s",
+                "questions": {
+                    "q": {"type": "noul", "instructions": "x", "criteria": {"true": [v]}}
+                },
+            },
+        ),
+    ],
+)
+def test_content_the_template_cannot_render_alike_is_refused(where, make):
+    """NaN and Infinity (which Python's JSON reads), integers past 4,300 digits, lone
+    surrogates, keys that are not strings, values that are not JSON, and nesting past 100
+    levels: refused with a ValueError, in the state, the instructions and the descriptions."""
+    for bad, match in [
+        (math.nan, "not a JSON number"),
+        (math.inf, "not a JSON number"),
+        (-math.inf, "not a JSON number"),
+        (10**4300, "4,300 digits"),
+        (-(10**4300), "4,300 digits"),
+        ("lone \ud800 surrogate", "lone surrogate"),
+        ({"\udfff": 1}, "lone surrogate"),
+        ({1: "a"}, "keys must be strings"),
+        ((1, 2), "not a JSON value"),
+        ({1.5}, "not a JSON value"),
+        (b"bytes", "not a JSON value"),
+        (_nested(100), "nested more than 100 levels"),
+    ]:
+        with pytest.raises(ValueError, match=match) as e:
+            render_text(make(bad), PLAIN)
+        assert where in str(e.value)
+    # Within the limits, they render: an array inside the request's own is one level deeper.
+    render_text(make(10**4300 - 1), PLAIN)
+    render_text(make(_nested(99)), PLAIN)
+
+
+def test_nesting_is_counted_from_the_outermost_container():
+    ok = {"state": _nested(100), "questions": {"q": {"instructions": "x"}}}
+    assert render_text(ok, PLAIN)
+    deep = {"state": _nested(101), "questions": {"q": {"instructions": "x"}}}
+    with pytest.raises(ValueError, match="nested more than 100 levels deep"):
+        render_text(deep, PLAIN)
+    # Far deeper than Python's recursion limit: still a ValueError, never a RecursionError.
+    with pytest.raises(ValueError, match="nested more than 100 levels deep"):
+        render_text({"state": _nested(100_000), "questions": {"q": {"instructions": "x"}}}, PLAIN)
+    with pytest.raises(ValueError, match="lone surrogate"):
+        render_text(
+            {
+                "state": "s",
+                "questions": {
+                    "q": {
+                        "type": "choice",
+                        "instructions": "x",
+                        "criteria": {"\ud83d": None, "b": None},
+                    }
+                },
+            },
+            PLAIN,
+        )
+    with pytest.raises(ValueError, match="lone surrogate"):
+        render_text(
+            {
+                "state": "s",
+                "questions": {
+                    "q": {"type": "score", "instructions": "x", "criteria": ["\udc00", "b"]}
+                },
+            },
+            PLAIN,
+        )
 
 
 @pytest.mark.parametrize("state", ["", "   \n\t "])

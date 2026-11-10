@@ -250,9 +250,21 @@ def test_data_uri_prefix_is_v1s():
         "DATA:image/png;base64,",
         "data:image/png,",
         "data:;base64,",
+        "data:image/\u00f1;base64,",  # the subtype is ASCII: [A-Za-z0-9_.+-]
+        "data:image/\u0660;base64,",  # an Arabic-Indic digit, which Python's \\w matches
     ):
         with pytest.raises(ValueError, match="image is not valid base64"):
             decode_image(prefix + png)
+
+
+def test_surrounding_whitespace_is_the_specs():
+    """The string is stripped of the spec's whitespace (Rendering content), Unicode's
+    included; U+FEFF is not whitespace, so a byte order mark makes it invalid base64."""
+    png = image_b64("checker-64x48.png")
+    want = image_bytes("checker-64x48.png")
+    assert decode_image(f"\u00a0\u2028 {png}\u3000\x1f\n").data == want
+    with pytest.raises(ValueError, match="not ASCII"):
+        decode_image("\ufeff" + png)
 
 
 def test_the_pixel_limit_is_v1s():
