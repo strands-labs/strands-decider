@@ -994,3 +994,16 @@ def test_mps_calls_take_turns(ckpt, kind, monkeypatch):
     monkeypatch.setattr(backend, "_decode", peak)
     got = _threads(lambda: backend.forward(state, questions), n=4)
     assert all(np.array_equal(g, want) for g in got) and peak.peak == 1
+
+
+def test_an_intermediate_checkpoints_float32_readout_is_rounded_to_bf16(tmp_path):
+    """Section 7.1: a runtime that reads an f32 readout rounds it to bf16 first."""
+    from safetensors.torch import save_file
+
+    path = intermediate_checkpoint(tmp_path / "mid")
+    w = torch.randn(255, 64, generator=torch.Generator().manual_seed(3))
+    save_file({"weight": w}, str(path / "readout.safetensors"))
+    ck = tb.Checkpoint.open(str(path))
+    assert ck.config is None and ck.warnings  # an intermediate checkpoint, its notes kept
+    assert np.array_equal(ck.readout.weight, round_to_bf16(w.numpy()))
+    assert not np.array_equal(ck.readout.weight, w.numpy())
