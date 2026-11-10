@@ -71,7 +71,8 @@ from strands_decider.core import (  # noqa: E402
     round_to_bf16,
     soft_tokens,
 )
-from strands_decider.decision import DecisionEngine, RequestRefused, load_decision_engine  # noqa: E402
+from strands_decider.decision import DecisionEngine, load_decision_engine  # noqa: E402
+from strands_decider.refusals import RequestRefused  # noqa: E402
 from strands_decider.schema import NoulQuestion, SystemOneRequest, SystemOneResponse  # noqa: E402
 
 V = 512  # vocabulary: the toy tokenizer's ids, and room for the audio and video tokens
@@ -649,7 +650,7 @@ def test_other_processor_settings_leave_no_image_path(ckpts, tmp_path):
     [
         (
             "decision_config.json",
-            {"interface": "pplx-decider"},
+            {"interface": "another-format"},
             "not a Strands Decider decision config",
         ),
         ("config.json", {"text_config.final_logit_softcapping": 50.0}, "inconsistent"),
@@ -779,7 +780,7 @@ def test_convert_refuses_what_it_cannot_write(bf16_ckpts, tmp_path):
     with pytest.raises(FileExistsError):
         convert(src, tmp_path / "full")
     q = convert(src, tmp_path / "q8", bits=8)["artifact"]
-    with pytest.raises(ValueError, match="already a quantized MLX artifact"):
+    with pytest.raises(ValueError, match="already an MLX artifact"):
         convert(q, tmp_path / "again", bits=8)
 
 
@@ -892,7 +893,7 @@ def test_a_relative_path_loads_and_converts(bf16_ckpts, tmp_path, monkeypatch):
 def test_a_failed_conversion_leaves_nothing(bf16_ckpts, tmp_path, monkeypatch):
     from strands_decider.backends import mlx_convert
 
-    def reject(source, artifact):
+    def reject(source, artifact, **kw):
         raise AssertionError("rejected")
 
     monkeypatch.setattr(mlx_convert, "verify", reject)
@@ -902,7 +903,9 @@ def test_a_failed_conversion_leaves_nothing(bf16_ckpts, tmp_path, monkeypatch):
 
 
 def test_4_bit_says_it_makes_no_conformance_claim(bf16_ckpts, tmp_path):
-    with pytest.warns(UserWarning, match="4-bit MLX artifact makes no conformance claim"):
+    with pytest.warns(
+        UserWarning, match=r"\(4-bit, group 64, affine, of .*\) makes no conformance"
+    ):
         summary = convert(bf16_ckpts["e2b"], tmp_path / "q4", bits=4)
     assert summary["quantization"]["bits"] == 4 and summary["notice"]
     with pytest.warns(UserWarning, match="no conformance claim"):
@@ -960,13 +963,65 @@ def test_forward_from_several_threads(kind, backends):
         np.testing.assert_array_equal(x, y)
 
 
-def test_image_decoding_and_the_queue_are_bounded(backends, monkeypatch):
+def _gated(backend, monkeypatch):
+    """Hold the backend's worker on each request until the returned event is set."""
+    import threading
+
+    gate = threading.Event()
+    forward = backend._forward
+    monkeypatch.setattr(backend, "_forward", lambda *a: (gate.wait(30), forward(*a))[1])
+    return gate
+
+
+def test_serve_bounds_the_queue_and_answers_503(ckpts, monkeypatch):
+    """Under serve, the engine's slots are the worker's queue: `max_concurrency` requests
+    reach the backend (one runs on the worker, the rest queue on it), and a request that finds
+    no slot within `queue_timeout` gets 503. A refusal is answered at once, even then."""
     import threading
     import time
 
+    from fastapi.testclient import TestClient
+
+    from strands_decider import server
+
+    app = server.create_app(
+        str(ckpts["e2b"]), device="mlx", max_concurrency=2, queue_timeout=0.5, warmup=False
+    )
+    with TestClient(app) as client:
+        gate = _gated(app.state.engine.backend, monkeypatch)
+        codes: list[int] = []
+        held = [
+            threading.Thread(
+                target=lambda: codes.append(client.post("/v1/systemone", json=REQUEST).status_code)
+            )
+            for _ in range(2)
+        ]
+        for t in held:
+            t.start()
+        time.sleep(0.2)  # both hold a slot: one on the worker, one queued on it
+        started = time.perf_counter()
+        r = client.post("/v1/systemone", json=REQUEST)
+        assert r.status_code == 503 and "no slot came free" in r.json()["detail"]
+        assert time.perf_counter() - started >= 0.5
+        r = client.post("/v1/systemone", json={**REQUEST, "audio": ["x"]})
+        assert r.status_code == 422  # refused before it would wait
+        gate.set()
+        for t in held:
+            t.join()
+        assert codes == [200, 200]
+        assert client.get("/health").json()["max_concurrency"] == 2
+
+
+def test_serve_decodes_images_two_requests_at_a_time(ckpts, monkeypatch):
+    import threading
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+
+    from fastapi.testclient import TestClient
+
+    from strands_decider import server
     from strands_decider.backends import mlx as backend_mlx
 
-    b = backends["e2b"]
     live, peak, lock = [0], [0], threading.Lock()
     real = backend_mlx.prepare_image
 
@@ -982,29 +1037,49 @@ def test_image_decoding_and_the_queue_are_bounded(backends, monkeypatch):
                 live[0] -= 1
 
     monkeypatch.setattr(backend_mlx, "prepare_image", counting)
-    r = render({**REQUEST, "images": [png("red")]}, TOK, "strands-plain")
-    job = (list(r.state_ids), [list(r.questions["urgent"].question_ids)], r.images)
-    from concurrent.futures import ThreadPoolExecutor
-
-    with ThreadPoolExecutor(6) as pool:
-        list(pool.map(lambda _: b.forward(*job), range(6)))
+    app = server.create_app(str(ckpts["e2b"]), device="mlx", max_concurrency=6, warmup=False)
+    with TestClient(app) as client, ThreadPoolExecutor(6) as pool:
+        req = {**REQUEST, "images": [png("red")]}
+        codes = list(
+            pool.map(lambda _: client.post("/v1/systemone", json=req).status_code, range(6))
+        )
+    assert codes == [200] * 6
     assert peak[0] == backend_mlx.DECODE_SLOTS
 
-    # One place in the queue, held by a request the worker is still running: the next waits
-    # its timeout, then is refused.
-    gate = threading.Event()
-    monkeypatch.setattr(b, "_pending", threading.BoundedSemaphore(1))
-    monkeypatch.setattr(b, "_max_pending", 1)
-    monkeypatch.setattr(b, "_queue_timeout", 0.2)
-    forward = b._forward
-    monkeypatch.setattr(b, "_forward", lambda *a: (gate.wait(10), forward(*a))[1])
-    first = threading.Thread(target=b.forward, args=(STATE, QUESTIONS[:1]))
-    first.start()
+
+def test_close_cancels_what_is_queued_and_refuses_what_comes_after(ckpts, monkeypatch):
+    import threading
+    import time
+
+    b = load_backend(ckpts["e2b"])
+    gate = _gated(b, monkeypatch)
+    results: dict[str, object] = {}
+
+    def run(name):
+        try:
+            results[name] = b.forward(STATE, QUESTIONS[:1]).shape
+        except Exception as e:
+            results[name] = e
+
+    running, queued = (
+        threading.Thread(target=run, args=("running",)),
+        threading.Thread(target=run, args=("queued",)),
+    )
+    running.start()
     time.sleep(0.1)
-    with pytest.raises(backend_mlx.BackendBusy, match="1 requests waiting or running"):
-        b.forward(STATE, QUESTIONS[:1])
+    queued.start()
+    time.sleep(0.1)
+    closer = threading.Thread(target=b.close)
+    closer.start()
+    time.sleep(0.1)
     gate.set()
-    first.join()
+    for t in (running, queued, closer):
+        t.join()
+    assert results["running"] == (1, 64)
+    assert isinstance(results["queued"], RuntimeError) and "closed before" in str(results["queued"])
+    with pytest.raises(RuntimeError, match="the MLX backend is closed"):
+        b.forward(STATE, QUESTIONS[:1])
+    b.close()  # again: nothing to do
 
 
 # ---- against the transformers backend ---------------------------------------------------------
@@ -1033,3 +1108,178 @@ def test_answers_as_the_transformers_backend_does(kind, tmp_path):
         pb = b.get("probabilities") or {"p": b["noul"]}
         assert pa.keys() == pb.keys()
         assert max(abs(pa[k] - pb[k]) for k in pa) < 2e-3, (name, pa, pb)
+
+
+# ---- second review: artifacts off mlx, images over HTTP, conversion, load ----------------------
+
+
+def test_an_mlx_artifact_is_refused_on_every_other_device(bf16_ckpts, tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from strands_decider import server
+    from strands_decider.backends.mlx_format import ARTIFACT, ARTIFACT_KEY
+
+    art = Path(convert(bf16_ckpts["e2b"], tmp_path / "bf16-artifact")["artifact"])
+    assert json.loads((art / "config.json").read_text())[ARTIFACT_KEY] == ARTIFACT
+    for device in ("cpu", "mps"):
+        with pytest.raises(ValueError, match=r"is an MLX artifact .* use --device mlx"):
+            load_decision_engine(str(art), device=device)
+    with pytest.raises(ValueError, match="is an MLX artifact"):
+        with TestClient(server.create_app(str(art), device="cpu", warmup=False)):
+            pass
+    monkeypatch.setattr(cli, "_exit_fast", False)
+    out = CliRunner().invoke(
+        cli.app, ["ask", str(art), "--state", "x", "--noul", "y?", "--device", "cpu"]
+    )
+    assert out.exit_code != 0 and "MLX artifact" in str(out.exception)
+    engine = mlx_engine(art)  # and on mlx it serves
+    try:
+        assert engine.evaluate(REQUEST).usage.output_tokens == 3
+    finally:
+        engine.close()
+
+
+def test_undecodable_images_are_422_over_http(ckpts, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from strands_decider import server
+    from strands_decider.backends import mlx as backend_mlx
+
+    broken = bytearray(base64.b64decode(png("red")))
+    idat = broken.index(b"IDAT")
+    broken[idat + 8 : idat + 20] = b"\x00" * 12  # the compressed pixels, not the header
+    with TestClient(server.create_app(str(ckpts["e2b"]), device="mlx", warmup=False)) as client:
+        r = client.post(
+            "/v1/systemone",
+            json={**REQUEST, "images": [base64.b64encode(bytes(broken)).decode("ascii")]},
+        )
+        assert r.status_code == 422 and r.json()["detail"].startswith("image could not be decoded")
+        real = backend_mlx.decode_image
+        monkeypatch.setattr(backend_mlx, "decode_image", lambda d: real(d).resize((10, 10)))
+        r = client.post("/v1/systemone", json={**REQUEST, "images": [png("red")]})
+        assert r.status_code == 422
+        assert r.json()["detail"] == (
+            "image could not be decoded: its pixels are 10x10, and its header says 64x48"
+        )
+
+
+def test_conversion_permissions_an_empty_destination_and_a_crash(bf16_ckpts, tmp_path, monkeypatch):
+    import os
+    import stat
+
+    old = os.umask(0o022)
+    try:
+        (tmp_path / "empty").mkdir()
+        art = Path(convert(bf16_ckpts["e2b"], tmp_path / "empty")["artifact"])
+    finally:
+        os.umask(old)
+    assert stat.S_IMODE(art.stat().st_mode) == 0o755  # not mkdtemp's 0700
+    assert not list(tmp_path.glob("*.partial-*"))
+
+    def crash(path, model, **kw):
+        (Path(path) / "model-00001-of-00002.safetensors").write_bytes(b"half")
+        raise OSError("disk full")
+
+    monkeypatch.setattr("mlx_vlm.utils.save_weights", crash)
+    with pytest.raises(OSError, match="disk full"):
+        convert(bf16_ckpts["e2b"], tmp_path / "crashed", bits=8)
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["empty"]
+
+
+def test_conversion_sweeps_what_a_killed_one_left(bf16_ckpts, tmp_path):
+    import os
+    import subprocess
+
+    from strands_decider.backends.mlx_convert import OWNER, PARTIAL, sweep_partials
+
+    proc = subprocess.Popen(["true"])  # a process that has exited
+    proc.wait()
+    stale, live = tmp_path / f"out{PARTIAL}stale", tmp_path / f"out{PARTIAL}live"
+    for d, pid in ((stale, proc.pid), (live, os.getpid())):
+        d.mkdir()
+        (d / OWNER).write_text(str(pid))
+        (d / "model-00001-of-00001.safetensors").write_bytes(b"x")
+    assert sweep_partials(tmp_path / "out") == [stale]
+    assert live.exists() and not stale.exists()
+    convert(bf16_ckpts["e2b"], tmp_path / "out")
+    assert (tmp_path / "out" / "config.json").exists() and live.exists()
+
+
+def test_conversion_refuses_a_quantized_artifact_that_is_not(bf16_ckpts, tmp_path, monkeypatch):
+    from strands_decider.backends import mlx_convert
+
+    monkeypatch.setattr(mlx_convert, "decoder_only", lambda model: lambda path, module: False)
+    with pytest.raises(AssertionError, match="asked for 8 bits, and no decoder layer is quantized"):
+        convert(bf16_ckpts["e2b"], tmp_path / "q8", bits=8)
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_another_mlx_vlm_is_refused_at_load(ckpts, monkeypatch):
+    import importlib.metadata
+
+    real = importlib.metadata.version
+    monkeypatch.setattr(
+        importlib.metadata, "version", lambda n: "0.7.13" if n == "mlx-vlm" else real(n)
+    )
+    with pytest.raises(RuntimeError, match=r"tested on mlx-vlm 0\.7\.12, and mlx-vlm 0\.7\.13"):
+        load_backend(ckpts["e2b"])
+
+
+def test_describe_is_computed_at_load_and_carries_the_claim(bf16_ckpts, tmp_path, monkeypatch):
+    import importlib.metadata
+
+    b = load_backend(bf16_ckpts["e2b"])
+    q4 = None
+    try:
+        monkeypatch.setattr(importlib.metadata, "version", lambda n: 1 / 0)  # no I/O after load
+        info = b.describe()
+        assert info["backend"] == "mlx-vlm" and info["mlx_vlm"] == "0.7.12"
+        assert info["dtype"] == "bfloat16" and info["conformance"]["claim"] == "bf16"
+        assert b.hidden_size == 64
+    finally:
+        b.close()
+    monkeypatch.undo()
+    with pytest.warns(UserWarning):
+        convert(bf16_ckpts["e2b"], tmp_path / "q4", bits=4)
+    with pytest.warns(UserWarning, match="no conformance claim"):
+        q4 = load_backend(tmp_path / "q4")
+    try:
+        assert q4.describe()["conformance"]["claim"] == "none"
+    finally:
+        q4.close()
+
+
+def test_a_failed_engine_build_closes_the_backend(ckpts, tmp_path, monkeypatch):
+    from strands_decider import decision
+    from strands_decider.backends import mlx as backend_mlx
+
+    path = copy_of(ckpts["e2b"], tmp_path)
+    (path / "tokenizer.json").unlink()  # read after the backend is loaded
+    built = []
+
+    def loader(p, **kw):
+        built.append(backend_mlx.load_backend(p, **kw))
+        return built[-1]
+
+    monkeypatch.setattr(decision, "_LOADERS", {**decision._LOADERS})
+    decision.register_backend(["mlx"], loader)
+    with pytest.raises(Exception, match="No such file"):  # tokenizers names no path
+        load_decision_engine(str(path), device="mlx")
+    [b] = built
+    assert b._closed and b._executor._shutdown
+
+
+def test_a_load_failure_names_the_checkpoint(ckpts, tmp_path):
+    path = copy_of(ckpts["e2b"], tmp_path, "broken")
+    edit_json(path, "config.json", **{"text_config.hidden_size": 96})
+    assert not (path / "model.safetensors.index.json").exists()  # loaded through the link view
+    with pytest.raises(ValueError) as e:
+        load_backend(path)
+    assert str(path) in str(e.value) and "strands-decider-mlx-" not in str(e.value)
+
+
+def test_device_indices(ckpts):
+    engine = load_decision_engine(str(ckpts["e2b"]), device="mlx:0")
+    engine.close()
+    with pytest.raises(ValueError, match=r"'mlx' \(or 'mlx:0'\), not 'mlx:1'"):
+        load_decision_engine(str(ckpts["e2b"]), device="mlx:1")
