@@ -173,6 +173,17 @@ IMAGE_FILES = {
     "thin-1x300.png": ("PNG", 1, 300),  # greyscale
     "offset-frame.gif": ("GIF", 25, 36),  # a 10 x 10 screen, its first frame 20 x 30 at (5, 6)
 }
+# Larger test images, for the pixel goldens of a downscale (the resize target is at most 645,120
+# pixels, so real photos and screenshots shrink): kept apart from IMAGE_FILES, which the render
+# goldens and the random requests draw on.
+DOWNSCALE_FILES = {
+    # A tall screenshot: its height shrinks by more than twice as much as its width, where one
+    # Pillow 13 resize call does the height first.
+    "tall-1080x2400.png": ("PNG", 1080, 2400),
+    "wide-1600x1000.png": ("PNG", 1600, 1000),
+    "photo-1280x960.jpg": ("JPEG", 1280, 960),  # a lossy decode, then a downscale
+}
+PIXEL_FILES = {**IMAGE_FILES, **DOWNSCALE_FILES}
 
 
 def image_bytes(name: str) -> bytes:
@@ -184,7 +195,7 @@ def image_b64(name: str, *, data_uri: bool = False) -> str:
     b64 = base64.b64encode(image_bytes(name)).decode("ascii")
     if not data_uri:
         return b64
-    mime = {"PNG": "png", "JPEG": "jpeg", "WEBP": "webp", "GIF": "gif"}[IMAGE_FILES[name][0]]
+    mime = {"PNG": "png", "JPEG": "jpeg", "WEBP": "webp", "GIF": "gif"}[PIXEL_FILES[name][0]]
     return f"data:image/{mime};base64,{b64}"
 
 
@@ -194,6 +205,8 @@ def make_image(name: str) -> bytes:
 
     from PIL import Image
 
+    if name in DOWNSCALE_FILES:
+        return _make_downscale_image(name)
     _, w, h = IMAGE_FILES[name]
     if name == "offset-frame.gif":
         w, h = 20, 30
@@ -235,6 +248,33 @@ def make_image(name: str) -> bytes:
     return data
 
 
+def _make_downscale_image(name: str) -> bytes:
+    """The larger test images, drawn with numpy and encoded with Pillow."""
+    import io
+
+    import numpy as np
+    from PIL import Image
+
+    fmt, w, h = DOWNSCALE_FILES[name]
+    yy, xx = np.mgrid[0:h, 0:w]
+    if name.startswith("tall"):  # text-like rows, a gradient and a disc: edges in both axes
+        red = ((xx // 6 + yy // 4) % 2) * ((yy // 60) % 3 == 0) * 200 + 30
+        green = yy * 255 // h
+        blue = (((xx - w / 2) ** 2 + (yy - h / 3) ** 2) < (w / 3) ** 2) * 180 + 40
+    elif name.startswith("wide"):
+        red, green, blue = xx * 255 // w, ((xx // 3) % 2) * 220 + 10, (yy // 25 % 3) * 100
+    else:  # a smooth photo-like scene, saved as JPEG
+        red, green = xx * 255 // w, yy * 255 // h
+        blue = (((xx - w / 2) ** 2 + (yy - h / 2) ** 2) < (h / 3) ** 2) * 150 + 60
+    a = np.stack([red, green, blue], axis=-1).astype(np.uint8)
+    buf = io.BytesIO()
+    if fmt == "PNG":
+        Image.fromarray(a).save(buf, format="PNG", compress_level=9)
+    else:
+        Image.fromarray(a).save(buf, format="JPEG", quality=75)
+    return buf.getvalue()
+
+
 def _offset_first_frame(gif: bytes, *, screen: tuple[int, int], offset: tuple[int, int]) -> bytes:
     """A GIF with its logical screen set to `screen` and its first frame moved to `offset`."""
     b = bytearray(gif)
@@ -250,10 +290,13 @@ def _offset_first_frame(gif: bytes, *, screen: tuple[int, int], offset: tuple[in
     return bytes(b)
 
 
-# Aspect ratios w:h where 280 h / w is a perfect square, so that f h / 48 is an integer in
-# exact arithmetic and the floor is decided by the double's last bit (docs/spec.md, The state
-# block); 280:1 is the k = 1 family above. Each at KNIFE_EDGE_SCALES, both ways round.
-KNIFE_EDGE_RATIOS = ((10, 7), (14, 5), (40, 7), (35, 32), (35, 2), (56, 5), (70, 1))
+# Aspect ratios w:h = 280:m^2, in lowest terms, where 280 h / w = m^2 is a perfect square, so
+# that f h / 48 = m in exact arithmetic and the floor is decided by the double's last bit
+# (docs/spec.md, The state block); where m divides 280, f w / 48 = 280 / m is an integer too.
+# m = 1 to 24, each at KNIFE_EDGE_SCALES, both ways round.
+KNIFE_EDGE_RATIOS = tuple(
+    (280 // math.gcd(280, m * m), m * m // math.gcd(280, m * m)) for m in range(1, 25)
+)
 KNIFE_EDGE_SCALES = (*range(1, 41), 49, 50, 64, 77, 100, 128, 200, 300, 500, 1000)
 
 
@@ -405,13 +448,14 @@ def _coefficients(in_size: int, out_size: int) -> list[tuple[int, list[int]]]:
     spec's rule (Pillow's precompute_coeffs and normalize_coeffs_8bpc)."""
     scale = in_size / out_size
     filterscale = max(scale, 1.0)
+    inverse = 1.0 / filterscale  # multiplied by, as Pillow does, not divided by
     support = 2.0 * filterscale
     out = []
     for i in range(out_size):
         center = (i + 0.5) * scale
         lo = max(int(center - support + 0.5), 0)  # int() truncates, as C's cast does
         hi = min(int(center + support + 0.5), in_size)
-        weights = [_bicubic((j + lo - center + 0.5) / filterscale) for j in range(hi - lo)]
+        weights = [_bicubic((j + lo - center + 0.5) * inverse) for j in range(hi - lo)]
         total = 0.0
         for w in weights:
             total += w
@@ -457,6 +501,47 @@ def reference_resize(img, width: int, height: int):
     return resize_image(img, width, height)
 
 
+PIXELS_DIR = FIXTURES / "pixels"
+
+
+def write_rgb_png(path, pixels) -> None:
+    """RGB pixels [h, w, 3] (uint8) as a PNG with no row filters, so that `read_rgb_png`, and
+    any runtime, reads it with zlib alone."""
+    import struct
+    import zlib
+
+    h, w, _ = pixels.shape
+    raw = b"".join(b"\x00" + pixels[y].tobytes() for y in range(h))
+
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        crc = zlib.crc32(kind + data)
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", crc)
+
+    ihdr = struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0)
+    body = chunk(b"IHDR", ihdr) + chunk(b"IDAT", zlib.compress(raw, 9)) + chunk(b"IEND", b"")
+    path.write_bytes(b"\x89PNG\r\n\x1a\n" + body)
+
+
+def read_rgb_png(path):
+    """The pixels of a `write_rgb_png` file, [h, w, 3] uint8, with zlib and numpy only."""
+    import struct
+    import zlib
+
+    import numpy as np
+
+    data = path.read_bytes()
+    w, h = struct.unpack(">II", data[16:24])
+    pos, idat = 8, b""
+    while pos < len(data):
+        (length,) = struct.unpack(">I", data[pos : pos + 4])
+        if data[pos + 4 : pos + 8] == b"IDAT":
+            idat += data[pos + 8 : pos + 8 + length]
+        pos += 12 + length
+    rows = np.frombuffer(zlib.decompress(idat), np.uint8).reshape(h, 1 + 3 * w)
+    assert not rows[:, 0].any(), "a row filter: not a write_rgb_png file"
+    return rows[:, 1:].reshape(h, w, 3)
+
+
 def _write_pixel_goldens() -> None:
     import PIL
 
@@ -465,9 +550,13 @@ def _write_pixel_goldens() -> None:
     assert PIL.__version__ == PIXELS_PILLOW, (
         f"the pixel goldens are made with Pillow {PIXELS_PILLOW}"
     )
+    import numpy as np
+
     rows = {}
-    for name in IMAGE_FILES:
+    PIXELS_DIR.mkdir(exist_ok=True)
+    for name in PIXEL_FILES:
         decoded = reference_pixels(image_bytes(name))
+        write_rgb_png(PIXELS_DIR / f"{name}.png", np.asarray(decoded))
         w, h = resized_size(*decoded.size)
         resized = reference_resize(decoded, w, h)
         rows[name] = {
@@ -480,9 +569,9 @@ def _write_pixel_goldens() -> None:
         "pillow": PIXELS_PILLOW,
         "note": (
             "For each test image: its size and the sha256 of its RGB bytes (row by row, 3 per "
-            "pixel) as v1 decodes it, then resized to (W, H) from the decoded size by the "
-            "spec's bicubic resize, width first. Generated by tests/core_support.py with "
-            "Pillow " + PIXELS_PILLOW + "."
+            "pixel) as v1 decodes it, which tests/fixtures/core/pixels/<name>.png holds, then "
+            "resized to (W, H) from the decoded size by the spec's bicubic resize, width first. "
+            "Generated by tests/core_support.py with Pillow " + PIXELS_PILLOW + "."
         ),
     }
     lines = ",\n".join(

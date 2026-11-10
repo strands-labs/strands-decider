@@ -18,7 +18,6 @@ then, with v1's `image could not be decoded`.
 
 from __future__ import annotations
 
-import base64
 import binascii
 import hashlib
 import json
@@ -55,6 +54,9 @@ IMAGE_PROCESSOR_SETTINGS = {
     "pooling_kernel_size": POOLING_KERNEL_SIZE,
     "max_soft_tokens": MAX_SOFT_TOKENS,
 }
+# Where processor_config.json gives `image_seq_length`, under image_processor or at its top
+# level, it is max_soft_tokens.
+IMAGE_SEQ_LENGTH = MAX_SOFT_TOKENS
 PROCESSOR_CONFIG_FILE = "processor_config.json"
 
 # The three control tokens of an image in the prompt, by their strings: begin, one soft-token
@@ -141,6 +143,8 @@ def resize_image(image: Any, width: int, height: int) -> Any:
 
     if not (isinstance(width, int) and isinstance(height, int)) or width < 1 or height < 1:
         raise ValueError(f"a resized image is at least 1 x 1 pixels, not {width!r} x {height!r}")
+    if image.mode != "RGB":  # Pillow resizes palette and 1-bit images by nearest neighbour
+        raise ValueError(f"resize_image takes the decoded RGB image, not a {image.mode} one")
     if image.width != width:
         image = image.resize((width, image.height), Image.Resampling.BICUBIC)
     if image.height != height:
@@ -168,8 +172,9 @@ def check_image_processor(processor_config: Mapping[str, Any] | str | os.PathLik
     """That a checkpoint's image processor sizes images as the core counts them: its
     `processor_config.json` (a mapping, the file, or the checkpoint directory) gives
     `patch_size` 16, `pooling_kernel_size` 3 and `max_soft_tokens` 280, under
-    `image_processor` or at its top level. ValueError otherwise: a runtime refuses image
-    requests for such a checkpoint (docs/spec.md, The checkpoint layout)."""
+    `image_processor` or at its top level, and `image_seq_length`, wherever it is given,
+    280. ValueError otherwise: a runtime refuses image requests for such a checkpoint
+    (docs/spec.md, The checkpoint layout)."""
     if not isinstance(processor_config, Mapping):
         path = os.fspath(processor_config)
         if os.path.isdir(path):
@@ -186,6 +191,10 @@ def check_image_processor(processor_config: Mapping[str, Any] | str | os.PathLik
         for k, v in IMAGE_PROCESSOR_SETTINGS.items()
         if isinstance(settings.get(k), bool) or settings.get(k) != v
     }
+    for where in (settings, processor_config):
+        n = where.get("image_seq_length", IMAGE_SEQ_LENGTH)
+        if isinstance(n, bool) or n != IMAGE_SEQ_LENGTH:
+            wrong["image_seq_length"] = n
     if wrong:
         raise ValueError(
             f"the checkpoint's image processor has {wrong}; the interface counts soft tokens "
@@ -230,7 +239,9 @@ def _strict_b64decode(payload: str) -> bytes:
     pad = len(payload) - len(data)
     if len(payload) % 4 or pad > 2 or "=" in data:
         raise ValueError("its length or padding is wrong")
-    return base64.b64decode(payload, validate=True)
+    # The string is now valid by the rule, so the decoder only maps it to bytes: binascii's,
+    # which does not depend on what the interpreter's base64 module accepts.
+    return binascii.a2b_base64(payload)
 
 
 def decode_image(data: str, max_pixels: int = MAX_IMAGE_PIXELS) -> EncodedImage:
@@ -319,6 +330,23 @@ def _png_size(b: bytes) -> tuple[int, int]:
 # JPEG markers as Pillow's JpegImagePlugin reads them before the first scan: the frame
 # headers (SOF0-3, 5-7, 9-11, 13-15, and DHP), the other segments that carry a length, and
 # the markers without one. Any other marker is refused ("no marker found").
+_NOT_FF = re.compile(rb"[^\xff]")  # the end of a run of fill bytes
+
+
+def _run_end(b: bytes, pos: int, unit: bytes) -> int:
+    """Where the run of `unit`, repeated from `pos`, ends: by doubling and then halving the
+    stretch compared, so megabytes of padding cost a few comparisons, not one step a byte."""
+    step = 1
+    while b.startswith(unit * step, pos):
+        pos += len(unit) * step
+        step *= 2
+    while step > 1:
+        step //= 2
+        if b.startswith(unit * step, pos):
+            pos += len(unit) * step
+    return pos
+
+
 _SOF = {0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF, 0xDE}
 _SOS = 0xDA
 _SEGMENTS = {0xC4, 0xCC, 0xDA, 0xDB, 0xDC, 0xDD, 0xDF, 0xFE, *range(0xE0, 0xF0), *_SOF}
@@ -343,13 +371,18 @@ def _jpeg_size(b: bytes) -> tuple[int, int]:
                 raise ValueError("truncated JPEG file: it ends before its first scan")
             prefix, pos = True, ff + 1
             continue
+        if pos < n and b[pos] == 0xFF:  # fill: the run's last 0xFF starts the marker
+            end = _NOT_FF.search(b, pos)
+            pos = n if end is None else end.start()
         if pos >= n:
             raise ValueError("truncated JPEG file: it ends before its first scan")
         code, pos = b[pos], pos + 1
-        if code == 0xFF:  # fill: this 0xFF starts the marker
-            continue
-        if code == 0x00:  # an escaped 0xFF: skipped
-            prefix = False
+        if code == 0x00:  # an escaped 0xFF: skipped, with the junk after it
+            pos = _run_end(b, pos, b"\xff\x00")  # and any escaped 0xFFs that follow
+            ff = b.find(b"\xff", pos)
+            if ff < 0:
+                raise ValueError("truncated JPEG file: it ends before its first scan")
+            pos = ff + 1
             continue
         if code in _SEGMENTS:
             if pos + 2 > n:
