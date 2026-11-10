@@ -1049,8 +1049,17 @@ def test_headers_match_pillow():
 def test_validation_matches_v1():
     """The same requests accepted and refused as by v1's `vision.decode_image`, which opens
     and decodes the image with Pillow, with v1's messages: exactly for the pixel limit, and
-    up to v1's prefix where v1 passes on Python's or Pillow's own words, for base64 (whose
-    reasons are the core's own, by the spec's rule) and for headers."""
+    up to v1's prefix where v1 passes on Python's or Pillow's own words, for headers.
+
+    Base64 is the spec's rule (RFC 4648), which is what Python 3.12's strict decode accepts;
+    Python before 3.12 accepts more. So for base64 the core is held to the rule, refuses
+    wherever v1 refuses, and matches v1's acceptance exactly only on 3.12. Every later step
+    is compared exactly, whenever both sides got past base64."""
+    import sys
+
+    from strands_decider.core.images import DATA_URI
+    from strands_decider.core.text import strip
+
     pytest.importorskip("PIL")
     pytest.importorskip("torch")
     try:
@@ -1060,6 +1069,7 @@ def test_validation_matches_v1():
     png = image_b64("checker-64x48.png")
     cases = [image_b64(n) for n in IMAGE_FILES] + [image_b64(n, data_uri=True) for n in IMAGE_FILES]
     cases += [png[:-1], png + "=", png[:40] + "\n" + png[40:], "", "aGk=", f" {png} "]
+    cases += [png[:-2] + "==", png + "==", png[:-4] + "a===", "aGk", "aGk==", "aG=k"]
     cases += ["data:text/plain;base64," + png, "data:image/svg+xml;base64," + png]
     cases += [_b64(b) for b in _pillow_images(40, seed=9)]
     cases += [_b64(b) for b in MALFORMED.values()]
@@ -1076,14 +1086,21 @@ def test_validation_matches_v1():
             error = None
         except ValueError as e:
             error = str(e)
+        by_rule = _rfc4648(DATA_URI.sub("", strip(data)))
+        if by_rule is None:  # the spec refuses the base64
+            assert error is not None and error.startswith(NOT_BASE64), (data[:40], error)
+            if sys.version_info[:2] == (3, 12):
+                assert v1_error is not None and v1_error.startswith(NOT_BASE64), data[:40]
+            continue
+        # The spec accepts the base64; v1 accepts at least as much on every version.
+        assert error is None or not error.startswith(NOT_BASE64), (data[:40], error)
+        assert v1_error is None or not v1_error.startswith(NOT_BASE64), (data[:40], v1_error)
         if v1_error is None:
             assert error is None, (data[:40], error)
         elif v1_error.startswith("image could not be decoded"):
             pass  # the header is sound and the pixels are not: the runtime finds that out
         elif v1_error.startswith(COULD_NOT_READ):
             assert error is not None and error.startswith(COULD_NOT_READ), (data[:40], error)
-        elif v1_error.startswith(NOT_BASE64):
-            assert error is not None and error.startswith(NOT_BASE64), (data[:40], error)
         else:
             assert error == v1_error, data[:40]
 
