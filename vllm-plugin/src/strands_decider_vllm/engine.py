@@ -15,12 +15,16 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from . import ARCHS, SERVER_CONFIG_KEY, hashing
+from . import ARCHS, SERVER_CONFIG_KEY, hashing, logger
 from .validation import RequestRefused, check_images, check_request
 
 _MARK = "_strands_decider"
 _SERVES_DECIDER = "_strands_decider_serves"
 _POLICY = "_strands_decider_policy"
+#: The refusal of an image request whose checkpoint configuration could not be read (the error is logged).
+UNREADABLE_POLICY = (
+    "the server could not check this request's images against the checkpoint; see the server log"
+)
 
 
 def serves_decider(engine: Any) -> bool:
@@ -111,11 +115,13 @@ def wrap_preprocess_add_request(original: Any, validation_error: type[Exception]
             if features:
                 try:
                     p = policy(self)
-                except Exception as e:  # only if the scheduler did not compute it at startup
-                    raise RequestRefused(
-                        f"the checkpoint's decision_config.json could not be read to check the request's images: {e}",
-                        parameter="multi_modal_data",
-                    ) from e
+                except Exception:  # only if the scheduler did not compute it at startup
+                    # The error, which can name a path or a Hub failure, goes to the log, not to the client.
+                    logger.exception(
+                        "strands-decider: decision_config.json could not be read to check request %s's images",
+                        request.request_id,
+                    )
+                    raise RequestRefused(UNREADABLE_POLICY, parameter="multi_modal_data") from None
                 images = check_images(
                     features, s, takes_images=p.takes_images, accepts_images=p.accepts_images
                 )
