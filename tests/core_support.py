@@ -94,8 +94,8 @@ def gemma4_tokenizer_dir() -> str:
 
 
 def decision_config_fixture() -> dict:
-    """The scrubbed E2B decision_config.json: the schema's fields only (codes and token ids
-    as the checkpoint has them; `prompt` and `max_length_validated` are test values)."""
+    """The E2B checkpoint's decision_config.json reduced to the schema's fields (codes and
+    token ids as the checkpoint has them; `prompt` and `max_length_validated` are test values)."""
     return json.loads((FIXTURES / "decision_config.json").read_text(encoding="utf-8"))
 
 

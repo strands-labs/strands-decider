@@ -30,7 +30,7 @@ class Backend(Protocol):
         "hidden"         the final-norm hidden state at the last token, [hidden]
         "raw_logits"     z = W h, the readout applied: [255], or the question's [k]
         "capped_logits"  tanh(z / c) * c, the soft-cap applied, not the temperature
-        "final_logits"   tanh(z / c) * c / T, both applied (the vLLM plugin's compute_logits)
+        "final_logits"   tanh(z / c) * c / T, both applied (as strands-decider-vllm returns them)
         "probabilities"  the codes' probabilities: the question's k, or all 255
 
     `inputs` says what `forward` takes, as decision_config.json's `inputs` names it:

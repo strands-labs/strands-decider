@@ -22,9 +22,9 @@ from .codes import CODES
 from .prompt import VARIANTS
 
 FILENAME = "decision_config.json"
-# Tells this interface's decision config from other formats that use the same file names
-# (llama.cpp's pplx-decider loader claims any directory with decision_config.json and
-# readout.safetensors).
+# Tells this interface's decision config from other decision-model formats that use the same
+# file names (converters, such as llama.cpp's, claim any directory with decision_config.json
+# and readout.safetensors).
 INTERFACE = "strands-decider"
 FORMAT_VERSION = 1
 ATTENTION_MODES = ("prefix_bidir",)
