@@ -1463,6 +1463,39 @@ def test_a_handed_over_tokenizer_is_used_without_a_copy(monkeypatch):
         plain_text_tokenizer(plain)
 
 
+def test_a_failed_hand_over_leaves_the_tokenizer_as_it_was():
+    """A tokenizer whose check fails, here one whose special token `answer` is also an
+    ordinary word, so that request text would encode to it, keeps its own settings."""
+    from tokenizers import AddedToken
+
+    from strands_decider.core import plain_text_tokenizer
+    from strands_decider.core.prompt import _OWNED
+
+    tok = toy_tokenizer()
+    tok.add_special_tokens([AddedToken("answer", special=True)])
+    tok.enable_padding(length=64, pad_id=0, pad_token="<unk>")
+    tok.enable_truncation(32)
+    before = (tok.encode_special_tokens, tok.padding, tok.truncation)
+    with pytest.raises(ValueError, match="encodes to its control token"):
+        plain_text_tokenizer(tok)
+    assert (tok.encode_special_tokens, tok.padding, tok.truncation) == before
+    assert id(tok) not in _OWNED
+
+
+def test_a_handed_over_tokenizer_can_be_released():
+    from strands_decider.core import plain_text_tokenizer, release_plain_text_tokenizer
+    from strands_decider.core.prompt import _OWNED
+
+    tok = plain_text_tokenizer(toy_tokenizer())
+    assert _OWNED[id(tok)] is tok
+    release_plain_text_tokenizer(tok)
+    assert id(tok) not in _OWNED
+    release_plain_text_tokenizer(tok)  # twice is harmless
+    assert render(CASES["support_ticket"], tok, PLAIN) == render(
+        CASES["support_ticket"], toy_tokenizer(), PLAIN
+    )
+
+
 def test_a_tokenizer_with_added_tokens_that_are_not_special_is_refused():
     """Special-token matching off does not stop a plain added token from matching request
     text, so a tokenizer with one could turn a state's words into it."""
@@ -1571,11 +1604,30 @@ def test_the_checkpoints_tokenizer_is_checked_at_load(tmp_path):
     changed.add_tokens(["Help"])
     with pytest.raises(ValueError, match="not special"):
         check_tokenizer(changed, cfg)
+    # Handed over, the check makes no copy, and render then uses the tokenizer as it is.
+    from strands_decider.core import prompt
+    from strands_decider.core.prompt import _OWNED
+
+    own = Tokenizer.from_str(tok.to_str())
+    real = prompt._make_plain_text_copy
+    prompt._make_plain_text_copy = lambda t: (_ for _ in ()).throw(AssertionError("copied"))
+    try:
+        check_tokenizer(own, cfg, hand_over=True)
+        assert _OWNED[id(own)] is own and own.encode_special_tokens is True
+        assert render(CASES["support_ticket"], own, PLAIN) == render(
+            CASES["support_ticket"], tok, PLAIN
+        )
+    finally:
+        prompt._make_plain_text_copy = real
+        prompt.release_plain_text_tokenizer(own)
     shutil.copy(FIXTURES / "decision_config.json", tmp_path / "decision_config.json")
     shutil.copy(gemma4_tokenizer_path(), tmp_path / "tokenizer.json")
     loaded = load_tokenizer(tmp_path)
     assert loaded.encode("AB", add_special_tokens=False).ids == [cfg.token_ids[27]]
     assert load_tokenizer(tmp_path, cfg).get_vocab_size() == tok.get_vocab_size()
+    handed = load_tokenizer(tmp_path, cfg, hand_over=True)
+    assert _OWNED[id(handed)] is handed
+    prompt.release_plain_text_tokenizer(handed)
 
 
 # ---- conformance with Gemma 4's chat templates, and with v1 ---------------------------------
