@@ -281,14 +281,16 @@ src/strands_decider/              -- published package (inference only)
   cpu_kernels.py  the Gated DeltaNet depthwise causal conv for CPU inference
   mlx_engine.py   serving with the torso on MLX (--device mlx); the engine otherwise infer.py's
   server.py       FastAPI, POST /v1/systemone
-  cli.py          the strands-decider command (ask / serve / info)
+  cli.py          the strands-decider command (ask / serve / convert-mlx / info)
   hf_export.py    a checkpoint as a Hugging Face model folder (safetensors, card, manifest)
   naming.py       release naming helpers (used by hf_export and release scripts)
   vision.py       Qwen3.5 vision-tower engine (`serve --vision`, `ask --image`)
   core/           the decision interface without torch (docs/spec.md): prompt
                   rendering, the code readout, decision_config.json, the runtime contract
   backends/       runtimes for decision checkpoints; transformers.py runs them on PyTorch
-                  (CPU, CUDA, MPS), with images, and is the spec's reference runtime
+                  (CPU, CUDA, MPS), with images, and is the spec's reference runtime;
+                  mlx.py runs them on Apple silicon through mlx-vlm (--device mlx), and
+                  mlx_convert.py writes their MLX artifacts (strands-decider convert-mlx)
   decision.py     decision checkpoints behind ask and serve: the core, and a backend per
                   device kind (BACKENDS; another runtime registers its own)
 

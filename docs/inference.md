@@ -23,7 +23,8 @@ CPU), so they report the numbers serving returns. `--device mlx` is refused.
   ([spec.md](spec.md)), with images, on the transformers backend.
 - [Asking many questions is nearly free](#asking-many-questions-is-nearly-free): the shared-prefix cache.
 - [Serving on a Mac](#serving-on-a-mac): MPS, and the one kernel that had to be replaced.
-- [Serving on a Mac with MLX](#serving-on-a-mac-with-mlx): `--device mlx`, measured against MPS.
+- [Serving on a Mac with MLX](#serving-on-a-mac-with-mlx): `--device mlx`, measured against MPS, and
+  [decision checkpoints on MLX](#decision-checkpoints-on-mlx), images included.
 - [`../deploy/`](../deploy/README.md): hosting the server, for example on an Amazon SageMaker
   real-time endpoint.
 - [`../examples/strands/`](../examples/strands/README.md): an agent built with the Strands
@@ -55,7 +56,7 @@ from a clone, for example `pip install -e ".[mlx]"`.
 | `cuda` | `pip install "strands-decider[cuda]"` | flash-linear-attention (Linux). causal-conv1d compiles against the local CUDA toolkit and is installed separately: `pip install causal-conv1d --no-build-isolation`. |
 | `mps` | `pip install "strands-decider[mps]"` | Nothing: the base install. |
 | `cpu` | `pip install "strands-decider[cpu]"` | Nothing: the base install. |
-| `mlx` | `pip install "strands-decider[mlx]"` | mlx and mlx-lm (Apple silicon only). |
+| `mlx` | `pip install "strands-decider[mlx]"` | mlx, mlx-lm and, for decision checkpoints, mlx-vlm (Apple silicon only). |
 
 flash-linear-attention installs on a Mac without Triton, but its kernels need Triton, so it
 cannot run there. `mps_kernels.py` therefore steps aside only when Triton is present too, and
@@ -423,3 +424,75 @@ trainable token embeddings, per-module ranks and quantised base weights. `--dtyp
 (`mlx_engine.DEFAULT_CACHE_LIMIT`); MLX's own default is its memory limit, nearly all of RAM.
 Evaluations run one at a time, because `_fit` keeps a request's option offsets on the engine for
 `_option_idx` to read; the torch engine has the same race (#9).
+
+### Decision checkpoints on MLX
+
+A decision checkpoint ([`spec.md`](spec.md): the Gemma 4 base's multimodal checkpoint with its
+fine-tuning merged in, beside a `readout.safetensors` and a `decision_config.json`) runs on
+`--device mlx` through mlx-vlm ([`backends/mlx.py`](../src/strands_decider/backends/mlx.py)).
+`ask` and `serve` tell it from a v1 checkpoint by its `decision_config.json`, and load it the
+same way. It takes images whenever the checkpoint's `inputs` hold `image`; `--vision` is not
+needed.
+
+```bash
+strands-decider ask CHECKPOINT --device mlx --state "A photo from the support chat." \
+  --image photo.jpg --choice "What does it show?=a person,an animal,food or drink"
+strands-decider serve CHECKPOINT --device mlx --port 8099
+```
+
+The backend implements the core's `Backend` (spec section 11) over mlx-vlm's own Gemma 4
+classes, unpatched:
+
+- Every pass hands mlx-vlm a mask, which it gives every layer as it is, so `prefix_bidir` holds
+  on every layer with no sliding window. The state is encoded once, into plain KV caches, and
+  each question runs over it; `--no-prefix-cache` runs each question as its own full pass under
+  the dense mask instead.
+- On E2B and E4B, whose last layers read an earlier layer's keys and values, a question carries
+  only its last token through those layers, which is exact.
+- An image is decoded as v1 decodes it, resized with Pillow's bicubic filter to the spec's size,
+  prepared by the checkpoint's image processor with its resize off, and encoded in bf16; its
+  vectors replace the placeholders at its span in the state.
+- The backend hands the core the final-norm hidden state, and the core's `Readout` applies the
+  readout in the spec's precision regime.
+
+`strands-decider convert-mlx CHECKPOINT OUT [--bits 8]` writes an MLX artifact
+([`backends/mlx_convert.py`](../src/strands_decider/backends/mlx_convert.py)), which `ask` and
+`serve` load like the checkpoint. Only the decoder is quantized: the vision and audio encoders
+and their projections stay bf16, and `readout.safetensors`, `decision_config.json`,
+`processor_config.json` and the tokenizer are copied byte for byte. `mlx_vlm.convert` alone
+would lose the readout and quantize the audio projection.
+
+Measured on an M4 Pro (48 GB) with an intermediate Strands Decider v2 E2B checkpoint in the
+multimodal layout, against reference outputs computed with transformers in bf16 on a GPU, one
+masked pass per prompt:
+
+- Text. On the reference's 1,200 golden prompts (200 to 7,987 tokens, 300 in each of four length
+  buckets, given as the reference's own token ids), bf16 agrees on the top code for 99.25% of
+  questions (98.67% to 99.67% per bucket), with mean |Δp| 0.0065 and at most 0.086. Every
+  disagreement is a near-tie, with the reference's top two at most 0.084 apart. The 8-bit
+  artifact agrees on 98.83% (98.00% to 99.67% per bucket), with mean |Δp| 0.0099 and at most
+  0.225; 11 of its 14 disagreements are within 0.02 in the reference, and the widest is 0.107.
+- Images. On 24 requests over six photographs (an astronaut's portrait, a greyscale photograph
+  of a cameraman, a cat, a cup of coffee, a deep-field telescope image and a rocket launch; one
+  to four images per request, an empty state, and a 1,300-token state), bf16 agrees with the
+  reference, whose pixels come from transformers' `Gemma4ImageProcessorPil`, on 24 of 24 top
+  codes, with mean |Δp| 0.0021 and at most 0.024. The 8-bit artifact agrees on 24 of 24 too,
+  with mean |Δp| 0.0043.
+- Latency, the state encoded and then one question: a median of 78 ms at about 270 tokens,
+  231 ms at 1,100, 968 ms at 3,900 and 2,471 ms at 7,400 in bf16, and 70, 233, 1,010 and
+  2,485 ms in 8-bit. A one-image request of 350 tokens takes 300 ms, against 90 ms for the same
+  prompt with the image's placeholders left as they are; requests with two, three and four
+  images (630 to 1,140 tokens) take 567, 841 and 1,099 ms. `ask` with one image, from the shell
+  to its printed answer, model load included, takes 6.0 s on the 8-bit artifact.
+- Memory. bf16 holds 8.9 GiB (the audio encoder is not loaded) and peaks at 9.3 GiB at 270
+  tokens and 11.8 GiB at 7,400; the 8-bit artifact holds 4.9 GiB and peaks at 5.3 and 7.7 GiB.
+  `convert-mlx --bits 8` wrote the 5.9 GB artifact in 11 s, with a peak footprint of 13.1 GB.
+
+The 12B, 26B-A4B and 31B load strictly, and convert to 8 bits (and the 26B-A4B to 4), with the
+same code; their answers on a Mac are not yet measured.
+
+Limits. mlx-vlm is pinned to the minor version tested, because the backend calls its Gemma 4
+internals. A quantized artifact makes no conformance claim until the spec records a bound for its
+format (spec section 10); a 4-bit E2B quantized with the same affine quantizer has agreed on
+only 88.9% of top codes. Each request encodes its state afresh: there is no cache across
+requests. Audio is not served.
