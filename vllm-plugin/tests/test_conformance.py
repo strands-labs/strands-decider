@@ -72,7 +72,7 @@ def test_any_other_form_is_unreadable(line):
 
 def test_the_measures_and_bounds_are_the_cores():
     cc = pytest.importorskip("strands_decider.core.conformance")
-    assert cc.BOUNDS["bf16"] == (0.98, 0.02) and cc.MIN_QUESTIONS == 1000
+    assert cc.bounds() == (0.98, 0.02) and cc.MIN_QUESTIONS == 1000
     a = cc.agreement({(0, "q"): [0.26, 0.74]}, {(0, "q"): [0.25, 0.75]})
     assert (a.questions, a.top1, a.mean_abs_dp) == (1, 1.0, pytest.approx(0.01))
     assert a.conforms(min_questions=1) and not a.conforms()
