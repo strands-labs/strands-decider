@@ -24,7 +24,9 @@ from .decision import (
     DECISION,
     INTERMEDIATE,
     DecisionEngine,
+    EngineBusy,
     check_device,
+    check_dtype,
     checkpoint_kind,
     load_decision_engine,
     refuse_intermediate,
@@ -105,12 +107,14 @@ def create_app(
     build_engine: Callable[[], SystemOneEngine] | None = None,
     max_concurrency: int | None = None,
     dtype: str | None = None,
+    queue_timeout: float | None = 60.0,
+    revision: str | None = None,
 ) -> FastAPI:
     if max_concurrency is not None and max_concurrency < 1:
         raise ValueError("--max-concurrency must be at least 1")
     # A decision checkpoint (docs/spec.md) is served by the core and a decision backend;
     # anything else takes v1's path below, unchanged. Tests inject `build_engine` and skip this.
-    kind = checkpoint_kind(checkpoint) if build_engine is None else None
+    kind = checkpoint_kind(checkpoint, revision=revision) if build_engine is None else None
     if kind == INTERMEDIATE:
         raise refuse_intermediate(checkpoint)
     decision = kind == DECISION
@@ -120,6 +124,9 @@ def create_app(
                 "--device-map is for v1 checkpoints; a decision checkpoint runs on one device"
             )
         check_device(device)
+        check_dtype(device, dtype)  # imports the device's backend: its import errors show here
+        if queue_timeout is not None and queue_timeout <= 0:
+            raise ValueError("--queue-timeout must be positive")
         if vision:
             warnings.warn(
                 "--vision is for v1 checkpoints: a decision checkpoint takes images when its "
@@ -131,8 +138,11 @@ def create_app(
                 "attn_implementation is for v1 checkpoints: a decision checkpoint runs SDPA",
                 stacklevel=2,
             )
-    elif dtype:
-        raise ValueError("--dtype is for decision checkpoints")
+    elif build_engine is None:
+        # v1's engines take neither.
+        for flag, value in (("--dtype", dtype), ("--revision", revision)):
+            if value is not None:
+                raise ValueError(f"{flag} is for decision checkpoints")
     if not decision:
         if device_map and (vision or not device.startswith("cuda")):
             raise ValueError(
@@ -165,6 +175,9 @@ def create_app(
                 max_batch=max_batch,
                 max_batch_tokens=max_batch_tokens,
                 dtype=dtype,
+                max_concurrency=max_concurrency or 1,
+                queue_timeout=queue_timeout,
+                revision=revision,
             )
         if vision:
             from .vision import load_vision_engine
@@ -186,8 +199,11 @@ def create_app(
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         engine = build()
         app.state.engine = engine
-        # None: requests share anyio's default worker pool (40 threads), as sync handlers do.
-        app.state.limiter = anyio.CapacityLimiter(max_concurrency) if max_concurrency else None
+        # None: requests share anyio's default worker pool (40 threads), as sync handlers do. A
+        # decision engine bounds its own concurrency, after its refusals and with a timeout.
+        app.state.limiter = None
+        if max_concurrency and not isinstance(engine, DecisionEngine):
+            app.state.limiter = anyio.CapacityLimiter(max_concurrency)
         try:
             # Listener binds only after lifespan startup returns, so /health (/ping)
             # fails until this is done.
@@ -249,12 +265,16 @@ def create_app(
             "vision": vision,
         }
 
-    def evaluate(eng: SystemOneEngine, request: SystemOneRequest) -> SystemOneResponse:
-        with guard:
+    def evaluate(eng: SystemOneEngine, request: Any) -> SystemOneResponse:
+        # A decision engine bounds its own concurrency and its backend takes turns on MPS, so
+        # its refusals never wait behind the server's lock.
+        lock = contextlib.nullcontext() if isinstance(eng, DecisionEngine) else guard
+        with lock:
             return eng.evaluate(request)
 
     # The engine runs in a worker thread. With --max-concurrency N, at most N requests run at
-    # once and the rest wait on the event loop, holding no thread and no GPU memory.
+    # once: for a v1 engine the rest wait on the event loop, holding no thread and no GPU
+    # memory; a decision engine queues them for at most --queue-timeout.
     @app.post("/v1/systemone", response_model=SystemOneResponse)
     @app.post("/invocations", response_model=SystemOneResponse)
     async def systemone(
@@ -268,6 +288,8 @@ def create_app(
             response = await anyio.to_thread.run_sync(
                 evaluate, eng, request if body is None else body, limiter=http.app.state.limiter
             )
+        except EngineBusy as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
         except ValueError as exc:
             # Malformed permutation, etc. -- caller error.
             raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -294,6 +316,8 @@ def serve(
     warmup: bool = True,
     max_concurrency: int | None = None,
     dtype: str | None = None,
+    queue_timeout: float | None = 60.0,
+    revision: str | None = None,
 ) -> None:
     import uvicorn
 
@@ -309,6 +333,8 @@ def serve(
         warmup=warmup,
         max_concurrency=max_concurrency,
         dtype=dtype,
+        queue_timeout=queue_timeout,
+        revision=revision,
     )
     # Single worker: the model owns the GPU, and forking more would just duplicate it.
     uvicorn.run(app, host=host, port=port, workers=1)
