@@ -23,7 +23,8 @@ the core's header reader and the render goldens need no imaging library. `make_i
 draws each one deterministically with Pillow; with STRANDS_DECIDER_REGEN_IMAGES=1 the files
 are rewritten, and so is tests/fixtures/core/image_soft_tokens.json, the soft-token count
 of every listed size by Gemma 4's real image processors (which needs transformers, Pillow
-and torchvision). Regenerate the render goldens after the images.
+and torchvision); STRANDS_DECIDER_REGEN_SOFT_TOKENS=1 rewrites the table alone. Regenerate
+the render goldens after the images.
 
 tests/fixtures/core/image_pixels.json holds the pixel goldens of docs/spec.md (Images, in The
 runtime interface): for each test image, the sha256 of its RGB bytes as v1 decodes it and
@@ -60,6 +61,7 @@ TOKENIZER_ENV = "STRANDS_DECIDER_GEMMA4_TOKENIZER"
 TEMPLATES_ENV = "STRANDS_DECIDER_GEMMA4_TEMPLATES"
 REGEN_IMAGES_ENV = "STRANDS_DECIDER_REGEN_IMAGES"
 REGEN_PIXELS_ENV = "STRANDS_DECIDER_REGEN_PIXELS"
+REGEN_SOFT_TOKENS_ENV = "STRANDS_DECIDER_REGEN_SOFT_TOKENS"
 IMAGES = FIXTURES / "images"
 SOFT_TOKENS = FIXTURES / "image_soft_tokens.json"
 PIXELS = FIXTURES / "image_pixels.json"
@@ -248,12 +250,30 @@ def _offset_first_frame(gif: bytes, *, screen: tuple[int, int], offset: tuple[in
     return bytes(b)
 
 
+# Aspect ratios w:h where 280 h / w is a perfect square, so that f h / 48 is an integer in
+# exact arithmetic and the floor is decided by the double's last bit (docs/spec.md, The state
+# block); 280:1 is the k = 1 family above. Each at KNIFE_EDGE_SCALES, both ways round.
+KNIFE_EDGE_RATIOS = ((10, 7), (14, 5), (40, 7), (35, 32), (35, 2), (56, 5), (70, 1))
+KNIFE_EDGE_SCALES = (*range(1, 41), 49, 50, 64, 77, 100, 128, 200, 300, 500, 1000)
+
+
+def knife_edge_sizes() -> set[tuple[int, int]]:
+    from strands_decider.core import MAX_IMAGE_PIXELS
+
+    out = set()
+    for p, q in KNIFE_EDGE_RATIOS:
+        for k in KNIFE_EDGE_SCALES:
+            if p * q * k * k <= MAX_IMAGE_PIXELS:
+                out |= {(p * k, q * k), (q * k, p * k)}
+    return out
+
+
 def soft_token_sizes() -> list[tuple[int, int]]:
     """The (width, height) pairs of tests/fixtures/core/image_soft_tokens.json: a grid of
     common and boundary sides, extreme aspect ratios to the pixel limit (1 x 16,777,216),
     both sides of the 280:1 ratio where one resized side becomes 48 pixels, every size whose
     area makes the processor's scale factor exactly 1 and samples where it is 1/2, 1/3 and
-    1/4, and log-uniform random sizes."""
+    1/4, log-uniform random sizes, and the knife-edge ratios at many scales."""
     from strands_decider.core import MAX_IMAGE_PIXELS
 
     grid = [1, 2, 3, 4, 5, 7, 8, 15, 16, 17, 31, 32, 33, 47, 48, 49, 63, 64, 96, 100, 127, 128,
@@ -280,7 +300,7 @@ def soft_token_sizes() -> list[tuple[int, int]]:
         h = round(math.exp(rng.uniform(0, math.log(16384))))
         if w * h <= MAX_IMAGE_PIXELS:
             out.add((w, h))
-    return sorted(out)
+    return sorted(out | knife_edge_sizes())  # after the random sizes, which they leave as they were
 
 
 GEMMA4_PROCESSOR = "Gemma4ImageProcessor"  # E2B, E4B, 26B-A4B, 31B
@@ -309,13 +329,17 @@ def processor_soft_tokens(processor, width: int, height: int) -> int:
 
 
 def _write_test_images() -> None:
+    IMAGES.mkdir(parents=True, exist_ok=True)
+    for name in IMAGE_FILES:
+        (IMAGES / name).write_bytes(make_image(name))
+    _write_soft_token_table()
+
+
+def _write_soft_token_table() -> None:
     import PIL
     import torchvision
     import transformers
 
-    IMAGES.mkdir(parents=True, exist_ok=True)
-    for name in IMAGE_FILES:
-        (IMAGES / name).write_bytes(make_image(name))
     procs = image_processors()
     torchvision_backend = transformers.Gemma4ImageProcessor(**PROCESSOR_SETTINGS)
     rows = []
@@ -473,5 +497,7 @@ def _write_pixel_goldens() -> None:
 
 if os.environ.get(REGEN_IMAGES_ENV) == "1":
     _write_test_images()
+elif os.environ.get(REGEN_SOFT_TOKENS_ENV) == "1":
+    _write_soft_token_table()
 if os.environ.get(REGEN_PIXELS_ENV) == "1":
     _write_pixel_goldens()
