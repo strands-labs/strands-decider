@@ -783,6 +783,27 @@ class TransformersBackend:
         return out
 
 
+def load_backend(
+    path: str,
+    *,
+    device: str,
+    dtype: str | None = None,
+    reuse_state: bool = True,
+    max_batch: int = 32,
+    max_batch_tokens: int | None = None,
+) -> TransformersBackend:
+    """The loader `strands_decider.decision.BACKENDS` names for cpu, cuda and mps: `dtype` is
+    "float32", "bfloat16" or None (the device's own)."""
+    return TransformersBackend.load(
+        path,
+        device=device,
+        dtype=getattr(torch, dtype) if dtype else None,
+        reuse_state=reuse_state,
+        max_batch=max_batch,
+        max_batch_tokens=max_batch_tokens or MAX_BATCH_TOKENS,
+    )
+
+
 def _tokenizer_problem(ckpt: Checkpoint) -> str | None:
     """Why the checkpoint's tokenizer and config.json disagree on the image tokens, or None:
     the prompt's placeholders must be the ids the model replaces."""
@@ -813,6 +834,7 @@ __all__ = [
     "decode",
     "default_dtype",
     "image_processor_problem",
+    "load_backend",
     "load_image_processor",
     "resize",
     "resized_size",

@@ -19,7 +19,7 @@ import os
 import sys
 import threading
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
 from .core import DecisionConfig, Readout, evaluate, render
@@ -88,6 +88,22 @@ def _decision_file(checkpoint: str, revision: str | None) -> str | None:
             return None
         path = os.path.join(snapshot, FILENAME)
         return path if os.path.isfile(path) else None
+
+
+def _local_dir(checkpoint: str, revision: str | None) -> str:
+    """`checkpoint` if it is a directory, else the Hub repo's snapshot, downloaded to the Hub
+    cache (as v1's `modeling.checkpoint_dir`, without torch)."""
+    if os.path.isdir(checkpoint):
+        return checkpoint
+    from huggingface_hub import snapshot_download
+
+    try:
+        return str(snapshot_download(checkpoint, revision=revision))
+    except Exception as e:
+        raise FileNotFoundError(
+            f"{checkpoint}: not a local directory, and could not be downloaded from the "
+            f"Hugging Face Hub: {type(e).__name__}: {e}"
+        ) from e
 
 
 def checkpoint_kind(checkpoint: str, *, revision: str | None = None) -> str | None:
@@ -256,9 +272,48 @@ def warm_up_requests(*, images: bool) -> list[SystemOneRequest]:
     return out
 
 
+# The decision backends, by device kind (the part of `--device` before any ":"): the import
+# path of a loader, imported when a checkpoint is loaded on that device, so that one runtime's
+# framework never loads another's. A loader is called as
+#     loader(path, device=..., dtype=..., reuse_state=..., max_batch=..., max_batch_tokens=...)
+# with `path` the checkpoint's local directory, and returns a `strands_decider.core.Backend`;
+# it may give the backend `image_problem` (why images are refused) and `describe()`. Another
+# runtime adds its devices here, or calls `register_backend`.
+BACKENDS: dict[str, str] = {
+    "cpu": "strands_decider.backends.transformers:load_backend",
+    "cuda": "strands_decider.backends.transformers:load_backend",
+    "mps": "strands_decider.backends.transformers:load_backend",
+}
+_LOADERS: dict[str, Callable[..., Backend]] = {}
+
+
+def register_backend(devices: Sequence[str], loader: Callable[..., Backend]) -> None:
+    """Serve decision checkpoints on `devices` with `loader` (see `BACKENDS`)."""
+    for d in devices:
+        _LOADERS[d] = loader
+
+
+def _device_kind(device: str) -> str:
+    return str(device).split(":", 1)[0]
+
+
 def check_device(device: str) -> None:
-    if str(device).split(":", 1)[0] not in ("cpu", "cuda", "mps"):
-        raise ValueError(f"decision checkpoints run on cpu, cuda or mps here, not {device!r}")
+    """ValueError unless some backend serves decision checkpoints on `device`."""
+    kind = _device_kind(device)
+    if kind not in _LOADERS and kind not in BACKENDS:
+        known = sorted({*BACKENDS, *_LOADERS})
+        raise ValueError(f"decision checkpoints run on {', '.join(known)} here, not {device!r}")
+
+
+def backend_loader(device: str) -> Callable[..., Backend]:
+    check_device(device)
+    kind = _device_kind(device)
+    if kind not in _LOADERS:
+        import importlib
+
+        module, _, name = BACKENDS[kind].partition(":")
+        _LOADERS[kind] = getattr(importlib.import_module(module), name)
+    return _LOADERS[kind]
 
 
 def load_decision_engine(
@@ -274,57 +329,66 @@ def load_decision_engine(
     max_concurrency: int = 1,
     revision: str | None = None,
 ) -> DecisionEngine:
-    """A decision checkpoint on `device`. Torch devices (cpu, cuda, mps) run the transformers
-    backend, in `dtype` (`DTYPES`) or the device's own (`DEVICE_DTYPES`: float32 on CPU,
-    bfloat16 on CUDA and MPS). `reuse_state=False` runs each question as one full prompt;
-    on CUDA in bfloat16 that is the reference of docs/spec.md section 10."""
-    check_device(device)
+    """A decision checkpoint on `device`, through the backend registered for it (`BACKENDS`):
+    on cpu, cuda and mps the transformers backend, in `dtype` (`DTYPES`) or the device's own
+    (float32 on CPU, bfloat16 on CUDA and MPS). The interface's files, decision_config.json
+    (validated strictly), readout.safetensors and the tokenizer, are read here for every
+    backend. `reuse_state=False` runs each question as one full prompt; on CUDA in bfloat16
+    that is the reference of docs/spec.md section 10."""
+    loader = backend_loader(device)
     if dtype is not None and dtype not in DTYPES:
         raise ValueError(f"dtype must be one of {DTYPES}, not {dtype!r}")
-    import torch
+    from tokenizers import Tokenizer
 
-    from .backends.transformers import MAX_BATCH_TOKENS, Checkpoint, TransformersBackend
-
-    ckpt = Checkpoint.open(checkpoint, revision=revision)
-    if ckpt.config is None:
+    path = _local_dir(checkpoint, revision)
+    with open(os.path.join(path, FILENAME), encoding="utf-8") as f:
+        raw = json.load(f)
+    if isinstance(raw, dict) and "interface" not in raw:
         raise refuse_intermediate(checkpoint)
-    backend = TransformersBackend.load(
-        ckpt,
+    config = DecisionConfig.from_dict(raw)
+    readout = Readout.load(path, config)
+    backend = loader(
+        path,
         device=device,
-        dtype=getattr(torch, dtype) if dtype else None,
+        dtype=dtype,
         reuse_state=reuse_state,
         max_batch=max_batch,
-        max_batch_tokens=max_batch_tokens or MAX_BATCH_TOKENS,
+        max_batch_tokens=max_batch_tokens,
     )
-    d = backend.describe()
+    describe = getattr(backend, "describe", None)
+    d = describe() if callable(describe) else {"device": device}
     print(
-        f"[strands-decider] decision checkpoint: transformers backend on {d['device']} in "
-        f"{d['dtype']}, inputs {d['inputs']}, "
+        f"[strands-decider] decision checkpoint: {d.get('backend', 'backend')} on "
+        f"{d.get('device', device)} in {d.get('dtype', 'its dtype')}, inputs "
+        f"{list(getattr(backend, 'inputs', ('text',)))}, "
         + ("state encoded once per request" if reuse_state else "one full pass per question"),
         file=sys.stderr,
     )
     name = model_name or os.path.basename(checkpoint.rstrip("/")) or checkpoint
     return DecisionEngine(
         backend,
-        ckpt.tokenizer(),
-        ckpt.config,
-        ckpt.readout,
+        Tokenizer.from_file(os.path.join(path, "tokenizer.json")),
+        config,
+        readout,
         model_name=name,
         max_length=max_length,
-        image_problem=backend.image_problem,
+        image_problem=getattr(backend, "image_problem", None),
         max_concurrency=max_concurrency,
     )
 
 
 __all__ = [
+    "BACKENDS",
     "DECISION",
     "DTYPES",
     "INTERMEDIATE",
     "DecisionEngine",
     "RequestRefused",
+    "backend_loader",
     "check_device",
     "checkpoint_kind",
     "load_decision_engine",
     "refuse_intermediate",
+    "register_backend",
     "warm_up_requests",
 ]
