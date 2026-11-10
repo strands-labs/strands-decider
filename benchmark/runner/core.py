@@ -152,6 +152,7 @@ class SageMakerClient:
         timeout_s: float,
         profile: str | None,
         max_pool_connections: int,
+        inference_component: str | None = None,
     ):
         session = boto3.Session(profile_name=profile, region_name=region)
         control = session.client("sagemaker")
@@ -165,7 +166,8 @@ class SageMakerClient:
         variants = [
             {
                 "name": variant["VariantName"],
-                "model_name": variant["ModelName"],
+                # Absent on endpoints that host models as inference components.
+                "model_name": variant.get("ModelName"),
                 "instance_type": variant.get("InstanceType"),
                 "instance_count": live_variants.get(variant["VariantName"], {}).get(
                     "CurrentInstanceCount", variant.get("InitialInstanceCount")
@@ -176,6 +178,28 @@ class SageMakerClient:
             }
             for variant in endpoint_config.get("ProductionVariants", [])
         ]
+        component_metadata = None
+        if inference_component:
+            component = control.describe_inference_component(
+                InferenceComponentName=inference_component
+            )
+            if component.get("EndpointName") != endpoint_name:
+                raise ValueError(
+                    f"inference component {inference_component} belongs to endpoint "
+                    f"{component.get('EndpointName')}, not {endpoint_name}"
+                )
+            specification = component.get("Specification") or {}
+            runtime_config = component.get("RuntimeConfig") or {}
+            component_metadata = {
+                "name": inference_component,
+                "arn": component.get("InferenceComponentArn"),
+                "status": component.get("InferenceComponentStatus"),
+                "variant_name": component.get("VariantName"),
+                "model_name": specification.get("ModelName"),
+                "compute_resource_requirements": specification.get("ComputeResourceRequirements"),
+                "copy_count": runtime_config.get("CurrentCopyCount"),
+                "desired_copy_count": runtime_config.get("DesiredCopyCount"),
+            }
         self.client = session.client(
             "sagemaker-runtime",
             config=Config(
@@ -186,6 +210,7 @@ class SageMakerClient:
             ),
         )
         self.endpoint_name = endpoint_name
+        self.inference_component = inference_component
         self.model = model
         self.region = region
         self.metadata = {
@@ -195,15 +220,21 @@ class SageMakerClient:
             "instance_count": sum(int(variant.get("instance_count") or 0) for variant in variants),
             "variants": variants,
         }
+        if component_metadata:
+            self.metadata["inference_component"] = component_metadata
 
     def invoke(self, payload: bytes) -> Invocation:
         started = time.perf_counter()
+        request: dict[str, Any] = {
+            "EndpointName": self.endpoint_name,
+            "ContentType": "application/json",
+            "Body": payload,
+        }
+        if self.inference_component:
+            # Inference-component endpoints route each request by component name, not by endpoint.
+            request["InferenceComponentName"] = self.inference_component
         try:
-            response = self.client.invoke_endpoint(
-                EndpointName=self.endpoint_name,
-                ContentType="application/json",
-                Body=payload,
-            )
+            response = self.client.invoke_endpoint(**request)
             status = int(response["ResponseMetadata"]["HTTPStatusCode"])
             body = response["Body"].read()
         except (BotoCoreError, ClientError) as exc:
@@ -615,6 +646,9 @@ class BenchmarkRunner:
             endpoint_name = endpoint_name or endpoints.get(self.model)
             if not endpoint_name:
                 raise ValueError(f"no SageMaker endpoint configured for model {self.model}")
+            inference_component = (
+                self.environment.sagemaker.get("inference_components") or {}
+            ).get(self.model)
             self.client = SageMakerClient(
                 endpoint_name,
                 self.environment.sagemaker["region"],
@@ -622,6 +656,7 @@ class BenchmarkRunner:
                 timeout_s=self.environment.timeout_s,
                 profile=self.environment.sagemaker.get("profile"),
                 max_pool_connections=max(self.concurrency_levels),
+                inference_component=inference_component,
             )
         else:
             self.client = HTTPClient(base_url, timeout_s=self.environment.timeout_s)
