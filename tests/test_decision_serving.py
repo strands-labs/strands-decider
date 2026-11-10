@@ -98,7 +98,7 @@ def test_serve_refuses_an_intermediate_checkpoint_and_a_device_map(ckpt, tmp_pat
         server.create_app(str(intermediate_checkpoint(tmp_path / "mid")), device="cpu")
     with pytest.raises(ValueError, match="device-map"):
         server.create_app(str(ckpt), device="cuda", device_map="auto")
-    with pytest.raises(ValueError, match="cpu, cuda or mps"):
+    with pytest.raises(ValueError, match="decision checkpoints run on cpu, cuda, mps here"):
         load_decision_engine(str(ckpt), device="mlx")
 
 
@@ -168,7 +168,7 @@ def test_flags_that_do_not_apply_are_named(ckpt, tmp_path, monkeypatch):
 
     with pytest.warns(UserWarning, match="--vision is for v1"):
         server.create_app(str(ckpt), device="cpu", vision=True, warmup=False)
-    with pytest.raises(ValueError, match="cpu, cuda or mps"):
+    with pytest.raises(ValueError, match="decision checkpoints run on cpu, cuda, mps here"):
         server.create_app(str(ckpt), device="mlx")
     with pytest.raises(ValueError, match="--dtype is for decision checkpoints"):
         server.create_app(str(tmp_path), device="cpu", dtype="bfloat16")
@@ -290,3 +290,71 @@ def test_hub_detection_asks_the_hub_once_and_lets_real_errors_through(hub):
     assert calls[-1] == ("snapshot", "org/repo", "abc", True)
     state["snapshot"] = _hub_error(LocalEntryNotFoundError)
     assert checkpoint_kind("org/repo") is None
+
+
+def test_serve_refusals_over_http(ckpt, tmp_path):
+    """Through create_app and HTTP: audio, five images, and images on a text-only checkpoint
+    are each refused with 422 and the interface's message."""
+    img = image_b64(64, 48)
+    with TestClient(server.create_app(str(ckpt), device="cpu", warmup=False)) as client:
+        r = client.post("/v1/systemone", json={**request(), "audio": ["UklGRiQAAABXQVZF"]})
+        assert r.status_code == 422 and r.json()["detail"] == "audio input is not supported"
+        r = client.post("/v1/systemone", json=request([img] * 5))
+        assert (
+            r.status_code == 422 and r.json()["detail"] == "5 images; this server takes at most 4"
+        )
+        assert client.post("/v1/systemone", json=request([img] * 4)).status_code == 200
+    text_only = decision_checkpoint(tmp_path / "t", GEMMA4, decision={"inputs": ["text"]})
+    with TestClient(server.create_app(str(text_only), device="cpu", warmup=False)) as client:
+        r = client.post("/v1/systemone", json=request([img]))
+        assert r.status_code == 422
+        assert r.json()["detail"].startswith("this checkpoint does not take images")
+
+
+class _StubBackend:
+    """A backend another runtime might register: it returns each question's probabilities."""
+
+    outputs = "probabilities"
+    inputs = ("text", "image")
+    image_problem = None
+
+    def __init__(self, path, **settings):
+        self.path, self.settings, self.calls = path, settings, []
+
+    def describe(self):
+        return {"backend": "stub", "device": self.settings["device"], "dtype": "none"}
+
+    def forward(self, state, questions, images=()):
+        import numpy as np
+
+        self.calls.append((len(state), len(questions), len(images)))
+        return [np.full(255, 1 / 255) for _ in questions]
+
+
+def test_another_runtime_plugs_in_by_device(ckpt, monkeypatch):
+    """A backend registered for a device kind gets the engine, the serve wiring and its checks:
+    the raw request, the refusals, the health check."""
+    from strands_decider import decision
+
+    monkeypatch.setattr(decision, "_LOADERS", dict(decision._LOADERS))
+    seen = []
+    decision.register_backend(
+        ["stub"], lambda path, **kw: seen.append(_StubBackend(path, **kw)) or seen[-1]
+    )
+    with TestClient(server.create_app(str(ckpt), device="stub:0", warmup=False)) as client:
+        health = client.get("/health").json()
+        assert (health["backend"], health["device"], health["images"]) == ("stub", "stub:0", True)
+        r = client.post("/v1/systemone", json=request([image_b64(64, 48)]))
+        assert r.status_code == 200, r.text
+        assert r.json()["answers"]["team"]["probabilities"] == {
+            "billing": 0.3333,
+            "shipping": 0.3333,
+            "sales": 0.3333,
+        }
+        assert client.post("/v1/systemone", json={**request(), "audio": ["x"]}).status_code == 422
+    [backend] = seen
+    assert backend.path == str(ckpt) and backend.settings["reuse_state"] is True
+    [(state_tokens, questions, images)] = backend.calls  # the state once, its image in it
+    assert (questions, images) == (3, 1) and state_tokens > 266
+    with pytest.raises(ValueError, match=r"decision checkpoints run on .*stub.* here, not 'tpu'"):
+        decision.check_device("tpu")
