@@ -27,9 +27,12 @@ from core_support import toy_tokenizer  # noqa: E402
 
 from strands_decider.core import CODES  # noqa: E402
 
-GEMMA4 = "gemma4"
-UNIFIED = "unified"
-KINDS = (GEMMA4, UNIFIED)
+GEMMA4 = "gemma4"  # E2B's design: per-layer embeddings, KV-shared layers
+# 26B-A4B's and 31B's: the same class, with bidirectional image blocks ("vision"), no per-layer
+# embeddings and no KV sharing
+GEMMA4_VISION = "gemma4-vision"
+UNIFIED = "unified"  # the 12B's encoder-free class, also "vision"
+KINDS = (GEMMA4, GEMMA4_VISION, UNIFIED)
 HAS_UNIFIED = hasattr(transformers, "Gemma4UnifiedForConditionalGeneration")
 LAYERS = ["sliding_attention", "full_attention", "sliding_attention", "full_attention"]
 HIDDEN = 64
@@ -37,9 +40,14 @@ SOFTCAP = 30.0
 TEMPERATURE = 1.7
 BASE = {
     GEMMA4: ("google/gemma-4-E2B-it", "3e22461f65e89153144f8adb70e3b8c2cc9845a7"),
+    GEMMA4_VISION: ("google/gemma-4-31B-it", "842da3794eaa0b77d5f08bae87a17459d91ff475"),
     UNIFIED: ("google/gemma-4-12B-it", "43c9d014b231474fa7212dbb48a762566c2b255d"),
 }
-PROCESSOR_TYPES = {GEMMA4: "Gemma4ImageProcessor", UNIFIED: "Gemma4UnifiedImageProcessor"}
+PROCESSOR_TYPES = {
+    GEMMA4: "Gemma4ImageProcessor",
+    GEMMA4_VISION: "Gemma4ImageProcessor",
+    UNIFIED: "Gemma4UnifiedImageProcessor",
+}
 
 
 def tokenizer():
@@ -64,12 +72,20 @@ def _text_kwargs(vocab: int) -> dict:
 
 
 def gemma4_text_config(vocab: int, **overrides):
-    return transformers.Gemma4TextConfig(
-        **{**_text_kwargs(vocab), **overrides},
-        hidden_size_per_layer_input=8,
-        vocab_size_per_layer_input=vocab,
-        num_kv_shared_layers=1,
-    )
+    defaults = {
+        **_text_kwargs(vocab),
+        "hidden_size_per_layer_input": 8,
+        "vocab_size_per_layer_input": vocab,
+        "num_kv_shared_layers": 1,
+    }
+    return transformers.Gemma4TextConfig(**{**defaults, **overrides})
+
+
+VISION_TEXT = {
+    "use_bidirectional_attention": "vision",
+    "hidden_size_per_layer_input": 0,
+    "num_kv_shared_layers": 0,
+}
 
 
 def model_config(kind: str, tok, *, vision: bool = True, text: dict | None = None):
@@ -79,7 +95,9 @@ def model_config(kind: str, tok, *, vision: bool = True, text: dict | None = Non
         "eoi_token_id": tok.token_to_id("<image|>"),
     }
     vocab = tok.get_vocab_size()
-    if kind == GEMMA4:
+    if kind in (GEMMA4, GEMMA4_VISION):
+        if kind == GEMMA4_VISION:
+            text = {**VISION_TEXT, **(text or {})}
         vis = transformers.Gemma4VisionConfig(
             hidden_size=32,
             intermediate_size=64,

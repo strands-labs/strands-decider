@@ -54,6 +54,7 @@ import importlib.util
 import json
 import math
 import os
+import threading
 import warnings
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
@@ -74,6 +75,7 @@ from ..core.images import (
 )
 from ..core.readout import MODEL_CONFIG_FILE, READOUT_FILE, load_safetensors
 from ..core.request import NO_VISION
+from ..decision import RequestRefused
 
 if TYPE_CHECKING:
     from PIL import Image
@@ -98,8 +100,9 @@ MEDIA_TOKEN_IDS = (258880, 258881, 258884)
 # 4 times slower on CPUs without bf16 instructions (E2B with an image on 16 EPYC 7R13 cores:
 # 1.8 s against 6.5 s for the state). CUDA: bf16, the reference precision. MPS: bf16. On
 # random-weight models with Gemma 4's head sizes it runs, SDPA with boolean masks included, and
-# lands as far from float32 on CPU as bf16 on CPU does (torch 2.15); float32 on MPS matches
-# float32 on CPU to 1e-3 (tests/test_backend_transformers.py, test_mps_*).
+# lands as far from float32 on CPU as bf16 on CPU does; float32 on MPS matches float32 on CPU
+# to 1e-3 (measured with torch 2.15.0 on an M4 Pro; tests/test_backend_transformers.py,
+# test_mps_*).
 DEVICE_DTYPES = {"cpu": torch.float32, "cuda": torch.bfloat16, "mps": torch.bfloat16}
 # The most tokens one question batch may hold: rows x (S + the longest question). Each row
 # carries its own copy of the state's keys and values through every layer, so the budget
@@ -316,13 +319,20 @@ def resized_size(width: int, height: int) -> tuple[int, int]:
     return w, h
 
 
+class ImageRefused(RequestRefused):
+    """An image file the runtime cannot decode: the caller's error, with v1's message."""
+
+
 def decode(image: RenderedImage) -> Image.Image:
     """The image's file as v1 decodes it (`vision.decode_image`): the first frame, upright by
     its EXIF orientation, transparent areas on white, RGB. A file that fails is refused with
-    v1's message (ValueError)."""
+    v1's message (`ImageRefused`)."""
     from ..vision import decode_image
 
-    return decode_image(base64.b64encode(image.data).decode("ascii"))
+    try:
+        return decode_image(base64.b64encode(image.data).decode("ascii"))
+    except ValueError as e:
+        raise ImageRefused(str(e)) from e
 
 
 def resize(img: Image.Image) -> Image.Image:
@@ -472,8 +482,8 @@ def _ids(name: str, seq: Sequence[int], vocab: int) -> list[int]:
 
 class TransformersBackend:
     """`strands_decider.core.Backend` on a transformers Gemma 4 model (see the module
-    docstring). Build one with `load`; `forward` may be called from several threads at once,
-    except on MPS, which needs one caller at a time."""
+    docstring). Build one with `load`. `forward` may be called from several threads at once;
+    on MPS, where two threads on the device abort the process, calls take turns."""
 
     outputs = HIDDEN
 
@@ -499,6 +509,10 @@ class TransformersBackend:
         self.reuse_state = reuse_state
         self.max_batch = max_batch
         self.max_batch_tokens = max_batch_tokens
+        # Metal aborts the process when two threads use the device at once.
+        self._turns: contextlib.AbstractContextManager[Any] = (
+            threading.RLock() if torch.device(device).type == "mps" else contextlib.nullcontext()
+        )
         # The decoder, with the vision encoder where there is one: Gemma4Model or
         # Gemma4UnifiedModel inside the multimodal class, or the bare Gemma4TextModel.
         self.decoder: Any = model if checkpoint.layout == DECODER else cast(Any, model).model
@@ -508,6 +522,13 @@ class TransformersBackend:
         self.vocab_size = int(text.vocab_size)
         self.pad_id = int(text.pad_token_id or 0)
         self.hidden_size = int(text.hidden_size)
+        weight = checkpoint.readout.weight
+        if weight is None or weight.shape != (len(CODES), self.hidden_size):
+            shape = None if weight is None else weight.shape
+            raise ValueError(
+                f"{checkpoint.path}: readout.safetensors `weight` is {shape}, not "
+                f"[{len(CODES)}, {self.hidden_size}]: the decoder's hidden size"
+            )
         if checkpoint.layout == MULTIMODAL:
             self.media_ids = frozenset(
                 int(i) for i in (cfg.image_token_id, cfg.audio_token_id, cfg.video_token_id)
@@ -548,7 +569,10 @@ class TransformersBackend:
         )
         for note in ckpt.warnings:
             warnings.warn(note, stacklevel=2)
-        dtype = dtype or default_dtype(device)
+        default = default_dtype(device)  # checks the device
+        dtype = dtype or default
+        if dtype not in (torch.float32, torch.bfloat16):
+            raise ValueError(f"the transformers backend runs float32 or bfloat16, not {dtype}")
         processor, problem = None, None
         if images and IMAGE in ckpt.inputs:
             problem = image_processor_problem(ckpt.processor_config(), ckpt.unified)
@@ -557,8 +581,9 @@ class TransformersBackend:
             if problem is None:
                 try:
                     processor = load_image_processor(ckpt.path, ckpt.unified)
-                except ImportError as e:
-                    problem = f"{e}, so image requests are refused"
+                except (ImportError, AttributeError, OSError, ValueError) as e:
+                    # A transformers without the class, or an unreadable processor config.
+                    problem = f"the image processor could not be built ({e}), so image requests are refused"
             if problem is not None:
                 warnings.warn(f"{ckpt.path}: {problem}", stacklevel=2)
         model = _load_model(ckpt, dtype, vision=processor is not None)
@@ -604,10 +629,11 @@ class TransformersBackend:
                 f"the image processor gives {counts} soft tokens where the prompt has "
                 f"{[im.tokens for im in images]} placeholders"
             )
-        return {
-            "pixel_values": out["pixel_values"].to(self.device, self.dtype),
-            "image_position_ids": out["image_position_ids"].to(self.device),
-        }
+        with self._turns:
+            return {
+                "pixel_values": out["pixel_values"].to(self.device, self.dtype),
+                "image_position_ids": out["image_position_ids"].to(self.device),
+            }
 
     # ---- the decoder ---------------------------------------------------------------------
 
@@ -743,7 +769,7 @@ class TransformersBackend:
         if images and self.image_processor is None:
             raise ValueError(self.image_problem or NO_VISION)
         self._check_media(state, qs, images)
-        with torch.inference_mode():
+        with self._turns, torch.inference_mode():
             # The reference reruns the vision encoder in each prompt's pass, as one prompt per
             # pass does; with the state reused it runs once, in the state's pass.
             pixels = self.prepare_pixels(images) if images else None
@@ -781,6 +807,7 @@ __all__ = [
     "DEVICE_DTYPES",
     "MULTIMODAL",
     "Checkpoint",
+    "ImageRefused",
     "StateCache",
     "TransformersBackend",
     "decode",
