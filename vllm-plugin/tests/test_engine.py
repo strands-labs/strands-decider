@@ -261,8 +261,10 @@ def test_an_unreadable_policy_refuses_the_image_request_and_the_engine_keeps_ser
 
     monkeypatch.setattr(engine_mod, "compute_policy", unreadable)
     core = FakeEngineCore([ARCH_MULTIMODAL])
-    with pytest.raises(ValidationError, match="could not be read") as err:
+    with pytest.raises(ValidationError) as err:
         wrapped(core, engine_request(prefix_end=9, mm_features=[image("a")]))
+    assert str(err.value) == "strands-decider: " + engine_mod.UNREADABLE_POLICY
+    assert "connection reset" not in str(err.value), "the error's own text stays in the log"
     assert err.value.parameter == "multi_modal_data" and core.calls == 0
     assert wrapped(core, engine_request(prefix_end=9, request_id="r2"))[0], "text is served"
 
