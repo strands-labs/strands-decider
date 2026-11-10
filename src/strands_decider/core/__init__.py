@@ -27,7 +27,14 @@ from __future__ import annotations
 
 from .codes import CODES, MAX_CODES, codes_for
 from .config import FORMAT_VERSION, INPUTS, INTERFACE, DecisionConfig, Provenance
-from .conformance import Agreement, agreement, read_golden_vectors
+from .conformance import (
+    BOUNDS,
+    Agreement,
+    NoRecordedBound,
+    agreement,
+    agreement_with_goldens,
+    read_golden_vectors,
+)
 from .images import (
     IMAGE_FORMATS,
     MAX_IMAGE_PIXELS,
@@ -75,6 +82,7 @@ from .runtime import Backend, ImageBackend, attention_mask, evaluate
 from .tokenizer import CONTROL_TOKEN_IDS, check_tokenizer, load_tokenizer
 
 __all__ = [
+    "BOUNDS",
     "CAPPED_LOGITS",
     "CHAT",
     "CODES",
@@ -98,12 +106,14 @@ __all__ = [
     "DecisionConfig",
     "EncodedImage",
     "ImageBackend",
+    "NoRecordedBound",
     "Provenance",
     "Readout",
     "RenderedImage",
     "RenderedQuestion",
     "RenderedRequest",
     "agreement",
+    "agreement_with_goldens",
     "answer",
     "attention_mask",
     "check_decoded_size",

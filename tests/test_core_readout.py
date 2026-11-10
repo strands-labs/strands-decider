@@ -488,7 +488,7 @@ def test_the_readout_goldens_see_a_misapplied_cap_or_temperature():
 
 def test_agreement_measures_top1_and_mean_dp():
     from strands_decider.core import Agreement, agreement
-    from strands_decider.core.conformance import BOUNDS, MIN_QUESTIONS
+    from strands_decider.core.conformance import MIN_QUESTIONS
 
     ref = {"a": [0.7, 0.3], "b": [0.2, 0.5, 0.3], "c": [0.5, 0.5]}
     ours = {"a": [0.6, 0.4], "b": [0.2, 0.3, 0.5], "c": [0.5, 0.5]}
@@ -503,9 +503,7 @@ def test_agreement_measures_top1_and_mean_dp():
     assert (
         not Agreement(1200, 0.979, 0.001).conforms() and not Agreement(1200, 0.99, 0.021).conforms()
     )
-    assert MIN_QUESTIONS == 1000 and BOUNDS["bf16"] == BOUNDS["mlx-8bit"] == BOUNDS[
-        "gguf-q8_0"
-    ] == (0.98, 0.02)
+    assert MIN_QUESTIONS == 1000
     for bad in ({"a": [0.7, 0.3]}, {**ours, "d": [1.0]}):
         with pytest.raises(ValueError, match="questions differ"):
             agreement(bad, ref)
@@ -513,6 +511,32 @@ def test_agreement_measures_top1_and_mean_dp():
         agreement({**ours, "b": [0.5, 0.5]}, ref)
     with pytest.raises(ValueError, match="finite"):
         agreement({**ours, "a": [math.nan, 1.0]}, ref)
+
+
+def test_conforms_applies_the_formats_recorded_bounds():
+    """bf16's bounds for bf16 weights, at any size and whatever the activations; a quantized
+    format's only at a size docs/spec.md records, and otherwise no claim at all."""
+    from strands_decider.core import BOUNDS, Agreement, NoRecordedBound
+
+    good, bad = Agreement(1200, 0.9908, 0.0104), Agreement(1200, 0.975, 0.0104)
+    assert BOUNDS == {
+        ("bf16", None): (0.98, 0.02),
+        ("mlx-8bit", "E2B"): (0.98, 0.02),
+        ("gguf-q8_0", "E2B"): (0.98, 0.02),
+    }
+    assert good.conforms() and good.conforms("bf16") and good.conforms("bf16", "12B")
+    assert good.conforms("mlx-8bit", "E2B") and good.conforms("gguf-q8_0", "E2B")
+    assert not bad.conforms() and not bad.conforms("gguf-q8_0", "E2B")
+    unrecorded = [
+        ("mlx-8bit",),
+        ("mlx-8bit", "12B"),
+        ("gguf-q8_0", "26B-A4B"),
+        ("gguf-q4_k_m", "E2B"),
+    ]
+    for args in [*unrecorded, ("mlx-4bit", "E2B")]:
+        with pytest.raises(NoRecordedBound, match=r"no conformance claim|give the size"):
+            good.conforms(*args)
+    assert issubclass(NoRecordedBound, ValueError)
 
 
 def test_read_golden_vectors(tmp_path):
@@ -538,6 +562,9 @@ def test_read_golden_vectors(tmp_path):
     ref = read_golden_vectors(path)
     assert ref == {(0, "q"): [0.1, 0.9], (1, "q"): [0.6, 0.4], (1, "r"): [0.2, 0.3, 0.5]}
     assert agreement(ref, ref).top1 == 1.0 and agreement(ref, ref).mean_abs_dp == 0.0
+    from strands_decider.core import agreement_with_goldens
+
+    assert agreement_with_goldens(ref, path) == agreement(ref, ref)
 
 
 # ---- safetensors and the readout file ---------------------------------------------------
