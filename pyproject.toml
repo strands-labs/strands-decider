@@ -42,12 +42,15 @@ train = ["datasets>=2.20"]
 # (0.22 pairs with torch 2.7, the floor above). v1's Qwen path stays on the PIL processor.
 vision = ["pillow>=13", "torchvision>=0.22"]
 # `--device mlx`: the torso on Apple silicon's GPU through mlx-lm
-# (src/strands_decider/mlx_engine.py).
-# mlx-lm is capped at the minor version tested: the backend uses its Qwen3.5 module layout and
-# prompt-cache classes, which are internals.
+# (src/strands_decider/mlx_engine.py), and decision checkpoints through mlx-vlm
+# (src/strands_decider/backends/mlx.py).
+# mlx-lm and mlx-vlm are capped at the minor version tested: the backends use mlx-lm's Qwen3.5
+# module layout and prompt-cache classes, and mlx-vlm's Gemma 4 classes, caches and image
+# processors, which are internals.
 mlx = [
-    "mlx>=0.32.2; sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "mlx>=0.32.4; sys_platform == 'darwin' and platform_machine == 'arm64'",
     "mlx-lm>=0.32,<0.33; sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "mlx-vlm>=0.7.12,<0.8; sys_platform == 'darwin' and platform_machine == 'arm64'",
 ]
 # `--device cuda`: flash-linear-attention's Triton kernels for the Gated DeltaNet layers. The conv
 # layer's kernel, causal-conv1d, compiles against the local CUDA toolkit and is not listed; on a
@@ -142,6 +145,7 @@ module = [
     "yaml",
     "mlx.*",
     "mlx_lm.*",
+    "mlx_vlm.*",
     "PIL.*",
     "tokenizers",
 ]
