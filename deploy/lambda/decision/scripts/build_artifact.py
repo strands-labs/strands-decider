@@ -1,7 +1,8 @@
 """Build what the Lambda image serves from a decision checkpoint (docs/spec.md, The checkpoint layout).
 
     python build_artifact.py CHECKPOINT OUT_DIR --llama-cpp DIR --quantize PATH [--revision REV]
-        [--name NAME] [--mmproj-type f16] [--max-bytes N] [--work DIR] [--gguf-tmp DIR]
+        [--expect-digest SHA256] [--name NAME] [--mmproj-type q8_0|f16] [--max-bytes N]
+        [--work DIR] [--gguf-tmp DIR]
 
 CHECKPOINT is a Hugging Face Hub id, an s3:// URI of a checkpoint directory (read with the
 environment's AWS credentials), or a local directory. OUT_DIR gets:
@@ -13,8 +14,16 @@ environment's AWS credentials), or a local directory. OUT_DIR gets:
                            --mmproj-type), without the audio tower (vision_only_mmproj.py)
     readout.safetensors, decision_config.json, tokenizer.json, processor_config.json
                            the checkpoint's own, unchanged
-    artifact.json          the model's name, the checkpoint, the llama.cpp commit, the files' sha256,
-                           and the byte ranges of model.gguf that llama.cpp reads lazily
+    artifact.json          the model's name; the checkpoint, its resolved Hub commit and its
+                           manifest digest; the llama.cpp commit; each served file's size and
+                           sha256, and the sha256 of each 16 MiB chunk of the GGUFs, which the
+                           function checks as it reads them at start; and the byte ranges of
+                           model.gguf that llama.cpp reads lazily
+
+The checkpoint is pinned: a Hub revision is resolved to its commit, and each of its LFS files is
+checked against the sha256 the Hub records. The manifest digest is the sha256 of the lines
+`<sha256>  <file>`, one per file of the checkpoint, sorted by name (in a checkpoint directory,
+`sha256sum * | sort -k 2 | sha256sum`); with --expect-digest, any other is refused.
 
 The checkpoint is checked before anything is converted, as a runtime checks it: decision_config.json
 must validate (`"interface": "strands-decider"`, the soft-cap among its required fields),
@@ -53,15 +62,18 @@ from strands_decider.core.config import IMAGE  # noqa: E402
 HERE = Path(__file__).resolve().parent
 QUANT = "Q8_0"
 # The decoder and the vision tower must leave the function room for llama.cpp's buffers, Python and
-# a request's state within Lambda's 10,240 MB: E2B's are 4.95 GB and 0.37 GB.
+# a request's state within Lambda's 10,240 MB: E2B's are 4.95 GB and, at q8_0, 0.23 GB.
 MAX_BYTES = 6_000_000_000
 FILES = ("readout.safetensors", "decision_config.json", "tokenizer.json", "processor_config.json")
+# The chunk the function reads and checks the GGUFs in (handler.py, _prefetch).
+CHUNK = 16 << 20
 
 
-def fetch(checkpoint: str, revision: str | None, work: Path) -> Path:
-    """The checkpoint as a local directory."""
+def fetch(checkpoint: str, revision: str | None, work: Path) -> tuple[Path, str | None]:
+    """The checkpoint as a local directory, and the Hub commit it was read at (None off the Hub).
+    A Hub checkpoint's LFS files are checked against the sha256 the Hub records for them."""
     if os.path.isdir(checkpoint):
-        return Path(checkpoint)
+        return Path(checkpoint), None
     dest = work / "checkpoint"
     started, total = time.time(), 0
     if checkpoint.startswith("s3://"):
@@ -84,13 +96,34 @@ def fetch(checkpoint: str, revision: str | None, work: Path) -> Path:
                 total += obj["Size"]
         if total == 0:
             raise SystemExit(f"nothing under {checkpoint}")
+        commit = None
     else:
-        from huggingface_hub import snapshot_download
+        from huggingface_hub import HfApi, snapshot_download
 
-        snapshot_download(checkpoint, revision=revision, local_dir=dest)
+        info = HfApi().model_info(checkpoint, revision=revision, files_metadata=True)
+        commit = info.sha
+        snapshot_download(checkpoint, revision=commit, local_dir=dest)
+        for f in info.siblings or []:
+            lfs = getattr(f, "lfs", None)
+            want = getattr(lfs, "sha256", None) if lfs is not None else None
+            if want and sha256(dest / f.rfilename) != want:
+                raise SystemExit(f"{f.rfilename} does not have the sha256 the Hub records, {want}")
         total = sum(p.stat().st_size for p in dest.rglob("*") if p.is_file())
-    print(f"fetched {checkpoint}: {total:,} bytes in {time.time() - started:.0f} s", flush=True)
-    return dest
+    print(
+        f"fetched {checkpoint} ({commit or 'no commit'}): {total:,} bytes in {time.time() - started:.0f} s",
+        flush=True,
+    )
+    return dest, commit
+
+
+def manifest_digest(ckpt: Path) -> str:
+    """The sha256 of `<sha256>  <file>` lines, one per file of the checkpoint, sorted by name."""
+    lines = [
+        f"{sha256(p)}  {p.name}\n"
+        for p in sorted(ckpt.iterdir(), key=lambda p: p.name)
+        if p.is_file()
+    ]
+    return hashlib.sha256("".join(lines).encode()).hexdigest()
 
 
 def check(ckpt: Path) -> DecisionConfig:
@@ -129,9 +162,23 @@ def run(*cmd: str | Path) -> None:
 def sha256(path: Path) -> str:
     h = hashlib.sha256()
     with open(path, "rb") as f:
-        while chunk := f.read(16 << 20):
+        while chunk := f.read(CHUNK):
             h.update(chunk)
     return h.hexdigest()
+
+
+def file_record(path: Path, chunked: bool) -> dict:
+    """A served file's size and sha256, and for a GGUF each CHUNK's sha256, in order."""
+    whole, chunks = hashlib.sha256(), []
+    with open(path, "rb") as f:
+        while chunk := f.read(CHUNK):
+            whole.update(chunk)
+            if chunked:
+                chunks.append(hashlib.sha256(chunk).hexdigest())
+    rec: dict = {"size": path.stat().st_size, "sha256": whole.hexdigest()}
+    if chunked:
+        rec.update({"chunk_size": CHUNK, "chunks": chunks})
+    return rec
 
 
 def gguf_has_audio(llama_cpp: Path, path: Path) -> bool:
@@ -158,17 +205,13 @@ def lazy_ranges(llama_cpp: Path, path: Path) -> list[list[int]]:
     ]
 
 
-def llama_cpp_rev(llama_cpp: Path) -> str | None:
-    """The llama.cpp commit: LLAMA_CPP_REV (the image build's), else the tree's git HEAD."""
-    if os.environ.get("LLAMA_CPP_REV"):
-        return os.environ["LLAMA_CPP_REV"]
-    try:
-        out = subprocess.run(
-            ["git", "-C", str(llama_cpp), "rev-parse", "HEAD"], capture_output=True, text=True
-        )
-    except OSError:
-        return None
-    return out.stdout.strip() or None
+def llama_cpp_rev(llama_cpp: Path) -> str:
+    """The llama.cpp commit the tree was built at: the LLAMA_CPP_REV file build_native.sh writes
+    after it checks the checkout against the pin."""
+    path = llama_cpp / "LLAMA_CPP_REV"
+    if not path.is_file():
+        raise SystemExit(f"{llama_cpp} has no LLAMA_CPP_REV: build it with scripts/build_native.sh")
+    return path.read_text().strip()
 
 
 def main() -> None:
@@ -178,6 +221,9 @@ def main() -> None:
     ap.add_argument("checkpoint")
     ap.add_argument("out", type=Path)
     ap.add_argument("--revision", default=None, help="the Hub revision (a Hub id only)")
+    ap.add_argument(
+        "--expect-digest", default="", help="the checkpoint's manifest digest, to refuse any other"
+    )
     ap.add_argument("--name", default=None, help="the model's name; the checkpoint's by default")
     ap.add_argument("--llama-cpp", type=Path, required=True, help="the patched llama.cpp source")
     ap.add_argument("--quantize", type=Path, required=True, help="llama-quantize")
@@ -191,7 +237,14 @@ def main() -> None:
 
     a.work.mkdir(parents=True, exist_ok=True)
     tmp = a.gguf_tmp or a.work
-    ckpt = fetch(a.checkpoint, a.revision, a.work)
+    rev = llama_cpp_rev(a.llama_cpp)
+    ckpt, commit = fetch(a.checkpoint, a.revision, a.work)
+    digest = manifest_digest(ckpt)
+    print(f"checkpoint manifest digest {digest}", flush=True)
+    if a.expect_digest and a.expect_digest != digest:
+        raise SystemExit(
+            f"the checkpoint's manifest digest is {digest}, not the expected {a.expect_digest}"
+        )
     config = check(ckpt)
     name = a.name or config.provenance.release or a.checkpoint.rstrip("/").split("/")[-1]
     name = name.split("/")[-1]
@@ -227,21 +280,27 @@ def main() -> None:
         )
     for f in FILES:
         shutil.copyfile(ckpt / f, a.out / f)
+        files[f] = a.out / f
     artifact = {
         "model_name": f"{name}-{QUANT.lower()}",
         "checkpoint": a.checkpoint,
-        "revision": a.revision
-        if not (a.checkpoint.startswith("s3://") or os.path.isdir(a.checkpoint))
-        else None,
+        "revision": commit,
+        "checkpoint_digest": digest,
         "inputs": list(config.inputs),
         "quantization": QUANT,
         "mmproj_type": a.mmproj_type if "mmproj.gguf" in files else None,
-        "llama_cpp": llama_cpp_rev(a.llama_cpp),
+        "llama_cpp": rev,
         "lazy_ranges": lazy_ranges(a.llama_cpp, a.out / "model.gguf"),
-        "sha256": {k: sha256(p) for k, p in files.items()},
+        "files": {k: file_record(p, k.endswith(".gguf")) for k, p in files.items()},
     }
     (a.out / "artifact.json").write_text(json.dumps(artifact, indent=2) + "\n")
-    print(json.dumps(artifact, indent=2), flush=True)
+    shown = {
+        **artifact,
+        "files": {
+            k: {"size": v["size"], "sha256": v["sha256"]} for k, v in artifact["files"].items()
+        },
+    }
+    print(json.dumps(shown, indent=2), flush=True)
 
 
 if __name__ == "__main__":

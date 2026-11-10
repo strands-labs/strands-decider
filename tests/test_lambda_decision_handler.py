@@ -1,8 +1,8 @@
 """The decision checkpoint's AWS Lambda handler (deploy/lambda/decision/handler.py), over a stand-in
 backend, and the image build's checks of a checkpoint (deploy/lambda/decision/scripts/build_artifact.py).
 
-The backend is the one part replaced: llama.cpp is tests/test_backend_llama_cpp.py's and
-deploy/lambda/decision's to test. Everything else is the handler's own: the load and its validation
+The backend is the one part replaced: it is tests/test_backend_llama_cpp.py's and, with the real
+library, tests/test_llama_cpp_shim.py's to test. Everything else is the handler's own: the load and its validation
 of the checkpoint's files, the routes, the status codes and bodies, the limits and the warm-up. The
 core under it is tests/test_core_*.py's. A checkpoint whose decision_config.json lacks the
 soft-cap, or whose config.json names another, is refused, at load and at build.
@@ -11,11 +11,13 @@ soft-cap, or whose config.json names another, is refused, at load and at build.
 from __future__ import annotations
 
 import base64
+import hashlib
 import importlib
 import importlib.util
 import json
 import struct
 import sys
+import threading
 import types
 from pathlib import Path
 from typing import ClassVar
@@ -24,6 +26,7 @@ import numpy as np
 import pytest
 from core_support import decision_config_fixture, image_b64
 
+from strands_decider.backends.llama_cpp import ImageError
 from strands_decider.core import CODES, CONTROL_TOKEN_IDS, HIDDEN
 
 DECISION = Path(__file__).resolve().parents[1] / "deploy" / "lambda" / "decision"
@@ -46,7 +49,7 @@ class FakeBackend:
     """Hidden states that make the first question's first code and the others' second code win."""
 
     calls: ClassVar[list[tuple[list[int], list[list[int]], tuple]]] = []
-    fail: ClassVar[bool] = False
+    fail: ClassVar[Exception | None] = None
     outputs = HIDDEN
 
     def __init__(self, library, model, *, mmproj=None, processor_config=None, threads=None):
@@ -55,12 +58,14 @@ class FakeBackend:
         self.last_timings: dict = {}
 
     def forward(self, state, questions, images=()):
-        if FakeBackend.fail:
-            raise RuntimeError("sd_forward failed: the state's decode failed")
+        if FakeBackend.fail is not None:
+            raise FakeBackend.fail
         FakeBackend.calls.append((state, questions, tuple(images)))
         self.last_timings = {"state_ms": 1.0, "question_ms": [2.0] * len(questions)}
         if images:
-            self.last_timings["images"] = [{"size": [912, 672], "encode_ms": 3.0}] * len(images)
+            unique = {im.sha256 for im in images}
+            self.last_timings["images"] = [{"size": [912, 672], "encode_ms": 3.0}] * len(unique)
+            self.last_timings["n_images"] = len(images)
         h = np.zeros((len(questions), HIDDEN_SIZE), dtype=np.float32)
         for i in range(len(questions)):
             h[i, 0 if i == 0 else 1] = 40.0
@@ -116,11 +121,37 @@ def write_checkpoint(d: Path, *, vision: bool = True, **config) -> Path:
             }
         )
     )
-    (d / "artifact.json").write_text(json.dumps({"model_name": "tiny-decision-q8_0"}))
-    (d / "model.gguf").write_bytes(b"\0" * 1000)
+    (d / "model.gguf").write_bytes(bytes(range(256)) * 4)
     if vision:
         (d / "mmproj.gguf").write_bytes(b"\0" * 100)
+    record_artifact(d)
     return d
+
+
+CHUNK = 16 << 20
+
+
+def record_artifact(d: Path, **extra) -> None:
+    """artifact.json as the image build writes it: each served file's size and sha256, and the
+    GGUFs' chunk digests."""
+    files = {}
+    for p in sorted(d.iterdir()):
+        if p.name in ("artifact.json", "config.json") or not p.is_file():
+            continue
+        data = p.read_bytes()
+        rec = {"size": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+        if p.name.endswith(".gguf"):
+            rec |= {
+                "chunk_size": CHUNK,
+                "chunks": [
+                    hashlib.sha256(data[i : i + CHUNK]).hexdigest()
+                    for i in range(0, len(data), CHUNK)
+                ],
+            }
+        files[p.name] = rec
+    (d / "artifact.json").write_text(
+        json.dumps({"model_name": "tiny-decision-q8_0", "files": files, **extra})
+    )
 
 
 @pytest.fixture
@@ -140,11 +171,12 @@ def load(model_dir, monkeypatch):
             monkeypatch.setenv(key, value)
         fake = types.ModuleType("strands_decider.backends.llama_cpp")
         fake.LlamaCppBackend = FakeBackend  # type: ignore[attr-defined]
+        fake.ImageError = ImageError  # type: ignore[attr-defined]
         monkeypatch.setitem(sys.modules, "strands_decider.backends.llama_cpp", fake)
         monkeypatch.syspath_prepend(str(DECISION))
         monkeypatch.delitem(sys.modules, "handler", raising=False)
         FakeBackend.calls.clear()
-        FakeBackend.fail = False
+        FakeBackend.fail = None
         return importlib.import_module("handler")
 
     yield _load
@@ -191,8 +223,10 @@ def test_the_lazy_tables_pages_leave_the_page_cache(load, model_dir, monkeypatch
         raising=False,
     )
     monkeypatch.setattr(handler_os(), "POSIX_FADV_DONTNEED", 4, raising=False)
-    artifact = json.loads((model_dir / "artifact.json").read_text())
-    (model_dir / "artifact.json").write_text(json.dumps({**artifact, "lazy_ranges": [[100, 900]]}))
+    # One good range, and ones that are empty, past the file's end, or negative, which are skipped:
+    # posix_fadvise reads a length of 0 as "to the end of the file".
+    bad = [[900, 900], [1000, 5000], [-1, 10], ["a", 9]]
+    record_artifact(model_dir, lazy_ranges=[[100, 900], *bad])
     load(**({} if setting is None else {"DECIDER_PAGE_CACHE": setting}))
     # The vision tower's file, whole, after mtmd reads it; the table's range after the warm-ups.
     assert calls == ([(0, 0), (100, 800)] if dropped else [(0, 0)])
@@ -290,12 +324,94 @@ def test_the_request_limit(load):
         load(DECIDER_MAX_REQUEST_TOKENS="-1")
 
 
-def test_a_backend_failure_is_a_500(load):
+@pytest.mark.parametrize(
+    "failure",
+    [RuntimeError("sd_forward failed: the state's decode failed"), ValueError("an internal check")],
+)
+def test_a_backend_failure_is_a_500(load, failure):
     handler = load()
-    FakeBackend.fail = True
+    FakeBackend.fail = failure
     assert call(handler, url_event("POST", "/v1/systemone", REQUEST)) == (
         500,
         {"detail": "Internal Server Error"},
+    )
+
+
+def test_an_image_that_cannot_be_decoded_is_a_422(load):
+    handler = load()
+    FakeBackend.fail = ImageError("image could not be decoded: broken data stream")
+    assert call(handler, url_event("POST", "/v1/systemone", IMAGE_REQUEST)) == (
+        422,
+        {"detail": "image could not be decoded: broken data stream"},
+    )
+
+
+def test_audio_is_refused(load):
+    status, body = call(
+        load(), url_event("POST", "/v1/systemone", {**REQUEST, "audio": ["UklGRg=="]})
+    )
+    assert status == 422 and "audio input is not supported" in body["detail"]
+
+
+def test_the_request_limit_fails_closed(load):
+    assert load()._model.result().health()["max_request_tokens"] == 16384
+    assert (
+        load(DECIDER_MAX_REQUEST_TOKENS="")._model.result().health()["max_request_tokens"] == 16384
+    )
+    assert (
+        load(DECIDER_MAX_REQUEST_TOKENS="0")._model.result().health()["max_request_tokens"] is None
+    )
+
+
+def test_images_are_counted_with_repeats(load, tmp_path):
+    handler = load(write_checkpoint(tmp_path / "long", max_length_validated=2048))
+    twice = {**REQUEST, "images": [image_b64("checker-64x48.png")] * 2}
+    _, info = handler._evaluate(twice)
+    assert info["images"] == 2 and len(info["timings_ms"]["images"]) == 1
+
+
+def test_a_served_file_that_is_not_the_builds_is_refused(load, tmp_path):
+    for name in ("model.gguf", "mmproj.gguf", "readout.safetensors", "tokenizer.json"):
+        d = write_checkpoint(tmp_path / name)
+        data = bytearray((d / name).read_bytes())
+        data[len(data) // 2] ^= 1
+        (d / name).write_bytes(bytes(data))
+        with pytest.raises(ValueError, match="is not the file the image build wrote"):
+            load(d)
+    assert FakeBackend.calls == []
+
+
+def test_a_listed_vision_tower_must_be_there(load, tmp_path):
+    d = write_checkpoint(tmp_path / "gone")
+    (d / "mmproj.gguf").unlink()
+    with pytest.raises(FileNotFoundError):
+        load(d)
+
+
+def test_an_on_demand_load_that_fails_ends_the_environment(load, tmp_path, monkeypatch):
+    import os
+
+    exited = threading.Event()
+    codes = []
+
+    def _exit(code):
+        codes.append(code)
+        exited.set()
+
+    monkeypatch.setattr(os, "_exit", _exit)
+    handler = load(
+        write_checkpoint(tmp_path / "nocap", final_logit_softcapping=None),
+        AWS_LAMBDA_INITIALIZATION_TYPE="on-demand",
+    )
+    assert exited.wait(10) and codes == [1]
+    assert isinstance(handler._model.exception(), ValueError)
+
+
+def test_an_on_demand_load_answers_once_ready(load):
+    handler = load(AWS_LAMBDA_INITIALIZATION_TYPE="on-demand")
+    response = handler.handler(url_event("POST", "/v1/systemone", REQUEST), None)
+    assert (
+        response["statusCode"] == 200 and float(response["headers"]["x-decider-load-wait-ms"]) >= 0
     )
 
 
@@ -324,6 +440,7 @@ def test_a_tokenizer_without_the_checkpoints_ids_is_refused(load, tmp_path):
 
     d = write_checkpoint(tmp_path / "toy")
     toy_tokenizer().save(str(d / "tokenizer.json"))
+    record_artifact(d)
     with pytest.raises(ValueError, match="control tokens are not Gemma 4's"):
         load(d)
 
@@ -399,3 +516,108 @@ def test_the_build_refuses_other_checkpoints(build_artifact, tmp_path):
         build_artifact.check(d)
     with pytest.raises(ValueError, match="not a Strands Decider decision config"):
         build_artifact.check(_layout(tmp_path / "other", interface=None))
+
+
+def test_the_build_fetches_an_s3_checkpoint_and_only_its_files(
+    build_artifact, tmp_path, monkeypatch
+):
+    objects = {
+        "ckpt/e2b/config.json": b"{}",
+        "ckpt/e2b/model.safetensors": b"w" * 10,
+        "ckpt/e2b/sub/x": b"no",
+    }
+
+    class Client:
+        def get_paginator(self, name):
+            assert name == "list_objects_v2"
+            return types.SimpleNamespace(
+                paginate=lambda Bucket, Prefix: [
+                    {
+                        "Contents": [
+                            {"Key": k, "Size": len(v)}
+                            for k, v in objects.items()
+                            if k.startswith(Prefix)
+                        ]
+                    }
+                ]
+            )
+
+        def download_file(self, bucket, key, dest, Config):
+            assert bucket == "b"
+            Path(dest).write_bytes(objects[key])
+
+    fake = types.ModuleType("boto3")
+    fake.client = lambda name: Client()  # type: ignore[attr-defined]
+    transfer = types.ModuleType("boto3.s3.transfer")
+    transfer.TransferConfig = lambda **kw: None  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "boto3", fake)
+    monkeypatch.setitem(sys.modules, "boto3.s3", types.ModuleType("boto3.s3"))
+    monkeypatch.setitem(sys.modules, "boto3.s3.transfer", transfer)
+    d, commit = build_artifact.fetch("s3://b/ckpt/e2b", None, tmp_path)
+    assert commit is None and sorted(p.name for p in d.iterdir()) == [
+        "config.json",
+        "model.safetensors",
+    ]
+
+
+def test_the_build_pins_a_hub_checkpoint_and_checks_its_files(
+    build_artifact, tmp_path, monkeypatch
+):
+    files = {"config.json": b"{}", "model.safetensors": b"weights"}
+    lfs = {"model.safetensors": hashlib.sha256(files["model.safetensors"]).hexdigest()}
+    seen = {}
+
+    class Api:
+        def model_info(self, repo, revision, files_metadata):
+            seen["info"] = (repo, revision)
+            siblings = [
+                types.SimpleNamespace(
+                    rfilename=n, lfs=types.SimpleNamespace(sha256=lfs[n]) if n in lfs else None
+                )
+                for n in files
+            ]
+            return types.SimpleNamespace(sha="c" * 40, siblings=siblings)
+
+    def snapshot_download(repo, revision, local_dir):
+        seen["download"] = revision
+        Path(local_dir).mkdir(parents=True, exist_ok=True)
+        for n, b in files.items():
+            (Path(local_dir) / n).write_bytes(b)
+
+    hub = types.ModuleType("huggingface_hub")
+    hub.HfApi = Api  # type: ignore[attr-defined]
+    hub.snapshot_download = snapshot_download  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "huggingface_hub", hub)
+    _, commit = build_artifact.fetch("org/model", "main", tmp_path / "a")
+    assert commit == "c" * 40 and seen == {"info": ("org/model", "main"), "download": "c" * 40}
+    lfs["model.safetensors"] = "0" * 64
+    with pytest.raises(SystemExit, match="does not have the sha256 the Hub records"):
+        build_artifact.fetch("org/model", "main", tmp_path / "b")
+
+
+def test_the_manifest_digest_is_sha256sum_of_the_files(build_artifact, tmp_path):
+    d = tmp_path / "ckpt"
+    d.mkdir()
+    for n, b in {"b.json": b"2", "a.json": b"1"}.items():
+        (d / n).write_bytes(b)
+    lines = "".join(
+        f"{hashlib.sha256(b).hexdigest()}  {n}\n" for n, b in [("a.json", b"1"), ("b.json", b"2")]
+    )
+    assert build_artifact.manifest_digest(d) == hashlib.sha256(lines.encode()).hexdigest()
+
+
+def test_the_build_refuses_a_checkpoint_with_another_digest(build_artifact, tmp_path, monkeypatch):
+    ckpt = _layout(tmp_path / "ckpt")
+    llama = tmp_path / "llama"
+    llama.mkdir()
+    (llama / "LLAMA_CPP_REV").write_text("f" * 40 + "\n")
+    assert build_artifact.llama_cpp_rev(llama) == "f" * 40
+    argv = ["build_artifact.py", str(ckpt), str(tmp_path / "out"), "--llama-cpp", str(llama),
+            "--quantize", "/bin/false", "--expect-digest", "0" * 64]  # fmt: skip
+    monkeypatch.setattr(sys, "argv", argv)
+    with pytest.raises(SystemExit, match="manifest digest is"):
+        build_artifact.main()
+    assert not (tmp_path / "out").exists()  # refused before anything was converted
+    (llama / "LLAMA_CPP_REV").unlink()
+    with pytest.raises(SystemExit, match="no LLAMA_CPP_REV"):
+        build_artifact.llama_cpp_rev(llama)

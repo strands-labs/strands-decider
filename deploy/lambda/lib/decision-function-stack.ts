@@ -1,6 +1,5 @@
 import * as path from "path";
 import {
-  Annotations,
   CfnOutput,
   CustomResource,
   Duration,
@@ -17,6 +16,8 @@ import * as lambda from "aws-cdk-lib/aws-lambda";
 import * as logs from "aws-cdk-lib/aws-logs";
 import { Construct } from "constructs";
 import { ContainerImageBuild } from "@cdklabs/deploy-time-build";
+import { createHash } from "crypto";
+import { stackNameFor } from "./decider-function-stack";
 
 const REPO_ROOT = path.join(__dirname, "..", "..", "..");
 
@@ -41,6 +42,36 @@ const ASSET_EXCLUDE = [
  */
 export const DECISION_MAX_REQUEST_TOKENS = 16384;
 
+export const CHECKPOINT_NEEDED = "set the decision checkpoint: -c checkpoint=<Hub id or s3://bucket/prefix/>";
+
+/**
+ * An s3:// checkpoint's bucket and its key prefix, ending in "/", or undefined for a Hub id. The
+ * build role's grant is scoped to the prefix, so it must be a real one: a bucket name S3 allows, a
+ * prefix that is not empty, and no wildcard (`*`, `?`) in either.
+ */
+export function parseS3Checkpoint(checkpoint: string): { bucket: string; prefix: string } | undefined {
+  if (!checkpoint.startsWith("s3://")) return undefined;
+  const m = /^s3:\/\/([^/]+)\/(.+)$/.exec(checkpoint);
+  if (!m) throw new Error(`an s3:// checkpoint needs a bucket and a prefix: ${checkpoint}`);
+  const bucket = m[1];
+  const prefix = m[2].replace(/\/*$/, "/");
+  if (!/^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/.test(bucket)) throw new Error(`not an S3 bucket name: ${bucket}`);
+  if (/[*?]/.test(prefix) || prefix === "/") throw new Error(`not a checkpoint prefix: ${m[2]}`);
+  return { bucket, prefix };
+}
+
+/**
+ * A decision checkpoint's stack name: a Hub id's, as for a v1 model (stackNameFor); an s3://
+ * checkpoint's last path part with 8 hex digits of the full URI's sha256, so that checkpoints of
+ * the same name under different prefixes or buckets get stacks of their own.
+ */
+export function decisionStackName(checkpoint: string): string {
+  const trimmed = checkpoint.replace(/\/+$/, "");
+  if (!trimmed.startsWith("s3://")) return stackNameFor(trimmed);
+  const hash = createHash("sha256").update(trimmed).digest("hex").slice(0, 8);
+  return stackNameFor(`${trimmed.split("/").pop()}-${hash}`);
+}
+
 /** A true or false context value, from cdk.json or `-c key=value`. */
 function flag(value: unknown, key: string): boolean {
   if (String(value) !== "true" && String(value) !== "false") {
@@ -54,16 +85,23 @@ function flag(value: unknown, key: string): boolean {
  * image, built from the checkpoint with its decoder and vision tower converted for llama.cpp, the
  * function, its `live` alias and that alias's IAM-authenticated Function URL. Settings are CDK
  * context values (cdk.json, or -c key=value): `checkpoint`, a Hugging Face Hub id or an s3:// URI
- * of a checkpoint directory; `checkpoint_revision`; `snapstart`; and `max_request_tokens`, the most
- * tokens one request may forward (DECISION_MAX_REQUEST_TOKENS by default).
+ * of a checkpoint directory; `checkpoint_revision`; `checkpoint_digest`, the checkpoint's manifest
+ * digest, to refuse any other; and `max_request_tokens`, the most tokens one request may forward
+ * (DECISION_MAX_REQUEST_TOKENS by default). SnapStart is not offered: it was not measured for a
+ * decision checkpoint, whose load reads 5 GB from a lazily loaded image.
  */
 export class DecisionFunctionStack extends Stack {
   constructor(scope: Construct, id: string, props?: StackProps) {
     super(scope, id, props);
     const ctx = (key: string) => this.node.tryGetContext(key);
     const checkpoint = String(ctx("checkpoint") ?? "");
-    if (!checkpoint) throw new Error("set the decision checkpoint: -c checkpoint=<Hub id or s3://bucket/prefix/>");
-    const snapStart = flag(ctx("snapstart") ?? false, "snapstart");
+    if (!checkpoint) throw new Error(CHECKPOINT_NEEDED);
+    if (flag(ctx("snapstart") ?? false, "snapstart")) {
+      throw new Error("snapstart=true is not supported for a decision checkpoint: it has not been measured");
+    }
+    const digest = String(ctx("checkpoint_digest") ?? "");
+    if (digest && !/^[0-9a-f]{64}$/.test(digest)) throw new Error(`checkpoint_digest must be a sha256, not ${digest}`);
+    const s3 = parseS3Checkpoint(checkpoint);
     const maxRequestTokens = Number(ctx("max_request_tokens") ?? DECISION_MAX_REQUEST_TOKENS);
     if (!Number.isInteger(maxRequestTokens) || maxRequestTokens < 0) {
       throw new Error(`max_request_tokens must be a whole number, 0 for no limit, not ${ctx("max_request_tokens")}`);
@@ -72,7 +110,11 @@ export class DecisionFunctionStack extends Stack {
     // Builds the image in AWS CodeBuild during `cdk deploy` (deploy-time-build) and publishes it to
     // an ECR repository that belongs to the stack. The build downloads the checkpoint and converts
     // it with llama.cpp's own converter, so the image holds the model.
-    const buildArgs = { CHECKPOINT: checkpoint, CHECKPOINT_REVISION: String(ctx("checkpoint_revision") ?? "main") };
+    const buildArgs = {
+      CHECKPOINT: checkpoint,
+      CHECKPOINT_REVISION: String(ctx("checkpoint_revision") ?? "main"),
+      CHECKPOINT_DIGEST: digest,
+    };
     const image = new ContainerImageBuild(this, "Image", {
       directory: REPO_ROOT,
       file: "deploy/lambda/decision/Dockerfile",
@@ -81,22 +123,21 @@ export class DecisionFunctionStack extends Stack {
       buildArgs,
       // An s3:// checkpoint is read with the CodeBuild project's role, through the container
       // credentials endpoint; its path goes in as a BuildKit secret, so no layer or image setting
-      // holds it.
-      buildSecrets: { aws_container_credentials_uri: "env=AWS_CONTAINER_CREDENTIALS_RELATIVE_URI" },
+      // holds it. A Hub checkpoint's build gets no credentials.
+      buildSecrets: s3 ? { aws_container_credentials_uri: "env=AWS_CONTAINER_CREDENTIALS_RELATIVE_URI" } : undefined,
       platform: ecrAssets.Platform.LINUX_ARM64,
     });
-    const s3 = /^s3:\/\/([^/]+)\/?(.*)$/.exec(checkpoint);
     if (s3) {
       // Read-only access to the checkpoint's own prefix; nothing changes on the bucket.
-      const [bucket, prefix] = [s3[1], s3[2].replace(/\/?$/, "/").replace(/^\/$/, "")];
+      const bucketArn = `arn:${this.partition}:s3:::${s3.bucket}`;
       image.grantPrincipal.addToPrincipalPolicy(
-        new iam.PolicyStatement({ actions: ["s3:GetObject"], resources: [`arn:aws:s3:::${bucket}/${prefix}*`] }),
+        new iam.PolicyStatement({ actions: ["s3:GetObject"], resources: [`${bucketArn}/${s3.prefix}*`] }),
       );
       image.grantPrincipal.addToPrincipalPolicy(
         new iam.PolicyStatement({
           actions: ["s3:ListBucket"],
-          resources: [`arn:aws:s3:::${bucket}`],
-          conditions: { StringLike: { "s3:prefix": [`${prefix}*`] } },
+          resources: [bucketArn],
+          conditions: { StringLike: { "s3:prefix": [`${s3.prefix}*`] } },
         }),
       );
     }
@@ -141,11 +182,10 @@ export class DecisionFunctionStack extends Stack {
       // The most Lambda gives, and the only size with 6 vCPUs.
       memorySize: 10240,
       timeout: Duration.minutes(15),
-      snapStart: snapStart ? lambda.SnapStartConf.ON_PUBLISHED_VERSIONS : undefined,
       logGroup,
       environment: { DECIDER_MAX_REQUEST_TOKENS: String(maxRequestTokens) },
       // Each deploy that changes the function publishes a version, and CloudFormation deletes the
-      // one it replaces: Lambda bills a version's SnapStart snapshot for as long as it exists.
+      // one it replaces.
       currentVersionOptions: { removalPolicy: RemovalPolicy.DESTROY },
     });
     // The image is built during the deploy, so its tag is not known when CDK hashes the function's
@@ -154,7 +194,6 @@ export class DecisionFunctionStack extends Stack {
       FileSystem.fingerprint(REPO_ROOT, { exclude: ASSET_EXCLUDE, ignoreMode: IgnoreMode.DOCKER }) +
         JSON.stringify(buildArgs),
     );
-    Annotations.of(fn).acknowledgeWarning("@aws-cdk/aws-lambda:snapStartRequirePublish", "the alias below publishes the version");
     const alias = new lambda.Alias(this, "Live", { aliasName: "live", version: fn.currentVersion });
     const url = alias.addFunctionUrl({ authType: lambda.FunctionUrlAuthType.AWS_IAM });
 
@@ -162,6 +201,5 @@ export class DecisionFunctionStack extends Stack {
     new CfnOutput(this, "FunctionArn", { value: alias.functionArn });
     new CfnOutput(this, "LogGroup", { value: logGroup.logGroupName });
     new CfnOutput(this, "BuildLogGroup", { value: buildLogs.logGroupName });
-    new CfnOutput(this, "SnapStart", { value: String(snapStart) });
   }
 }
