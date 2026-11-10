@@ -24,6 +24,12 @@ draws each one deterministically with Pillow; with STRANDS_DECIDER_REGEN_IMAGES=
 are rewritten, and so is tests/fixtures/core/image_soft_tokens.json, the soft-token count
 of every listed size by Gemma 4's real image processors (which needs transformers, Pillow
 and torchvision). Regenerate the render goldens after the images.
+
+tests/fixtures/core/image_pixels.json holds the pixel goldens of docs/spec.md (Images, in The
+runtime interface): for each test image, the sha256 of its RGB bytes as v1 decodes it and
+after the bicubic resize to (W, H), made with PIXELS_PILLOW; STRANDS_DECIDER_REGEN_PIXELS=1
+rewrites it (Pillow only). `reference_pixels` is v1's decode, and `spec_resize` the spec's
+resize written out in numpy, without Pillow.
 """
 
 from __future__ import annotations
@@ -53,8 +59,13 @@ GEMMA4_TOKENIZERS = {
 TOKENIZER_ENV = "STRANDS_DECIDER_GEMMA4_TOKENIZER"
 TEMPLATES_ENV = "STRANDS_DECIDER_GEMMA4_TEMPLATES"
 REGEN_IMAGES_ENV = "STRANDS_DECIDER_REGEN_IMAGES"
+REGEN_PIXELS_ENV = "STRANDS_DECIDER_REGEN_PIXELS"
 IMAGES = FIXTURES / "images"
 SOFT_TOKENS = FIXTURES / "image_soft_tokens.json"
+PIXELS = FIXTURES / "image_pixels.json"
+# The Pillow that made the pixel goldens. Pillow 10.0 to 13.0 give the same bytes for every
+# test image, decoded and resized (`reference_resize`).
+PIXELS_PILLOW = "12.2.0"
 
 
 @lru_cache(maxsize=1)
@@ -332,5 +343,135 @@ def _write_test_images() -> None:
     SOFT_TOKENS.write_text(body + ',"rows":[\n' + lines + "\n]}\n", encoding="utf-8")
 
 
+# ---- pixels: v1's decode and the spec's resize -------------------------------------------
+
+
+def reference_pixels(data: bytes):
+    """An image file as v1 decodes it (`vision.decode_image`), as a PIL RGB image: the first
+    frame, its EXIF orientation applied, RGBA, LA and transparent palette images composited
+    onto white, then converted to RGB."""
+    import io
+
+    from PIL import Image, ImageOps
+
+    img = Image.open(io.BytesIO(data), formats=("PNG", "JPEG", "WEBP", "GIF"))
+    img.load()
+    img = ImageOps.exif_transpose(img)
+    if img.mode in ("RGBA", "LA") or (img.mode == "P" and "transparency" in img.info):
+        rgba = img.convert("RGBA")
+        img = Image.alpha_composite(Image.new("RGBA", rgba.size, (255, 255, 255, 255)), rgba)
+    return img.convert("RGB")
+
+
+def _bicubic(x: float) -> float:
+    """The cubic convolution kernel with a = -0.5 (Keys), support 2."""
+    a, x = -0.5, abs(x)
+    if x < 1.0:
+        return ((a + 2.0) * x - (a + 3.0)) * x * x + 1
+    if x < 2.0:
+        return (((x - 5) * x + 8) * x - 4) * a
+    return 0.0
+
+
+PRECISION_BITS = 22  # 32 - 8 - 2: the fixed-point coefficients' fraction bits
+
+
+def _coefficients(in_size: int, out_size: int) -> list[tuple[int, list[int]]]:
+    """For each output index, its first input index and its fixed-point weights, by the
+    spec's rule (Pillow's precompute_coeffs and normalize_coeffs_8bpc)."""
+    scale = in_size / out_size
+    filterscale = max(scale, 1.0)
+    support = 2.0 * filterscale
+    out = []
+    for i in range(out_size):
+        center = (i + 0.5) * scale
+        lo = max(int(center - support + 0.5), 0)  # int() truncates, as C's cast does
+        hi = min(int(center + support + 0.5), in_size)
+        weights = [_bicubic((j + lo - center + 0.5) / filterscale) for j in range(hi - lo)]
+        total = 0.0
+        for w in weights:
+            total += w
+        if total != 0.0:
+            weights = [w / total for w in weights]
+        fixed = [int((-0.5 if w < 0 else 0.5) + w * (1 << PRECISION_BITS)) for w in weights]
+        out.append((lo, fixed))
+    return out
+
+
+def _resample(pixels, out_size: int, axis: int):
+    import numpy as np
+
+    src = np.moveaxis(pixels, axis, 0).astype(np.int64)
+    out = np.empty((out_size, *src.shape[1:]), np.uint8)
+    for i, (lo, weights) in enumerate(_coefficients(src.shape[0], out_size)):
+        acc = np.full(src.shape[1:], 1 << (PRECISION_BITS - 1), np.int64)
+        for j, w in enumerate(weights):
+            acc += src[lo + j] * w
+        out[i] = np.clip(acc >> PRECISION_BITS, 0, 255)
+    return np.moveaxis(out, 0, axis)
+
+
+def spec_resize(pixels, width: int, height: int):
+    """docs/spec.md's bicubic resize of an RGB array [h, w, 3] (uint8) to [height, width, 3],
+    written from the spec's text with numpy: the horizontal pass, its 8-bit result, then the
+    vertical pass; a pass whose size does not change is left out."""
+    out = pixels
+    if out.shape[1] != width:
+        out = _resample(out, width, axis=1)
+    if out.shape[0] != height:
+        out = _resample(out, height, axis=0)
+    return out
+
+
+def reference_resize(img, width: int, height: int):
+    """docs/spec.md's resize with Pillow: bicubic, the width first and then the height, in two
+    calls. Pillow 10 to 12 do the same in one call; Pillow 13 does the height first when it
+    shrinks by more than twice as much as the width, which changes the pixels."""
+    from PIL import Image
+
+    if img.width != width:
+        img = img.resize((width, img.height), Image.Resampling.BICUBIC)
+    if img.height != height:
+        img = img.resize((width, height), Image.Resampling.BICUBIC)
+    return img
+
+
+def _write_pixel_goldens() -> None:
+    import PIL
+
+    from strands_decider.core import resize_target
+
+    assert PIL.__version__ == PIXELS_PILLOW, (
+        f"the pixel goldens are made with Pillow {PIXELS_PILLOW}"
+    )
+    rows = {}
+    for name in IMAGE_FILES:
+        decoded = reference_pixels(image_bytes(name))
+        w, h = resize_target(*decoded.size)
+        resized = reference_resize(decoded, w, h)
+        rows[name] = {
+            "decoded": list(decoded.size),
+            "decoded_sha256": hashlib.sha256(decoded.tobytes()).hexdigest(),
+            "resized": [w, h],
+            "resized_sha256": hashlib.sha256(resized.tobytes()).hexdigest(),
+        }
+    head = {
+        "pillow": PIXELS_PILLOW,
+        "note": (
+            "For each test image: its size and the sha256 of its RGB bytes (row by row, 3 per "
+            "pixel) as v1 decodes it, then resized to (W, H) from the decoded size by the "
+            "spec's bicubic resize, width first. Generated by tests/core_support.py with "
+            "Pillow " + PIXELS_PILLOW + "."
+        ),
+    }
+    lines = ",\n".join(
+        f"{json.dumps(n)}:{json.dumps(r, separators=(',', ':'))}" for n, r in rows.items()
+    )
+    body = json.dumps(head, separators=(",", ":"))[:-1]
+    PIXELS.write_text(body + ',"images":{\n' + lines + "\n}}\n", encoding="utf-8")
+
+
 if os.environ.get(REGEN_IMAGES_ENV) == "1":
     _write_test_images()
+if os.environ.get(REGEN_PIXELS_ENV) == "1":
+    _write_pixel_goldens()

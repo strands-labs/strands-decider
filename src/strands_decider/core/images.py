@@ -26,6 +26,7 @@ import re
 import struct
 import zlib
 from dataclasses import dataclass, field
+from typing import Any
 
 from .text import strip
 
@@ -51,23 +52,24 @@ IMAGE_SOFT = "<|image|>"
 IMAGE_CLOSE = "<image|>"
 
 
-def soft_tokens(
+def resize_target(
     width: int,
     height: int,
     *,
     max_soft_tokens: int = MAX_SOFT_TOKENS,
     patch_size: int = PATCH_SIZE,
     pooling_kernel_size: int = POOLING_KERNEL_SIZE,
-) -> int:
-    """N, the soft tokens Gemma 4's image processor gives a `width` x `height` image.
+) -> tuple[int, int]:
+    """(W, H): the size Gemma 4's image processor resizes a `width` x `height` image to,
+    keeping its aspect ratio: the largest whose sides are multiples of
+    `pooling_kernel_size * patch_size` (48) and whose area is at most
+    `max_soft_tokens * pooling_kernel_size**2 * patch_size**2` pixels. This is its
+    arithmetic, operation for operation in IEEE double precision
+    (`get_aspect_ratio_preserving_size` in transformers' Gemma4ImageProcessor and
+    Gemma4UnifiedImageProcessor, which size alike).
 
-    The processor resizes the image, keeping its aspect ratio, to the largest size whose
-    sides are multiples of `pooling_kernel_size * patch_size` (48) and whose area is at most
-    `max_soft_tokens * pooling_kernel_size**2 * patch_size**2` pixels, then pools each 3 x 3
-    group of 16-pixel patches into one soft token. This is its arithmetic, operation for
-    operation in IEEE double precision (`get_aspect_ratio_preserving_size` in
-    transformers' Gemma4ImageProcessor and Gemma4UnifiedImageProcessor, which count alike).
-    N lies in [1, max_soft_tokens], and swapping width and height leaves it unchanged."""
+    The width and height are the decoded image's, after its EXIF orientation: swapping them
+    swaps W and H (`check_decoded_size`)."""
     if not (isinstance(width, int) and isinstance(height, int)) or width < 1 or height < 1:
         raise ValueError(f"an image is at least 1 x 1 pixels, not {width!r} x {height!r}")
     max_patches = max_soft_tokens * pooling_kernel_size**2
@@ -84,7 +86,46 @@ def soft_tokens(
         target_height = min(math.floor(height / width) * side, max_soft_tokens * side)
     if target_height * target_width > target_px:  # never, for any size; the processor checks
         raise ValueError(f"{width} x {height} exceeds {max_soft_tokens} soft tokens")
-    return (target_height // side) * (target_width // side)
+    return target_width, target_height
+
+
+def soft_tokens(
+    width: int,
+    height: int,
+    *,
+    max_soft_tokens: int = MAX_SOFT_TOKENS,
+    patch_size: int = PATCH_SIZE,
+    pooling_kernel_size: int = POOLING_KERNEL_SIZE,
+) -> int:
+    """N, the soft tokens Gemma 4's image processor gives a `width` x `height` image: it
+    resizes the image to `resize_target`'s W x H, then pools each 3 x 3 group of 16-pixel
+    patches into one soft token, so N = (W / 48) (H / 48). N lies in [1, max_soft_tokens],
+    and swapping width and height leaves it unchanged."""
+    w, h = resize_target(
+        width,
+        height,
+        max_soft_tokens=max_soft_tokens,
+        patch_size=patch_size,
+        pooling_kernel_size=pooling_kernel_size,
+    )
+    side = pooling_kernel_size * patch_size
+    return (h // side) * (w // side)
+
+
+def check_decoded_size(image: Any, width: int, height: int) -> tuple[int, int]:
+    """(W, H), the size to resize a decoded image of `width` x `height` pixels to (after its
+    EXIF orientation), for a request `image` (an EncodedImage or a RenderedImage, sized from
+    its header). The decoded size must be the header's or, turned a quarter by the
+    orientation, its transpose; otherwise ValueError with v1's `image could not be decoded`.
+    W and H come from the decoded size, never the header's: for a turned image they swap,
+    and N, which does not, cannot show a runtime that resized it to the header's shape."""
+    header = (image.width, image.height)
+    if (width, height) not in (header, header[::-1]):
+        raise ValueError(
+            f"image could not be decoded: its pixels are {width}x{height}, and its header "
+            f"gives {header[0]}x{header[1]}"
+        )
+    return resize_target(width, height)
 
 
 @dataclass(frozen=True)

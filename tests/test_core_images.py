@@ -26,6 +26,8 @@ import pytest
 from core_support import (
     GEMMA4_PROCESSOR,
     IMAGE_FILES,
+    PIXELS,
+    PIXELS_PILLOW,
     PROCESSOR_SETTINGS,
     SOFT_TOKENS,
     UNIFIED_PROCESSOR,
@@ -34,16 +36,21 @@ from core_support import (
     image_b64,
     image_bytes,
     processor_soft_tokens,
+    reference_pixels,
+    reference_resize,
+    spec_resize,
 )
 
 from strands_decider.core import (
     IMAGE_FORMATS,
     MAX_IMAGE_PIXELS,
     VARIANTS,
+    check_decoded_size,
     decode_image,
     image_size,
     parse_request,
     render,
+    resize_target,
     soft_tokens,
 )
 from strands_decider.core.images import (
@@ -344,6 +351,243 @@ def test_soft_token_properties():
     for bad in ((0, 5), (5, 0), (-1, 3), (1.5, 2), (2, None)):
         with pytest.raises(ValueError):
             soft_tokens(*bad)  # type: ignore[arg-type]
+
+
+# ---- pixels: the decode, the resize target and the resize --------------------------------
+
+
+def _pixel_goldens() -> dict:
+    return json.loads(PIXELS.read_text(encoding="utf-8"))
+
+
+def test_the_resize_target_comes_from_the_decoded_size():
+    """W and H are the decoded, oriented image's, never the header's: the rotated JPEG's
+    header says 80 x 40 and its pixels are 40 x 80, so it is resized to 528 x 1104, where the
+    header's shape would give 1104 x 528 with the same N."""
+    goldens = _pixel_goldens()
+    assert goldens["pillow"] == PIXELS_PILLOW and set(goldens["images"]) == set(IMAGE_FILES)
+    for name, g in goldens["images"].items():
+        image = decode_image(image_b64(name))
+        decoded, resized = tuple(g["decoded"]), tuple(g["resized"])
+        assert decoded in ((image.width, image.height), (image.height, image.width)), name
+        assert resized == resize_target(*decoded) == check_decoded_size(image, *decoded), name
+        assert soft_tokens(*decoded) == image.tokens == (resized[0] // 48) * (resized[1] // 48)
+    rotated = goldens["images"]["rotated-80x40.jpg"]
+    assert rotated["decoded"] == [40, 80] and rotated["resized"] == [528, 1104]
+    assert (
+        resize_target(80, 40) == (1104, 528) and soft_tokens(80, 40) == soft_tokens(40, 80) == 253
+    )
+    image = decode_image(image_b64("rotated-80x40.jpg"))
+    assert check_decoded_size(image, 80, 40) == (1104, 528)  # as the header says, unturned
+    for w, h in ((41, 80), (40, 81), (80, 80), (1, 1)):
+        with pytest.raises(ValueError) as e:
+            check_decoded_size(image, w, h)
+        assert (
+            str(e.value)
+            == f"image could not be decoded: its pixels are {w}x{h}, and its header gives 80x40"
+        )
+
+
+def test_the_reference_decode_and_resize_give_the_pixel_goldens():
+    """v1's decode and Pillow's bicubic resize give the goldens' bytes, and the spec's resize,
+    written out in numpy without Pillow, gives Pillow's bytes exactly."""
+    pytest.importorskip("PIL")
+    np = pytest.importorskip("numpy")
+
+    for name, g in _pixel_goldens()["images"].items():
+        decoded = reference_pixels(image_bytes(name))
+        assert list(decoded.size) == g["decoded"], name
+        assert hashlib.sha256(decoded.tobytes()).hexdigest() == g["decoded_sha256"], name
+        resized = reference_resize(decoded, *g["resized"])
+        assert hashlib.sha256(resized.tobytes()).hexdigest() == g["resized_sha256"], name
+        ours = spec_resize(np.asarray(decoded), *g["resized"])
+        assert ours.tobytes() == resized.tobytes(), name
+
+
+def test_the_specs_resize_is_pillows_bicubic():
+    """The spec's resize (cubic convolution, a = -0.5, its support scaled by the downscale
+    factor, fixed-point weights, horizontal then vertical with an 8-bit result between them)
+    is Pillow's BICUBIC, byte for byte, up and down, in one dimension or both: in one call
+    before Pillow 13, and in two, width then height, on any version."""
+    PIL = pytest.importorskip("PIL")
+    np = pytest.importorskip("numpy")
+    from PIL import Image
+
+    one_call = int(PIL.__version__.split(".")[0]) < 13
+
+    rng = random.Random(17)
+    sizes = [
+        ((1, 1), (48, 48)),
+        ((300, 1), (48, 48)),
+        ((97, 31), (97, 13)),
+        ((5, 200), (48, 13440)),
+    ]
+    sizes += [
+        ((rng.randint(1, 160), rng.randint(1, 160)), (rng.randint(1, 400), rng.randint(1, 400)))
+        for _ in range(40)
+    ]
+    for i, ((w, h), (tw, th)) in enumerate(sizes):
+        a = np.random.default_rng(i).integers(0, 256, (h, w, 3), dtype=np.uint8)
+        want = np.asarray(reference_resize(Image.fromarray(a, "RGB"), tw, th))
+        assert np.array_equal(spec_resize(a, tw, th), want), ((w, h), (tw, th))
+        if one_call:
+            single = Image.fromarray(a, "RGB").resize((tw, th), Image.Resampling.BICUBIC)
+            assert np.array_equal(np.asarray(single), want), ((w, h), (tw, th))
+
+
+def test_pillow_13_resizes_a_tall_image_height_first():
+    """Why the reference resizes in two calls: from Pillow 13, one call runs the height's pass
+    first when the height shrinks by more than twice as much as the width, as it does for a
+    1,080 x 2,400 screenshot, and its pixels differ from the spec's by several levels."""
+    PIL = pytest.importorskip("PIL")
+    np = pytest.importorskip("numpy")
+    from PIL import Image
+
+    w, h = 1080, 2400
+    tw, th = resize_target(w, h)
+    yy, xx = np.mgrid[0:h, 0:w]
+    a = np.stack([(xx * 7 + yy * 3) % 256, (xx ^ yy) % 256, (xx // 9 + yy // 13) % 2 * 255], -1)
+    img = Image.fromarray(a.astype(np.uint8), "RGB")
+    single = np.asarray(img.resize((tw, th), Image.Resampling.BICUBIC)).astype(int)
+    reference = np.asarray(reference_resize(img, tw, th)).astype(int)
+    if int(PIL.__version__.split(".")[0]) < 13:
+        assert np.array_equal(single, reference)
+    else:
+        assert np.abs(single - reference).max() > 1
+
+
+def _png(
+    width: int, height: int, depth: int, colour: int, rows: list[bytes], extra: bytes = b""
+) -> bytes:
+    ihdr = _chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, depth, colour, 0, 0, 0))
+    data = zlib.compress(b"".join(b"\x00" + r for r in rows))
+    return PNG_SIGNATURE + ihdr + extra + _chunk(b"IDAT", data) + _chunk(b"IEND", b"")
+
+
+def _on_white(c, a):
+    """The spec's compositing of a channel c with alpha a onto white, in integers."""
+    y = 128 * (c * a + 255 * (255 - a) + 128)
+    return (((y >> 8) + y) >> 15) if a else 255
+
+
+def test_decoding_follows_the_specs_rules():
+    """The decode cases the spec defines, by what v1 does with Pillow: bit depths, 16-bit
+    samples, transparency (composited onto white, and where it is not), CMYK, and a GIF's
+    canvas."""
+    pytest.importorskip("PIL")
+    np = pytest.importorskip("numpy")
+    import io
+
+    from PIL import Image
+
+    def rgb(data: bytes):
+        return np.asarray(reference_pixels(data)).astype(int)
+
+    vals = [0, 1, 255, 256, 1000, 32768, 65535]
+    grey16 = _png(len(vals), 1, 16, 0, [b"".join(struct.pack(">H", v) for v in vals)])
+    assert rgb(grey16)[0, :, 0].tolist() == [min(v, 255) for v in vals]  # clipped, not scaled
+    rgb16 = _png(len(vals), 1, 16, 2, [b"".join(struct.pack(">HHH", v, v, 0) for v in vals)])
+    assert rgb(rgb16)[0, :, 0].tolist() == [v >> 8 for v in vals]  # the high byte
+    rgba16 = _png(
+        len(vals), 1, 16, 6, [b"".join(struct.pack(">HHHH", v, 0, 0, 0x80FF) for v in vals)]
+    )
+    assert rgb(rgba16)[0, :, 0].tolist() == [_on_white(v >> 8, 0x80) for v in vals]
+    assert rgb(_png(8, 1, 1, 0, [bytes([0b10100000])]))[0, :, 0].tolist() == [
+        255,
+        0,
+        255,
+        0,
+        0,
+        0,
+        0,
+        0,
+    ]
+    assert rgb(_png(4, 1, 2, 0, [bytes([0b00011011])]))[0, :, 0].tolist() == [0, 85, 170, 255]
+    assert rgb(_png(2, 1, 4, 0, [bytes([0x1E])]))[0, :, 0].tolist() == [17, 238]
+    # Transparency: a palette's tRNS and grey-and-alpha are composited onto white...
+    plte = _chunk(b"PLTE", bytes([255, 0, 0, 0, 255, 0, 0, 0, 255]))
+    trns = _chunk(b"tRNS", bytes([0, 128]))  # index 2 has no entry: opaque
+    pal = rgb(_png(3, 1, 8, 3, [bytes([0, 1, 2])], plte + trns))[0].tolist()
+    assert pal == [[255] * 3, [_on_white(0, 128), 255, _on_white(0, 128)], [0, 0, 255]]
+    la = rgb(_png(3, 1, 8, 4, [bytes([100, 0, 100, 128, 100, 255])]))[0, :, 0].tolist()
+    assert la == [_on_white(100, a) for a in (0, 128, 255)]
+    # ...and a greyscale or RGB image's tRNS is not.
+    grey_trns = _png(2, 1, 8, 0, [bytes([0, 128])], _chunk(b"tRNS", struct.pack(">H", 128)))
+    assert rgb(grey_trns)[0, :, 0].tolist() == [0, 128]
+    rgb_trns = _png(
+        1, 1, 8, 2, [bytes([10, 20, 30])], _chunk(b"tRNS", struct.pack(">HHH", 10, 20, 30))
+    )
+    assert rgb(rgb_trns)[0, 0].tolist() == [10, 20, 30]
+    # The compositing formula is Pillow's alpha_composite onto white, for every channel and alpha.
+    c, a = np.meshgrid(np.arange(256), np.arange(256))
+    rgba = np.stack([c, c, c, a], axis=-1).astype(np.uint8)
+    white = Image.new("RGBA", (256, 256), (255, 255, 255, 255))
+    got = np.asarray(Image.alpha_composite(white, Image.fromarray(rgba, "RGBA")).convert("RGB"))[
+        ..., 0
+    ]
+    want = np.vectorize(_on_white)(c, a)
+    assert np.array_equal(got, want) and np.max(np.abs(want - (c * a + 255 * (255 - a)) / 255)) <= 1
+    # CMYK: Pillow reads a four-component JPEG as inverted CMYK, then each channel is
+    # (255 - K) - m(C, 255 - K) with m(x, y) = ((t >> 8) + t) >> 8, t = x y + 128.
+    for cmyk in [
+        (0, 0, 0, 0),
+        (255, 0, 0, 0),
+        (128, 64, 32, 16),
+        (200, 100, 50, 128),
+        (3, 250, 77, 255),
+    ]:
+        buf = io.BytesIO()
+        Image.new("CMYK", (16, 16), cmyk).save(buf, "JPEG", quality=100)
+        raw = Image.open(io.BytesIO(buf.getvalue()))
+        raw.load()
+        cc, mm, yy, kk = (int(v) for v in raw.getpixel((5, 5)))
+        nk = 255 - kk
+
+        def m(x, y):
+            t = x * y + 128
+            return ((t >> 8) + t) >> 8
+
+        assert rgb(buf.getvalue())[5, 5].tolist() == [
+            nk - m(cc, nk),
+            nk - m(mm, nk),
+            nk - m(yy, nk),
+        ]
+    # A GIF's first frame on its canvas: outside the frame, palette index 0 ...
+    gif = image_bytes("offset-frame.gif")
+    frame = Image.open(io.BytesIO(gif))
+    palette = frame.getpalette()
+    assert rgb(gif)[0, 0].tolist() == palette[:3] and rgb(gif)[35, 24].tolist() == palette[:3]
+
+
+def test_the_processor_with_its_resize_off_takes_the_resized_pixels():
+    """Gemma4ImageProcessorPil's own resize is Pillow's bicubic to (W, H): it gives the same
+    pixel values as resizing first and calling it with do_resize=False, as section 11.1 has
+    the runtime do. Where torchvision is installed, the 12B's processor, which resizes with
+    torchvision, takes the Pillow-resized pixels with do_resize=False and counts N."""
+    transformers = pytest.importorskip("transformers")
+    pytest.importorskip("PIL")
+    np = pytest.importorskip("numpy")
+    from PIL import Image
+
+    transformers.logging.set_verbosity_error()
+    proc = transformers.Gemma4ImageProcessorPil(**PROCESSOR_SETTINGS)
+    for name, g in _pixel_goldens()["images"].items():
+        decoded = reference_pixels(image_bytes(name))
+        own = proc(images=[decoded], return_tensors="np")
+        resized = decoded.resize(tuple(g["resized"]), Image.Resampling.BICUBIC)
+        ours = proc(images=[resized], do_resize=False, return_tensors="np")
+        assert np.array_equal(own["pixel_values"], ours["pixel_values"]), name
+        assert int(own["num_soft_tokens_per_image"][0]) == soft_tokens(*g["decoded"]), name
+    # The 12B's processor (torchvision only) takes the Pillow-resized pixels as they are.
+    try:
+        import torchvision  # noqa: F401
+    except ImportError:
+        return
+    unified = transformers.Gemma4UnifiedImageProcessor(**PROCESSOR_SETTINGS)
+    for name, g in _pixel_goldens()["images"].items():
+        resized = reference_resize(reference_pixels(image_bytes(name)), *g["resized"])
+        out = unified(images=[resized], do_resize=False, return_tensors="pt")
+        assert int(out["num_soft_tokens_per_image"][0]) == soft_tokens(*g["decoded"]), name
 
 
 def test_exif_orientation_leaves_n_unchanged():
