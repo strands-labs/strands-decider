@@ -168,27 +168,54 @@ jobs:
           python -c "import importlib.util as u, sys; sys.exit(u.find_spec('torch') is not None)"
           python -m pytest -q -rs tests/test_core_prompt.py tests/test_core_readout.py tests/test_core_config.py tests/test_core_images.py
       # The other three Gemma 4 tokenizer.json files docs/spec.md lists (From text to token
-      # ids): the render goldens and the properties of the tokenizer and of S, on each.
+      # ids): fetched here, with the token, and tested in the next step, without it. A gated
+      # file skips that step with a warning, as the first fetch does.
       - if: steps.fetch.outputs.available == 'true'
+        id: fetch_others
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           set -euo pipefail
           auth=()
           if [ -n "${HF_TOKEN:-}" ]; then auth=(-H "Authorization: Bearer $HF_TOKEN"); fi
+          dirs=()
           while read -r repo revision sha; do
             dir="$RUNNER_TEMP/tokenizers/$sha"
             mkdir -p "$dir"
-            curl -sSfL --retry 3 ${auth[@]+"${auth[@]}"} -o "$dir/tokenizer.json" \
-              "https://huggingface.co/$repo/resolve/$revision/tokenizer.json"
+            code=$(curl -sSL --retry 3 ${auth[@]+"${auth[@]}"} -o "$dir/tokenizer.json" -w '%{http_code}' \
+              "https://huggingface.co/$repo/resolve/$revision/tokenizer.json")
+            if [ "$code" = 401 ] || [ "$code" = 403 ]; then
+              if [ -z "${HF_TOKEN:-}" ]; then
+                echo "::warning::$repo is gated and HF_TOKEN is not set; skipping the other tokenizers' tests"
+                echo "available=false" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+              echo "::error::HF_TOKEN cannot read $repo (HTTP $code)"
+              exit 1
+            fi
+            if [ "$code" != 200 ]; then
+              echo "::error::$repo tokenizer.json: HTTP $code"
+              exit 1
+            fi
             echo "$sha  $dir/tokenizer.json" | sha256sum -c -
-            STRANDS_DECIDER_GEMMA4_TOKENIZER="$dir/tokenizer.json" HF_HUB_OFFLINE=1 \
-              python -m pytest -q -rs tests/test_core_prompt.py tests/test_core_images.py </dev/null
+            dirs+=("$dir")
           done <<'EOF'
           google/gemma-4-E2B-it 4adf15748de9e1a0097b6274cee9c15836c41c37 ab26b2add729e6f645bd869f228f14190a06615538f3be6f7786f33d13d78ad2
           google/gemma-4-E4B-it 4ecc2ba63bcac23ba4a767fc87025b1450f84c9c 91d9cf86906f78e197021fda88214d448e5c120665d0243a8e776e046986c6bc
           google/gemma-4-12B-it 43c9d014b231474fa7212dbb48a762566c2b255d 9788bdb6a021b3170357cd3587b5d622b1177561ad3c5bf43d73728fd71aeacb
           EOF
+          echo "available=true" >> "$GITHUB_OUTPUT"
+          echo "dirs=${dirs[*]}" >> "$GITHUB_OUTPUT"
+      - if: steps.fetch_others.outputs.available == 'true'
+        env:
+          HF_HUB_OFFLINE: "1"
+          DIRS: ${{ steps.fetch_others.outputs.dirs }}
+        run: |
+          set -euo pipefail
+          for dir in $DIRS; do
+            STRANDS_DECIDER_GEMMA4_TOKENIZER="$dir/tokenizer.json" \
+              python -m pytest -q -rs tests/test_core_prompt.py tests/test_core_images.py
+          done
 
   lint:
     name: lint
