@@ -33,6 +33,14 @@ const ASSET_EXCLUDE = [
   "**/*.egg-info",
 ];
 
+/**
+ * The most tokens a request may forward by default, the state once plus every question. The
+ * slowest request under it, 4 images and an 8,000-token state with the shortest questions after it,
+ * takes about 640 s on Graviton2, inside the 15-minute timeout; at 24,576 it does not finish
+ * (README.md, Decision checkpoints, Limits).
+ */
+export const DECISION_MAX_REQUEST_TOKENS = 16384;
+
 /** A true or false context value, from cdk.json or `-c key=value`. */
 function flag(value: unknown, key: string): boolean {
   if (String(value) !== "true" && String(value) !== "false") {
@@ -47,8 +55,7 @@ function flag(value: unknown, key: string): boolean {
  * function, its `live` alias and that alias's IAM-authenticated Function URL. Settings are CDK
  * context values (cdk.json, or -c key=value): `checkpoint`, a Hugging Face Hub id or an s3:// URI
  * of a checkpoint directory; `checkpoint_revision`; `snapstart`; and `max_request_tokens`, the most
- * tokens one request may forward, which keeps the slowest request, with 4 images and 8,192-token
- * prompts, inside the 15-minute timeout on Graviton2 (README.md, Decision checkpoints, Limits).
+ * tokens one request may forward (DECISION_MAX_REQUEST_TOKENS by default).
  */
 export class DecisionFunctionStack extends Stack {
   constructor(scope: Construct, id: string, props?: StackProps) {
@@ -57,7 +64,7 @@ export class DecisionFunctionStack extends Stack {
     const checkpoint = String(ctx("checkpoint") ?? "");
     if (!checkpoint) throw new Error("set the decision checkpoint: -c checkpoint=<Hub id or s3://bucket/prefix/>");
     const snapStart = flag(ctx("snapstart") ?? false, "snapstart");
-    const maxRequestTokens = Number(ctx("max_request_tokens"));
+    const maxRequestTokens = Number(ctx("max_request_tokens") ?? DECISION_MAX_REQUEST_TOKENS);
     if (!Number.isInteger(maxRequestTokens) || maxRequestTokens < 0) {
       throw new Error(`max_request_tokens must be a whole number, 0 for no limit, not ${ctx("max_request_tokens")}`);
     }
