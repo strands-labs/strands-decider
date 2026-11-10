@@ -1,0 +1,75 @@
+From 92a2c04f152070b838e389848cbb317ece04d0aa Mon Sep 17 00:00:00 2001
+From: Jonathan Buck <jonathan.j.buck@gmail.com>
+Date: Tue, 10 Nov 2026 00:37:15 +0000
+Subject: [PATCH 1/2] llama: optional attention.non_causal_type key to choose
+ which layers llama_set_causal_attn(false) makes non-causal
+
+---
+ gguf-py/gguf/constants.py |  1 +
+ src/llama-arch.cpp        |  1 +
+ src/llama-arch.h          |  1 +
+ src/llama-model.cpp       | 12 ++++++++++++
+ 4 files changed, 15 insertions(+)
+
+diff --git a/gguf-py/gguf/constants.py b/gguf-py/gguf/constants.py
+index 5f9cbf1e3..556fecfa9 100644
+--- a/gguf-py/gguf/constants.py
++++ b/gguf-py/gguf/constants.py
+@@ -199,6 +199,7 @@ class Keys:
+         GROUPNORM_EPS                = "{arch}.attention.group_norm_epsilon"
+         GROUPNORM_GROUPS             = "{arch}.attention.group_norm_groups"
+         CAUSAL                       = "{arch}.attention.causal"
++        NON_CAUSAL_TYPE              = "{arch}.attention.non_causal_type"
+         Q_LORA_RANK                  = "{arch}.attention.q_lora_rank"
+         KV_LORA_RANK                 = "{arch}.attention.kv_lora_rank"
+         DECAY_LORA_RANK              = "{arch}.attention.decay_lora_rank"
+diff --git a/src/llama-arch.cpp b/src/llama-arch.cpp
+index 6dcf34e77..011a5d6ee 100644
+--- a/src/llama-arch.cpp
++++ b/src/llama-arch.cpp
+@@ -296,6 +296,7 @@ static const std::map<llm_kv, const char *> LLM_KV_NAMES = {
+     { LLM_KV_ATTENTION_GROUPNORM_EPS,                "%s.attention.group_norm_epsilon"           },
+     { LLM_KV_ATTENTION_GROUPNORM_GROUPS,             "%s.attention.group_norm_groups"            },
+     { LLM_KV_ATTENTION_CAUSAL,                       "%s.attention.causal"                       },
++    { LLM_KV_ATTENTION_NON_CAUSAL_TYPE,              "%s.attention.non_causal_type"              },
+     { LLM_KV_ATTENTION_Q_LORA_RANK,                  "%s.attention.q_lora_rank"                  },
+     { LLM_KV_ATTENTION_KV_LORA_RANK,                 "%s.attention.kv_lora_rank"                 },
+     { LLM_KV_ATTENTION_DECAY_LORA_RANK,              "%s.attention.decay_lora_rank"              },
+diff --git a/src/llama-arch.h b/src/llama-arch.h
+index 3b8f45d26..e6a6f142f 100644
+--- a/src/llama-arch.h
++++ b/src/llama-arch.h
+@@ -302,6 +302,7 @@ enum llm_kv {
+     LLM_KV_ATTENTION_GROUPNORM_EPS,
+     LLM_KV_ATTENTION_GROUPNORM_GROUPS,
+     LLM_KV_ATTENTION_CAUSAL,
++    LLM_KV_ATTENTION_NON_CAUSAL_TYPE,
+     LLM_KV_ATTENTION_Q_LORA_RANK,
+     LLM_KV_ATTENTION_KV_LORA_RANK,
+     LLM_KV_ATTENTION_DECAY_LORA_RANK,
+diff --git a/src/llama-model.cpp b/src/llama-model.cpp
+index 72639b155..7f99e4589 100644
+--- a/src/llama-model.cpp
++++ b/src/llama-model.cpp
+@@ -1651,6 +1651,18 @@ void llama_model_base::load_hparams(llama_model_loader & ml) {
+     // per-arch hparams
+     load_arch_hparams(ml);
+ 
++    // optional: how llama_set_causal_attn(ctx, false) masks each layer type, overriding the arch default
++    // (see llama_non_causal_type; e.g. 0 makes every Gemma 4 layer non-causal instead of the SWA layers only)
++    {
++        uint32_t non_causal_type = hparams.non_causal_type;
++        if (ml.get_key(LLM_KV_ATTENTION_NON_CAUSAL_TYPE, non_causal_type, false)) {
++            if (non_causal_type > LLAMA_NON_CAUSAL_TYPE_DENSE_ONLY) {
++                throw std::runtime_error("invalid attention.non_causal_type");
++            }
++            hparams.non_causal_type = (llama_non_causal_type) non_causal_type;
++        }
++    }
++
+     pimpl->n_bytes = ml.n_bytes;
+ 
+     pimpl->desc_str = arch_name() + " " + type_name() + " " + ml.ftype_name();
+-- 
+2.34.1
+
