@@ -71,7 +71,9 @@ class NumpyPointerHead:
     def _norm(self, x: np.ndarray) -> np.ndarray:
         mu = x.mean(-1, keepdims=True)
         var = x.var(-1, keepdims=True)
-        return (x - mu) / np.sqrt(var + self.eps) * self.w["norm.weight"] + self.w["norm.bias"]
+        normed = (x - mu) / np.sqrt(var + self.eps)
+        out: np.ndarray = normed * self.w["norm.weight"] + self.w["norm.bias"]
+        return out
 
     def logits(self, decide: np.ndarray, options: np.ndarray) -> np.ndarray:
         """decide [hidden], options [K, hidden] -> logits [K]."""
