@@ -33,6 +33,7 @@ KINDS = ("noul", "choice", "score")
 # v1's text-only engine refuses images with this message (hidden_engine.HiddenStateEngine);
 # `runtime.evaluate` gives it for a backend without an image path.
 NO_VISION = "this engine has no vision tower; images are not supported"
+NO_AUDIO = "audio input is not supported"
 
 
 @dataclass(frozen=True)
@@ -164,6 +165,9 @@ def parse_request(request: Any) -> Request:
     raw_images = request.get("images", [])
     if not isinstance(raw_images, list) or not all(isinstance(i, str) for i in raw_images):
         raise ValueError("images must be a list of strings (base64 or data: URIs)")
+    # Refused rather than ignored, so a client never believes its audio was heard.
+    if request.get("audio"):
+        raise ValueError(NO_AUDIO)
     model = request.get("model", "strands-decider-latest")
     if not isinstance(model, str):
         raise ValueError("model must be a string")
