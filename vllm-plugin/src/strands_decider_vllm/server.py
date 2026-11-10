@@ -55,6 +55,7 @@ from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
+from starlette.requests import ClientDisconnect
 
 from . import ARCH_FOR_BASE, PREFIX_END_KEY, SERVER_CONFIG_KEY, __version__, logger
 
@@ -87,6 +88,9 @@ TEXT_BYTES = 8 * 2**20
 SMALL_BODY = 2**20
 #: The default budget of buffered body bytes over SMALL_BODY: about two and a half bodies at the default limit.
 BUFFERED_BYTES = 256 * 2**20
+#: The default for --body-read-timeout: how long, in seconds, a body may go without a chunk arriving, and how long a
+#: large body may wait for the budget.
+BODY_READ_TIMEOUT = 30.0
 
 
 def base64_size(n: int) -> int:
@@ -345,8 +349,9 @@ class ByteBudget:
         self.used = 0
         self._waiters: collections.deque[tuple[int, asyncio.Future]] = collections.deque()
 
-    async def take(self, n: int) -> int:
-        """Reserve ``n`` bytes (at most the whole budget) and return the reservation."""
+    async def take(self, n: int, timeout: float | None = None) -> int:
+        """Reserve ``n`` bytes (at most the whole budget) and return the reservation; asyncio.TimeoutError after ``timeout``
+        seconds of waiting, having taken nothing."""
         n = min(n, self.capacity)
         if not self._waiters and self.used + n <= self.capacity:
             self.used += n
@@ -354,12 +359,15 @@ class ByteBudget:
         fut = asyncio.get_running_loop().create_future()
         self._waiters.append((n, fut))
         try:
-            await fut
+            await asyncio.wait_for(fut, timeout)
         except BaseException:
             if fut.done() and not fut.cancelled():
-                self.give(n)  # granted as it was cancelled
+                self.give(n)  # granted as it was cancelled or timed out
             else:
-                self._waiters.remove((n, fut))
+                try:
+                    self._waiters.remove((n, fut))
+                except ValueError:
+                    pass  # a give already dropped the cancelled waiter
                 self._grant()
             raise
         return n
@@ -390,6 +398,7 @@ class Decider:
         image_problem: str | None,
         max_body: int | None = None,
         max_buffered: int = BUFFERED_BYTES,
+        body_read_timeout: float = BODY_READ_TIMEOUT,
         preprocess_workers: int = 4,
         tokenizer: Any = None,
         core: SimpleNamespace | None = None,
@@ -410,6 +419,7 @@ class Decider:
             else default_max_body(self.takes_images and not image_problem)
         )
         self.max_buffered = max(max_buffered, self.max_body)
+        self.body_read_timeout = body_read_timeout
         # Two lanes of preprocess_workers threads each: parsing and rendering, and image decoding. A request without
         # images never waits behind another request's decode. Each lane's semaphore admits at most
         # preprocess_workers at once, so nothing queues inside the pool, and a cancelled request leaves nothing
@@ -565,10 +575,12 @@ class Decider:
     async def decide_http(self, request: Request) -> dict[str, Any]:
         """The answers to one HTTP request. A body over SMALL_BODY reserves its size from the budget of buffered
         bytes before it is read past SMALL_BODY, and gives it back once the body is parsed and its images decoded,
-        before the engine runs."""
+        before the engine runs (and at once if the client stalls, disconnects or the wait times out)."""
         reserved = 0
         try:
-            raw, reserved = await read_body(request, self.max_body, self.budget)
+            raw, reserved = await read_body(
+                request, self.max_body, self.budget, timeout=self.body_read_timeout
+            )
             prepared = await self.prepare(raw)
             del raw
         finally:
@@ -586,12 +598,21 @@ def too_large(limit: int, n: int | None = None) -> HTTPException:
 
 
 async def read_body(
-    request: Request, limit: int, budget: ByteBudget | None = None
+    request: Request,
+    limit: int,
+    budget: ByteBudget | None = None,
+    *,
+    timeout: float | None = BODY_READ_TIMEOUT,
 ) -> tuple[bytearray, int]:
-    """The request's body and the bytes it reserved from ``budget``. It is refused with HTTP 413 past ``limit``
-    bytes, by its Content-Length before reading and by what arrives while reading. A body declared over SMALL_BODY
-    reserves its declared size before reading; one without a length reads SMALL_BODY freely and then reserves the
-    limit, returning what it does not use once read. The caller gives the reservation back."""
+    """The request's body and the bytes it reserved from ``budget``; the caller gives the reservation back.
+
+    - HTTP 413 past ``limit`` bytes: by its Content-Length before reading, and by what arrives while reading.
+    - A body declared over SMALL_BODY reserves its declared size before reading. One without a length reads
+      SMALL_BODY freely, then reserves the limit, and returns what it does not use once read.
+    - HTTP 503 when a reservation has waited ``timeout`` seconds (the budget is held by other large bodies).
+    - HTTP 408 when no chunk arrives for ``timeout`` seconds: a client that sends its headers and stops, or
+      vanishes without closing, gives its reservation back then. One that disconnects gives it back at once.
+    """
     declared = request.headers.get("content-length")
     n = None
     if declared is not None:
@@ -601,21 +622,42 @@ async def read_body(
             raise HTTPException(status_code=400, detail="Content-Length is not a number") from None
         if n > limit:
             raise too_large(limit, n)
+
+    async def reserve(size: int) -> int:
+        try:
+            return await budget.take(size, timeout)
+        except asyncio.TimeoutError:  # the builtin TimeoutError from Python 3.11 on
+            raise HTTPException(
+                status_code=503,
+                detail="the server is busy with other large requests; retry",
+                headers={"Retry-After": "5"},
+            ) from None
+
     reserved = 0
     try:
         if budget is not None and n is not None and n > SMALL_BODY:
-            reserved = await budget.take(n)
+            reserved = await reserve(n)
         body = bytearray()
-        async for chunk in request.stream():
+        chunks = request.stream().__aiter__()
+        while True:
+            try:
+                chunk = await asyncio.wait_for(chunks.__anext__(), timeout)
+            except StopAsyncIteration:
+                break
+            except asyncio.TimeoutError:
+                raise HTTPException(
+                    status_code=408,
+                    detail=f"no part of the body arrived for {timeout:g} s (--body-read-timeout)",
+                ) from None
             body += chunk
             if len(body) > limit:
                 raise too_large(limit)
             if budget is not None and not reserved and len(body) > SMALL_BODY:
-                reserved = await budget.take(limit)
+                reserved = await reserve(limit)
         if budget is not None and reserved > len(body) and n is None:
             budget.give(reserved - len(body))
             reserved = len(body)
-    except BaseException:
+    except BaseException:  # a 408, 413 or 503, a client that disconnected, a cancellation
         if reserved:
             budget.give(reserved)
         raise
@@ -666,6 +708,9 @@ def build_app(decider_factory: Any) -> Any:
             payload = await d.decide_http(request)
         except HTTPException:
             raise
+        except ClientDisconnect:  # the client left mid-body; its reservation is already given back
+            logger.info("strands-decider: a client disconnected before its body arrived")
+            return JSONResponse({"detail": "the client disconnected"}, status_code=400)
         except Exception as e:
             if refusal(e):
                 raise HTTPException(status_code=400, detail=str(e)) from e
@@ -823,6 +868,7 @@ def decider(engine: Any, s: Settings, a: Any) -> Decider:
         image_problem=s.image_problem,
         max_body=s.max_body,
         max_buffered=s.max_buffered,
+        body_read_timeout=a.body_read_timeout,
         preprocess_workers=a.preprocess_workers,
         tokenizer=s.tokenizer,
         core=s.core,

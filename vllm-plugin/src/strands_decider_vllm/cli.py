@@ -92,6 +92,13 @@ def parser() -> argparse.ArgumentParser:
         "--max-body-mb if larger)",
     )
     s.add_argument(
+        "--body-read-timeout",
+        type=float,
+        default=30.0,
+        help="seconds a request body may go without a chunk arriving (HTTP 408), and that a body over 1 MiB may wait "
+        "for --max-buffered-mb (HTTP 503); either way it holds no budget afterwards (default 30)",
+    )
+    s.add_argument(
         "--limit-concurrency",
         type=int,
         default=128,

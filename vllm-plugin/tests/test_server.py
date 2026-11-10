@@ -629,6 +629,149 @@ def test_ping_answers_while_an_image_is_decoded(checkpoint, monkeypatch):
     d.close()
 
 
+async def asgi_post(app, chunks, *, content_length=None, then="end"):
+    """POST /v1/systemone straight to the ASGI app, with no socket: the body as ``chunks``, then the end of the body
+    (``then="end"``), nothing ever again (``"stall"``) or a disconnect (``"disconnect"``). (status, response body,
+    and ``app.state.decider``'s budget in use at each receive)."""
+    headers = [(b"content-type", b"application/json")]
+    if content_length is not None:
+        headers.append((b"content-length", str(content_length).encode()))
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": "/v1/systemone",
+        "raw_path": b"/v1/systemone",
+        "query_string": b"",
+        "root_path": "",
+        "headers": headers,
+        "client": ("127.0.0.1", 50000),
+        "server": ("127.0.0.1", 8000),
+    }
+    queue, sent, used = list(chunks), [], []
+
+    async def receive():
+        used.append(app.state.decider._budget.used if app.state.decider._budget else 0)
+        if queue:
+            body = queue.pop(0)
+            return {"type": "http.request", "body": body, "more_body": bool(queue) or then != "end"}
+        if then == "disconnect":
+            return {"type": "http.disconnect"}
+        if then == "stall":
+            await asyncio.Event().wait()
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message):
+        sent.append(message)
+
+    await app(scope, receive, send)
+    status = next(m["status"] for m in sent if m["type"] == "http.response.start")
+    return (
+        status,
+        b"".join(m.get("body", b"") for m in sent if m["type"] == "http.response.body"),
+        used,
+    )
+
+
+def budget_app(checkpoint, *, max_body, max_buffered, timeout=30.0):
+    d, _, _ = decider(checkpoint, max_body=max_body)
+    d.max_buffered, d.body_read_timeout, d.max_length = max_buffered, timeout, 10**7
+    app = server.build_app(None)
+    app.state.decider = d
+    return d, app
+
+
+def large_body(n=2 * 2**20):
+    return json.dumps({"state": "x" * n, "questions": QUESTIONS}).encode()
+
+
+def test_stalled_clients_give_their_reservations_back_and_a_later_large_body_proceeds(checkpoint):
+    # Two connections declare large bodies and send nothing more: one holds a reservation and stalls in its read,
+    # the other waits for the budget behind it. Without timeouts they would block every later large body.
+    d, app = budget_app(checkpoint, max_body=10 * 2**20, max_buffered=3 * 2**20, timeout=0.3)
+
+    async def run():
+        declared = int(2.5 * 2**20)
+        stalled = await asyncio.gather(
+            asgi_post(app, [], content_length=declared, then="stall"),
+            asgi_post(app, [], content_length=declared, then="stall"),
+        )
+        held_after = d._budget.used
+        body = large_body()
+        later = await asgi_post(app, [body], content_length=len(body))
+        return stalled, held_after, later
+
+    stalled, held_after, later = asyncio.run(run())
+    statuses = sorted(st for st, _, _ in stalled)
+    assert statuses[0] == 408 and statuses[1] in (408, 503), statuses
+    assert b"--body-read-timeout" in min(stalled)[1]
+    assert held_after == 0, "every stalled reservation is given back"
+    assert later[0] == 200, later[1][:200]
+    assert d._budget.used == 0
+    d.close()
+
+
+def test_a_client_that_disconnects_mid_body_gives_its_reservation_back(checkpoint):
+    d, app = budget_app(checkpoint, max_body=10 * 2**20, max_buffered=3 * 2**20)
+
+    async def run():
+        gone = await asgi_post(
+            app, [b'{"state": "' + b"x" * 2**20], content_length=int(2.5 * 2**20), then="disconnect"
+        )
+        body = large_body()
+        return gone, await asgi_post(app, [body], content_length=len(body))
+
+    (st, out, used), later = asyncio.run(run())
+    assert st == 400 and b"disconnected" in out
+    assert max(used) == int(2.5 * 2**20), "it held its declared size while reading"
+    assert later[0] == 200 and d._budget.used == 0
+    d.close()
+
+
+def test_a_body_without_a_length_reserves_the_limit_past_1_mib_and_gives_back_the_rest(checkpoint):
+    d, app = budget_app(checkpoint, max_body=4 * 2**20, max_buffered=8 * 2**20)
+    body = large_body()
+    chunks = [
+        body[i : i + 2**19] for i in range(0, len(body), 2**19)
+    ]  # 512 KiB each, no Content-Length
+    at_render = []
+    real = d.render_request
+
+    def render(raw):
+        at_render.append(d._budget.used)
+        return real(raw)
+
+    d.render_request = render
+    st, _, used = asyncio.run(asgi_post(app, chunks))
+    assert st == 200
+    assert used[:3] == [0, 0, 0], "the first 1 MiB is read without a reservation"
+    assert d.max_body in used, "past 1 MiB it reserves the limit, before reading on"
+    assert at_render == [len(body)], "once read, it gives back what it did not use"
+    assert d._budget.used == 0
+    d.close()
+
+
+def test_a_cancelled_wait_raced_by_a_give_ends_cancelled():
+    async def run():
+        b = server.ByteBudget(100)
+        await b.take(100)
+        waiting = asyncio.ensure_future(b.take(50))
+        await asyncio.sleep(0)
+        waiting.cancel()  # its future is cancelled at once
+        b.give(100)  # and this give drops the cancelled waiter before the task wakes
+        with pytest.raises(asyncio.CancelledError):
+            await waiting
+        assert b.used == 0 and not b._waiters
+        await b.take(100)
+        with pytest.raises(asyncio.TimeoutError):
+            await b.take(1, timeout=0.05)
+        assert b.used == 100 and not b._waiters, "a timed-out wait takes nothing"
+
+    asyncio.run(run())
+
+
 def test_a_request_without_images_never_waits_behind_a_decode(checkpoint, monkeypatch):
     import threading
 
