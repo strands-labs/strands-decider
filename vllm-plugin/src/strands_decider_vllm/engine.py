@@ -35,7 +35,13 @@ def serves_decider(engine: Any) -> bool:
 
 def started_by_server(vllm_config: Any) -> bool:
     """Whether the plugin's own server (``strands-decider-vllm serve``) built this engine: it marks its engines in
-    vLLM's ``additional_config``."""
+    vLLM's ``additional_config``.
+
+    The mark is trust at the operator's level, not a security boundary: it says that every request reaching this
+    engine names each image by the sha256 of the image's file, which the plugin's server guarantees and vLLM's own
+    endpoints do not (their clients may choose an image's id, and with it its cache key). An operator who sets
+    ``strands_decider_server`` in ``--additional-config`` for ``vllm serve`` lets that server's clients make two
+    different images share cached state."""
     extra = getattr(vllm_config, "additional_config", None) or {}
     return bool(isinstance(extra, dict) and extra.get(SERVER_CONFIG_KEY))
 
@@ -48,20 +54,42 @@ class Policy:
     accepts_images: bool
 
 
+def compute_policy(vllm_config: Any) -> Policy:
+    takes = False
+    if vllm_config.model_config.is_multimodal_model:
+        # The multimodal layout only; a decoder checkpoint never receives images (vLLM refuses them for a text-only
+        # architecture before the engine core).
+        from .model import checkpoint_spec
+
+        takes = checkpoint_spec(vllm_config.model_config).takes_images
+    return Policy(takes_images=takes, accepts_images=started_by_server(vllm_config))
+
+
 def policy(engine_core: Any) -> Policy:
+    """The engine's :class:`Policy`. It is computed when the engine core builds its scheduler (so a checkpoint whose
+    ``decision_config.json`` cannot be read stops the engine at startup) and only read here."""
     cached = engine_core.__dict__.get(_POLICY)
     if cached is None:
-        vc = engine_core.vllm_config
-        takes = False
-        if vc.model_config.is_multimodal_model:
-            # The multimodal layout only; a decoder checkpoint never receives images (vLLM refuses them for a
-            # text-only architecture before the engine core). The workers validated the file at startup.
-            from .model import checkpoint_spec
-
-            takes = checkpoint_spec(vc.model_config).takes_images
-        cached = Policy(takes_images=takes, accepts_images=started_by_server(vc))
+        scheduler = engine_core.__dict__.get("scheduler")
+        cached = scheduler.__dict__.get(_POLICY) if scheduler is not None else None
+        if cached is None:
+            cached = compute_policy(engine_core.vllm_config)
         engine_core.__dict__[_POLICY] = cached
     return cached
+
+
+def wrap_scheduler_init(original: Any) -> Any:
+    """``Scheduler.__init__``, then the engine's :class:`Policy` for a Strands Decider engine. The engine core builds
+    its scheduler after loading the plugins, so this runs in every engine-core process at startup."""
+
+    def __init__(self, *args, **kwargs):
+        original(self, *args, **kwargs)
+        if serves_decider(self):
+            self.__dict__[_POLICY] = compute_policy(self.vllm_config)
+
+    __init__._strands_decider = True
+    __init__.__wrapped__ = original
+    return __init__
 
 
 def wrap_preprocess_add_request(original: Any, validation_error: type[Exception]) -> Any:
@@ -76,10 +104,18 @@ def wrap_preprocess_add_request(original: Any, validation_error: type[Exception]
                 sampling_params=request.sampling_params,
                 resumable=request.resumable,
             )
-            features = getattr(request, "mm_features", None)
+            # Read directly: were vLLM to rename the attribute, every request fails here rather than skipping the
+            # image checks and the image digests.
+            features = request.mm_features
             images = ()
             if features:
-                p = policy(self)
+                try:
+                    p = policy(self)
+                except Exception as e:  # only if the scheduler did not compute it at startup
+                    raise RequestRefused(
+                        f"the checkpoint's decision_config.json could not be read to check the request's images: {e}",
+                        parameter="multi_modal_data",
+                    ) from e
                 images = check_images(
                     features, s, takes_images=p.takes_images, accepts_images=p.accepts_images
                 )
@@ -102,12 +138,15 @@ def wrap_preprocess_add_request(original: Any, validation_error: type[Exception]
 
 
 def install_request_validation() -> None:
-    """Wrap ``vllm.v1.engine.core.EngineCore.preprocess_add_request`` (idempotent)."""
+    """Wrap ``vllm.v1.engine.core.EngineCore.preprocess_add_request``, and ``Scheduler.__init__`` to compute the
+    engine's policy at startup (idempotent)."""
     from vllm.exceptions import VLLMValidationError
+    from vllm.v1.core.sched.scheduler import Scheduler
     from vllm.v1.engine.core import EngineCore
 
-    if getattr(EngineCore.preprocess_add_request, _MARK, False):
-        return
-    EngineCore.preprocess_add_request = wrap_preprocess_add_request(
-        EngineCore.preprocess_add_request, VLLMValidationError
-    )
+    if not getattr(EngineCore.preprocess_add_request, _MARK, False):
+        EngineCore.preprocess_add_request = wrap_preprocess_add_request(
+            EngineCore.preprocess_add_request, VLLMValidationError
+        )
+    if not getattr(Scheduler.__init__, _MARK, False):
+        Scheduler.__init__ = wrap_scheduler_init(Scheduler.__init__)
