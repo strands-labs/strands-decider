@@ -2,7 +2,9 @@
 
 Torch-free: tokenizers and numpy. The goldens' text is checked everywhere; their token ids,
 and the properties, need Gemma 4's tokenizer (tests/core_support.py says where to point it).
-Regenerate the goldens after an intended template change, and review the diff:
+Requests with images use the small test images in tests/fixtures/core/images; the image
+tokens are control tokens, emitted by id. Regenerate the goldens after an intended template
+change, and review the diff:
 
     STRANDS_DECIDER_REGEN_GOLDENS=1 STRANDS_DECIDER_GEMMA4_TOKENIZER=... \\
         pytest tests/test_core_prompt.py
@@ -26,14 +28,18 @@ from core_support import (
     GEMMA4_REPO,
     GEMMA4_REVISION,
     GEMMA4_TOKENIZER_SHA256,
+    IMAGE_FILES,
     TEMPLATES_ENV,
     decision_config_fixture,
     gemma4_tokenizer,
     gemma4_tokenizer_path,
+    image_b64,
+    image_bytes,
     toy_tokenizer,
 )
 
-from strands_decider.core import CHAT, CODES, PLAIN, VARIANTS, render, render_text
+from strands_decider.core import CHAT, CODES, PLAIN, VARIANTS, render, render_text, soft_tokens
+from strands_decider.core.images import IMAGE_CLOSE, IMAGE_OPEN, IMAGE_SOFT
 from strands_decider.core.prompt import BOS, TURN_CLOSE, TURN_OPEN
 
 GOLDENS = FIXTURES / "render_goldens.json"
@@ -138,7 +144,59 @@ CASES: dict[str, dict] = {
             }
         },
     },
+    # One image: its line comes first in the state block, then the state text's.
+    "one_image": {
+        "state": "Checkout page after the user tapped Pay.",
+        "images": [image_b64("checker-64x48.png")],
+        "questions": {
+            "paid": {"type": "noul", "instructions": "Did the payment succeed?"},
+            "next": {
+                "type": "choice",
+                "instructions": "Which control should the agent use next?",
+                "criteria": {"retry": "a retry button is shown", "back": "return to the cart"},
+            },
+        },
+    },
+    # Two images of different sizes and formats, in the request's order, one behind a
+    # data: URI, and a structured state.
+    "two_images": {
+        "state": {"screen": "settings", "step": 2},
+        "images": [image_b64("stripes-300x40.jpg"), image_b64("rings-90x120.webp", data_uri=True)],
+        "questions": {
+            "severity": {
+                "type": "score",
+                "instructions": "How severe is the error shown?",
+                "criteria": ["no error", "warning", "blocking error"],
+            }
+        },
+    },
+    # An image and an empty state: the image's line is all the state block holds.
+    "image_empty_state": {
+        "state": "",
+        "images": [image_b64("dots-50x50.gif")],
+        "questions": {"dots": {"type": "noul", "instructions": "Are there dots in the image?"}},
+    },
 }
+IMAGE_CASES = [n for n in CASES if CASES[n].get("images")]
+
+
+def _golden_images(r) -> dict:
+    """Each image of a rendered request as the goldens record it (absent without images)."""
+    if not r.images:
+        return {}
+    return {
+        "images": [
+            {
+                "format": i.format,
+                "width": i.width,
+                "height": i.height,
+                "sha256": i.sha256,
+                "tokens": i.tokens,
+                "span": list(i.span),
+            }
+            for i in r.images
+        ]
+    }
 
 
 def _golden_case(name: str, variant: str, tok) -> dict:
@@ -151,6 +209,7 @@ def _golden_case(name: str, variant: str, tok) -> dict:
         "state_text": any_q.state_text,
         "S": any_q.state_len,
         "state_ids": list(any_q.state_ids),
+        **_golden_images(r),
         "questions": {
             n: {
                 "question_text": q.question_text,
@@ -338,17 +397,81 @@ def test_unknown_variants_are_refused(variant):
         render(CASES["support_ticket"], toy_tokenizer(), variant)
 
 
-def test_images_are_refused():
-    from strands_decider.core.request import NO_VISION
+def _image_line(name: str) -> str:
+    _, w, h = IMAGE_FILES[name]
+    return IMAGE_OPEN + IMAGE_SOFT * soft_tokens(w, h) + IMAGE_CLOSE
 
-    req = {**CASES["support_ticket"], "images": ["aGk="]}
-    with pytest.raises(ValueError, match="no vision tower") as e:
-        render_text(req, PLAIN)
-    assert str(e.value) == NO_VISION
+
+def test_images_go_first_in_the_state_one_line_each():
+    """v1's layout for Gemma 4 images: inside `<state>`, one line per image in the
+    request's order, then the state text's line; with an empty state, the images' lines
+    alone. An image's line is `<|image>`, N `<|image|>` and `<image|>`."""
+    one, two, empty = (
+        _image_line(n) for n in ("checker-64x48.png", "stripes-300x40.jpg", "dots-50x50.gif")
+    )
+    webp = _image_line("rings-90x120.webp")
+    s, _ = render_text(CASES["one_image"], PLAIN)
+    assert s == BOS + f"<state>\n{one}\nCheckout page after the user tapped Pay.\n</state>\n"
+    s, _ = render_text(CASES["two_images"], PLAIN)
+    assert (
+        s
+        == BOS + f'<state>\n{two}\n{webp}\n{{\n  "screen": "settings",\n  "step": 2\n}}\n</state>\n'
+    )
+    s, _ = render_text(CASES["image_empty_state"], PLAIN)
+    assert s == BOS + f"<state>\n{empty}\n</state>\n"
+    s, _ = render_text(CASES["image_empty_state"], CHAT)
+    assert s == BOS + TURN_OPEN + f"user\n<state>\n{empty}\n</state>\n"
+    assert (one.count(IMAGE_SOFT), two.count(IMAGE_SOFT), webp.count(IMAGE_SOFT)) == (266, 270, 266)
+    # Whitespace-only state text is empty, with or without images.
+    req = {**CASES["image_empty_state"], "state": " \n\t"}
+    assert render_text(req, PLAIN)[0] == BOS + f"<state>\n{empty}\n</state>\n"
+    # The questions are the text-only questions: images change only the state block.
+    for name in IMAGE_CASES:
+        text_only = {k: v for k, v in CASES[name].items() if k != "images"}
+        assert render_text(CASES[name], CHAT)[1] == render_text(text_only, CHAT)[1]
+
+
+@pytest.mark.parametrize("which", ["toy", "gemma4"])
+@pytest.mark.parametrize("variant", VARIANTS)
+def test_image_spans_and_control_ids(which, variant):
+    """Each image's placeholders are `state_ids[start:end]`, N of them, with `<|image>`
+    before and `<image|>` after, emitted by id; render returns each image's file, size,
+    sha256 and span, in order, on the request and on every question."""
+    tok = _tokenizer(which)
+    soft, open_, close = (tok.token_to_id(t) for t in (IMAGE_SOFT, IMAGE_OPEN, IMAGE_CLOSE))
+    names = ["stripes-300x40.jpg", "rings-90x120.webp"]
+    r = render(CASES["two_images"], tok, variant)
+    assert [i.data for i in r.images] == [image_bytes(n) for n in names]
+    assert [(i.format, i.width, i.height) for i in r.images] == [IMAGE_FILES[n] for n in names]
+    assert [i.sha256 for i in r.images] == [
+        hashlib.sha256(image_bytes(n)).hexdigest() for n in names
+    ]
+    assert [i.tokens for i in r.images] == [270, 266]
+    first, second = r.images
+    assert r.state_ids[first.start - 1] == open_ and r.state_ids[first.end] == close
+    assert r.state_ids[first.start : first.end] == (soft,) * 270
+    assert r.state_ids[second.start - 1] == open_ and r.state_ids[second.end] == close
+    assert second.start == first.end + 3  # `<image|>`, the line feed, `<|image>`
+    assert r.state_ids.count(soft) == 536 and r.state_ids.count(open_) == 2
+    assert all(q.images == r.images for q in r.questions.values())
+
+
+def test_images_are_checked_when_parsed():
+    """`images` is v1's: a list of strings, null or any other type refused; then at most 4
+    images, each a PNG, JPEG, WebP or GIF file (tests/test_core_images.py has the rest)."""
     for bad in (None, "", 0, {}, "aGk=", [1], [None]):
         with pytest.raises(ValueError, match="list of strings"):
             render_text({**CASES["support_ticket"], "images": bad}, PLAIN)
-    assert render_text({**CASES["support_ticket"], "images": []}, PLAIN)
+    assert render_text({**CASES["support_ticket"], "images": []}, PLAIN) == render_text(
+        CASES["support_ticket"], PLAIN
+    )
+    png = image_b64("checker-64x48.png")
+    with pytest.raises(ValueError) as e:
+        render_text({**CASES["support_ticket"], "images": [png] * 5}, PLAIN)
+    assert str(e.value) == "5 images; this server takes at most 4"
+    assert render_text({**CASES["support_ticket"], "images": [png] * 4}, PLAIN)
+    with pytest.raises(ValueError, match="image could not be read as PNG/JPEG/WEBP/GIF"):
+        render_text({**CASES["support_ticket"], "images": ["aGk="]}, PLAIN)
 
 
 def test_max_length_refuses_and_never_truncates():
@@ -457,14 +580,30 @@ PLAIN_TEXT = _requests(60, controls=False, seed=1)
 WITH_CONTROLS = _requests(60, controls=True, seed=2)
 
 
+def _with_images(requests: list[dict], seed: int) -> list[dict]:
+    """The requests, each with one to four test images, in a random order."""
+    rng = random.Random(seed)
+    names = list(IMAGE_FILES)
+    return [
+        {**r, "images": [image_b64(rng.choice(names)) for _ in range(rng.randint(1, 4))]}
+        for r in requests
+    ]
+
+
+IMAGES_PLAIN_TEXT = _with_images(PLAIN_TEXT[:20], seed=3)
+IMAGES_WITH_CONTROLS = _with_images(WITH_CONTROLS[:20], seed=4)
+
+
 def _encode_across_s(tok, variant: str, req: dict, name: str) -> list[int]:
     """The prompt encoded with the two text runs that meet at S joined into one, control
     tokens by id and special-token matching off: what tokenizing across S gives."""
-    from strands_decider.core.prompt import prompt_pieces, question_block, state_block
+    from strands_decider.core.prompt import prompt_pieces, question_block, state_pieces
     from strands_decider.core.request import parse_request
 
-    q = parse_request(req).questions[name]
-    sp, qp = prompt_pieces(variant, state_block(req["state"]), question_block(q).text)
+    parsed = parse_request(req)
+    q = parsed.questions[name]
+    state = state_pieces(req["state"], parsed.images)
+    sp, qp = prompt_pieces(variant, state, question_block(q).text)
     assert not sp[-1][0] and not qp[0][0], "S must fall between two text runs"
     pieces = [*sp[:-1], (False, sp[-1][1] + qp[0][1]), *qp[1:]]
     tok.encode_special_tokens = True
@@ -493,7 +632,8 @@ def test_s_is_a_token_boundary(variant, controls):
     that starts with any character but a line feed (S's premise: it follows a line feed and
     precedes something else), special-token strings among them when `controls` is on."""
     tok = gemma4_tokenizer()
-    for req in WITH_CONTROLS if controls else PLAIN_TEXT:
+    with_images = IMAGES_WITH_CONTROLS if controls else IMAGES_PLAIN_TEXT
+    for req in [*(WITH_CONTROLS if controls else PLAIN_TEXT), *with_images]:
         for name, rq in render(req, tok, variant).questions.items():
             assert _encode_across_s(tok, variant, req, name) == list(rq.ids), rq.text
 
@@ -520,10 +660,12 @@ def test_s_is_a_token_boundary(variant, controls):
 @pytest.mark.parametrize("variant", VARIANTS)
 def test_ids_match_one_call_encoding(variant):
     """Without special-token strings in the request, the ids are what one call on the
-    whole prompt gives (Hugging Face's `apply_chat_template(tokenize=True)` encodes so),
-    and a token starts exactly at S's character offset."""
+    whole prompt gives (Hugging Face's `apply_chat_template(tokenize=True)` encodes so, and
+    so does Gemma4Processor once it has expanded each image), and a token starts exactly at
+    S's character offset."""
     tok = gemma4_tokenizer()
-    for req in [*PLAIN_TEXT, *(CASES[n] for n in CASES if n != "control_strings")]:
+    cases = [CASES[n] for n in CASES if n != "control_strings"]
+    for req in [*PLAIN_TEXT, *IMAGES_PLAIN_TEXT, *cases]:
         for rq in render(req, tok, variant).questions.values():
             enc = tok.encode(rq.text, add_special_tokens=False)
             assert enc.ids == list(rq.ids), rq.text
@@ -560,15 +702,21 @@ def _full_of_special_tokens() -> dict:
 @pytest.mark.parametrize("variant", VARIANTS)
 def test_request_text_never_makes_a_control_token(variant):
     """None of the 24 special tokens comes from request text: the only ones in a prompt
-    are the template's."""
+    are the template's and, in the state, each image's `<|image>`, N `<|image|>` and
+    `<image|>`."""
     tok = gemma4_tokenizer()
     controls = {tok.token_to_id(s) for s in SPECIAL_TOKENS}
     assert len(controls) == 24 and None not in controls
     want = {PLAIN: [BOS], CHAT: [BOS, TURN_OPEN, TURN_CLOSE, TURN_OPEN]}[variant]
-    for req in [*WITH_CONTROLS, CASES["control_strings"], _full_of_special_tokens()]:
+    full = _full_of_special_tokens()
+    for req in [*WITH_CONTROLS, CASES["control_strings"], full, *IMAGES_WITH_CONTROLS]:
         for rq in render(req, tok, variant).questions.values():
             got = [tok.id_to_token(i) for i in rq.ids if i in controls]
-            assert got == want, rq.text
+            head = 1 + (variant == CHAT)  # <bos>, and in chat <|turn>, before the state
+            images = [
+                t for i in rq.images for t in (IMAGE_OPEN, *[IMAGE_SOFT] * i.tokens, IMAGE_CLOSE)
+            ]
+            assert got == want[:head] + images + want[head:], rq.text
     # Each string alone, as the whole state: text, and never its own id.
     template = {PLAIN: 1, CHAT: 2}[variant]  # <bos>, and in chat <|turn>, before the text
     for t in SPECIAL_TOKENS:
@@ -657,12 +805,12 @@ def test_state_prefix_is_identical_across_questions(variant):
     """Every question of a request has the same state ids, and they are the ids of the
     state alone: rendering any one question by itself gives them too."""
     tok = gemma4_tokenizer()
-    for req in [*PLAIN_TEXT, *WITH_CONTROLS]:
+    for req in [*PLAIN_TEXT, *WITH_CONTROLS, *IMAGES_PLAIN_TEXT, *IMAGES_WITH_CONTROLS]:
         r = render(req, tok, variant)
         states = {q.state_ids for q in r.questions.values()}
         assert len(states) == 1
         for name, q in req["questions"].items():
-            alone = render({"state": req["state"], "questions": {name: q}}, tok, variant)
+            alone = render({**req, "questions": {name: q}}, tok, variant)
             assert alone.questions[name].state_ids == r.state_ids
             assert alone.questions[name].question_ids == r.questions[name].question_ids
 
@@ -683,7 +831,7 @@ def test_last_token_rule(variant):
     finally:
         tok.encode_special_tokens = False
     assert tok.id_to_token(tail[-1]) == (">" if variant == PLAIN else "\n")
-    for req in [*PLAIN_TEXT, *WITH_CONTROLS]:
+    for req in [*PLAIN_TEXT, *WITH_CONTROLS, *IMAGES_PLAIN_TEXT, *IMAGES_WITH_CONTROLS]:
         for rq in render(req, tok, variant).questions.values():
             assert list(rq.question_ids[-len(tail) :]) == tail
             assert rq.last_index == len(rq.ids) - 1 == rq.state_len + len(rq.question_ids) - 1
@@ -834,7 +982,8 @@ def test_request_parsing_matches_v1():
         {"type": "noul", "instructions": "x", "extra": 1},
     ]
     one = {"q": {"instructions": "x"}}
-    images = [None, "", 0, {}, [], ["aGk="], [""], [1], [None], "aGk=", ["a", 2], False]
+    png = image_b64("checker-64x48.png")
+    images = [None, "", 0, {}, [], [png], [png] * 4, [png] * 5, [1], [None], png, ["a", 2], False]
     requests = [{"state": "s", "questions": {"q": q}} for q in questions] + [
         {"state": None, "questions": one},
         {"state": 5, "questions": one},
@@ -845,7 +994,8 @@ def test_request_parsing_matches_v1():
         {"state": "s", "questions": one, "model": 5},
         *({"state": "s", "questions": one, "images": i} for i in images),
     ]
-    # v1's text-only engine refuses a request that validates with images, with this message.
+    # v1's text-only engine refuses a request that validates with images, with this message,
+    # which the core gives for a backend without an image path (runtime.evaluate).
     from strands_decider import hidden_engine
     from strands_decider.core.request import NO_VISION
 
@@ -853,7 +1003,9 @@ def test_request_parsing_matches_v1():
     for req in requests:
         try:
             validated = SystemOneRequest.model_validate(req)
-            schema_error = NO_VISION if validated.images else None
+            # v1's image engine then counts the images before it decodes them.
+            n = len(validated.images)
+            schema_error = f"{n} images; this server takes at most 4" if n > 4 else None
         except Exception as e:
             validated, schema_error = None, str(e)
         try:
@@ -868,6 +1020,8 @@ def test_request_parsing_matches_v1():
             ], req
         elif validated is not None:  # the schema accepts it and the engine refuses its images
             assert parse_error == schema_error, req
+        if parsed is not None and validated is not None:
+            assert len(parsed.images) == len(validated.images), req
     assert parse_request(SystemOneRequest.model_validate(CASES["support_ticket"])).questions
 
 
@@ -883,7 +1037,7 @@ def test_render_content_matches_v1():
 def test_core_imports_without_torch_pydantic_or_jinja():
     code = (
         "import sys, strands_decider.core; "
-        "heavy = {'torch', 'transformers', 'pydantic', 'jinja2', 'safetensors'}; "
+        "heavy = {'torch', 'transformers', 'pydantic', 'jinja2', 'safetensors', 'PIL'}; "
         "assert not heavy & set(sys.modules), sorted(heavy & set(sys.modules))"
     )
     subprocess.run([sys.executable, "-c", code], check=True)

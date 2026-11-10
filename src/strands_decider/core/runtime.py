@@ -1,20 +1,23 @@
 """What a runtime provides, and the glue around it (docs/spec.md, The runtime interface).
 
 A runtime runs the decoder. This core does the rest: it renders the request, hands the
-runtime one state and its questions as token ids, and reads the answers. The contract is
-v1's `hidden_engine.Backend`, narrowed to one row per question at its last token.
+runtime one state and its questions as token ids, with the state's images and where their
+placeholders sit, and reads the answers. The contract is v1's `hidden_engine.Backend`,
+narrowed to one row per question at its last token.
 """
 
 from __future__ import annotations
 
+import json
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any, Protocol
 
 import numpy as np
 
-from .config import DecisionConfig
-from .prompt import render
+from .config import IMAGE, TEXT, DecisionConfig
+from .prompt import RenderedImage, render
 from .readout import STAGES, Readout, read
+from .request import NO_VISION, has_images
 
 if TYPE_CHECKING:
     from tokenizers import Tokenizer
@@ -29,18 +32,32 @@ class Backend(Protocol):
         "capped_logits"  tanh(z / c) * c, the soft-cap applied, not the temperature
         "final_logits"   tanh(z / c) * c / T, both applied (the vLLM plugin's compute_logits)
         "probabilities"  the codes' probabilities: the question's k, or all 255
+
+    `inputs` says what `forward` takes, as decision_config.json's `inputs` names it:
+    ("text",), or ("text", "image") for a backend with an image path. A backend without
+    the attribute takes text only, and the core refuses image requests for it.
     """
 
     outputs: str
+    inputs: tuple[str, ...]
 
     def forward(
-        self, state: list[int], questions: list[list[int]]
+        self,
+        state: list[int],
+        questions: list[list[int]],
+        images: Sequence[RenderedImage] = (),
     ) -> np.ndarray | Sequence[np.ndarray]:
         """Run each question as a continuation of the state, under the prefix_bidir mask,
         seeing no other question: positions 0..S-1 for the state, S.. for the question.
         Return one row per question, in the order of `questions`, of the stage `outputs`
         names: an array [len(questions), width], or a sequence of rows (whose widths may
-        differ, as each question's k does)."""
+        differ, as each question's k does).
+
+        `images` are the state's images in order: each one's file (`data`), and the span
+        `[start, end)` of its N placeholders in `state`, which the backend fills with its
+        vision encoder's output for the image, preprocessed by the checkpoint's image
+        processor. The core passes `images` only when there are some, and only to a
+        backend whose `inputs` hold "image"."""
         ...
 
 
@@ -75,21 +92,35 @@ def evaluate(
 
     The prompt is the checkpoint's (`config.prompt`). Prompts longer than
     `config.max_length_validated` are refused unless `max_length` raises the limit.
-    `readout` may be None for a backend that applies the readout itself.
+    `readout` may be None for a backend that applies the readout itself. A request with
+    images is refused, before its images are decoded, unless the checkpoint's `inputs`
+    and the backend's both hold "image".
     """
-    inputs = getattr(backend, "outputs", None)
-    if inputs not in STAGES:
+    stage = getattr(backend, "outputs", None)
+    if stage not in STAGES:
         raise ValueError(
-            f"the backend must say what forward returns: `outputs` is {inputs!r}, not one "
+            f"the backend must say what forward returns: `outputs` is {stage!r}, not one "
             f"of {STAGES}"
         )
+    if has_images(request):
+        if IMAGE not in config.inputs:
+            raise ValueError(
+                "this checkpoint does not take images: its decision_config.json inputs are "
+                + json.dumps(list(config.inputs))
+            )
+        if IMAGE not in tuple(getattr(backend, "inputs", (TEXT,))):
+            raise ValueError(NO_VISION)
     rendered = render(
         request, tokenizer, config.prompt, max_length=max_length or config.max_length_validated
     )
+    state = list(rendered.state_ids)
     questions = [list(q.question_ids) for q in rendered.questions.values()]
-    out = backend.forward(list(rendered.state_ids), questions)
+    if rendered.images:
+        out = backend.forward(state, questions, images=rendered.images)
+    else:
+        out = backend.forward(state, questions)
     answers = read(
-        out, readout, config, rendered, inputs=inputs, ordinal_smoothing=ordinal_smoothing
+        out, readout, config, rendered, inputs=stage, ordinal_smoothing=ordinal_smoothing
     )
     return {
         "model": model_name,

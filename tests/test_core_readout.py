@@ -14,7 +14,7 @@ import struct
 
 import numpy as np
 import pytest
-from core_support import decision_config_fixture, toy_tokenizer
+from core_support import decision_config_fixture, image_b64, image_bytes, toy_tokenizer
 
 from strands_decider.core import (
     CAPPED_LOGITS,
@@ -642,12 +642,21 @@ T = 0.8  # a checkpoint temperature other than 1, so that applying it twice woul
 
 class _FakeBackend:
     """Returns, for each question, the stage `outputs` of a decoder whose hidden state
-    points at one code: with the identity as readout, `W h` is 50 on that code only."""
+    points at one code: with the identity as readout, `W h` is 50 on that code only. With
+    `images`, it says it has an image path and records the images it is given."""
 
-    def __init__(self, picks: dict[tuple[int, ...], int], outputs: str = HIDDEN):
+    def __init__(
+        self, picks: dict[tuple[int, ...], int], outputs: str = HIDDEN, *, images: bool = False
+    ):
         self.picks, self.outputs, self.calls = picks, outputs, []
+        if images:
+            self.inputs = ("text", "image")
+        self.images: list = []
 
-    def forward(self, state, questions):
+    def forward(self, state, questions, **kw):
+        if kw:
+            assert set(kw) == {"images"} and getattr(self, "inputs", ()) == ("text", "image")
+            self.images.append(kw["images"])
         self.calls.append((state, questions))
         rows = np.zeros((len(questions), 255))
         for i, q in enumerate(questions):
@@ -705,6 +714,74 @@ def test_evaluate_end_to_end_with_a_toy_tokenizer(outputs):
             _config(token_ids=list(cfg.token_ids), max_length_validated=5, temperature=T),
             backend,
         )
+
+
+IMAGE_REQUEST = {
+    "state": "a short state",
+    "images": [image_b64("checker-64x48.png"), image_b64("rings-90x120.webp", data_uri=True)],
+    "questions": {
+        "n": {"type": "noul", "instructions": "is it short"},
+        "c": {"type": "choice", "instructions": "pick", "criteria": {"x": None, "y": None}},
+    },
+}
+
+
+def test_evaluate_hands_a_backend_the_images_with_their_spans():
+    tok = toy_tokenizer()
+    cfg = _config(token_ids=[tok.token_to_id(c) for c in CODES])
+    rendered = render(IMAGE_REQUEST, tok, PLAIN)
+    ids = {n: q.question_ids for n, q in rendered.questions.items()}
+    backend = _FakeBackend({ids["n"]: 1, ids["c"]: 0}, images=True)
+    resp = evaluate(IMAGE_REQUEST, tok, Readout(np.eye(255, dtype=np.float32), C), cfg, backend)
+    ((state, _),) = backend.calls
+    (images,) = backend.images
+    assert state == list(rendered.state_ids) and images == rendered.images
+    assert [i.data for i in images] == [
+        image_bytes("checker-64x48.png"),
+        image_bytes("rings-90x120.webp"),
+    ]
+    soft = tok.token_to_id("<|image|>")
+    assert [state[i.start : i.end] for i in images] == [[soft] * 266, [soft] * 266]
+    assert resp["answers"]["c"]["choice"] == "x" and resp["answers"]["n"]["noul"] > 0.99
+    assert resp["usage"]["input_tokens"] == rendered.input_tokens
+    # A text request reaches the same backend without `images`.
+    text = {k: v for k, v in IMAGE_REQUEST.items() if k != "images"}
+    text_ids = {n: q.question_ids for n, q in render(text, tok, PLAIN).questions.items()}
+    backend = _FakeBackend({text_ids["n"]: 1, text_ids["c"]: 0}, images=True)
+    evaluate(text, tok, Readout(np.eye(255, dtype=np.float32), C), cfg, backend)
+    assert backend.images == [] and len(backend.calls) == 1
+
+
+def test_evaluate_refuses_images_without_an_image_path():
+    """Refused before the images are decoded, as v1's text-only engine refuses them: when
+    the checkpoint's `inputs` lack "image", and when the backend's do (or it has none)."""
+    from strands_decider.core.request import NO_VISION
+
+    tok = toy_tokenizer()
+    ids = [tok.token_to_id(c) for c in CODES]
+    readout = Readout(np.eye(255, dtype=np.float32), C)
+    bad = {**IMAGE_REQUEST, "images": ["not base64!"]}
+    for req in (IMAGE_REQUEST, bad):
+        with pytest.raises(ValueError, match="does not take images") as e:
+            evaluate(
+                req,
+                tok,
+                readout,
+                _config(token_ids=ids, inputs=["text"]),
+                _FakeBackend({}, images=True),
+            )
+        assert str(e.value).endswith('its decision_config.json inputs are ["text"]')
+        for backend in (_FakeBackend({}), _FakeBackend({}, images=False)):
+            with pytest.raises(ValueError) as e:
+                evaluate(req, tok, readout, _config(token_ids=ids), backend)
+            assert str(e.value) == NO_VISION
+    text_only = _FakeBackend({})
+    text_only.inputs = ("text",)
+    with pytest.raises(ValueError, match="no vision tower"):
+        evaluate(IMAGE_REQUEST, tok, readout, _config(token_ids=ids), text_only)
+    # With an image path, a bad image is the request's error.
+    with pytest.raises(ValueError, match="image is not valid base64"):
+        evaluate(bad, tok, readout, _config(token_ids=ids), _FakeBackend({}, images=True))
 
 
 def test_evaluate_needs_the_backend_to_name_its_stage():

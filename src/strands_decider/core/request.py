@@ -1,9 +1,11 @@
 """The System One request, parsed without pydantic.
 
-The request is v1's (`strands_decider.schema.SystemOneRequest`): a state and named
-questions of type noul, choice or score. This module accepts and refuses what v1's pydantic
-models accept and refuse (tests/test_core_prompt.py checks it against them when pydantic is
-installed), so that the torch-free core needs only the standard library to read a request.
+The request is v1's (`strands_decider.schema.SystemOneRequest`): a state, optional images,
+and named questions of type noul, choice or score. This module accepts and refuses what
+v1's pydantic models accept and refuse (tests/test_core_prompt.py checks it against them
+when pydantic is installed), and checks images as v1's image engine checks them
+(`images.decode_image`), so that the torch-free core needs only the standard library to
+read a request.
 """
 
 from __future__ import annotations
@@ -11,6 +13,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
+
+from .images import MAX_IMAGES, EncodedImage, decode_image
 
 # v1's limits (schema.py). Repeated, not imported: schema.py needs pydantic.
 MAX_CHOICE_OPTIONS = 255
@@ -26,7 +30,8 @@ NOUL_DEFAULT_CRITERIA = {
 }
 
 KINDS = ("noul", "choice", "score")
-# v1's text-only engine refuses images with this message (hidden_engine.HiddenStateEngine).
+# v1's text-only engine refuses images with this message (hidden_engine.HiddenStateEngine);
+# `runtime.evaluate` gives it for a backend without an image path.
 NO_VISION = "this engine has no vision tower; images are not supported"
 
 
@@ -47,9 +52,13 @@ class Question:
 
 @dataclass(frozen=True)
 class Request:
+    """A request, normalised. `images` are the request's images in order, checked and sized
+    from their headers; they go first in the state block."""
+
     state: Any
     questions: dict[str, Question]
     model: str = "strands-decider-latest"
+    images: tuple[EncodedImage, ...] = ()
 
 
 def _is_content(v: Any) -> bool:
@@ -117,14 +126,31 @@ def parse_question(name: str, q: Any) -> Question:
     return Question("score", instructions, tuple(str(i) for i in range(len(crit))), tuple(crit))
 
 
+def _as_mapping(request: Any) -> Any:
+    return request.model_dump() if hasattr(request, "model_dump") else request
+
+
+def has_images(request: Any) -> bool:
+    """Whether the request carries a non-empty `images` list, before anything is checked:
+    a runtime that cannot take images refuses such a request before it decodes them, as v1's
+    text-only engine does."""
+    request = _as_mapping(request)
+    return (
+        isinstance(request, Mapping)
+        and isinstance(request.get("images"), list)
+        and bool(request["images"])
+    )
+
+
 def parse_request(request: Any) -> Request:
     """A request from its JSON object, or from a v1 `SystemOneRequest` (anything with
     `model_dump`). Unknown fields are ignored, as v1 ignores them.
 
     `images`, as in v1, is optional and must be a list of strings; null or any other type is
-    refused. A non-empty list is refused with v1's text-only error: the core renders text only."""
-    if hasattr(request, "model_dump"):
-        request = request.model_dump()
+    refused. Then, as v1's image engine checks them: at most 4, each base64 (behind an
+    optional `data:image/...;base64,` prefix) of a PNG, JPEG, WebP or GIF file of at most
+    4096 x 4096 pixels, read from its header (`images.decode_image`)."""
+    request = _as_mapping(request)
     if not isinstance(request, Mapping):
         raise ValueError("a request must be an object")
     if "state" not in request:
@@ -135,14 +161,15 @@ def parse_request(request: Any) -> Request:
     questions = request.get("questions")
     if not isinstance(questions, Mapping) or not questions:
         raise ValueError("a request needs at least one question")
-    if "images" in request:
-        images = request["images"]
-        if not isinstance(images, list) or not all(isinstance(i, str) for i in images):
-            raise ValueError("images must be a list of strings (base64 or data: URIs)")
-        if images:
-            raise ValueError(NO_VISION)
+    raw_images = request.get("images", [])
+    if not isinstance(raw_images, list) or not all(isinstance(i, str) for i in raw_images):
+        raise ValueError("images must be a list of strings (base64 or data: URIs)")
     model = request.get("model", "strands-decider-latest")
     if not isinstance(model, str):
         raise ValueError("model must be a string")
     parsed = {str(n): parse_question(str(n), q) for n, q in questions.items()}
-    return Request(state=state, questions=parsed, model=model)
+    # After the schema's checks, as v1's image engine checks images after validation.
+    if len(raw_images) > MAX_IMAGES:
+        raise ValueError(f"{len(raw_images)} images; this server takes at most {MAX_IMAGES}")
+    images = tuple(decode_image(i) for i in raw_images)
+    return Request(state=state, questions=parsed, model=model, images=images)
