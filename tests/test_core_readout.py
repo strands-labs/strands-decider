@@ -1025,6 +1025,21 @@ def test_evaluate_refuses_images_without_an_image_path():
         evaluate(bad, tok, readout, _config(token_ids=ids), _FakeBackend({}, images=True))
 
 
+def test_a_malformed_request_with_images_is_refused_for_what_is_malformed():
+    """v1 validates the request before its text-only engine refuses the images, so a request
+    that is malformed and has images gets the malformed part's message from any runtime."""
+    tok = toy_tokenizer()
+    ids = [tok.token_to_id(c) for c in CODES]
+    readout = Readout(np.eye(255, dtype=np.float32), C)
+    bad = {**IMAGE_REQUEST, "questions": {"q": {"type": "noul"}}}
+    for cfg, backend in (
+        (_config(token_ids=ids, inputs=["text"]), _FakeBackend({}, images=True)),
+        (_config(token_ids=ids), _FakeBackend({})),
+    ):
+        with pytest.raises(ValueError, match="has no instructions"):
+            evaluate(bad, tok, readout, cfg, backend)
+
+
 def test_evaluate_needs_the_backend_to_name_its_stage():
     tok = toy_tokenizer()
     cfg = _config(token_ids=[tok.token_to_id(c) for c in CODES])

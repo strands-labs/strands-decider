@@ -188,9 +188,10 @@ def _as_mapping(request: Any) -> Any:
 
 
 def has_images(request: Any) -> bool:
-    """Whether the request carries a non-empty `images` list, before anything is checked:
-    a runtime that cannot take images refuses such a request before it decodes them, as v1's
-    text-only engine does."""
+    """Whether the request carries a non-empty `images` list, before anything is checked.
+    A runtime that cannot take images checks the rest of the request first
+    (`parse_request(request, images=False)`), then refuses one with images before it decodes
+    them, as v1's text-only engine does after v1's validation."""
     request = _as_mapping(request)
     return (
         isinstance(request, Mapping)
@@ -199,14 +200,18 @@ def has_images(request: Any) -> bool:
     )
 
 
-def parse_request(request: Any) -> Request:
+def parse_request(request: Any, *, images: bool = True) -> Request:
     """A request from its JSON object, or from a v1 `SystemOneRequest` (anything with
     `model_dump`). Unknown fields are ignored, as v1 ignores them.
 
     `images`, as in v1, is optional and must be a list of strings; null or any other type is
     refused. Then, as v1's image engine checks them: at most 4, each base64 (behind an
     optional `data:image/...;base64,` prefix) of a PNG, JPEG, WebP or GIF file of at most
-    4096 x 4096 pixels, read from its header (`images.decode_image`)."""
+    4096 x 4096 pixels, read from its header (`images.decode_image`), every check of one
+    image before the next image's. Every other check comes first, as v1 validates the
+    request before its engine looks at the images. With `images=False` the images are
+    neither counted nor decoded, and the request returned has none: a runtime that cannot
+    take images checks the rest so, and then refuses the images (`runtime.evaluate`)."""
     request = _as_mapping(request)
     if not isinstance(request, Mapping):
         raise ValueError("a request must be an object")
@@ -229,8 +234,10 @@ def parse_request(request: Any) -> Request:
     if not isinstance(model, str):
         raise ValueError("model must be a string")
     parsed = {str(n): parse_question(str(n), q) for n, q in questions.items()}
+    if not images:
+        return Request(state=state, questions=parsed, model=model)
     # After the schema's checks, as v1's image engine checks images after validation.
     if len(raw_images) > MAX_IMAGES:
         raise ValueError(f"{len(raw_images)} images; this server takes at most {MAX_IMAGES}")
-    images = tuple(decode_image(i) for i in raw_images)
-    return Request(state=state, questions=parsed, model=model, images=images)
+    decoded = tuple(decode_image(i) for i in raw_images)
+    return Request(state=state, questions=parsed, model=model, images=decoded)

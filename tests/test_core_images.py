@@ -280,10 +280,160 @@ def test_surrounding_whitespace_is_the_specs():
 def test_the_pixel_limit_is_v1s():
     assert decode_image(_b64(_png_header(4096, 4096))).width == 4096
     assert decode_image(_b64(_png_header(1, MAX_IMAGE_PIXELS))).height == MAX_IMAGE_PIXELS
-    for w, h in ((4097, 4096), (1, MAX_IMAGE_PIXELS + 1), (65535, 65535)):
+    for w, h in ((4097, 4096), (1, MAX_IMAGE_PIXELS + 1), (9500, 9500), (13377, 13377)):
         with pytest.raises(ValueError) as e:
             decode_image(_b64(_png_header(w, h)))
         assert str(e.value) == f"image is {w}x{h}; at most 16,777,216 pixels are accepted"
+    # Past 178,956,970 pixels Pillow will not open the file, so v1 refuses it as unreadable.
+    for w, h in ((13378, 13378), (65535, 65535)):
+        with pytest.raises(ValueError) as e:
+            decode_image(_b64(_png_header(w, h)))
+        assert str(e.value).startswith(COULD_NOT_READ) and "178,956,970" in str(e.value)
+
+
+def test_each_image_is_checked_in_turn_after_everything_else():
+    """The request's own checks come first, then the count, then every check of the first
+    image before any of the second's."""
+    req = {"state": "", "questions": {"q": {"instructions": "x"}}}
+    big, bad = _b64(_png_header(4097, 4096)), "not base64!"
+    with pytest.raises(ValueError, match="image is 4097x4096"):
+        parse_request({**req, "images": [big, bad]})
+    with pytest.raises(ValueError, match="image is not valid base64"):
+        parse_request({**req, "images": [bad, big]})
+    with pytest.raises(ValueError, match="no instructions"):
+        parse_request({"state": "", "questions": {"q": {"type": "noul"}}, "images": [bad] * 5})
+    assert parse_request({**req, "images": [bad] * 5}, images=False).images == ()
+
+
+def test_png_chunks_are_read_as_pillow_reads_them():
+    """Chunk types of letters, digits or underscores; the walk stops at the first IDAT or
+    IEND, reading only its length and type; a later IHDR replaces an earlier one."""
+    png = image_bytes("checker-64x48.png")
+    for ctype in (b"ab1c", b"ab_c", b"zz9_"):
+        assert image_size(png[:33] + _chunk(ctype, b"x") + png[33:]) == ("PNG", 64, 48), ctype
+    for ctype in (b"ab-c", b"ab c", b"a\xe9bc"):
+        with pytest.raises(ValueError, match="broken PNG file"):
+            image_size(png[:33] + _chunk(ctype, b"x") + png[33:])
+    assert image_size(png[:33] + _chunk(b"IEND", b"")) == (
+        "PNG",
+        64,
+        48,
+    )  # no IDAT: fails to decode
+    with pytest.raises(ValueError, match="no IHDR"):
+        image_size(PNG_SIGNATURE + _chunk(b"IEND", b"") + png[8:])
+    idat = png.index(b"IDAT")
+    assert image_size(png[: idat + 10]) == ("PNG", 64, 48)  # cut inside the IDAT: sized
+    assert image_size(png[: idat + 4]) == ("PNG", 64, 48)  # its length and type are all it reads
+    with pytest.raises(ValueError, match="no IDAT"):
+        image_size(png[: idat + 2])
+    second = _chunk(b"IHDR", struct.pack(">IIBBBBB", 7, 9, 8, 2, 0, 0, 0))
+    assert image_size(png[:33] + second + png[33:]) == ("PNG", 7, 9)
+
+
+def _jpeg_segments(jpeg: bytes) -> list[tuple[int, int, int]]:
+    """(marker, start, end) of each segment from SOI's end through the first scan's header."""
+    out, pos = [], 2
+    while True:
+        marker, length = jpeg[pos + 1], struct.unpack(">H", jpeg[pos + 2 : pos + 4])[0]
+        out.append((marker, pos, pos + 2 + length))
+        if marker == 0xDA:
+            return out
+        pos += 2 + length
+
+
+@pytest.mark.parametrize("name", ["stripes-300x40.jpg", "rotated-80x40.jpg"])
+def test_a_jpeg_must_reach_its_first_scan(name):
+    """A JPEG cut anywhere before the end of its first scan's header, between two segments
+    or inside one, is refused; one cut after it is sized. Pillow before 13 refuses all such
+    cuts when it opens the file; Pillow 13 opens one cut between segments after the frame
+    header, and then cannot decode it, so v1 refuses it either way."""
+    jpeg = image_bytes(name)
+    segments = _jpeg_segments(jpeg)
+    sos_end = segments[-1][2]
+    cuts = {
+        c
+        for _, start, end in segments
+        for c in (start, start + 1, start + 2, start + 3, end - 1, end)
+    }
+    for cut in sorted(c for c in cuts if c < sos_end):
+        with pytest.raises(ValueError, match=r"truncated JPEG|no frame header|not a PNG, JPEG"):
+            image_size(jpeg[:cut])
+    assert image_size(jpeg[:sos_end]) == ("JPEG", *IMAGE_FILES[name][1:])
+    try:
+        from PIL import Image  # noqa: F401
+    except ImportError:
+        return
+    for cut in sorted(cuts | {sos_end}):
+        core, pillow = _core_size(jpeg[:cut]), _pillow_size(jpeg[:cut])
+        if core is None and pillow is not None:
+            assert cut < sos_end and not _pillow_decodes(jpeg[:cut]), cut
+        else:
+            assert core == pillow, cut
+
+
+def test_jpeg_segments_and_frame_headers():
+    """A segment length of 0 or 1 counts as 2; a later frame header replaces an earlier one;
+    megabytes of junk between segments are skipped quickly."""
+    jpeg = image_bytes("stripes-300x40.jpg")
+    sof = jpeg.index(b"\xff\xc0")
+    sof_end = sof + 2 + struct.unpack(">H", jpeg[sof + 2 : sof + 4])[0]
+    for length in (b"\x00\x00", b"\x00\x01"):
+        assert image_size(jpeg[:2] + b"\xff\xe5" + length + jpeg[2:]) == ("JPEG", 300, 40)
+    second = bytearray(jpeg[sof:sof_end])
+    second[5:9] = struct.pack(">HH", 11, 22)  # height 11, width 22
+    assert image_size(jpeg[:sof_end] + bytes(second) + jpeg[sof_end:]) == ("JPEG", 22, 11)
+    junk = jpeg[:sof] + b"\x00\x7f" * 1_000_000 + jpeg[sof:]
+    assert image_size(junk) == ("JPEG", 300, 40)
+
+
+def test_gif_extensions_are_read_as_pillow_reads_them():
+    """An extension whose first sub-block is the empty one reads one more chain of
+    sub-blocks, as Pillow does, so a descriptor hidden in that chain is skipped; a short
+    graphic control extension is refused; junk between blocks is skipped."""
+    gif = image_bytes("dots-50x50.gif")
+    gct = 13 + (3 << ((gif[10] & 7) + 1))
+    decoy = b"\x2c" + struct.pack("<HHHH", 0, 0, 99, 77) + b"\x00\x02"
+    for label in (0x01, 0xF9, 0xFF):
+        hidden = gif[:gct] + bytes([0x21, label, 0x00, len(decoy)]) + decoy + b"\x00" + gif[gct:]
+        assert image_size(hidden) == ("GIF", 50, 50), hex(label)
+    comment = gif[:gct] + bytes([0x21, 0xFE, 0x00, len(decoy)]) + decoy + b"\x00" + gif[gct:]
+    assert image_size(comment) == ("GIF", 99, 77)  # a comment reads no further
+    for gce in (b"\x21\xf9\x02\x00\x00\x00", b"\x21\xf9\x03\x01\x00\x00\x00"):
+        with pytest.raises(ValueError, match="graphic control extension"):
+            image_size(gif[:gct] + gce + gif[gct:])
+    assert image_size(gif[:gct] + b"\x00\x07\xff" * 400_000 + gif[gct:]) == ("GIF", 50, 50)
+    try:
+        from PIL import Image  # noqa: F401
+    except ImportError:
+        return
+    for data in (hidden, comment, gif[:gct] + b"\x00\x07\xff" + gif[gct:]):
+        assert _core_size(data) == _pillow_size(data)
+
+
+def test_webp_sizes_below_their_minimum_are_refused():
+    vp8x = image_bytes("alpha-21x34.webp")
+    with pytest.raises(ValueError, match="malformed WebP VP8X"):
+        image_size(vp8x[:16] + struct.pack("<I", 9) + vp8x[20:])
+    vp8 = image_bytes("rings-90x120.webp")
+    for riff in (0, 11):
+        with pytest.raises(ValueError, match="RIFF or chunk size"):
+            image_size(vp8[:4] + struct.pack("<I", riff) + vp8[8:])
+
+
+def test_the_image_processors_settings_are_checked(tmp_path):
+    from strands_decider.core import check_image_processor
+
+    good = {"image_processor": {"patch_size": 16, "pooling_kernel_size": 3, "max_soft_tokens": 280}}
+    check_image_processor(good)
+    check_image_processor(good["image_processor"])
+    (tmp_path / "processor_config.json").write_text(json.dumps(good))
+    check_image_processor(tmp_path)
+    check_image_processor(tmp_path / "processor_config.json")
+    for k, v in (("patch_size", 14), ("max_soft_tokens", 560), ("pooling_kernel_size", True)):
+        with pytest.raises(ValueError, match="cannot take images"):
+            check_image_processor({"image_processor": {**good["image_processor"], k: v}})
+    with pytest.raises(ValueError, match="<missing>"):
+        check_image_processor({"image_processor": {"patch_size": 16}})
 
 
 def test_more_than_four_images_are_refused_before_any_is_decoded():
@@ -298,11 +448,14 @@ def test_more_than_four_images_are_refused_before_any_is_decoded():
 
 
 def test_audio_is_refused_rather_than_ignored():
+    """Refused unless absent or empty by the spec's rule: null, false, a number equal to 0,
+    or an empty string, array or object."""
     req = {"state": "a call", "questions": {"q": {"instructions": "x"}}}
-    with pytest.raises(ValueError) as e:
-        parse_request({**req, "audio": ["UklGRg=="]})
-    assert str(e.value) == "audio input is not supported"
-    for empty in (None, []):
+    for given in (["UklGRg=="], "UklGRg==", {"data": "x"}, True, 1, 0.5, [None], [""]):
+        with pytest.raises(ValueError) as e:
+            parse_request({**req, "audio": given})
+        assert str(e.value) == "audio input is not supported", given
+    for empty in (None, [], False, 0, 0.0, "", {}):
         assert parse_request({**req, "audio": empty}).images == ()
 
 
@@ -681,6 +834,16 @@ def _pillow_size(data: bytes):
         return None
 
 
+def _pillow_decodes(data: bytes) -> bool:
+    from PIL import Image
+
+    try:
+        Image.open(io.BytesIO(data), formats=IMAGE_FORMATS).load()
+        return True
+    except Exception:
+        return False
+
+
 def _core_size(data: bytes):
     try:
         return image_size(data)
@@ -759,6 +922,7 @@ def test_validation_matches_v1():
     cases += [_b64(b) for b in _pillow_images(40, seed=9)]
     cases += [_b64(b) for b in MALFORMED.values()]
     cases += [_b64(_png_header(4097, 4096)), _b64(_png_header(1, MAX_IMAGE_PIXELS + 1))]
+    cases += [_b64(_png_header(13378, 13378)), _b64(_png_header(65535, 65535))]
     for data in cases:
         try:
             v1_decode(data)

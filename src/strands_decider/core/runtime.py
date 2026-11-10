@@ -17,7 +17,7 @@ import numpy as np
 from .config import IMAGE, TEXT, DecisionConfig
 from .prompt import RenderedImage, render
 from .readout import STAGES, Readout, check_rendered, check_stage, read
-from .request import NO_VISION, has_images
+from .request import NO_VISION, has_images, parse_request
 
 if TYPE_CHECKING:
     from tokenizers import Tokenizer
@@ -105,6 +105,9 @@ def evaluate(
             f"of {STAGES}"
         )
     check_stage(stage, readout, config)
+    # v1's order: the request's own checks, then the refusal of images by an engine without
+    # them, then the images, each in turn.
+    parse_request(request, images=False)
     if has_images(request):
         if IMAGE not in config.inputs:
             raise ValueError(
