@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 
 
 def parser() -> argparse.ArgumentParser:
@@ -31,14 +32,15 @@ def parser() -> argparse.ArgumentParser:
         "--max-model-len",
         type=int,
         default=None,
-        help="the engine's context, in tokens (default: decision_config.json's max_length_validated)",
+        help="the engine's context, in tokens (default: --max-length plus 1, the answer token's position; vLLM "
+        "refuses a prompt that fills the context)",
     )
     s.add_argument(
         "--max-length",
         type=int,
         default=None,
-        help="refuse prompts longer than this many tokens (default: max_length_validated); raising it past the "
-        "validated length is the operator's decision",
+        help="refuse prompts longer than this many tokens (default: decision_config.json's max_length_validated); "
+        "raising it past the validated length is the operator's decision",
     )
     s.add_argument(
         "--max-num-batched-tokens",
@@ -74,6 +76,27 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument(
         "--enforce-eager", action="store_true", help="no CUDA graphs (slower; for debugging)"
     )
+    s.add_argument(
+        "--max-body-mb",
+        type=float,
+        default=None,
+        help="refuse request bodies larger than this, in MiB, with HTTP 413 (default: 187, four 32 MiB image files "
+        "in base64 plus 16 MiB of text; 16 for a checkpoint that takes no images)",
+    )
+    s.add_argument(
+        "--limit-concurrency",
+        type=int,
+        default=128,
+        help="uvicorn's limit on open connections and requests, /ping and /health included; past it uvicorn answers "
+        "HTTP 503 (default 128)",
+    )
+    s.add_argument(
+        "--preprocess-workers",
+        type=int,
+        default=min(4, os.cpu_count() or 1),
+        help="threads that parse, render and decode requests, and so the requests decoded at once (default: 4, or "
+        "the CPU count if lower)",
+    )
     return ap
 
 
@@ -82,7 +105,7 @@ def main(argv: list[str] | None = None) -> None:
     if a.command == "serve":
         from .server import prepare_environment
 
-        prepare_environment(a.host)
+        prepare_environment()
         from .server import serve
 
         serve(a)
