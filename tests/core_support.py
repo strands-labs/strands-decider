@@ -2,16 +2,19 @@
 
 The render goldens and properties run against Gemma 4's real tokenizer. It is 32 MB, so it
 is not committed: point STRANDS_DECIDER_GEMMA4_TOKENIZER at a copy of `tokenizer.json`, and
-the tests check its sha256 before they trust it. The goldens were made with the pinned file
-(google/gemma-4-E2B-it at GEMMA4_REVISION, which 26B-A4B and 31B also ship) and need it; the
-property tests accept any of the Gemma 4 files docs/spec.md lists (GEMMA4_TOKENIZERS), since
-the E2B, E4B and 12B repositories now ship slightly different ones. Without a tokenizer those
-tests skip; the tests that need only text, numbers or a toy tokenizer always run.
+the tests check its sha256 before they trust it. It may be any of the four Gemma 4 files
+docs/spec.md lists (GEMMA4_TOKENIZERS), since the E2B, E4B and 12B repositories now ship
+slightly different ones: the goldens were made with the pinned file (google/gemma-4-E2B-it at
+GEMMA4_REVISION, which 26B-A4B and 31B also ship), which regenerating them needs, and every
+golden gives the same ids with all four. Without a tokenizer those tests skip; the tests that
+need only text, numbers or a toy tokenizer always run.
 
     STRANDS_DECIDER_GEMMA4_TOKENIZER=/path/to/tokenizer.json pytest tests/test_core_*.py
 
-CI's `core tokenizer (gemma 4)` job (.github/workflows/tests.yml) fetches that file and the
-E2B chat template at GEMMA4_REVISION, checks both sha256s, and runs these tests without torch.
+CI's `core tokenizer (gemma 4)` job (.github/workflows/tests.yml) fetches the pinned file and the
+E2B chat template at GEMMA4_REVISION, checks both sha256s, and runs these tests without torch;
+then it fetches the other three listed files and runs tests/test_core_prompt.py and
+tests/test_core_images.py with each.
 
 STRANDS_DECIDER_GEMMA4_TEMPLATES lists the Gemma 4 base models' chat_template.jinja files
 (os.pathsep between them) for the tests that compare strands-chat with them, which also

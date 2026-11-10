@@ -30,6 +30,7 @@ all special is refused, since request text could match them.
 from __future__ import annotations
 
 import json
+import operator
 import threading
 from collections import OrderedDict
 from collections.abc import Mapping, Sequence
@@ -118,6 +119,31 @@ class QuestionBlock:
     codes: tuple[str, ...]
 
 
+def _indices(option_order: Any) -> list[int]:
+    """An option order as a list of ints: any iterable of integers that `operator.index`
+    takes, numpy's among them (a permutation from `rng.permutation(k)`), but not bools, and
+    not the characters of a string or the keys of a mapping."""
+    if isinstance(option_order, (str, bytes, Mapping)):
+        raise ValueError(f"option_order must be a sequence of option indices, not {option_order!r}")
+    try:
+        items = list(option_order)
+    except TypeError:
+        raise ValueError(
+            f"option_order must be a sequence of option indices, not {option_order!r}"
+        ) from None
+    order = []
+    for i in items:
+        try:
+            if type(i).__name__ in ("bool", "bool_"):
+                raise TypeError
+            order.append(operator.index(i))
+        except TypeError:
+            raise ValueError(
+                f"option_order must hold integer option indices, not {items!r}"
+            ) from None
+    return order
+
+
 def question_block(question: Question, option_order: Sequence[int] | None = None) -> QuestionBlock:
     """The question part's body, from `<question` to `</question>`.
 
@@ -132,15 +158,7 @@ def question_block(question: Question, option_order: Sequence[int] | None = None
     if option_order is None:
         order = identity
     else:
-        if isinstance(option_order, (str, bytes, Mapping)) or not isinstance(
-            option_order, Sequence
-        ):
-            raise ValueError(
-                f"option_order must be a sequence of option indices, not {option_order!r}"
-            )
-        order = list(option_order)
-        if not all(isinstance(i, int) and not isinstance(i, bool) for i in order):
-            raise ValueError(f"option_order must hold integer option indices, not {order!r}")
+        order = _indices(option_order)
         if sorted(order) != identity:
             raise ValueError("option_order must be a permutation of the option indices")
         if question.kind == "score" and order not in (identity, identity[::-1]):
@@ -291,21 +309,21 @@ def _text(pieces: Sequence[Piece]) -> str:
 
 # Keyed by id with the tokenizer itself held, so an id is never reused while its entry lives:
 # tokenizers before 0.23 cannot be weakly referenced. Least recently used out, because each
-# copy costs about 170 MB; a process that serves all five Gemma 4 sizes, each with its own
-# tokenizer, should raise the bound to five.
+# copy costs about 170 MB; eight is more than a process serving all five Gemma 4 sizes needs.
+# A caller that cannot spare the memory hands its tokenizer over (`plain_text_tokenizer`).
 _PLAIN_TEXT: OrderedDict[int, tuple[Tokenizer, Tokenizer]] = OrderedDict()
-_PLAIN_TEXT_MAX = 4
+_PLAIN_TEXT_MAX = 8
+# Tokenizers handed over by `plain_text_tokenizer`, by id, held: render uses them as they are.
+_OWNED: dict[int, Tokenizer] = {}
 # Guards _PLAIN_TEXT and _PENDING only; a copy is made outside it, under its tokenizer's lock
 # in _PENDING, so a first render of one tokenizer never blocks renders of another.
 _PLAIN_TEXT_LOCK = threading.Lock()
 _PENDING: dict[int, tuple[Tokenizer, threading.Lock]] = {}
 
 
-def _make_plain_text_copy(tok: Tokenizer) -> Tokenizer:
-    """A copy of `tok` with special-token matching, padding and truncation off, checked to
-    encode every added token's string as text. Refuses a tokenizer with an added token that
-    is not special: special-token matching off does not stop such a token from matching
-    request text."""
+def _refuse_plain_added_tokens(tok: Tokenizer) -> None:
+    """Special-token matching off does not stop an added token that is not special from
+    matching request text, so a tokenizer with one is refused."""
     plain = [t.content for t in tok.get_added_tokens_decoder().values() if not t.special]
     if plain:
         raise ValueError(
@@ -313,32 +331,67 @@ def _make_plain_text_copy(tok: Tokenizer) -> Tokenizer:
             "would be matched to them, which the interface forbids (docs/spec.md, From text "
             "to token ids)"
         )
-    copy: Tokenizer = type(tok).from_str(tok.to_str())
-    copy.no_padding()
-    copy.no_truncation()
-    copy.encode_special_tokens = True
-    added = {
-        t.content: copy.token_to_id(t.content) for t in tok.get_added_tokens_decoder().values()
-    }
+
+
+def _set_plain_text(tok: Tokenizer) -> None:
+    """Special-token matching, padding and truncation off, then checked: every added token's
+    string must encode as text, not as its own id."""
+    tok.no_padding()
+    tok.no_truncation()
+    tok.encode_special_tokens = True
+    added = {t.content: tok.token_to_id(t.content) for t in tok.get_added_tokens_decoder().values()}
     strings = list(added)
-    for s, enc in zip(strings, copy.encode_batch(strings, add_special_tokens=False), strict=True):
+    for s, enc in zip(strings, tok.encode_batch(strings, add_special_tokens=False), strict=True):
         if list(enc.ids) == [added[s]]:
             raise ValueError(
                 f"request text {s!r} encodes to its control token's id: this version of "
                 "tokenizers does not honour encode_special_tokens, or the vocabulary holds the "
                 "string as an ordinary token"
             )
+
+
+def _is_plain_text(tok: Tokenizer) -> bool:
+    return bool(tok.encode_special_tokens) and tok.padding is None and tok.truncation is None
+
+
+def _make_plain_text_copy(tok: Tokenizer) -> Tokenizer:
+    """A copy of `tok`, set to encode all text as plain text (`_set_plain_text`)."""
+    _refuse_plain_added_tokens(tok)
+    copy: Tokenizer = type(tok).from_str(tok.to_str())
+    _set_plain_text(copy)
     return copy
+
+
+def plain_text_tokenizer(tokenizer: Tokenizer) -> Tokenizer:
+    """Hand `tokenizer` over to the core, so that `render` encodes with it directly and makes
+    no private copy of it (Gemma 4's costs about 170 MB, which matters on AWS Lambda). It is
+    set in place to encode all text as plain text: special-token matching, padding and
+    truncation off, checked as a copy is. It is then the core's: the caller must not change
+    its settings or its vocabulary, and must not use it to encode text with special-token
+    matching on. `render` refuses it if its settings have changed. Returns the tokenizer."""
+    _refuse_plain_added_tokens(tokenizer)
+    _set_plain_text(tokenizer)
+    with _PLAIN_TEXT_LOCK:
+        _OWNED[id(tokenizer)] = tokenizer
+        _PLAIN_TEXT.pop(id(tokenizer), None)
+    return tokenizer
 
 
 def _plain_text_copy(tok: Tokenizer) -> Tokenizer:
     """A private copy of `tok` that encodes all text as plain text: special-token matching,
     padding and truncation off, set once and never changed, so it is safe to share across
     threads. One copy per tokenizer object, made on first use (Gemma 4's takes about 0.3 s
-    and 170 MB), outside the cache's lock; the four most recently used tokenizers' copies are
+    and 170 MB), outside the cache's lock; the eight most recently used tokenizers' copies are
     kept. A tokenizer changed after its first render keeps its first copy: pass the changed
-    one as a new object."""
+    one as a new object. A tokenizer handed over by `plain_text_tokenizer` is used as it is."""
     with _PLAIN_TEXT_LOCK:
+        if _OWNED.get(id(tok)) is tok:
+            if not _is_plain_text(tok):
+                raise ValueError(
+                    "a tokenizer handed over by plain_text_tokenizer has had its settings "
+                    "changed: special-token matching, padding and truncation must stay off"
+                )
+            return tok
         entry = _PLAIN_TEXT.get(id(tok))
         if entry is not None and entry[0] is tok:
             _PLAIN_TEXT.move_to_end(id(tok))

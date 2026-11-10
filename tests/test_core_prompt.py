@@ -325,6 +325,22 @@ CASES: dict[str, dict] = {
         },
     },
 }
+# Requests given as JSON text, for the reading half of the JSON rules (docs/spec.md, Rendering
+# content): a number with an exponent or a fraction is a double (1e3 renders 1000.0), -0 is the
+# integer 0, more digits than a double holds round to the nearest double, a number too small
+# for one is 0.0, a key given twice keeps its last value at its first place, and escapes
+# (an escaped slash, a surrogate pair) are read. The goldens publish these bodies as text.
+BODIES = {
+    "json_reading": (
+        '{"state": {"e3": 1e3, "E3": 1E3, "neg_zero": -0, "neg_zero_float": -0.0, "frac": 1.10, '
+        '"long": 0.1000000000000000055511151231257827021181583404541015625, '
+        '"seventeen": 12345678901234567890.5, "big": 123456789012345678901234567890, '
+        '"tiny": 4.9e-324, "under": 1e-400, "dup": "first", "other": 1, "dup": "last", '
+        '"esc": "\\u00e9\\/\\u2028\\ud83d\\ude42"}, '
+        '"questions": {"q": {"type": "noul", "instructions": {"a": 1, "b": 2.50, "a": 3}}}}'
+    ),
+}
+CASES.update({name: json.loads(body) for name, body in BODIES.items()})
 IMAGE_CASES = [n for n in CASES if CASES[n].get("images")]
 # The cases whose request text holds special-token strings, which a one-call encoding with
 # special-token matching on (Hugging Face's) would turn into control tokens.
@@ -360,6 +376,7 @@ def _golden_case(name: str, variant: str, tok) -> dict:
     return {
         "case": name,
         "variant": variant,
+        **({"body": BODIES[name]} if name in BODIES else {}),
         "request": CASES[name],
         "state_text": any_q.state_text,
         "S": any_q.state_len,
@@ -432,6 +449,8 @@ def test_golden_text(goldens, key):
     """The rendered strings, without a tokenizer: runs everywhere."""
     g = goldens[key]
     assert g["request"] == CASES[g["case"]], "the golden's request no longer matches CASES"
+    if "body" in g:  # a request given as JSON text: the text, read as json.loads reads it
+        assert json.loads(g["body"]) == g["request"]
     state_text, questions = render_text(g["request"], g["variant"])
     assert state_text == g["state_text"]
     assert questions == {n: q["question_text"] for n, q in g["questions"].items()}
@@ -439,7 +458,9 @@ def test_golden_text(goldens, key):
 
 @pytest.mark.parametrize("key", GOLDEN_IDS)
 def test_golden_ids(goldens, key):
-    tok = pinned_gemma4_tokenizer()
+    """Exactly the goldens' ids, with any of the four Gemma 4 tokenizer.json files docs/spec.md
+    lists: every golden was measured to give the same ids with all four."""
+    tok = gemma4_tokenizer()
     g = goldens[key]
     assert _golden_case(g["case"], g["variant"], tok) == g
     assert g["S"] == len(g["state_ids"])
@@ -747,6 +768,26 @@ def test_content_the_template_cannot_render_alike_is_refused(where, make):
 
 
 def test_nesting_is_counted_from_the_outermost_container():
+    """An object or array is one level deeper than the deepest value in it, so an empty one
+    is level 1, and a number whose double is not finite, such as JSON's 1e400, is refused."""
+    assert render_text(
+        {"state": _nested(99, leaf=[]), "questions": {"q": {"instructions": "x"}}}, PLAIN
+    )
+    with pytest.raises(ValueError, match="nested more than 100 levels deep"):
+        render_text(
+            {"state": _nested(100, leaf={}), "questions": {"q": {"instructions": "x"}}}, PLAIN
+        )
+    for body in ('{"a": 1e400}', '{"a": [-1e400]}', '{"a": 1E999}'):
+        with pytest.raises(ValueError, match="not a JSON number"):
+            render_text(
+                {"state": json.loads(body), "questions": {"q": {"instructions": "x"}}}, PLAIN
+            )
+    assert (
+        "0.0"
+        in render_text(
+            {"state": json.loads('{"a": 1e-400}'), "questions": {"q": {"instructions": "x"}}}, PLAIN
+        )[0]
+    )
     ok = {"state": _nested(100), "questions": {"q": {"instructions": "x"}}}
     assert render_text(ok, PLAIN)
     deep = {"state": _nested(101), "questions": {"q": {"instructions": "x"}}}
@@ -856,8 +897,21 @@ def test_option_order_rebinds_codes():
         render(req, toy_tokenizer(), PLAIN, option_orders={"department": [0, 0, 1]})
     with pytest.raises(ValueError, match="unknown questions"):
         render(req, toy_tokenizer(), PLAIN, option_orders={"nope": [0, 1]})
-    # Indices are integers: not floats, bools or the characters of a string.
-    for bad in ([1.0, 0.0, 2.0], [True, False, 2], "021", 3, {0: 1}):
+    # numpy's integers count, as from rng.permutation(k); floats, bools and the characters of
+    # a string do not.
+    np = pytest.importorskip("numpy")
+    for order in (np.array([2, 0, 1]), [np.int64(2), np.int32(0), 1], (2, 0, 1)):
+        r2 = render(req, toy_tokenizer(), PLAIN, option_orders={"department": order})
+        assert r2.questions["department"].options == ("sales", "billing", "technical")
+    for bad in (
+        [1.0, 0.0, 2.0],
+        [True, False, 2],
+        [np.True_, 0, 2],
+        np.array([1.0, 0.0, 2.0]),
+        "021",
+        3,
+        {0: 1},
+    ):
         with pytest.raises(ValueError, match="option_order must"):
             render(req, toy_tokenizer(), PLAIN, option_orders={"department": bad})
     # A noul's two may swap; a score's levels may be reversed, as v1's training reverses
@@ -1380,6 +1434,35 @@ def test_the_private_copy_encodes_every_added_token_as_text(which):
         assert ids != [tok.token_to_id(added.content)], added.content
 
 
+def test_a_handed_over_tokenizer_is_used_without_a_copy(monkeypatch):
+    """plain_text_tokenizer sets a tokenizer to plain text in place, and render then encodes
+    with it directly: the same ids as through a private copy, and no copy made (which saves
+    a copy's memory, 170 MB for Gemma 4's, on Lambda). Changing its settings afterwards is
+    refused, not silently obeyed."""
+    from strands_decider.core import plain_text_tokenizer, prompt
+
+    want = render(CASES["control_strings"], toy_tokenizer(), CHAT)
+    tok = toy_tokenizer()
+    assert plain_text_tokenizer(tok) is tok and tok.encode_special_tokens is True
+
+    def no_copy(t):
+        raise AssertionError("a handed-over tokenizer was copied")
+
+    monkeypatch.setattr(prompt, "_make_plain_text_copy", no_copy)
+    assert render(CASES["control_strings"], tok, CHAT) == want
+    tok.encode_special_tokens = False
+    with pytest.raises(ValueError, match="handed over"):
+        render(CASES["control_strings"], tok, CHAT)
+    tok.encode_special_tokens = True
+    tok.enable_padding(length=64, pad_id=0, pad_token="<unk>")
+    with pytest.raises(ValueError, match="handed over"):
+        render(CASES["control_strings"], tok, CHAT)
+    plain = toy_tokenizer()
+    plain.add_tokens(["state"])
+    with pytest.raises(ValueError, match="not special"):
+        plain_text_tokenizer(plain)
+
+
 def test_a_tokenizer_with_added_tokens_that_are_not_special_is_refused():
     """Special-token matching off does not stop a plain added token from matching request
     text, so a tokenizer with one could turn a state's words into it."""
@@ -1480,6 +1563,14 @@ def test_the_checkpoints_tokenizer_is_checked_at_load(tmp_path):
     # The toy tokenizer has the control tokens, but not at Gemma 4's ids.
     with pytest.raises(ValueError, match="control tokens are not Gemma 4's"):
         check_tokenizer(toy_tokenizer(), cfg)
+    # The tokenizer as it is now, not as render first copied it: one changed since is refused.
+    from tokenizers import Tokenizer
+
+    changed = Tokenizer.from_str(tok.to_str())
+    render(CASES["support_ticket"], changed, PLAIN)  # a copy is cached
+    changed.add_tokens(["Help"])
+    with pytest.raises(ValueError, match="not special"):
+        check_tokenizer(changed, cfg)
     shutil.copy(FIXTURES / "decision_config.json", tmp_path / "decision_config.json")
     shutil.copy(gemma4_tokenizer_path(), tmp_path / "tokenizer.json")
     loaded = load_tokenizer(tmp_path)
@@ -1631,10 +1722,16 @@ def test_request_parsing_matches_v1():
     ]
     # v1's text-only engine refuses a request that validates with images, with this message,
     # which the core gives for a backend without an image path (runtime.evaluate).
-    from strands_decider import hidden_engine
+    # Only that check needs torch, so the parity checks below still run without it; hidden_engine
+    # imports without torch today, but need not.
+    import importlib.util
+
     from strands_decider.core.request import NO_VISION
 
-    assert NO_VISION in inspect.getsource(hidden_engine.HiddenStateEngine.evaluate)
+    if importlib.util.find_spec("torch") is not None:
+        from strands_decider import hidden_engine
+
+        assert NO_VISION in inspect.getsource(hidden_engine.HiddenStateEngine.evaluate)
     for req in requests:
         try:
             validated = SystemOneRequest.model_validate(req)
@@ -1663,10 +1760,19 @@ def test_request_parsing_matches_v1():
 def test_render_content_matches_v1():
     pytest.importorskip("pydantic")
     from strands_decider.core import render_content
+    from strands_decider.core.text import WHITESPACE
     from strands_decider.prompting import render_content as prompting_render_content
 
-    for c in [None, "", "  x \n", {"b": 1, "a": ["é", {"c": None}]}, [], [1, "two"], {}]:
-        assert render_content(c) == prompting_render_content(c)
+    values = [None, "", "  x \n", {"b": 1, "a": ["é", {"c": None}]}, [], [1, "two"], {}]
+    values += [f"{w}a{w}b{w}" for w in WHITESPACE] + ["\ufeffa\u200b", WHITESPACE + "x"]
+    values += [CASES[n]["state"] for n in ("json_rendering", "whitespace_edges", "json_reading")]
+    values += [
+        [x] for x in (1.0, -0.0, 1e-05, 1e16, 0.1 + 0.2, 5e-324, 1.7976931348623157e308, 10**30)
+    ]
+    rng = random.Random(41)
+    values += [{"k": _random_json(rng)} for _ in range(300)]
+    for c in values:
+        assert render_content(c) == prompting_render_content(c), ascii(c)[:80]
 
 
 def test_core_imports_without_torch_pydantic_or_jinja():
