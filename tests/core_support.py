@@ -32,8 +32,8 @@ the render goldens after the images.
 tests/fixtures/core/image_pixels.json holds the pixel goldens of docs/spec.md (Images, in The
 runtime interface): for each test image, the sha256 of its RGB bytes as v1 decodes it and
 after the bicubic resize to (W, H), made with PIXELS_PILLOW; STRANDS_DECIDER_REGEN_PIXELS=1
-rewrites it (Pillow only). `reference_pixels` is v1's decode, and `spec_resize` the spec's
-resize written out in numpy, without Pillow.
+rewrites it (Pillow only). `reference_pixels` is v1's decode; the spec's resize written out in
+numpy, without Pillow, is the core's `spec_resize`.
 """
 
 from __future__ import annotations
@@ -48,6 +48,8 @@ from functools import lru_cache
 from pathlib import Path
 
 import pytest
+
+from strands_decider.core.images import spec_resize  # noqa: F401  (the tests import it from here)
 
 FIXTURES = Path(__file__).parent / "fixtures" / "core"
 GEMMA4_REPO = "google/gemma-4-E2B-it"
@@ -431,67 +433,6 @@ def reference_pixels(data: bytes):
         rgba = img.convert("RGBA")
         img = Image.alpha_composite(Image.new("RGBA", rgba.size, (255, 255, 255, 255)), rgba)
     return img.convert("RGB")
-
-
-def _bicubic(x: float) -> float:
-    """The cubic convolution kernel with a = -0.5 (Keys), support 2."""
-    a, x = -0.5, abs(x)
-    if x < 1.0:
-        return ((a + 2.0) * x - (a + 3.0)) * x * x + 1
-    if x < 2.0:
-        return (((x - 5) * x + 8) * x - 4) * a
-    return 0.0
-
-
-PRECISION_BITS = 22  # 32 - 8 - 2: the fixed-point coefficients' fraction bits
-
-
-def _coefficients(in_size: int, out_size: int) -> list[tuple[int, list[int]]]:
-    """For each output index, its first input index and its fixed-point weights, by the
-    spec's rule (Pillow's precompute_coeffs and normalize_coeffs_8bpc)."""
-    scale = in_size / out_size
-    filterscale = max(scale, 1.0)
-    inverse = 1.0 / filterscale  # multiplied by, as Pillow does, not divided by
-    support = 2.0 * filterscale
-    out = []
-    for i in range(out_size):
-        center = (i + 0.5) * scale
-        lo = max(int(center - support + 0.5), 0)  # int() truncates, as C's cast does
-        hi = min(int(center + support + 0.5), in_size)
-        weights = [_bicubic((j + lo - center + 0.5) * inverse) for j in range(hi - lo)]
-        total = 0.0
-        for w in weights:
-            total += w
-        if total != 0.0:
-            weights = [w / total for w in weights]
-        fixed = [int((-0.5 if w < 0 else 0.5) + w * (1 << PRECISION_BITS)) for w in weights]
-        out.append((lo, fixed))
-    return out
-
-
-def _resample(pixels, out_size: int, axis: int):
-    import numpy as np
-
-    src = np.moveaxis(pixels, axis, 0).astype(np.int64)
-    out = np.empty((out_size, *src.shape[1:]), np.uint8)
-    for i, (lo, weights) in enumerate(_coefficients(src.shape[0], out_size)):
-        acc = np.full(src.shape[1:], 1 << (PRECISION_BITS - 1), np.int64)
-        for j, w in enumerate(weights):
-            acc += src[lo + j] * w
-        out[i] = np.clip(acc >> PRECISION_BITS, 0, 255)
-    return np.moveaxis(out, 0, axis)
-
-
-def spec_resize(pixels, width: int, height: int):
-    """docs/spec.md's bicubic resize of an RGB array [h, w, 3] (uint8) to [height, width, 3],
-    written from the spec's text with numpy: the horizontal pass, its 8-bit result, then the
-    vertical pass; a pass whose size does not change is left out."""
-    out = pixels
-    if out.shape[1] != width:
-        out = _resample(out, width, axis=1)
-    if out.shape[0] != height:
-        out = _resample(out, height, axis=0)
-    return out
 
 
 def reference_resize(img, width: int, height: int):
