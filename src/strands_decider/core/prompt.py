@@ -122,13 +122,32 @@ def question_block(question: Question, option_order: Sequence[int] | None = None
     """The question part's body, from `<question` to `</question>`.
 
     `option_order` permutes the options before they take their codes (training
-    augmentation); the binding it produces is returned, so callers never track it.
+    augmentation); the binding it produces is returned, so callers never track it. It is a
+    sequence of the option indices, each once: any order of a choice's options or a noul's
+    two, and a score's levels in order or reversed (as v1's training reverses them).
     """
     names = list(question.options)
     descs = [render_content(d) for d in question.criteria]
-    order = list(range(len(names))) if option_order is None else list(option_order)
-    if sorted(order) != list(range(len(names))):
-        raise ValueError("option_order must be a permutation of the option indices")
+    identity = list(range(len(names)))
+    if option_order is None:
+        order = identity
+    else:
+        if isinstance(option_order, (str, bytes, Mapping)) or not isinstance(
+            option_order, Sequence
+        ):
+            raise ValueError(
+                f"option_order must be a sequence of option indices, not {option_order!r}"
+            )
+        order = list(option_order)
+        if not all(isinstance(i, int) and not isinstance(i, bool) for i in order):
+            raise ValueError(f"option_order must hold integer option indices, not {order!r}")
+        if sorted(order) != identity:
+            raise ValueError("option_order must be a permutation of the option indices")
+        if question.kind == "score" and order not in (identity, identity[::-1]):
+            raise ValueError(
+                "a score's levels are ordered: option_order may reverse them, as v1's training "
+                f"does, but not shuffle them ({order!r})"
+            )
     codes = codes_for(len(names))
     lines = []
     for code, i in zip(codes, order, strict=True):
