@@ -35,6 +35,16 @@ from .planning import plan_segments, prefix_end_of
 __all__ = ["PrefixBidirModelState", "plan_segments", "prefix_end_of"]
 
 
+def _split_impls() -> tuple[type, ...]:
+    """The plugin's attention implementations: FlashAttention, and CPU attention where vLLM has it."""
+    impls: tuple[type, ...] = (SplitFlashAttentionImpl,)
+    try:
+        from .attention_cpu import SplitCPUAttentionImpl
+    except ImportError:  # a vLLM build without CPU attention
+        return impls
+    return (*impls, SplitCPUAttentionImpl)
+
+
 def _rows(segments: list, device: torch.device) -> tuple[torch.Tensor | slice, np.ndarray]:
     idx = (
         np.concatenate([np.arange(a, b) for _, a, b, _ in segments])
@@ -64,12 +74,12 @@ class PrefixBidirModelState(DefaultModelState):
         bad = sorted(
             n
             for n, layer in layers.items()
-            if not isinstance(getattr(layer, "impl", None), SplitFlashAttentionImpl)
+            if not isinstance(getattr(layer, "impl", None), _split_impls())
         )
         if bad:
             raise ValueError(
-                f"strands-decider: attention layers not on the plugin's FlashAttention: {bad[:4]}... "
-                "(use the default or FLASH_ATTN backend)"
+                f"strands-decider: attention layers not on the plugin's attention: {bad[:4]}... "
+                "(use the default backend: FLASH_ATTN on GPUs, CPU_ATTN on CPUs)"
             )
         windowed = sorted(
             n
@@ -77,7 +87,8 @@ class PrefixBidirModelState(DefaultModelState):
             if getattr(layer, "sliding_window", None) is not None
             and (
                 layer.sliding_window < self.max_model_len
-                or tuple(getattr(layer.impl, "sliding_window", ())) != (-1, -1)
+                or getattr(layer.impl, "sliding_window", None)
+                != getattr(layer.impl, "no_window", (-1, -1))
             )
         )
         if windowed:
@@ -250,12 +261,18 @@ class PrefixBidirModelState(DefaultModelState):
 
 
 def _restrict(md: Any, **fields: Any) -> Any:
-    """``md`` restricted to some segments: no AOT schedule, no mm_prefix ranges, no R-SWA mask."""
+    """``md`` restricted to some segments: no AOT schedule (CPU attention plans its own), no mm_prefix ranges, no R-SWA
+    mask, no per-sequence causal flags."""
     from dataclasses import replace
 
     extra = {
         k: None
-        for k in ("scheduler_metadata", "mm_prefix_query_range_tensor", "rswa_prefix_lens")
+        for k in (
+            "scheduler_metadata",
+            "mm_prefix_query_range_tensor",
+            "rswa_prefix_lens",
+            "dynamic_causal",
+        )
         if hasattr(md, k)
     }
     out = replace(md, **fields, **extra)

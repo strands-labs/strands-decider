@@ -126,10 +126,15 @@ def check_config(vllm_config: VllmConfig) -> None:
             f"--logprobs-mode {mc.logprobs_mode}: the codes' probabilities are the processed logprobs, taken "
             "after allowed_token_ids; pass --logprobs-mode processed_logprobs"
         )
-    # The readout is defined in bf16 (specification, section 7.1); the checkpoints are bf16.
-    if mc.dtype != torch.bfloat16:
+    # The readout is defined in bf16 (specification, section 7.1); the checkpoints are bf16. A CPU build of vLLM also
+    # takes float32, for the tests' CPU tier on CPUs without bf16 arithmetic (CI's hosted runners).
+    from vllm.platforms import current_platform
+
+    dtypes = (torch.bfloat16, torch.float32) if current_platform.is_cpu() else (torch.bfloat16,)
+    if mc.dtype not in dtypes:
         problems.append(
-            f"--dtype {mc.dtype}: the plugin serves bfloat16 only; pass --dtype bfloat16"
+            f"--dtype {mc.dtype}: the plugin serves bfloat16 only (float32 too on a CPU build of vLLM, for "
+            "tests); pass --dtype bfloat16"
         )
     if mc.quantization is not None:
         problems.append(f"--quantization {mc.quantization} is not supported (bf16 weights only)")
@@ -230,7 +235,7 @@ def build_without_windows(
                 raise ValueError(
                     f"strands-decider: {module.layer_name} kept window {module.sliding_window}"
                 )
-            impl.sliding_window = (-1, -1)
+            impl.sliding_window = getattr(impl, "no_window", (-1, -1))
             n += 1
     logger.info(
         "strands-decider: %d sliding-window layers built with a %d-token window (no cut)",

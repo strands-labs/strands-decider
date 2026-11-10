@@ -49,6 +49,9 @@ def _put(dst: torch.Tensor, rows: torch.Tensor | slice, src: torch.Tensor) -> No
 class SplitFlashAttentionImpl(FlashAttentionImpl):
     """:class:`FlashAttentionImpl` that runs a :class:`Split` as one non-causal and one causal stock call."""
 
+    #: FlashAttention's sliding_window for "no window".
+    no_window = (-1, -1)
+
     def forward(
         self,
         layer: torch.nn.Module,
