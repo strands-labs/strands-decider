@@ -455,8 +455,9 @@ def _gif_size(b: bytes) -> tuple[int, int]:
 
     Extensions are read as Pillow reads them: the label, then the first data sub-block; a
     comment (FE) then reads sub-blocks while they are not empty; a graphic control extension
-    (F9) needs at least 3 bytes in its first sub-block (4 when it gives a transparent index);
-    an application extension (FF) naming NETSCAPE2.0 reads one more sub-block; and then
+    (F9) whose first sub-block is not empty needs at least 3 bytes in it (4 when it gives a
+    transparent index), and one whose first sub-block is empty is read on as any other; an
+    application extension (FF) naming NETSCAPE2.0 reads one more sub-block; and then
     every extension but a comment reads sub-blocks up to an empty one. So an extension whose
     first sub-block is already the empty one reads one chain of sub-blocks further than the
     GIF specification does, as Pillow does."""

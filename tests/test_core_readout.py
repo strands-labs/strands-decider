@@ -417,25 +417,50 @@ def test_the_hidden_state_is_rounded_to_bf16_before_the_gemm():
         readout_logits(w, np.full(64, np.nan))
 
 
+def _bf16_step(z: float) -> float:
+    """The spacing of bf16 values at |z|: 8 significant bits."""
+    return math.ldexp(1.0, math.frexp(abs(z))[1] - 8) if z else 2.0**-133
+
+
 def test_the_readout_goldens():
-    """tests/fixtures/core/readout_goldens.json, the readout apart from any decoder: the core
-    gives each case's z exactly and its probabilities to 1e-7, and the independent
-    reimplementation of strands-decider-vllm's arithmetic gives z exactly and the
-    probabilities to 1e-5, the spec's tolerance for a runtime."""
+    """tests/fixtures/core/readout_goldens.json, the readout apart from any decoder, by the
+    spec's two checks, each from the golden's input: the GEMM on the golden's weight and h
+    gives z within one bf16 step of the golden's (the core and the independent
+    reimplementation of strands-decider-vllm's arithmetic both give it exactly), and the
+    soft-cap, temperature and softmax applied to the golden's z give its probabilities to
+    1e-5 (the core's own, to 1e-7)."""
     g, w = readout_goldens()
     c = g["final_logit_softcapping"]
     assert w.shape == (255, 32) and c == 30.0 and len(g["cases"]) >= 6
     for case in g["cases"]:
-        h, t = np.array(case["hidden"], np.float32), case["temperature"]
-        z = readout_logits(w, h)
-        assert z.tolist() == case["z"], case["name"]
-        assert _vllm_gemm(w.tolist(), h.tolist()) == case["z"], case["name"]
-        final = _vllm_logits(w.tolist(), h.tolist(), c, t)
+        h, t, golden_z = np.array(case["hidden"], np.float32), case["temperature"], case["z"]
+        for name, z in (
+            ("core", readout_logits(w, h).tolist()),
+            ("vllm", _vllm_gemm(w.tolist(), h.tolist())),
+        ):
+            assert all(abs(a - b) <= _bf16_step(b) for a, b in zip(z, golden_z, strict=True)), name
+            assert z == golden_z, name  # within one step is allowed; both are exact
+        after = [_after_the_gemm(x, c, t) for x in golden_z]  # from the golden's z, not ours
         for k, want in case["probabilities"].items():
             k = int(k)
-            got = code_probabilities(z, k, stage=RAW_LOGITS, softcap_c=c, temperature=t)
-            assert np.allclose(got, want, rtol=0, atol=1e-7), (case["name"], k)
-            assert np.allclose(_softmax64(final[:k]), want, rtol=0, atol=1e-5), (case["name"], k)
+            core = code_probabilities(golden_z, k, stage=RAW_LOGITS, softcap_c=c, temperature=t)
+            assert np.allclose(core, want, rtol=0, atol=1e-7), (case["name"], k)
+            assert np.allclose(_softmax64(after[:k]), want, rtol=0, atol=1e-5), (case["name"], k)
+
+
+def test_a_one_step_z_can_move_the_probabilities_past_the_tolerance():
+    """Why the probabilities are measured from the golden's z: in the goldens, one bf16 step
+    on the top code's z, at T = 0.05, moves a probability by far more than 1e-5."""
+    g, _ = readout_goldens()
+    c = g["final_logit_softcapping"]
+    case = next(x for x in g["cases"] if x["temperature"] == 0.05)
+    z = np.array(case["z"][:40])
+    top = int(np.argmax(z))
+    moved = z.copy()
+    moved[top] -= _bf16_step(z[top])
+    want = code_probabilities(z, 40, stage=RAW_LOGITS, softcap_c=c, temperature=0.05)
+    got = code_probabilities(moved, 40, stage=RAW_LOGITS, softcap_c=c, temperature=0.05)
+    assert np.max(np.abs(got - want)) > 1e-3
 
 
 def test_the_readout_goldens_see_a_misapplied_cap_or_temperature():
