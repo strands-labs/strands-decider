@@ -1,6 +1,6 @@
 #!/bin/bash
 # Full conformance: every size against its own model goldens, one server per GPU, for nightly and release runs on an
-# 8-GPU H100 node (the team cluster's release gate; README, Tests).
+# 8-GPU H100 node (the release gate; README, Tests).
 #
 # usage: tests/gpu/conformance.sh OUT_DIR CKPT_E2B CKPT_E4B CKPT_12B CKPT_26B_A4B CKPT_31B
 #   each CKPT_* a released checkpoint directory (the multimodal layout) holding golden_vectors.jsonl

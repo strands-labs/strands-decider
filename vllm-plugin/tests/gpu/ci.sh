@@ -29,7 +29,8 @@
 #      reference;
 #   4. the server's request path in process on the multimodal checkpoint (tests/gpu/engine_checks.py): a prompt of
 #      exactly --max-length tokens is answered, one token more is refused, vLLM refuses a prompt that fills the
-#      context, and an engine refusal raises VLLMValidationError (HTTP 400);
+#      context, an engine refusal raises VLLMValidationError (HTTP 400), and image requests through the server's
+#      HTTP app have vLLM's image preprocessing off the event loop while /ping is timed;
 #   5. vllm serve on the bare decoder: tests/gpu/client.py requests (refusals, exact cache counts, mixed batches, the
 #      reference) and, on a second server without prefix caching, compare (the cross-server comparison);
 #   6. with STRANDS_DECIDER_SMOKE_CHECKPOINT, the smoke test.
@@ -182,7 +183,7 @@ step "4. the server's request path on a real engine, in process"
 mkdir -p "$OUT/engine"
 python "$HERE/engine_checks.py" serve "$C/mm" --max-length 1024 --dtype $DTYPE --block-size $BLOCK --enforce-eager \
   ${MEM[@]+"${MEM[@]}"} > "$OUT/engine/server.log" 2>&1
-result $? "engine checks: the length boundary, the engine's refusal ($(grep -c '^PASS' "$OUT/engine/server.log") passed)"
+result $? "engine checks: the length boundary, the engine's refusal, images off the loop ($(grep -c '^PASS' "$OUT/engine/server.log") passed)"
 grep -E '^(PASS|FAIL)' "$OUT/engine/server.log"
 
 step "5. vllm serve on the bare decoder: /v1/completions"
