@@ -23,13 +23,15 @@ strings; tests/test_core_prompt.py proves both.
 
 Rendering never changes the caller's tokenizer: text is encoded by a private copy whose
 settings are fixed once, so renders on several threads, and other users of the same
-tokenizer, cannot change how request text is encoded.
+tokenizer, cannot change how request text is encoded. A tokenizer whose added tokens are not
+all special is refused, since request text could match them.
 """
 
 from __future__ import annotations
 
 import json
 import threading
+from collections import OrderedDict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -270,30 +272,82 @@ def _text(pieces: Sequence[Piece]) -> str:
 
 
 # Keyed by id with the tokenizer itself held, so an id is never reused while its entry lives:
-# tokenizers before 0.23 cannot be weakly referenced. Bounded, oldest first out, because a
-# server holds one or two tokenizers and each copy costs about 170 MB.
-_PLAIN_TEXT: dict[int, tuple[Tokenizer, Tokenizer]] = {}
+# tokenizers before 0.23 cannot be weakly referenced. Least recently used out, because each
+# copy costs about 170 MB; a process that serves all five Gemma 4 sizes, each with its own
+# tokenizer, should raise the bound to five.
+_PLAIN_TEXT: OrderedDict[int, tuple[Tokenizer, Tokenizer]] = OrderedDict()
 _PLAIN_TEXT_MAX = 4
+# Guards _PLAIN_TEXT and _PENDING only; a copy is made outside it, under its tokenizer's lock
+# in _PENDING, so a first render of one tokenizer never blocks renders of another.
 _PLAIN_TEXT_LOCK = threading.Lock()
+_PENDING: dict[int, tuple[Tokenizer, threading.Lock]] = {}
+
+
+def _make_plain_text_copy(tok: Tokenizer) -> Tokenizer:
+    """A copy of `tok` with special-token matching, padding and truncation off, checked to
+    encode every added token's string as text. Refuses a tokenizer with an added token that
+    is not special: special-token matching off does not stop such a token from matching
+    request text."""
+    plain = [t.content for t in tok.get_added_tokens_decoder().values() if not t.special]
+    if plain:
+        raise ValueError(
+            f"the tokenizer has added tokens that are not special, {plain[:5]}: request text "
+            "would be matched to them, which the interface forbids (docs/spec.md, From text "
+            "to token ids)"
+        )
+    copy: Tokenizer = type(tok).from_str(tok.to_str())
+    copy.no_padding()
+    copy.no_truncation()
+    copy.encode_special_tokens = True
+    added = {
+        t.content: copy.token_to_id(t.content) for t in tok.get_added_tokens_decoder().values()
+    }
+    strings = list(added)
+    for s, enc in zip(strings, copy.encode_batch(strings, add_special_tokens=False), strict=True):
+        if list(enc.ids) == [added[s]]:
+            raise AssertionError(
+                f"the private tokenizer copy still matches {s!r} as a control token; this "
+                "version of tokenizers does not honour encode_special_tokens"
+            )
+    return copy
 
 
 def _plain_text_copy(tok: Tokenizer) -> Tokenizer:
     """A private copy of `tok` that encodes all text as plain text: special-token matching,
     padding and truncation off, set once and never changed, so it is safe to share across
     threads. One copy per tokenizer object, made on first use (Gemma 4's takes about 0.3 s
-    and 170 MB); the last four tokenizers' copies are kept. A tokenizer changed after its first
-    render keeps its first copy: pass the changed one as a new object."""
+    and 170 MB), outside the cache's lock; the four most recently used tokenizers' copies are
+    kept. A tokenizer changed after its first render keeps its first copy: pass the changed
+    one as a new object."""
     with _PLAIN_TEXT_LOCK:
         entry = _PLAIN_TEXT.get(id(tok))
         if entry is not None and entry[0] is tok:
+            _PLAIN_TEXT.move_to_end(id(tok))
             return entry[1]
-        copy = type(tok).from_str(tok.to_str())
-        copy.no_padding()
-        copy.no_truncation()
-        copy.encode_special_tokens = True
-        _PLAIN_TEXT[id(tok)] = (tok, copy)
-        while len(_PLAIN_TEXT) > _PLAIN_TEXT_MAX:
-            del _PLAIN_TEXT[next(iter(_PLAIN_TEXT))]
+        pending = _PENDING.get(id(tok))
+        if pending is None or pending[0] is not tok:
+            pending = (tok, threading.Lock())
+            _PENDING[id(tok)] = pending
+    with pending[1]:  # one copy per tokenizer, however many first renders race to make it
+        with _PLAIN_TEXT_LOCK:
+            entry = _PLAIN_TEXT.get(id(tok))
+            if entry is not None and entry[0] is tok:
+                _PLAIN_TEXT.move_to_end(id(tok))
+                return entry[1]
+        try:
+            copy = _make_plain_text_copy(tok)
+        except BaseException:
+            with _PLAIN_TEXT_LOCK:
+                if _PENDING.get(id(tok)) is pending:
+                    del _PENDING[id(tok)]
+            raise
+        with _PLAIN_TEXT_LOCK:  # cached and no longer pending in one step
+            _PLAIN_TEXT[id(tok)] = (tok, copy)
+            _PLAIN_TEXT.move_to_end(id(tok))
+            while len(_PLAIN_TEXT) > _PLAIN_TEXT_MAX:
+                _PLAIN_TEXT.popitem(last=False)
+            if _PENDING.get(id(tok)) is pending:
+                del _PENDING[id(tok)]
         return copy
 
 
