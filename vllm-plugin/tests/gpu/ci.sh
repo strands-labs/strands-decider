@@ -49,8 +49,9 @@ if [ "$DEVICE" = cpu ]; then
 else
   DTYPE=bfloat16; BLOCK=16; REF=(); MEM=(--gpu-memory-utilization 0.18); GATE=(--min-top1 0.95 --max-mean-dp 0.02)
   # A cached, repeated or batched answer runs other attention kernels than a cold one; on a tiny model in bf16 that
-  # moves it by up to about 0.015 (0.007 on the released E2B), against client.py's defaults of 0.002 and 0.01.
-  TOLS=(--repeat-tol 0.03 --same-server-tol 0.03 --cross-server-tol 0.05)
+  # moves it by up to about 0.015 (0.007 on the released E2B), against client.py's defaults of 0.002 and 0.01. Two
+  # servers differ by up to about 0.03; a top-1 flip within that is a near-tie (a top-2 gap of at most twice it).
+  TOLS=(--repeat-tol 0.03 --same-server-tol 0.03 --cross-server-tol 0.05 --tie-gap 0.1)
   export CUDA_VISIBLE_DEVICES=${GPU:-${CUDA_VISIBLE_DEVICES:-0}}
 fi
 FAILED=(); PIDS=()

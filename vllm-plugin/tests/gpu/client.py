@@ -323,19 +323,27 @@ def scenario_compare(srv, rows, a):
             )
         ],
     )
-    worst, flips = 0.0, 0
+    worst, flips, tie_flips = 0.0, 0, 0
     for i, x in enumerate(rows[: len(expect)]):
         st, _, p = ask(srv, x, cache_salt=f"answers-{i}")  # cold, as the other server's answers
         if not check(st == 200, f"row {i}: HTTP {st}") or expect[i] is None:
             continue
         worst = max(worst, dmax(p, expect[i]))
-        flips += argmax(p) != argmax(expect[i])
+        if argmax(p) != argmax(expect[i]):
+            top = sorted(expect[i], reverse=True)
+            # --tie-gap: a flip where the other server's top two are that close is a near-tie, not a flip.
+            if len(top) > 1 and top[0] - top[1] <= a.tie_gap:
+                tie_flips += 1
+            else:
+                flips += 1
     check(
         flips == 0 and worst <= CROSS_SERVER_MAX_DP,
-        f"{len(expect)} rows vs the other server: {flips} top-1 flips, worst max|dp| {worst:.4f}",
+        f"{len(expect)} rows vs the other server: {flips} top-1 flips"
+        + (f" (and {tie_flips} at near-ties within {a.tie_gap})" if tie_flips else "")
+        + f", worst max|dp| {worst:.4f}",
     )
     check(srv.health() == 200, "server healthy at the end")
-    return {"worst_dp": worst, "flips": flips}
+    return {"worst_dp": worst, "flips": flips, "near_tie_flips": tie_flips}
 
 
 def concurrent(srv, group, **over):
@@ -412,6 +420,12 @@ def main():
     )
     ap.add_argument(
         "--cross-server-tol", type=float, default=None, help="compare: max |dp| (default 0.03)"
+    )
+    ap.add_argument(
+        "--tie-gap",
+        type=float,
+        default=0.0,
+        help="compare: a top-1 flip where the other server's top two are within this gap is not counted",
     )
     ap.add_argument("--out")
     a = ap.parse_args()
