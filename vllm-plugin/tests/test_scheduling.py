@@ -299,13 +299,16 @@ def test_vllms_scheduler_cuts_before_an_image_and_the_wrapper_waits_for_the_whol
     first = s.schedule()
     assert first.num_scheduled_tokens == {"A": 600}
     s.add_request(b)
+    s.add_request(mm_request("C", [], 300))  # text only, behind B
     second = s.schedule()  # before A's step is processed, as with asynchronous scheduling
     if not decider:
         # vLLM alone schedules B up to its second image: half a prompt, which the mask cannot serve.
-        assert second.num_scheduled_tokens == {"B": 300}
+        assert second.num_scheduled_tokens == {"B": 300, "C": 300}
         return
     ecm = s.encoder_cache_manager
-    assert "B" not in second.num_scheduled_tokens
+    assert second.num_scheduled_tokens == {"C": 300}, (
+        "B waits whole; the text request behind it runs"
+    )
     assert ecm.get_cached_input_ids(b) == set() and ecm.cached["x"] == {"A"}, (
         "the reference the attempt took on the shared image is released"
     )
