@@ -242,6 +242,15 @@ def test_more_than_four_images_are_refused_before_any_is_decoded():
     assert [i.data for i in parsed.images] == [image_bytes(n) for n in list(IMAGE_FILES)[:4]]
 
 
+def test_audio_is_refused_rather_than_ignored():
+    req = {"state": "a call", "questions": {"q": {"instructions": "x"}}}
+    with pytest.raises(ValueError) as e:
+        parse_request({**req, "audio": ["UklGRg=="]})
+    assert str(e.value) == "audio input is not supported"
+    for empty in (None, []):
+        assert parse_request({**req, "audio": empty}).images == ()
+
+
 # ---- N ---------------------------------------------------------------------------------------
 
 
