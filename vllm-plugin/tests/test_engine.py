@@ -7,8 +7,14 @@ from types import SimpleNamespace
 
 import pytest
 
-from strands_decider_vllm import ARCH, hashing
-from strands_decider_vllm.engine import serves_decider, wrap_preprocess_add_request
+from strands_decider_vllm import ARCH, ARCH_MULTIMODAL, ARCH_UNIFIED, SERVER_CONFIG_KEY, hashing
+from strands_decider_vllm import engine as engine_mod
+from strands_decider_vllm.engine import (
+    Policy,
+    serves_decider,
+    started_by_server,
+    wrap_preprocess_add_request,
+)
 
 
 class ValidationError(Exception):
@@ -27,19 +33,21 @@ class FakeRequest:
 
 
 class FakeEngineCore:
-    def __init__(self, architectures, caching=True):
+    def __init__(self, architectures, caching=True, policy=None):
         self.vllm_config = SimpleNamespace(
             model_config=SimpleNamespace(architectures=architectures)
         )
         self.request_block_hasher = hashing._digests if caching else None
         self.calls = 0
+        if policy is not None:
+            self.__dict__[engine_mod._POLICY] = policy
 
     def preprocess_add_request(self, request):
         self.calls += 1
         return FakeRequest(request, self.request_block_hasher), 0
 
 
-def engine_request(prefix_end=9, request_id="r1", **sp_overrides):
+def engine_request(prefix_end=9, request_id="r1", mm_features=None, **sp_overrides):
     sp = dict(
         extra_args=None if prefix_end is None else {"prefix_end": prefix_end},
         max_tokens=1,
@@ -64,6 +72,7 @@ def engine_request(prefix_end=9, request_id="r1", **sp_overrides):
         prompt_is_token_ids=None,
         sampling_params=SimpleNamespace(**sp),
         resumable=False,
+        mm_features=mm_features,
     )
 
 
@@ -175,3 +184,79 @@ def test_vllm_maps_the_refusal_to_a_validation_error_output():
     back = outputs.RequestError(code="validation_error", message=str(err)).to_exception()
     assert isinstance(back, exceptions.VLLMValidationError)
     assert "strands-decider: x" in str(back) and "parameter=max_tokens" in str(back)
+
+
+# --- images ---------------------------------------------------------------------------------------------------------
+
+
+def image(identifier, offset=1, length=6):
+    return SimpleNamespace(
+        modality="image",
+        identifier=identifier,
+        mm_position=SimpleNamespace(offset=offset, length=length),
+    )
+
+
+SERVER = Policy(takes_images=True, accepts_images=True)
+
+
+@pytest.mark.parametrize("arch", [ARCH_MULTIMODAL, ARCH_UNIFIED])
+def test_an_image_request_gets_digests_over_its_images(wrapped, arch):
+    core = FakeEngineCore([arch], policy=SERVER)
+    req, _ = wrapped(core, engine_request(prefix_end=9, mm_features=[image("red")]))
+    assert req.digests_seen == hashing.digests(list(range(20)), 9, (("red", 1, 6),))
+    other, _ = wrapped(
+        core, engine_request(prefix_end=9, mm_features=[image("blue")], request_id="r2")
+    )
+    assert other.digests_seen[1] != req.digests_seen[1], (
+        "same tokens, another image: another state digest"
+    )
+
+
+@pytest.mark.parametrize("caching", [True, False])
+@pytest.mark.parametrize(
+    "policy, features, match",
+    [
+        (Policy(False, True), [image("a")], 'lacks "image"'),
+        (Policy(True, False), [image("a")], "strands-decider-vllm serve"),
+        (SERVER, [image("a", offset=5, length=6)], "inside the state"),  # ends at 11 > S = 9
+        (SERVER, [image(str(i), offset=1 + i, length=1) for i in range(5)], "at most 4"),
+        (SERVER, [SimpleNamespace(**{**vars(image("a")), "modality": "audio"})], "not audio"),
+    ],
+)
+def test_bad_image_requests_are_refused_before_vllm_builds_them(
+    wrapped, caching, policy, features, match
+):
+    core = FakeEngineCore([ARCH_MULTIMODAL], caching=caching, policy=policy)
+    with pytest.raises(ValidationError, match=match) as err:
+        wrapped(core, engine_request(prefix_end=9, mm_features=features))
+    assert core.calls == 0 and not hashing._PENDING
+    assert err.value.parameter in ("images", "multi_modal_data")
+
+
+def test_the_boundary_is_checked_before_the_images(wrapped):
+    core = FakeEngineCore([ARCH_MULTIMODAL], policy=Policy(False, False))
+    with pytest.raises(ValidationError) as err:
+        wrapped(core, engine_request(prefix_end="9", mm_features=[image("a")]))
+    assert err.value.parameter == "vllm_xargs.prefix_end"
+
+
+def test_a_text_request_never_reads_the_policy(wrapped, monkeypatch):
+    monkeypatch.setattr(
+        engine_mod, "policy", lambda core: pytest.fail("policy read for a text request")
+    )
+    req, _ = wrapped(FakeEngineCore([ARCH_MULTIMODAL]), engine_request(prefix_end=9))
+    assert req.digests_seen == hashing.digests(list(range(20)), 9)
+
+
+@pytest.mark.parametrize(
+    "additional, started",
+    [
+        ({}, False),
+        ({SERVER_CONFIG_KEY: "0.3.0"}, True),
+        ({SERVER_CONFIG_KEY: ""}, False),
+        (None, False),
+    ],
+)
+def test_the_server_marks_its_engines(additional, started):
+    assert started_by_server(SimpleNamespace(additional_config=additional)) is started

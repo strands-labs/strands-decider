@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "strands-decider-vllm"
-version = "0.2.1"
-description = "Serve Strands Decider (Gemma 4 text decoder, prefix_bidir attention, trained 255-code readout) on stock vLLM 0.33"
+version = "0.3.0"
+description = "Serve Strands Decider (Gemma 4, prefix_bidir attention, trained 255-code readout, text and images) on stock vLLM 0.33"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = ["vllm>=0.33.0,<0.34"]

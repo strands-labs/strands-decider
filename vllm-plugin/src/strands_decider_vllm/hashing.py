@@ -1,19 +1,25 @@
 """Prefix-cache keys that stay correct under prefix_bidir.
 
 vLLM keys a cached KV block by a hash chain over the request's tokens up to the end of that block, plus per-block extra
-keys. Under prefix_bidir a state token's keys and values depend on the whole state x[0:S), and a question token's on the
-whole prompt x[0:L). This module adds two extra keys to every block hash of a prefix_bidir request:
+keys. Under prefix_bidir a state token's keys and values depend on the whole state x[0:S), images included, and a
+question token's on the whole prompt x[0:L). This module adds two extra keys to every block hash of a prefix_bidir
+request:
 
-- block 0: ``("decider_state", sha256(x[0:S)))``, so every block of the chain is keyed on the whole state;
-- every block that ends past S: ``("decider_question", sha256(x[S:L)))``, so a block holding question tokens is keyed on
-  the whole question as well.
+- block 0: ``("decider_state", d_state)``, where d_state is a SHA-256 of the state's token ids x[0:S) and of each of
+  its images: vLLM's hash of the image's content (its multimodal identifier) and the image's placeholder span. Every
+  block of the chain is therefore keyed on the whole state, pixels included;
+- every block that ends past S: ``("decider_question", d_question)``, a SHA-256 of d_state and the question's token ids
+  x[S:L), so a block holding question tokens is keyed on the whole question and, through d_state, on every image too.
 
-A request therefore reuses a cached block only if it has the same state (same S, same tokens) and, for blocks that reach
-into the question, the same question, which is exactly when the block's keys and values are the same. A further
-question on a cached state reuses the state up to its last full block; requests without the digests never share
-blocks with prefix_bidir requests, whose block 0 differs.
+An image's placeholder ids are the same for any two images of the same size, so the token ids alone cannot tell two
+such images apart; vLLM's own multimodal extra key covers only the blocks that hold the image's tokens, not the state
+tokens before it, which attend to it under the mask. With d_state, a request reuses a cached block only if it has the
+same state (same S, same tokens, the same images at the same places) and, for blocks that reach into the question, the
+same question: exactly when the block's keys and values are the same. A further question on a cached state reuses the
+state up to its last full block; requests without the digests never share blocks with prefix_bidir requests, whose
+block 0 differs.
 
-The digests are computed in the engine core, from the request's own token ids and the boundary S that
+The digests are computed in the engine core, from the request's own token ids, the boundary S and the images that
 :mod:`strands_decider_vllm.engine` has validated, just before vLLM builds the request and hashes its blocks
 (:func:`expect`). Only requests to a Strands Decider model get them: the wrapper adds nothing to any other request, so
 other models served from the same environment keep vLLM's own keys.
@@ -22,6 +28,7 @@ other models served from the same environment keep vLLM's own keys.
 from __future__ import annotations
 
 import hashlib
+import struct
 from array import array
 from typing import Any
 
@@ -30,24 +37,33 @@ _ATTR = "_strands_decider_digests"
 _PENDING: dict[str, tuple[int, bytes, bytes]] = {}
 
 
-def _digest(token_ids: Any, a: int, b: int, domain: bytes) -> bytes:
-    h = hashlib.sha256(domain)
-    h.update(array("Q", token_ids[a:b]).tobytes())
-    return h.digest()
+STATE_DOMAIN = b"strands-decider/state\0"
+QUESTION_DOMAIN = b"strands-decider/question\0"
+IMAGE_DOMAIN = b"strands-decider/image\0"
 
 
-def digests(prompt: list[int], s: int) -> tuple[int, bytes, bytes]:
-    """(S, sha256 of the state x[0:S), sha256 of the question x[S:L)), each in its own domain."""
-    return (
-        s,
-        _digest(prompt, 0, s, b"strands-decider/state\0"),
-        _digest(prompt, s, len(prompt), b"strands-decider/question\0"),
-    )
+def digests(
+    prompt: list[int], s: int, images: tuple[tuple[str, int, int], ...] = ()
+) -> tuple[int, bytes, bytes]:
+    """(S, d_state, d_question). d_state hashes the state's token ids x[0:S), then each image of the state in order:
+    its identifier (vLLM's hash of the image) and its placeholder span (offset, length). A text request's d_state is
+    the hash of its tokens alone. d_question hashes d_state and the question's token ids x[S:L)."""
+    h = hashlib.sha256(STATE_DOMAIN)
+    h.update(array("Q", prompt[:s]).tobytes())
+    for identifier, offset, length in images:
+        key = identifier.encode()
+        h.update(IMAGE_DOMAIN + struct.pack("<QQQ", len(key), offset, length) + key)
+    state = h.digest()
+    q = hashlib.sha256(QUESTION_DOMAIN + state)
+    q.update(array("Q", prompt[s:]).tobytes())
+    return s, state, q.digest()
 
 
-def expect(request_id: str, prompt: list[int], s: int) -> None:
+def expect(
+    request_id: str, prompt: list[int], s: int, images: tuple[tuple[str, int, int], ...] = ()
+) -> None:
     """Register a validated request's digests before vLLM builds its ``Request`` (which hashes its blocks)."""
-    _PENDING[request_id] = digests(prompt, s)
+    _PENDING[request_id] = digests(prompt, s, images)
 
 
 def settle(request: Any) -> None:

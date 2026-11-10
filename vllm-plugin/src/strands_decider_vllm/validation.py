@@ -16,6 +16,8 @@ from . import PREFIX_END_KEY
 
 #: The number of answer codes of every checkpoint: the readout's rows.
 N_CODES = 255
+#: At most this many images in one request, as v1's image engine and the core library allow.
+MAX_IMAGES = 4
 
 
 class RequestRefused(ValueError):
@@ -114,6 +116,61 @@ def check_sampling(sp: Any) -> None:
         )
 
 
+#: (identifier, offset, length) of one image in the prompt: vLLM's hash of the image (its encoder-cache key) and the
+#: placeholder range, ``<|image>`` through ``<image|>``, that vLLM expanded it to.
+ImageSpan = tuple[str, int, int]
+
+
+def check_images(
+    features: Any,
+    s: int,
+    *,
+    takes_images: bool,
+    accepts_images: bool,
+) -> tuple[ImageSpan, ...]:
+    """The request's images as :data:`ImageSpan`, or :class:`RequestRefused`.
+
+    ``features`` are the request's multimodal items as vLLM's engine core receives them (each with ``modality``,
+    ``identifier`` and ``mm_position``), after vLLM has expanded each image's placeholder. Refused: images for a
+    checkpoint whose ``inputs`` lack "image" (``takes_images``); images on an engine that the plugin's server did not
+    start (``accepts_images``), because vLLM's own endpoints let a client name an image by an id of its choosing, which
+    vLLM then uses as the image's cache key; any modality other than an image; more than :data:`MAX_IMAGES` images;
+    and an image whose tokens do not lie inside the state ``[1, S)``. Image tokens are state tokens: the mask makes
+    them bidirectional with the rest of the state, and every question sees them.
+    """
+    if not features:
+        return ()
+    if not takes_images:
+        raise _refuse(
+            'this checkpoint does not take images: its decision_config.json "inputs" lacks "image"',
+            "images",
+        )
+    if not accepts_images:
+        raise _refuse(
+            "image requests are served only by `strands-decider-vllm serve`, which keys the cache on each image's "
+            "content; vLLM's own endpoints let a client name an image by an id of its choosing",
+            "images",
+        )
+    other = sorted({str(f.modality) for f in features if f.modality != "image"})
+    if other:
+        raise _refuse(f"only image input is supported, not {', '.join(other)}", "multi_modal_data")
+    if len(features) > MAX_IMAGES:
+        raise _refuse(
+            f"{len(features)} images; a request takes at most {MAX_IMAGES}", "images", len(features)
+        )
+    spans = []
+    for i, f in enumerate(features):
+        offset, length = int(f.mm_position.offset), int(f.mm_position.length)
+        if not (1 <= offset and offset + length <= s):
+            raise _refuse(
+                f"image {i}'s tokens [{offset}, {offset + length}) do not lie inside the state [1, S = {s}): "
+                "images go first in the state",
+                "images",
+            )
+        spans.append((str(f.identifier), offset, length))
+    return tuple(spans)
+
+
 def check_request(
     *,
     prompt_token_ids: list[int] | None,
@@ -122,7 +179,8 @@ def check_request(
     resumable: bool,
 ) -> int:
     """The request's boundary S, or :class:`RequestRefused`. The checks run in this order: the request's kind
-    (token ids, not embeddings or a streaming-input session), its boundary, then its sampling parameters."""
+    (token ids, not embeddings or a streaming-input session), its boundary, then its sampling parameters. The
+    images are checked after these (:func:`check_images`)."""
     if sampling_params is None:
         raise _refuse(
             "only completion requests are served (no sampling parameters)", "sampling_params"

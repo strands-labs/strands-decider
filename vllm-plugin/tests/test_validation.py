@@ -1,5 +1,6 @@
 """Per-request checks (engine core, before scheduling): every request a worker could not serve as a decision, or
-whose answer its parameters would change, is refused. No vLLM or torch needed."""
+whose answer its parameters would change, is refused, and so is every image the checkpoint or the entry point cannot
+take or that lies outside the state. No vLLM or torch needed."""
 
 from __future__ import annotations
 
@@ -9,8 +10,10 @@ from types import SimpleNamespace
 import pytest
 
 from strands_decider_vllm.validation import (
+    MAX_IMAGES,
     N_CODES,
     RequestRefused,
+    check_images,
     check_prefix_end,
     check_request,
     check_sampling,
@@ -180,3 +183,73 @@ def test_the_boundary_is_checked_before_sampling():
     with pytest.raises(RequestRefused) as err:
         check(sampling(extra_args={"prefix_end": "9"}, max_tokens=16))
     assert err.value.parameter == "vllm_xargs.prefix_end"
+
+
+# --- images ---------------------------------------------------------------------------------------------------------
+
+
+def feature(offset, length=258, identifier="a" * 64, modality="image"):
+    """A multimodal item as vLLM's engine core receives it, after the image's placeholder was expanded."""
+    return SimpleNamespace(
+        modality=modality,
+        identifier=identifier,
+        mm_position=SimpleNamespace(offset=offset, length=length),
+    )
+
+
+def images(features, s=600, takes=True, accepts=True):
+    return check_images(features, s, takes_images=takes, accepts_images=accepts)
+
+
+def test_a_text_request_has_no_images():
+    assert images(None) == () and images([]) == ()
+    # Text needs neither the checkpoint's image input nor the server.
+    assert images([], takes=False, accepts=False) == ()
+
+
+def test_images_inside_the_state_pass_as_identifier_offset_length():
+    fs = [feature(4, identifier="x"), feature(263, identifier="y", length=250)]
+    assert images(fs, s=520) == (("x", 4, 258), ("y", 263, 250))
+
+
+def test_an_image_ending_at_s_is_inside_the_state():
+    assert images([feature(10, 258)], s=268) == (("a" * 64, 10, 258),)
+
+
+@pytest.mark.parametrize(
+    "offset, length, s",
+    [
+        (10, 258, 267),  # ends one token past S
+        (300, 258, 200),  # starts in the question
+        (0, 258, 600),  # before <bos>: never where the template puts an image
+    ],
+)
+def test_an_image_outside_the_state_is_refused(offset, length, s):
+    with pytest.raises(RequestRefused, match=r"do not lie inside the state") as err:
+        images([feature(offset, length)], s=s)
+    assert err.value.parameter == "images"
+
+
+def test_images_for_a_text_only_checkpoint_are_refused():
+    with pytest.raises(RequestRefused, match='"inputs" lacks "image"') as err:
+        images([feature(4)], takes=False)
+    assert err.value.parameter == "images"
+
+
+def test_images_outside_the_plugins_server_are_refused():
+    with pytest.raises(RequestRefused, match="strands-decider-vllm serve"):
+        images([feature(4)], accepts=False)
+
+
+@pytest.mark.parametrize("modality", ["audio", "video"])
+def test_other_media_are_refused(modality):
+    with pytest.raises(RequestRefused, match=f"not {modality}"):
+        images([feature(4), feature(300, modality=modality)], s=900)
+
+
+def test_more_than_four_images_are_refused():
+    fs = [feature(4 + 260 * i) for i in range(MAX_IMAGES + 1)]
+    with pytest.raises(RequestRefused, match="5 images; a request takes at most 4") as err:
+        images(fs, s=2000)
+    assert err.value.value == 5
+    assert len(images(fs[:MAX_IMAGES], s=2000)) == MAX_IMAGES
