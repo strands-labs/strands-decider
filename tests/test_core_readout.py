@@ -14,7 +14,13 @@ import struct
 
 import numpy as np
 import pytest
-from core_support import decision_config_fixture, image_b64, image_bytes, toy_tokenizer
+from core_support import (
+    decision_config_fixture,
+    image_b64,
+    image_bytes,
+    readout_goldens,
+    toy_tokenizer,
+)
 
 from strands_decider.core import (
     CAPPED_LOGITS,
@@ -409,6 +415,104 @@ def test_the_hidden_state_is_rounded_to_bf16_before_the_gemm():
         readout_logits(w, np.full(64, 3.4e38, np.float32))
     with pytest.raises(ValueError, match="finite"):
         readout_logits(w, np.full(64, np.nan))
+
+
+def test_the_readout_goldens():
+    """tests/fixtures/core/readout_goldens.json, the readout apart from any decoder: the core
+    gives each case's z exactly and its probabilities to 1e-7, and the independent
+    reimplementation of strands-decider-vllm's arithmetic gives z exactly and the
+    probabilities to 1e-5, the spec's tolerance for a runtime."""
+    g, w = readout_goldens()
+    c = g["final_logit_softcapping"]
+    assert w.shape == (255, 32) and c == 30.0 and len(g["cases"]) >= 6
+    for case in g["cases"]:
+        h, t = np.array(case["hidden"], np.float32), case["temperature"]
+        z = readout_logits(w, h)
+        assert z.tolist() == case["z"], case["name"]
+        assert _vllm_gemm(w.tolist(), h.tolist()) == case["z"], case["name"]
+        final = _vllm_logits(w.tolist(), h.tolist(), c, t)
+        for k, want in case["probabilities"].items():
+            k = int(k)
+            got = code_probabilities(z, k, stage=RAW_LOGITS, softcap_c=c, temperature=t)
+            assert np.allclose(got, want, rtol=0, atol=1e-7), (case["name"], k)
+            assert np.allclose(_softmax64(final[:k]), want, rtol=0, atol=1e-5), (case["name"], k)
+
+
+def test_the_readout_goldens_see_a_misapplied_cap_or_temperature():
+    """Where the bound on model goldens may not, the readout goldens see a skipped cap, a
+    doubled temperature or an unrounded hidden state, far past their 1e-5 tolerance."""
+    g, w = readout_goldens()
+    c = g["final_logit_softcapping"]
+    worst = {"cap skipped": 0.0, "T twice": 0.0, "h unrounded": 0.0}
+    for case in g["cases"]:
+        h, t = np.array(case["hidden"], np.float64), case["temperature"]
+        z = np.array(case["z"])
+        want = np.array(case["probabilities"]["40"])
+        wrong = {
+            "cap skipped": _softmax64((z[:40] / t).tolist()),
+            "T twice": _softmax64((c * np.tanh(z[:40] / c) / (t * t)).tolist()),
+            "h unrounded": _softmax64((c * np.tanh((w @ h)[:40] / c) / t).tolist()),
+        }
+        for name, p in wrong.items():
+            worst[name] = max(worst[name], float(np.max(np.abs(np.array(p) - want))))
+    assert all(v > 1e-3 for v in worst.values()), worst
+
+
+# ---- conformance: the two measures, one way for every backend -------------------------------
+
+
+def test_agreement_measures_top1_and_mean_dp():
+    from strands_decider.core import Agreement, agreement
+    from strands_decider.core.conformance import BOUNDS, MIN_QUESTIONS
+
+    ref = {"a": [0.7, 0.3], "b": [0.2, 0.5, 0.3], "c": [0.5, 0.5]}
+    ours = {"a": [0.6, 0.4], "b": [0.2, 0.3, 0.5], "c": [0.5, 0.5]}
+    got = agreement(ours, ref)
+    assert got.questions == 3 and got.top1 == pytest.approx(2 / 3)  # b's top-1 moved
+    assert got.mean_abs_dp == pytest.approx((0.1 + 0.2 + 0.0) / 3)
+    # A tie goes to the first code, for both sides alike.
+    assert agreement({"t": [0.5, 0.5]}, {"t": [0.5, 0.5]}).top1 == 1.0
+    assert agreement({"t": [0.4, 0.6]}, {"t": [0.5, 0.5]}).top1 == 0.0
+    assert Agreement(1200, 0.9883, 0.0099).conforms()
+    assert not Agreement(999, 1.0, 0.0).conforms()  # too few questions to claim anything
+    assert (
+        not Agreement(1200, 0.979, 0.001).conforms() and not Agreement(1200, 0.99, 0.021).conforms()
+    )
+    assert MIN_QUESTIONS == 1000 and BOUNDS["bf16"] == BOUNDS["mlx-8bit"] == BOUNDS[
+        "gguf-q8_0"
+    ] == (0.98, 0.02)
+    for bad in ({"a": [0.7, 0.3]}, {**ours, "d": [1.0]}):
+        with pytest.raises(ValueError, match="questions differ"):
+            agreement(bad, ref)
+    with pytest.raises(ValueError, match="2 probabilities for 3 codes"):
+        agreement({**ours, "b": [0.5, 0.5]}, ref)
+    with pytest.raises(ValueError, match="finite"):
+        agreement({**ours, "a": [math.nan, 1.0]}, ref)
+
+
+def test_read_golden_vectors(tmp_path):
+    from strands_decider.core import agreement, read_golden_vectors
+
+    lines = [
+        {
+            "request": {},
+            "variant": "strands-plain",
+            "questions": {"q": {"probabilities": [0.1, 0.9]}},
+        },
+        {
+            "request": {},
+            "variant": "strands-plain",
+            "questions": {
+                "q": {"probabilities": [0.6, 0.4]},
+                "r": {"probabilities": [0.2, 0.3, 0.5]},
+            },
+        },
+    ]
+    path = tmp_path / "golden_vectors.jsonl"
+    path.write_text("\n".join(json.dumps(x) for x in lines) + "\n\n")
+    ref = read_golden_vectors(path)
+    assert ref == {(0, "q"): [0.1, 0.9], (1, "q"): [0.6, 0.4], (1, "r"): [0.2, 0.3, 0.5]}
+    assert agreement(ref, ref).top1 == 1.0 and agreement(ref, ref).mean_abs_dp == 0.0
 
 
 # ---- safetensors and the readout file ---------------------------------------------------

@@ -14,16 +14,20 @@ docs/spec.md defines the interface; this package implements its torch-free half 
     load_tokenizer(checkpoint)             -> tokenizer.json, checked against the
                                               interface's control and code ids
 
-A runtime supplies the decoder (`Backend`), and for images the vision encoder and the
-pixel preprocessing; `evaluate` joins the pieces. Images are checked and counted from their
-file headers (`decode_image`, `soft_tokens`), never decoded here. v1's engines are
-untouched: the core sits beside them.
+A runtime supplies the decoder (`Backend`, or `ImageBackend` with an image path), and for
+images the vision encoder and the pixel preprocessing; `evaluate` joins the pieces. Images
+are checked and counted from their file headers (`decode_image`, `soft_tokens`), never
+decoded here; `resize_image`, the spec's resize for a runtime's decoded pixels, is the one
+part that needs Pillow, which it imports when called. `agreement` measures a runtime's
+probabilities against the reference's (docs/spec.md, Golden vectors and conformance). v1's
+engines are untouched: the core sits beside them.
 """
 
 from __future__ import annotations
 
 from .codes import CODES, MAX_CODES, codes_for
 from .config import FORMAT_VERSION, INPUTS, INTERFACE, DecisionConfig, Provenance
+from .conformance import Agreement, agreement, read_golden_vectors
 from .images import (
     IMAGE_FORMATS,
     MAX_IMAGE_PIXELS,
@@ -67,7 +71,7 @@ from .readout import (
     softcap,
 )
 from .request import parse_request
-from .runtime import Backend, attention_mask, evaluate
+from .runtime import Backend, ImageBackend, attention_mask, evaluate
 from .tokenizer import CONTROL_TOKEN_IDS, check_tokenizer, load_tokenizer
 
 __all__ = [
@@ -89,14 +93,17 @@ __all__ = [
     "RAW_LOGITS",
     "STAGES",
     "VARIANTS",
+    "Agreement",
     "Backend",
     "DecisionConfig",
     "EncodedImage",
+    "ImageBackend",
     "Provenance",
     "Readout",
     "RenderedImage",
     "RenderedQuestion",
     "RenderedRequest",
+    "agreement",
     "answer",
     "attention_mask",
     "check_decoded_size",
@@ -113,6 +120,7 @@ __all__ = [
     "plain_text_tokenizer",
     "question_probabilities",
     "read",
+    "read_golden_vectors",
     "readout_logits",
     "render",
     "render_content",

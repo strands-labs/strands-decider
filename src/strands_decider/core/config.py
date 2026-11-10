@@ -92,10 +92,15 @@ def check_float32_scale(name: str, v: Any) -> float:
 
 def _shown(v: Any) -> str:
     """`v` for a message: an integer past a double's range by its size, since its digits may
-    be too many to print."""
+    be too many to print (Python 3.11 and later refuse to), a list or tuple item by item, and
+    anything long cut short."""
     if isinstance(v, int) and not isinstance(v, bool) and abs(v).bit_length() > 1024:
         return f"an integer of {abs(v).bit_length()} bits"
-    return repr(v)
+    if isinstance(v, (list, tuple)):
+        items = ", ".join(_shown(x) for x in v[:8]) + (", ..." if len(v) > 8 else "")
+        return f"[{items}]" if isinstance(v, list) else f"({items})"
+    text = repr(v)
+    return text if len(text) <= 200 else text[:200] + "..."
 
 
 # The provenance formats (docs/spec.md, The decision_config.json schema), ASCII and whole.
@@ -113,7 +118,7 @@ def _is_int(v: Any) -> bool:
 def _wrong_interface(interface: Any) -> str:
     return (
         f"not a Strands Decider decision config: {FILENAME} needs "
-        f'"interface": "{INTERFACE}", and has {interface!r}'
+        f'"interface": "{INTERFACE}", and has {_shown(interface)}'
     )
 
 
@@ -148,11 +153,13 @@ class Provenance:
             if not isinstance(value, str) or not value:
                 raise ValueError(f"provenance.{name} must be a non-empty string")
         if not _HUB_ID.fullmatch(self.base_model):
-            raise ValueError(f"provenance.base_model must be a Hub id, not {self.base_model!r}")
+            raise ValueError(
+                f"provenance.base_model must be a Hub id, not {_shown(self.base_model)}"
+            )
         if not _COMMIT.fullmatch(self.base_revision):
             raise ValueError("provenance.base_revision must be a 40-character commit hash")
         if self.release is not None and not _RELEASE.fullmatch(self.release):
-            raise ValueError(f"provenance.release must be a model name, not {self.release!r}")
+            raise ValueError(f"provenance.release must be a model name, not {_shown(self.release)}")
         if self.source is not None and not _HTTPS_URL.fullmatch(self.source):
             raise ValueError("provenance.source must be an https URL")
 
@@ -203,7 +210,7 @@ class DecisionConfig:
             raise ValueError(_unsupported_version(self.format_version))
         if not isinstance(self.prompt, str) or self.prompt not in VARIANTS:
             raise ValueError(
-                f"prompt {self.prompt!r} is not implemented; this runtime implements {VARIANTS}"
+                f"prompt {_shown(self.prompt)} is not implemented; this runtime implements {VARIANTS}"
             )
         inputs = self.inputs
         if (
@@ -214,9 +221,12 @@ class DecisionConfig:
         ):
             raise ValueError(
                 f"inputs must be an array of distinct strings from {list(INPUTS)} that holds "
-                f"{TEXT!r}, not {inputs!r}"
+                f"{TEXT!r}, not {_shown(inputs)}"
             )
         object.__setattr__(self, "inputs", tuple(inputs))
+        for name in ("codes", "token_ids"):
+            if not isinstance(getattr(self, name), (list, tuple)):
+                raise ValueError(f"{name} must be an array, not {_shown(getattr(self, name))}")
         if tuple(self.codes) != CODES:
             raise ValueError(
                 "codes must be the 255 answer codes, A through IV without GZ, in order"
@@ -230,6 +240,10 @@ class DecisionConfig:
             raise ValueError("token_ids must be distinct: one token per code")
         t = check_float32_scale("temperature", self.temperature)
         c = check_float32_scale("final_logit_softcapping", self.final_logit_softcapping)
+        # Held as Python floats, so a numpy scalar given here neither reaches to_dict, which
+        # json.dumps must take, nor compares differently in numpy 1 and 2.
+        object.__setattr__(self, "temperature", t)
+        object.__setattr__(self, "final_logit_softcapping", c)
         # The readout's largest final logit is c / T in float32; it must be finite there.
         with np.errstate(over="ignore"):
             if not np.isfinite(np.float32(c) / np.float32(t)):
@@ -239,10 +253,12 @@ class DecisionConfig:
                 )
         if self.attention_mode not in ATTENTION_MODES:
             raise ValueError(
-                f"attention_mode {self.attention_mode!r} is not supported; expected {ATTENTION_MODES}"
+                f"attention_mode {_shown(self.attention_mode)} is not supported; expected {ATTENTION_MODES}"
             )
         if self.pooling not in POOLINGS:
-            raise ValueError(f"pooling {self.pooling!r} is not supported; expected {POOLINGS}")
+            raise ValueError(
+                f"pooling {_shown(self.pooling)} is not supported; expected {POOLINGS}"
+            )
         if not _is_int(self.max_length_validated) or not 0 < self.max_length_validated <= INT32_MAX:
             raise ValueError(
                 f"max_length_validated must be a positive integer, at most {INT32_MAX}"
@@ -274,7 +290,7 @@ class DecisionConfig:
             if not isinstance(d[k], list):
                 raise ValueError(f"{k} must be a list")
         if not isinstance(d["inputs"], list):
-            raise ValueError(f"inputs must be an array, not {d['inputs']!r}")
+            raise ValueError(f"inputs must be an array, not {_shown(d['inputs'])}")
         return cls(
             interface=d["interface"],
             format_version=d["format_version"],

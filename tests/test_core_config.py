@@ -239,6 +239,24 @@ def test_bad_values_are_errors(field, value, match):
         DecisionConfig(**{**good.__dict__, field: value})
 
 
+@pytest.mark.parametrize("field", ["prompt", "attention_mode", "pooling", "inputs", "interface"])
+def test_a_huge_integer_anywhere_is_a_plain_valueerror(field):
+    """A value too large to print (Python 3.11 refuses int-to-str past 4,300 digits) is
+    described by its size, so the error is the schema's, not the interpreter's."""
+    value = [10**5000] if field == "inputs" else 10**5000
+    with pytest.raises(ValueError) as e:
+        DecisionConfig.from_dict(_with(**{field: value}))
+    assert "bits" in str(e.value) and "Exceeds the limit" not in str(e.value)
+
+
+@pytest.mark.parametrize("field", ["codes", "token_ids"])
+@pytest.mark.parametrize("value", [None, 3, "ABC"])
+def test_codes_and_ids_constructed_directly_must_be_arrays(field, value):
+    good = DecisionConfig.load(FIXTURES)
+    with pytest.raises(ValueError, match=f"{field} must be"):
+        DecisionConfig(**{**good.__dict__, field: value})
+
+
 def test_integers_hold_to_their_bounds():
     ids = [INT32_MAX, *range(1, 255)]
     cfg = DecisionConfig.from_dict(_with(token_ids=ids, max_length_validated=INT32_MAX))
@@ -259,8 +277,14 @@ def test_scales_take_numpy_scalars_and_refuse_bools():
         check_float32_scale("t", np.float64(0.5)) == 0.5
         and check_float32_scale("t", np.int64(2)) == 2.0
     )
-    cfg = DecisionConfig.from_dict(_with(temperature=np.float32(0.5)))
-    assert cfg.temperature == 0.5
+    cfg = DecisionConfig.from_dict(
+        _with(temperature=np.float32(0.5), final_logit_softcapping=np.int64(30))
+    )
+    assert cfg.temperature == 0.5 and type(cfg.temperature) is float
+    assert type(cfg.final_logit_softcapping) is float
+    # Held as Python floats, the config goes through JSON and back unchanged.
+    again = DecisionConfig.from_dict(json.loads(json.dumps(cfg.to_dict())))
+    assert again == cfg and again.to_dict() == cfg.to_dict()
     for bad in (True, np.bool_(True), "1", None, [1.0], 10**400, np.float32("nan")):
         with pytest.raises(ValueError, match="must be a finite number"):
             check_float32_scale("t", bad)
