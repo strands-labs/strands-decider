@@ -23,7 +23,9 @@ from .decision import (
     DECISION,
     INTERMEDIATE,
     DecisionEngine,
+    EngineBusy,
     check_device,
+    check_dtype,
     checkpoint_kind,
     load_decision_engine,
     refuse_intermediate,
@@ -103,10 +105,13 @@ def create_app(
     warmup: bool = True,
     build_engine: Callable[[], SystemOneEngine] | None = None,
     dtype: str | None = None,
+    max_concurrency: int | None = None,
+    queue_timeout: float | None = 60.0,
+    revision: str | None = None,
 ) -> FastAPI:
     # A decision checkpoint (docs/spec.md) is served by the core and a decision backend;
     # anything else takes v1's path below, unchanged. Tests inject `build_engine` and skip this.
-    kind = checkpoint_kind(checkpoint) if build_engine is None else None
+    kind = checkpoint_kind(checkpoint, revision=revision) if build_engine is None else None
     if kind == INTERMEDIATE:
         raise refuse_intermediate(checkpoint)
     decision = kind == DECISION
@@ -116,6 +121,11 @@ def create_app(
                 "--device-map is for v1 checkpoints; a decision checkpoint runs on one device"
             )
         check_device(device)
+        check_dtype(device, dtype)  # imports the device's backend: its import errors show here
+        if max_concurrency is not None and max_concurrency < 1:
+            raise ValueError("--max-concurrency must be at least 1")
+        if queue_timeout is not None and queue_timeout <= 0:
+            raise ValueError("--queue-timeout must be positive")
         if vision:
             warnings.warn(
                 "--vision is for v1 checkpoints: a decision checkpoint takes images when its "
@@ -127,8 +137,15 @@ def create_app(
                 "attn_implementation is for v1 checkpoints: a decision checkpoint runs SDPA",
                 stacklevel=2,
             )
-    elif dtype:
-        raise ValueError("--dtype is for decision checkpoints")
+    elif build_engine is None:
+        # v1's engines take neither (#128 brings --max-concurrency to them on main).
+        for flag, value in (
+            ("--dtype", dtype),
+            ("--max-concurrency", max_concurrency),
+            ("--revision", revision),
+        ):
+            if value is not None:
+                raise ValueError(f"{flag} is for decision checkpoints")
     if not decision:
         if device_map and (vision or not device.startswith("cuda")):
             raise ValueError(
@@ -161,6 +178,9 @@ def create_app(
                 max_batch=max_batch,
                 max_batch_tokens=max_batch_tokens,
                 dtype=dtype,
+                max_concurrency=max_concurrency or 1,
+                queue_timeout=queue_timeout,
+                revision=revision,
             )
         if vision:
             from .vision import load_vision_engine
@@ -250,9 +270,14 @@ def create_app(
         body: Any = Depends(decision_body),
     ) -> JSONResponse:
         started = time.perf_counter()
+        # A decision engine bounds its own concurrency and its backend takes turns on MPS, so
+        # its refusals never wait behind the server's lock.
+        lock = contextlib.nullcontext() if isinstance(eng, DecisionEngine) else guard
         try:
-            with guard:
+            with lock:
                 response = eng.evaluate(request if body is None else body)
+        except EngineBusy as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
         except ValueError as exc:
             # Malformed permutation, etc. -- caller error.
             raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -278,6 +303,9 @@ def serve(
     device_map: str | None = None,
     warmup: bool = True,
     dtype: str | None = None,
+    max_concurrency: int | None = None,
+    queue_timeout: float | None = 60.0,
+    revision: str | None = None,
 ) -> None:
     import uvicorn
 
@@ -292,6 +320,9 @@ def serve(
         device_map=device_map,
         warmup=warmup,
         dtype=dtype,
+        max_concurrency=max_concurrency,
+        queue_timeout=queue_timeout,
+        revision=revision,
     )
     # Single worker: the model owns the GPU, and forking more would just duplicate it.
     uvicorn.run(app, host=host, port=port, workers=1)

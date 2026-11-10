@@ -75,7 +75,7 @@ from ..core.images import (
 )
 from ..core.readout import MODEL_CONFIG_FILE, READOUT_FILE, load_safetensors
 from ..core.request import NO_VISION
-from ..decision import RequestRefused
+from ..refusals import RequestRefused
 
 if TYPE_CHECKING:
     from PIL import Image
@@ -108,6 +108,9 @@ DEVICE_DTYPES = {"cpu": torch.float32, "cuda": torch.bfloat16, "mps": torch.bflo
 # carries its own copy of the state's keys and values through every layer, so the budget
 # bounds that copy.
 MAX_BATCH_TOKENS = 65536
+# Taken by every backend on MPS around its device work (re-entrant: `forward` holds it while it
+# calls `prepare_pixels`).
+MPS_TURNS = threading.RLock()
 
 
 def default_dtype(device: str) -> torch.dtype:
@@ -343,6 +346,9 @@ def resize(img: Image.Image) -> Image.Image:
     return img.resize(resized_size(*img.size), PILImage.Resampling.BICUBIC)
 
 
+PROCESSOR_FAILED = "the image processor could not be built, so image requests are refused"
+
+
 def load_image_processor(path: str, unified: bool) -> Any:
     """The checkpoint's image processor from its processor_config.json: Gemma 4's PIL backend,
     or for the 12B its only one, which needs torchvision."""
@@ -470,6 +476,20 @@ def _load_model(ckpt: Checkpoint, dtype: torch.dtype, *, vision: bool) -> torch.
     return cast("torch.nn.Module", model)
 
 
+def _check_readout_width(ckpt: Checkpoint) -> None:
+    """The readout must have one row per code and the decoder's hidden size, read from
+    config.json (`text_config.hidden_size`, or the top level for a bare decoder)."""
+    cfg = ckpt.model_config
+    hidden = (cfg.get("text_config") or cfg).get("hidden_size")
+    weight = ckpt.readout.weight
+    shape = None if weight is None else tuple(weight.shape)
+    if shape != (len(CODES), hidden):
+        raise ValueError(
+            f"{ckpt.path}: readout.safetensors `weight` is {shape}, not "
+            f"[{len(CODES)}, {hidden}]: the decoder's hidden size"
+        )
+
+
 def _ids(name: str, seq: Sequence[int], vocab: int) -> list[int]:
     ids = [int(t) for t in seq]
     if not ids:
@@ -509,9 +529,10 @@ class TransformersBackend:
         self.reuse_state = reuse_state
         self.max_batch = max_batch
         self.max_batch_tokens = max_batch_tokens
-        # Metal aborts the process when two threads use the device at once.
+        # Metal aborts the process when two threads use the device at once, whichever backend
+        # they run: one lock for every backend on MPS.
         self._turns: contextlib.AbstractContextManager[Any] = (
-            threading.RLock() if torch.device(device).type == "mps" else contextlib.nullcontext()
+            MPS_TURNS if torch.device(device).type == "mps" else contextlib.nullcontext()
         )
         # The decoder, with the vision encoder where there is one: Gemma4Model or
         # Gemma4UnifiedModel inside the multimodal class, or the bare Gemma4TextModel.
@@ -569,6 +590,7 @@ class TransformersBackend:
         )
         for note in ckpt.warnings:
             warnings.warn(note, stacklevel=2)
+        _check_readout_width(ckpt)  # before the weights, which may be tens of GB
         default = default_dtype(device)  # checks the device
         dtype = dtype or default
         if dtype not in (torch.float32, torch.bfloat16):
@@ -582,9 +604,16 @@ class TransformersBackend:
                 try:
                     processor = load_image_processor(ckpt.path, ckpt.unified)
                 except (ImportError, AttributeError, OSError, ValueError) as e:
-                    # A transformers without the class, or an unreadable processor config.
-                    problem = f"the image processor could not be built ({e}), so image requests are refused"
-            if problem is not None:
+                    # A transformers without the class, or an unreadable processor config. The
+                    # reason clients get is fixed; the error, which may name local paths, is
+                    # only logged.
+                    problem = PROCESSOR_FAILED
+                    warnings.warn(
+                        f"{ckpt.path}: the image processor could not be built: "
+                        f"{type(e).__name__}: {e}",
+                        stacklevel=2,
+                    )
+            if problem is not None and problem != PROCESSOR_FAILED:
                 warnings.warn(f"{ckpt.path}: {problem}", stacklevel=2)
         model = _load_model(ckpt, dtype, vision=processor is not None)
         model.to(device).eval()
@@ -737,6 +766,11 @@ class TransformersBackend:
         for batch in self._batches(s, questions):
             qs = [questions[i] for i in batch]
             width = max(len(q) for q in qs)
+            if width % 64 == 1:
+                # torch 2.7's CUDA SDPA got such passes wrong for one key/value head (E2B).
+                # One more masked column of padding sidesteps it on any version, at no cost
+                # to the answers.
+                width += 1
             ids = torch.full((len(qs), width), self.pad_id, dtype=torch.long)
             for r, q in enumerate(qs):
                 ids[r, : len(q)] = torch.tensor(q)
@@ -793,7 +827,9 @@ def load_backend(
     max_batch_tokens: int | None = None,
 ) -> TransformersBackend:
     """The loader `strands_decider.decision.BACKENDS` names for cpu, cuda and mps: `dtype` is
-    "float32", "bfloat16" or None (the device's own)."""
+    one of `load_backend.dtypes`, or None for the device's own."""
+    if dtype is not None and dtype not in DTYPES:
+        raise ValueError(f"the transformers backend runs {' or '.join(DTYPES)}, not {dtype!r}")
     return TransformersBackend.load(
         path,
         device=device,
@@ -802,6 +838,11 @@ def load_backend(
         max_batch=max_batch,
         max_batch_tokens=max_batch_tokens or MAX_BATCH_TOKENS,
     )
+
+
+# The dtypes a caller may name (`--dtype`), checked before anything is loaded.
+DTYPES = ("float32", "bfloat16")
+load_backend.dtypes = DTYPES  # type: ignore[attr-defined]
 
 
 def _tokenizer_problem(ckpt: Checkpoint) -> str | None:

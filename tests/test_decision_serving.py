@@ -131,15 +131,6 @@ def test_ask_refuses_an_intermediate_checkpoint(tmp_path, monkeypatch):
     assert result.exit_code == 2 and "intermediate" in result.output  # a usage error
 
 
-def test_serve_refuses_audio_rather_than_dropping_it(ckpt):
-    """v1's request model has no `audio` field; the decision engine reads the JSON the client
-    sent, so the core's refusal holds on the wire too."""
-    with TestClient(server.create_app(str(ckpt), device="cpu", warmup=False)) as client:
-        r = client.post("/v1/systemone", json={**request(), "audio": ["UklGRiQAAABXQVZF"]})
-        assert r.status_code == 422 and r.json()["detail"] == "audio input is not supported"
-        assert client.post("/v1/systemone", json={**request(), "audio": []}).status_code == 200
-
-
 def test_serve_reports_a_runtime_failure_as_500(ckpt, monkeypatch):
     app = server.create_app(str(ckpt), device="cpu", warmup=False)
     with TestClient(app, raise_server_exceptions=False) as client:
@@ -204,94 +195,6 @@ def test_serve_takes_a_dtype(ckpt):
         assert client.get("/health").json()["dtype"] == "bfloat16"
 
 
-# ---- finding a decision checkpoint on the Hub ----------------------------------------------
-
-
-def _hub_error(cls, message="x"):
-    """A huggingface_hub error without an HTTP response behind it."""
-    e = cls.__new__(cls)
-    Exception.__init__(e, message)
-    return e
-
-
-@pytest.fixture
-def hub(monkeypatch, tmp_path):
-    """huggingface_hub's cache lookup and downloads, recorded; none reaches the network."""
-    import huggingface_hub
-
-    calls = []
-    state = {"cache": None, "download": None, "snapshot": None}
-
-    def outcome(name, value):
-        calls.append(name)
-        if isinstance(value, BaseException):
-            raise value
-        return value
-
-    monkeypatch.setattr(
-        huggingface_hub,
-        "try_to_load_from_cache",
-        lambda repo, fn, revision=None, **_: outcome(("cache", repo, fn, revision), state["cache"]),
-    )
-    monkeypatch.setattr(
-        huggingface_hub,
-        "hf_hub_download",
-        lambda repo, fn, revision=None, **_: outcome(
-            ("download", repo, fn, revision), state["download"]
-        ),
-    )
-    monkeypatch.setattr(
-        huggingface_hub,
-        "snapshot_download",
-        lambda repo, revision=None, local_files_only=False, **_: outcome(
-            ("snapshot", repo, revision, local_files_only), state["snapshot"]
-        ),
-    )
-    dc = tmp_path / "snap" / "decision_config.json"
-    dc.parent.mkdir()
-    dc.write_text(json.dumps({"interface": "strands-decider"}))
-    return state, calls, str(dc)
-
-
-def test_hub_detection_reads_the_cache_first(hub):
-    state, calls, dc = hub
-    state["cache"] = dc
-    assert checkpoint_kind("org/repo", revision="abc") == DECISION
-    assert calls == [("cache", "org/repo", "decision_config.json", "abc")]  # no Hub request
-    calls.clear()
-    state["cache"] = object()  # the cache's record that the repo has no such file
-    assert checkpoint_kind("org/repo") is None and len(calls) == 1
-
-
-def test_hub_detection_asks_the_hub_once_and_lets_real_errors_through(hub):
-    from huggingface_hub.errors import (
-        HfHubHTTPError,
-        LocalEntryNotFoundError,
-        RemoteEntryNotFoundError,
-        RepositoryNotFoundError,
-    )
-
-    state, calls, dc = hub
-    state["download"] = dc
-    assert checkpoint_kind("org/repo", revision="abc") == DECISION
-    assert calls[-1] == ("download", "org/repo", "decision_config.json", "abc")
-    state["download"] = _hub_error(RemoteEntryNotFoundError)  # a v1 repo: no such file
-    assert checkpoint_kind("org/repo") is None
-    state["download"] = _hub_error(RepositoryNotFoundError)  # v1's loader reports it
-    assert checkpoint_kind("org/repo") is None
-    state["download"] = _hub_error(HfHubHTTPError, "401 Unauthorized")
-    with pytest.raises(HfHubHTTPError, match="401"):
-        checkpoint_kind("org/repo")
-    # Offline, with the file not cached on its own: the cached snapshot decides.
-    state["download"] = _hub_error(LocalEntryNotFoundError)
-    state["snapshot"] = str(__import__("pathlib").Path(dc).parent)
-    calls.clear()
-    assert checkpoint_kind("org/repo", revision="abc") == DECISION
-    assert calls[-1] == ("snapshot", "org/repo", "abc", True)
-    state["snapshot"] = _hub_error(LocalEntryNotFoundError)
-    assert checkpoint_kind("org/repo") is None
-
-
 def test_serve_refusals_over_http(ckpt, tmp_path):
     """Through create_app and HTTP: audio, five images, and images on a text-only checkpoint
     are each refused with 422 and the interface's message."""
@@ -299,6 +202,7 @@ def test_serve_refusals_over_http(ckpt, tmp_path):
     with TestClient(server.create_app(str(ckpt), device="cpu", warmup=False)) as client:
         r = client.post("/v1/systemone", json={**request(), "audio": ["UklGRiQAAABXQVZF"]})
         assert r.status_code == 422 and r.json()["detail"] == "audio input is not supported"
+        assert client.post("/v1/systemone", json={**request(), "audio": []}).status_code == 200
         r = client.post("/v1/systemone", json=request([img] * 5))
         assert (
             r.status_code == 422 and r.json()["detail"] == "5 images; this server takes at most 4"
@@ -358,3 +262,319 @@ def test_another_runtime_plugs_in_by_device(ckpt, monkeypatch):
     assert (questions, images) == (3, 1) and state_tokens > 266
     with pytest.raises(ValueError, match=r"decision checkpoints run on .*stub.* here, not 'tpu'"):
         decision.check_device("tpu")
+
+
+# ---- finding a decision checkpoint on the Hub ----------------------------------------------
+
+
+def _hub_error(cls, message="x"):
+    """A huggingface_hub error without an HTTP response behind it."""
+    e = cls.__new__(cls)
+    Exception.__init__(e, message)
+    return e
+
+
+@pytest.fixture
+def hub(monkeypatch, tmp_path):
+    """huggingface_hub's cache lookup and downloads, recorded; none reaches the network.
+    Online unless the test sets `offline`."""
+    import huggingface_hub
+    from huggingface_hub import constants
+
+    monkeypatch.setattr(constants, "HF_HUB_OFFLINE", False)
+    calls = []
+    state = {"cache": None, "download": None, "snapshot": None}
+
+    def outcome(name, value):
+        calls.append(name)
+        if isinstance(value, BaseException):
+            raise value
+        return value
+
+    monkeypatch.setattr(
+        huggingface_hub,
+        "try_to_load_from_cache",
+        lambda repo, fn, revision=None, **_: outcome(("cache", revision), state["cache"]),
+    )
+    monkeypatch.setattr(
+        huggingface_hub,
+        "hf_hub_download",
+        lambda repo, fn, revision=None, **_: outcome(("download", revision), state["download"]),
+    )
+    monkeypatch.setattr(
+        huggingface_hub,
+        "snapshot_download",
+        lambda repo, revision=None, local_files_only=False, **_: outcome(
+            ("snapshot", revision, local_files_only), state["snapshot"]
+        ),
+    )
+    dc = tmp_path / "snap" / "decision_config.json"
+    dc.parent.mkdir()
+    dc.write_text(json.dumps({"interface": "strands-decider"}))
+    return state, calls, str(dc), lambda: monkeypatch.setattr(constants, "HF_HUB_OFFLINE", True)
+
+
+COMMIT = "a" * 40
+
+
+def test_hub_detection_online_asks_the_hub_unless_the_commit_is_pinned(hub):
+    """A cached answer for a branch may be an old commit's: online, the Hub is asked (one
+    small request, which the cache serves when current). A pinned commit never changes."""
+    state, calls, dc, _ = hub
+    state["cache"], state["download"] = object(), dc  # the cache's stale "no such file"
+    assert checkpoint_kind("org/repo", revision="main") == DECISION
+    assert calls == [("download", "main")]
+    calls.clear()
+    assert checkpoint_kind("org/repo", revision=COMMIT) is None  # pinned: the cache answers
+    assert calls == [("cache", COMMIT)]
+    calls.clear()
+    state["cache"] = dc
+    assert checkpoint_kind("org/repo", revision=COMMIT) == DECISION and calls == [("cache", COMMIT)]
+
+
+def test_hub_detection_offline_reads_the_cache_and_the_snapshot(hub):
+    state, calls, dc, go_offline = hub
+    go_offline()
+    state["cache"] = dc
+    assert checkpoint_kind("org/repo") == DECISION and calls == [("cache", None)]
+    calls.clear()
+    state["cache"], state["snapshot"] = None, str(__import__("pathlib").Path(dc).parent)
+    assert checkpoint_kind("org/repo", revision="v2") == DECISION
+    assert calls == [("cache", "v2"), ("snapshot", "v2", True)]
+    from huggingface_hub.errors import LocalEntryNotFoundError
+
+    state["snapshot"] = _hub_error(LocalEntryNotFoundError)  # nothing cached: v1 reports it
+    assert checkpoint_kind("org/repo") is None
+    assert not any(c[0] == "download" for c in calls)
+
+
+def test_hub_detection_takes_only_missing_files_and_repos_for_v1(hub):
+    from huggingface_hub.errors import (
+        HfHubHTTPError,
+        LocalEntryNotFoundError,
+        RemoteEntryNotFoundError,
+        RepositoryNotFoundError,
+        RevisionNotFoundError,
+    )
+
+    state, _, _, _ = hub
+    for missing in (RemoteEntryNotFoundError, RepositoryNotFoundError, RevisionNotFoundError):
+        state["download"] = _hub_error(missing)
+        assert checkpoint_kind("org/repo") is None, missing
+    # An authorization error, and what hf_hub_download makes of a rate limit, a 5xx or the
+    # network being down: raised, never taken for a v1 checkpoint.
+    for error in (_hub_error(HfHubHTTPError, "401"), _hub_error(LocalEntryNotFoundError, "503")):
+        state["download"] = error
+        with pytest.raises(type(error)):
+            checkpoint_kind("org/repo")
+
+
+def test_hub_detection_raises_the_network_through_the_real_download(monkeypatch, tmp_path):
+    """No mock of hf_hub_download: its metadata request fails as the network does, and the
+    error it raises reaches the caller with the network's failure as its cause."""
+    import huggingface_hub.file_download as fd
+    from huggingface_hub import constants
+    from huggingface_hub.errors import LocalEntryNotFoundError
+
+    httpx = getattr(fd, "httpx2", None) or fd.httpx
+    monkeypatch.setattr(constants, "HF_HUB_OFFLINE", False)
+    monkeypatch.setattr(constants, "HF_HUB_CACHE", str(tmp_path / "hub"))
+
+    def down(*_a, **_k):
+        raise httpx.ConnectError("the network is down")
+
+    monkeypatch.setattr(fd, "get_hf_file_metadata", down)
+    with pytest.raises(LocalEntryNotFoundError) as e:
+        checkpoint_kind("org/decision-repo")
+    assert isinstance(e.value.__cause__, httpx.ConnectError)
+
+
+def test_a_mistyped_path_keeps_v1s_message(tmp_path):
+    """Neither a directory nor a repo id: detection says v1, and v1's loader explains."""
+    from typer.testing import CliRunner
+
+    typo = str(tmp_path / "no" / "such" / "checkpoint")
+    assert checkpoint_kind(typo) is None
+    out = CliRunner().invoke(
+        cli.app, ["ask", typo, "--state", "x", "--noul", "y?", "--device", "cpu"]
+    )
+    assert out.exit_code != 0
+    assert "not a local directory" in str(out.exception)
+
+
+# ---- serving decisions: the details, the bound, the CLI ------------------------------------
+
+
+def test_a_422_never_names_a_local_path(tmp_path, monkeypatch):
+    from strands_decider.backends import transformers as tb
+
+    path = decision_checkpoint(tmp_path / "leak", GEMMA4)
+
+    def unreadable(p, unified):
+        raise OSError(f"{p}/processor_config.json: permission denied")
+
+    monkeypatch.setattr(tb, "load_image_processor", unreadable)
+    with pytest.warns(UserWarning, match="permission denied"):
+        app = server.create_app(str(path), device="cpu", warmup=False)
+        with TestClient(app) as client:
+            r = client.post("/v1/systemone", json=request([image_b64(64, 48)]))
+    assert r.status_code == 422
+    assert (
+        r.json()["detail"]
+        == "the image processor could not be built, so image requests are refused"
+    )
+    assert str(tmp_path) not in r.text
+
+
+def test_the_engine_answers_as_the_core_does(ckpt):
+    """The engine renders once and runs the backend and readout itself; the result is
+    core.evaluate's."""
+    from strands_decider.core import evaluate
+
+    engine = load_decision_engine(str(ckpt), device="cpu", model_name="t")
+    for req in (
+        request(),
+        request([image_b64(64, 48), image_b64(50, 90, "JPEG")]),
+        request(state=""),
+    ):
+        want = evaluate(
+            req, engine.tokenizer, engine.readout, engine.config, engine.backend, model_name="t"
+        )
+        assert (
+            engine.evaluate(req).model_dump() == SystemOneResponse.model_validate(want).model_dump()
+        )
+
+
+class _SlowBackend(_StubBackend):
+    def forward(self, state, questions, images=()):
+        import time
+
+        time.sleep(0.4)
+        return super().forward(state, questions, images)
+
+
+def test_a_full_engine_answers_503_and_refusals_do_not_wait(ckpt, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+
+    from strands_decider import decision
+
+    monkeypatch.setattr(decision, "_LOADERS", dict(decision._LOADERS))
+    decision.register_backend(["slow"], lambda path, **kw: _SlowBackend(path, **kw))
+    app = server.create_app(str(ckpt), device="slow", warmup=False, queue_timeout=0.1)
+    with TestClient(app) as client:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            first = pool.submit(client.post, "/v1/systemone", json=request())
+            import time
+
+            time.sleep(0.1)  # the first holds the only slot
+            second = pool.submit(client.post, "/v1/systemone", json=request())
+            started = time.perf_counter()
+            refused = client.post("/v1/systemone", json={**request(), "audio": ["x"]})
+            assert refused.status_code == 422 and time.perf_counter() - started < 0.3
+            assert second.result().status_code == 503 and "busy" in second.result().json()["detail"]
+            assert first.result().status_code == 200
+
+
+@pytest.mark.skipif(not __import__("torch").backends.mps.is_available(), reason="needs Apple's MPS")
+def test_serve_on_mps_answers_concurrent_requests_alike(ckpt):
+    from concurrent.futures import ThreadPoolExecutor
+
+    body = request([image_b64(64, 48)])
+    app = server.create_app(str(ckpt), device="mps", warmup=False, max_concurrency=3)
+    with TestClient(app) as client:
+        with ThreadPoolExecutor(max_workers=6) as pool:
+            got = list(pool.map(lambda _: client.post("/v1/systemone", json=body), range(6)))
+    assert all(r.status_code == 200 for r in got)
+    assert len({json.dumps(r.json()["answers"], sort_keys=True) for r in got}) == 1
+
+
+def test_serve_command_options(ckpt, tmp_path, monkeypatch):
+    """`serve` takes --dtype, --max-concurrency, --queue-timeout and --revision for decision
+    checkpoints, refuses them for v1 ones and refuses an intermediate checkpoint, each before
+    anything is announced."""
+    import uvicorn
+    from typer.testing import CliRunner
+
+    started = []
+    monkeypatch.setattr(uvicorn, "run", lambda app, **kw: started.append((app, kw)))
+    args = ["serve", str(ckpt), "--device", "cpu", "--no-warmup", "--dtype", "bfloat16",
+            "--max-concurrency", "2", "--queue-timeout", "5"]  # fmt: skip
+    out = CliRunner().invoke(cli.app, args)
+    assert out.exit_code == 0, out.output
+    [(app, kw)] = started
+    assert kw == {"host": "127.0.0.1", "port": 8000, "workers": 1}
+    with TestClient(app) as client:
+        health = client.get("/health").json()
+    assert (health["dtype"], health["max_concurrency"], health["queue_timeout"]) == (
+        "bfloat16",
+        2,
+        5.0,
+    )
+    for bad, hint in (
+        (
+            [str(tmp_path), "--device", "cpu", "--max-concurrency", "2"],
+            "--max-concurrency is for decision",
+        ),
+        ([str(tmp_path), "--device", "cpu", "--dtype", "bfloat16"], "--dtype is for decision"),
+        ([str(intermediate_checkpoint(tmp_path / "mid")), "--device", "cpu"], "intermediate"),
+        ([str(ckpt), "--device", "cpu", "--dtype", "float16"], "--dtype on cpu is one of"),
+        ([str(ckpt), "--device", "cuda:x"], "a device index is a number"),
+    ):
+        out = CliRunner().invoke(cli.app, ["serve", *bad])
+        assert out.exit_code == 2 and "serving" not in out.output, out.output
+        assert hint in " ".join(out.output.split()).replace("│ ", ""), out.output
+    assert len(started) == 1
+
+
+def test_ask_reports_a_refused_request_as_a_usage_error(tmp_path, monkeypatch):
+    import base64
+
+    from typer.testing import CliRunner
+
+    path = decision_checkpoint(tmp_path / "t", GEMMA4, decision={"inputs": ["text"]})
+    img = tmp_path / "x.png"
+    img.write_bytes(base64.b64decode(image_b64(64, 48)))
+    monkeypatch.setattr(cli, "_exit_fast", False)
+    args = [
+        "ask",
+        str(path),
+        "--state",
+        "x",
+        "--noul",
+        "y?",
+        "--image",
+        str(img),
+        "--device",
+        "cpu",
+    ]
+    out = CliRunner().invoke(cli.app, args)
+    assert out.exit_code == 2 and "does not take images" in " ".join(out.output.split())
+
+
+# ---- the backend registry ---------------------------------------------------------------
+
+
+def test_the_registry_checks_what_it_is_given(monkeypatch):
+    from strands_decider import decision
+
+    monkeypatch.setattr(decision, "_LOADERS", dict(decision._LOADERS))
+    monkeypatch.setattr(decision, "BACKENDS", dict(decision.BACKENDS))
+    with pytest.raises(ValueError, match="register device kinds"):
+        decision.register_backend(["cuda:1"], lambda *a, **k: None)
+    with pytest.raises(ValueError, match="a device index is a number"):
+        decision.check_device("cuda:x")
+    decision.check_device("cuda:1")
+    # Editing BACKENDS after a first load takes effect: imported loaders are kept by path.
+    first = decision.backend_loader("cpu")
+    decision.BACKENDS["cpu"] = "strands_decider.decision:refuse_intermediate"
+    assert decision.backend_loader("cpu") is decision.refuse_intermediate is not first
+    # A loader's own dtypes decide what --dtype may be.
+
+    def loader(path, **kw):
+        return _StubBackend(path, **kw)
+
+    loader.dtypes = ("float16",)
+    decision.register_backend(["half"], loader)
+    decision.check_dtype("half", "float16")
+    with pytest.raises(ValueError, match="one of float16"):
+        decision.check_dtype("half", "bfloat16")

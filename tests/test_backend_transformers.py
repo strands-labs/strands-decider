@@ -247,6 +247,7 @@ def test_every_layer_gets_the_prefix_bidir_mask(backends, kind, recorder, images
     assert len(rest) == nl * len(batches)
     for b, qs in enumerate(batches):
         width = max(map(len, qs))
+        width += width % 64 == 1  # never a 64k+1-wide pass over the state
         for _, m in rest[b * nl : (b + 1) * nl]:
             assert m.shape == (len(qs), 1, width, s + width)
             for row, q in enumerate(qs):
@@ -312,6 +313,18 @@ def test_state_reuse_is_the_full_pass(backends, kind, images):
     assert read(a, ck.readout, ck.config, r, inputs="hidden") == read(
         b, ck.readout, ck.config, r, inputs="hidden"
     )
+
+
+def test_no_pass_over_the_state_is_64k_plus_1_wide(backends, recorder):
+    """A batch whose longest question is 65 tokens runs 66 wide: one more masked column."""
+    _, reuse = backends
+    _, state, _ = _rendered(reuse, request())
+    g = np.random.default_rng(1)
+    vocab = reuse.checkpoint.tokenizer().get_vocab_size()
+    qs = [[int(t) for t in g.integers(10, vocab - 10, n)] for n in (65, 40)]
+    reuse.forward(state, qs)
+    widths = {m.shape[2] for _, m in recorder.calls if m.shape[2] != len(state)}
+    assert widths == {66}
 
 
 def test_one_question_is_one_full_pass(backends):
@@ -906,23 +919,26 @@ def test_an_image_processor_that_cannot_be_built_refuses_images_only(tmp_path, m
     path = decision_checkpoint(tmp_path / "p", GEMMA4)
 
     def missing(*_a, **_k):
-        raise AttributeError("module 'transformers' has no attribute 'Gemma4ImageProcessorPil'")
+        raise OSError(f"{path}/processor_config.json is unreadable")
 
     monkeypatch.setattr(tb, "load_image_processor", missing)
-    with pytest.warns(UserWarning, match="could not be built"):
+    with pytest.warns(UserWarning, match="processor_config.json is unreadable"):
         backend = tb.TransformersBackend.load(str(path))
-    assert backend.inputs == ("text",) and "Gemma4ImageProcessorPil" in backend.image_problem
+    # Clients get a fixed reason; the error, with its local path, is only in the warning.
+    assert backend.inputs == ("text",) and backend.image_problem == tb.PROCESSOR_FAILED
+    assert str(path) not in backend.image_problem
     ck = backend.checkpoint
     assert evaluate(request(), ck.tokenizer(), ck.readout, ck.config, backend)["answers"]
 
 
-def test_a_readout_of_the_wrong_width_is_refused_at_load(tmp_path):
+def test_a_readout_of_the_wrong_width_is_refused_before_the_weights_load(tmp_path, monkeypatch):
     from safetensors.torch import save_file
 
     path = decision_checkpoint(tmp_path / "w", GEMMA4)
     save_file(
         {"weight": torch.zeros(255, 32, dtype=torch.bfloat16)}, str(path / "readout.safetensors")
     )
+    monkeypatch.setattr(tb, "_load_model", lambda *a, **k: pytest.fail("loaded the weights"))
     with pytest.raises(ValueError, match=r"not \[255, 64\]"):
         tb.TransformersBackend.load(str(path))
 
@@ -1012,18 +1028,26 @@ def test_the_engine_bounds_concurrent_requests(backends, monkeypatch, slots):
     monkeypatch.setattr(full, "forward", peak)
     got = _threads(lambda: engine.evaluate(request()).model_dump())
     assert all(g == want for g in got)
-    assert peak.peak == slots
+    # One slot: never two at once. More: never past the bound (overlap depends on timing).
+    assert peak.peak == 1 if slots == 1 else 1 <= peak.peak <= slots
 
 
 @pytest.mark.skipif(not MPS, reason="needs Apple's MPS")
-def test_mps_calls_take_turns(ckpt, kind, monkeypatch):
-    backend = tb.TransformersBackend.load(str(ckpt), device="mps", images=IMAGING[kind])
-    _, state, questions = _rendered(backend, request())
-    want = backend.forward(state, questions)
-    peak = _Peak(backend._decode, hold=0.02)
-    monkeypatch.setattr(backend, "_decode", peak)
-    got = _threads(lambda: backend.forward(state, questions), n=4)
-    assert all(np.array_equal(g, want) for g in got) and peak.peak == 1
+def test_mps_calls_take_turns_across_backends(ckpt, kind, monkeypatch):
+    """Metal aborts on two threads at once, whichever backend each runs: two backends over
+    one model on MPS share one lock."""
+    one = tb.TransformersBackend.load(str(ckpt), device="mps", images=IMAGING[kind])
+    two = tb.TransformersBackend(
+        one.model, one.checkpoint, device="mps", dtype=one.dtype, reuse_state=False
+    )
+    _, state, questions = _rendered(one, request())
+    want = [b.forward(state, questions) for b in (one, two)]
+    peak = _Peak(lambda f, *a, **k: f(*a, **k), hold=0.02)
+    for b in (one, two):
+        monkeypatch.setattr(b, "_decode", lambda *a, _f=b._decode, **k: peak(_f, *a, **k))
+    got = _threads(lambda: [b.forward(state, questions) for b in (one, two)], n=4)
+    assert peak.peak == 1
+    assert all(np.array_equal(g[i], want[i]) for g in got for i in (0, 1))
 
 
 def test_an_intermediate_checkpoints_float32_readout_is_rounded_to_bf16(tmp_path):

@@ -102,6 +102,22 @@ def serve_cmd(
         help="Decision checkpoints: float32 or bfloat16. Default: float32 on cpu, bfloat16 on "
         "cuda and mps.",
     ),
+    max_concurrency: int | None = typer.Option(
+        None,
+        "--max-concurrency",
+        help="Decision checkpoints: requests run on the model at once (default 1); the others "
+        "wait.",
+    ),
+    queue_timeout: float = typer.Option(
+        60.0,
+        "--queue-timeout",
+        help="Decision checkpoints: seconds a request waits for the model before a 503.",
+    ),
+    revision: str | None = typer.Option(
+        None,
+        "--revision",
+        help="Decision checkpoints on the Hub: the branch, tag or commit to load.",
+    ),
     warmup: bool = typer.Option(
         True,
         "--warmup/--no-warmup",
@@ -109,24 +125,32 @@ def serve_cmd(
     ),
 ) -> None:
     """Serve POST /v1/systemone. JevBench's typesafe adapter runs against it unchanged."""
-    from .server import serve
+    import uvicorn
+
+    from .server import create_app
 
     selected_device = resolve_device(device)
+    try:  # the checks that refuse the arguments run here, before anything is announced
+        app_ = create_app(
+            checkpoint,
+            device=selected_device,
+            use_prefix_cache=not no_prefix_cache,
+            model_name=model_name,
+            max_batch=max_batch,
+            vision=vision,
+            max_batch_tokens=max_batch_tokens,
+            device_map=device_map,
+            warmup=warmup,
+            dtype=dtype,
+            max_concurrency=max_concurrency,
+            queue_timeout=queue_timeout,
+            revision=revision,
+        )
+    except ValueError as e:
+        raise typer.BadParameter(str(e)) from e
     console.print(f"[green]serving[/] {checkpoint} on http://{host}:{port} ({selected_device})")
-    serve(
-        checkpoint,
-        host=host,
-        port=port,
-        device=selected_device,
-        use_prefix_cache=not no_prefix_cache,
-        model_name=model_name,
-        max_batch=max_batch,
-        vision=vision,
-        max_batch_tokens=max_batch_tokens,
-        device_map=device_map,
-        warmup=warmup,
-        dtype=dtype,
-    )
+    # Single worker: the model owns the GPU, and forking more would just duplicate it.
+    uvicorn.run(app_, host=host, port=port, workers=1)
 
 
 @app.command("ask")
@@ -153,6 +177,11 @@ def ask_cmd(
         "Auto-detected when omitted: cuda > mps > cpu; mlx only when asked for.",
     ),
     as_json: bool = typer.Option(False, "--json", help="Print the raw API response."),
+    revision: str | None = typer.Option(
+        None,
+        "--revision",
+        help="Decision checkpoints on the Hub: the branch, tag or commit to load.",
+    ),
     dtype: str | None = typer.Option(
         None,
         "--dtype",
@@ -186,24 +215,32 @@ def ask_cmd(
     selected_device = resolve_device(device)
     from .decision import DECISION, INTERMEDIATE, checkpoint_kind, refuse_intermediate
 
-    kind = checkpoint_kind(checkpoint)
+    kind = checkpoint_kind(checkpoint, revision=revision)
     if kind == INTERMEDIATE:
         raise typer.BadParameter(str(refuse_intermediate(checkpoint)))
     if kind == DECISION:
         # A decision checkpoint (docs/spec.md): images go in the request, and the checkpoint's
         # decision_config.json says whether it takes them.
-        from .decision import DTYPES, check_device, load_decision_engine
+        from .decision import RequestRefused, check_device, check_dtype, load_decision_engine
 
         try:
             check_device(selected_device)
         except ValueError as e:
             raise typer.BadParameter(str(e), param_hint="--device") from e
-        if dtype is not None and dtype not in DTYPES:
-            raise typer.BadParameter(f"one of {DTYPES}", param_hint="--dtype")
-        engine = load_decision_engine(checkpoint, device=selected_device, dtype=dtype)
-        response = engine.ask(state, questions, _base64_files(image))
-    elif dtype is not None:
-        raise typer.BadParameter("--dtype is for decision checkpoints", param_hint="--dtype")
+        try:
+            check_dtype(selected_device, dtype)
+        except ValueError as e:
+            raise typer.BadParameter(str(e), param_hint="--dtype") from e
+        engine = load_decision_engine(
+            checkpoint, device=selected_device, dtype=dtype, revision=revision
+        )
+        try:
+            response = engine.ask(state, questions, _base64_files(image))
+        except RequestRefused as e:  # the request's fault: an image or a prompt it refuses
+            raise typer.BadParameter(str(e)) from e
+    elif dtype is not None or revision is not None:
+        flag = "--dtype" if dtype is not None else "--revision"
+        raise typer.BadParameter(f"{flag} is for decision checkpoints", param_hint=flag)
     elif image:
         from .vision import load_vision_engine
 
