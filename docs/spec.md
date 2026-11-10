@@ -2,7 +2,7 @@
 
 This document defines the Strands Decider decision interface, which the Strands Decider v2 models use. It specifies how a request, its text and its images, becomes token ids, how the decoder attends over them, how its output becomes answers, which files a checkpoint carries, and what a runtime must do to conform. Any runtime that follows it, in any language, gives answers within section 10's bounds of the reference's for the same checkpoint: PyTorch, vLLM, MLX, llama.cpp, or numpy behind a remote decoder.
 
-The reference implementation of the torch-free half is `strands_decider.core` (`src/strands_decider/core/`). It needs only `tokenizers`, numpy and the Python standard library; it reads images from their file headers and needs no imaging library. The `strands-decider` distribution declares both, but it also requires torch and transformers for v1's engines, so installing it installs torch. A torch-free install, for AWS Lambda for one, needs a separate distribution or an extra without torch; which one is not yet decided (section 12). Its tests are `tests/test_core_prompt.py`, `tests/test_core_readout.py`, `tests/test_core_config.py` and `tests/test_core_images.py`, and the render goldens are `tests/fixtures/core/render_goldens.json`. The core sits beside the v1 engines (`infer.py`, `hidden_engine.py`, `mlx_engine.py`); they and their checkpoints are unchanged.
+The reference implementation of the torch-free half is `strands_decider.core` (`src/strands_decider/core/`). It needs only `tokenizers`, numpy and the Python standard library; it reads images from their file headers and needs no imaging library, except for `resize_image`, a helper for runtimes that imports Pillow when it is called. The `strands-decider` distribution declares both, but it also requires torch and transformers for v1's engines, so installing it installs torch. A torch-free install, for AWS Lambda for one, needs a separate distribution or an extra without torch; which one is not yet decided (section 12). Its tests are `tests/test_core_prompt.py`, `tests/test_core_readout.py`, `tests/test_core_config.py` and `tests/test_core_images.py`, and the render goldens are `tests/fixtures/core/render_goldens.json`. The core sits beside the v1 engines (`infer.py`, `hidden_engine.py`, `mlx_engine.py`); they and their checkpoints are unchanged.
 
 The interface keeps v1's request and response: the same `POST /v1/systemone` body, the same three question types and limits, and the same answer fields and confidence formulas. Three things change. Options are labelled with letter codes instead of numbers, and the readout scores the codes from the hidden state at the prompt's last token, where v1's pointer head compared the answer position with each option's last token. The state is encoded bidirectionally, and each question sees the whole prompt bidirectionally (the `prefix_bidir` mask). The model is Gemma 4, merged to one set of bf16 weights. A request may also carry images, as v1's may. The base model's own vision encoder reads them, and they go first inside `<state>`, laid out as v1 lays out images for Gemma 4 (strands-decider pull request 67).
 
@@ -484,7 +484,7 @@ Confidence uses v1's formulas, unchanged and shared as code (`src/strands_decide
 
 `temperature` and `final_logit_softcapping` divide the readout's logits in float32 (section 7), so each must also lie in float32's normal range, about 1.2e-38 to 3.4e38, and `final_logit_softcapping / temperature`, the largest final logit, must be finite in float32; a value outside these is an error.
 
-An integer is a JSON number written without a fraction or an exponent: `8192`, not `8192.0` or `8.192e3`, which are numbers of the wrong type. `format_version` is exactly `1`. Integers past the bounds in the table are errors, so that a runtime that holds them in 32 bits never overflows, and so is a number too large for a double, wherever a number is expected.
+An integer field holds a JSON number whose value is an integer, and a writer writes it without a fraction or an exponent: `8192`, not `8192.0` or `8.192e3`. The reference reader refuses `8192.0` and `8.192e3` as numbers of the wrong type; a reader whose JSON parser gives only doubles, and so cannot tell them from `8192`, accepts them, and a file a writer writes correctly reads alike in both. `format_version` is exactly `1`. Integers past the bounds in the table are errors, so that a runtime that holds them in 32 bits never overflows, and so is a number too large for a double, wherever a number is expected.
 
 Validation is strict. A missing required field, an unknown field at any level, and a value of the wrong type are errors, and a runtime refuses the checkpoint. A runtime must refuse a `prompt` it does not implement, rather than fall back to another; a later variant gets a new name. A runtime refuses a prompt longer than `max_length_validated` tokens unless its operator raises the limit explicitly, and it refuses rather than truncates. Training-side records, such as data paths, hyperparameters and the inputs to a weight average, do not belong in this file.
 
@@ -547,27 +547,37 @@ A converted artifact for another runtime carries the model in that runtime's for
 
 ## 10. Golden vectors and conformance
 
-Three kinds of golden data pin the interface: render goldens the prompt, pixel goldens an image's pixels (section 11.1), and model goldens a checkpoint's answers.
+Four kinds of golden data pin the interface: render goldens the prompt, pixel goldens an image's pixels (section 11.1), readout goldens the readout, and model goldens a checkpoint's answers.
 
-Render goldens fix the prompt. `tests/fixtures/core/render_goldens.json` holds, for each case and variant, the request, the state text, S, the state ids, for a request with images each image's format, width, height, sha256, N and span, and for each question its text, ids, codes, code token ids and bound options. They depend only on the tokenizer and, through N, on the image processor's three settings. A conforming runtime reproduces them exactly: the same ids, the same S, the same spans, the same codes. There is no tolerance. Their images are small synthetic files in `tests/fixtures/core/images`, drawn deterministically by `tests/core_support.py` and checked in, and the goldens carry them in their requests as base64.
+Render goldens fix the prompt. `tests/fixtures/core/render_goldens.json` holds, for each case and variant, the request (and, for a request given as JSON text, its `body`), the state text, S, the state ids, for a request with images each image's format, width, height, sha256, N and span, and for each question its text, ids, codes, code token ids and bound options. They depend only on the tokenizer and, through N, on the image processor's three settings. A conforming runtime reproduces them exactly: the same ids, the same S, the same spans, the same codes. There is no tolerance. Their images are small synthetic files in `tests/fixtures/core/images`, drawn deterministically by `tests/core_support.py` and checked in, and the goldens carry them in their requests as base64.
 
-Model goldens fix the answers of one checkpoint. Each checkpoint release publishes `golden_vectors.jsonl` in its directory. Each line holds a request, with its images as base64, its rendered ids per question and each image's span, and the reference code probabilities per question, computed by the reference runtime: the model in bf16, weights and activations, one prompt per forward pass under the `prefix_bidir` mask, then the readout in section 7.1's precision regime. For images the reference runtime prepares the pixels as section 11.1 says, decoding them and resizing them with `resize_image`, then with `Gemma4ImageProcessorPil` (`Gemma4UnifiedImageProcessor` for the 12B) with its own resize off, and runs the checkpoint's vision encoder and projection in bf16. The reference runtime is the PyTorch model with the `prefix_bidir` mask behind `strands_decider.core.evaluate`; it is not part of this torch-free core. The set covers every question type, both short and long states up to `max_length_validated`, and choices with many options. For a checkpoint whose `inputs` hold `image` it also covers image requests: one image; up to four of different sizes, formats and aspect ratios, extreme ones included; an image with an empty state; and images beside a long state.
+Readout goldens fix the readout apart from any decoder. `tests/fixtures/core/readout_goldens.json` holds a synthetic bf16 weight [255, 32] (its bf16 bits, little-endian, row by row, in base64), the soft-cap, and cases each of a hidden state, in bf16 or in float32, a temperature, the bf16 logits z of section 7.1 and, for k of 2, 3, 7, 40 and 255, the probabilities of the first k codes. The weight's rows are scaled so that logits fall where bf16's spacing is 0.125 and past the cap, and the temperatures run from 0.05 to 1.9. A conforming readout gives every z within one bf16 step of the golden's (exactly, where its GEMM sums exactly), and every probability within 1e-5. These goldens see what the bounds on model goldens can miss, among them a skipped soft-cap, a doubled temperature and an unrounded hidden state, each of which moves their probabilities by more than 1e-3; `tests/test_core_readout.py` checks the core and an independent reimplementation of `strands-decider-vllm`'s arithmetic against them.
 
-A runtime conforms for a checkpoint when, on that checkpoint's model goldens:
+Model goldens fix the answers of one checkpoint. Each checkpoint release publishes `golden_vectors.jsonl` in its directory. Each line is a JSON object holding a request, with its images as base64 (`request`), its prompt (`variant`), its `state_ids` and each image's `sha256` and `span` (`images`), and, under `questions`, for each question by name its `question_ids`, its `codes` and the reference's code probabilities (`probabilities`, one per code in code order), computed by the reference runtime: the model in bf16, weights and activations, one prompt per forward pass under the `prefix_bidir` mask, then the readout in section 7.1's precision regime. For images the reference runtime prepares the pixels as section 11.1 says, decoding them and resizing them with `resize_image`, then with `Gemma4ImageProcessorPil` (`Gemma4UnifiedImageProcessor` for the 12B) with its own resize off, and runs the checkpoint's vision encoder and projection in bf16. The reference runtime is the PyTorch model with the `prefix_bidir` mask behind `strands_decider.core.evaluate`; it is not part of this torch-free core. The set covers every question type, both short and long states up to `max_length_validated`, and choices with many options, in at least 1,000 questions, so that the 98% bound means something: on 200 questions, a runtime at 98.8% would fail it about one time in seven. For a checkpoint whose `inputs` hold `image` it also covers image requests: one image; up to four of different sizes, formats and aspect ratios, extreme ones included; an image with an empty state; and images beside a long state.
+
+A runtime conforms for a checkpoint when, on that checkpoint's model goldens, at least 1,000 questions:
 
 1. its rendered ids equal the goldens' ids for every question;
-2. running the weights in bf16, its top-1 code (the code with the highest probability) agrees with the reference's on at least 98% of the questions, and its mean |Δp| is at most 0.02;
-3. running quantized weights, it meets the bounds recorded for that format in the table below.
+2. with bf16 weights, whatever the precision of its activations (bf16, or float32 as llama.cpp and MLX may run them), its top-1 code (the code with the highest probability, the first in code order on a tie) agrees with the reference's on at least 98% of the questions, and its mean |Δp| is at most 0.02;
+3. with quantized weights, it meets the bounds recorded for that format and size in the table below.
 
-A question's |Δp| is the largest absolute difference between the runtime's probability and the reference's for any of the question's options; the mean |Δp| is its average over the goldens' questions. The top-1 bound alone cannot see the errors that section 7.1 exists to prevent: the soft-cap and the temperature are both monotone, so a runtime that skips the cap, or applies T twice, keeps every top-1 code and still gets every `noul`, `score`, `probabilities` and `confidence` wrong. The probability bound does see them. Measured against the reference, vLLM (`strands-decider-vllm`) and transformers at all five sizes have a mean |Δp| of 0.0033 to 0.0119.
+A question's |Δp| is the largest absolute difference between the runtime's probability and the reference's for any of the question's codes; the mean |Δp| is its average over the goldens' questions. `strands_decider.core.agreement` computes both from two sets of probabilities, and `read_golden_vectors` reads the reference's from a `golden_vectors.jsonl`, so that every runtime measures them the same way; `Agreement.conforms` applies the bounds and the minimum number of questions.
+
+The top-1 bound alone cannot see the errors that section 7.1 exists to prevent: the soft-cap and the temperature are both monotone, so a runtime that skips the cap, or applies T twice, keeps every top-1 code and still gets `noul`, `score`, `probabilities` and `confidence` wrong. The probability bound sees such an error where logits are large enough for the cap to bend them, or the temperature is far from 1, but not always: where a checkpoint's code logits stay within about ±5, a skipped cap moves a question's probabilities by about 0.02 at most, and with T near 1 (0.95, say) a doubled temperature can move them by about 0.01, both within the bound. The readout goldens above catch both. Correct runtimes, vLLM (`strands-decider-vllm`) and the transformers backend at all five sizes, each measured against the reference's probabilities, have a mean |Δp| of 0.0033 to 0.0119, so the bound cannot be tightened to catch them.
 
 | weight format | top-1 agreement | mean \|Δp\| |
 | --- | --- | --- |
 | bf16 | at least 98% | at most 0.02 |
 | MLX 8-bit, group size 64, at E2B | at least 98% | at most 0.02 |
-| other quantized formats (for example MLX 4-bit, GGUF Q8_0 or Q4_K_M), and MLX 8-bit at other sizes | set from measurement when the format is first published, and recorded here | the same |
+| GGUF Q8_0 (llama.cpp), at E2B | at least 98% | at most 0.02 |
+| other quantized formats, and MLX 8-bit or GGUF Q8_0 at other sizes | none recorded | none recorded |
 
-MLX 8-bit's bounds are bf16's. They were set from its measurement against the reference at E2B, on 1,200 prompts, of 98.83% top-1 agreement and a mean |Δp| of 0.0099, and were measured at E2B only, so they are recorded for E2B only; no other size, and no other quantized format, has a recorded bound yet. A quantized artifact whose format and size have no recorded bounds makes no conformance claim.
+Both quantized rows have bf16's bounds, and both were measured at E2B only, so they hold for E2B only. Neither was measured on model goldens: both were measured on the intermediate E2B checkpoint, against the reference's probabilities on the 1,200 parity prompts.
+
+- MLX 8-bit, group size 64: 98.83% top-1 agreement and a mean |Δp| of 0.0099.
+- GGUF Q8_0, from llama.cpp: 99.08% top-1 agreement and a mean |Δp| of 0.0104. On images, its answers to 104 of 104 questions over 40 photos agreed with the transformers bf16 reference, with a mean |Δp| of 0.0076.
+
+GGUF formats below Q8_0 failed parity in earlier measurements and have no recorded bound; no other quantized format has one either. A quantized artifact whose format and size have no recorded bounds makes no conformance claim.
 
 ## 11. The runtime interface
 
@@ -581,7 +591,7 @@ A runtime runs the model. Given the state ids (positions [0, S)), the state's im
 | `final_logits` | `tanh(z / c) * c / T`: both applied, as `strands-decider-vllm`'s model returns them at the code ids | the softmax |
 | `probabilities` | the codes' probabilities: the question's k, or all 255 | renormalisation over the question's k codes |
 
-A row of logits or probabilities holds the codes in code order, either all 255 or only the question's first k, so rows may differ in width. The core refuses capped logits beyond ±c and final logits beyond ±c / T: such a row cannot be what its stage says, which is how raw logits passed as capped usually show.
+A row of logits or probabilities holds the codes in code order, either all 255 or only the question's first k, so rows may differ in width. The core refuses capped logits beyond ±c and final logits beyond ±c / T: such a row cannot be what its stage says. This catches raw logits passed as capped, or as final, only where some |z| exceeds the bound; raw logits within it, and capped logits passed as final at T ≤ 1, pass unseen, and only the stage's name prevents them.
 
 `strands-decider-vllm` is a `probabilities` runtime. A completion with `allowed_token_ids` set to the question's k code ids, `logprobs` k and `temperature` 1.0, under `--logprobs-mode processed_logprobs`, returns the log-softmax of the model's final logits over exactly those k codes; their exponentials are the row. This is the form to use. vLLM refuses `logprobs` above its `--max-logprobs` setting, 20 by default, so the server needs `--max-logprobs 255` for questions of up to 255 options (`strands-decider-vllm serve` sets it). A completion with `logprobs` 255 and no `allowed_token_ids` returns the softmax over all 255 codes, which renormalises to the same row in exact arithmetic, but not always in float32: at a small temperature the question's own codes can all lie so far below a code outside the question that their probabilities underflow to 0, and the core refuses such a row (`probabilities must ... not all be 0`). The k-wide form cannot underflow so, because its largest probability is at least 1/k.
 
@@ -593,17 +603,27 @@ class Backend(Protocol):
     outputs: str
 
     def forward(
+        self, state: list[int], questions: list[list[int]]
+    ) -> np.ndarray | Sequence[np.ndarray]:
+        """One row per question, in order, of the stage `outputs` names: each question run
+        under prefix_bidir after the shared state, read at its last token."""
+
+
+class ImageBackend(Backend, Protocol):
+    # What forward takes: ("text", "image").
+    inputs: tuple[str, ...]
+
+    def forward(
         self,
         state: list[int],
         questions: list[list[int]],
         images: Sequence[RenderedImage] = (),
     ) -> np.ndarray | Sequence[np.ndarray]:
-        """One row per question, in order, of the stage `outputs` names: each question run
-        under prefix_bidir after the shared state, read at its last token. `images` are the
-        state's, in order, each with its file and the span of its placeholders in `state`."""
+        """As Backend.forward. `images` are the state's, in order, each with its file and
+        the span of its placeholders in `state`."""
 ```
 
-A backend may also have an `inputs` attribute, which says what `forward` takes: `("text",)`, or `("text", "image")` for a backend with an image path. A backend without it takes text only. It is not a member of the protocol, so that a text-only backend need not define it.
+A text-only backend is a `Backend`: it need define neither `inputs` nor an `images` argument. A backend with an image path is also an `ImageBackend`: its `inputs` say what `forward` takes, `("text", "image")`, and its `forward` takes the images. The core passes `images` only when a request has some, and only to a backend whose `inputs` hold `image`; a backend without `inputs` takes text only.
 
 `strands_decider.core.evaluate(request, tokenizer, readout, config, backend)` joins the pieces. It refuses a backend that does not name its stage, and refuses a request with images as section 11.1 says. It renders the request with the checkpoint's prompt and checks, before the decoder runs, everything that does not need it: the stage, that the readout's soft-cap is the checkpoint's, that a `hidden` backend has a readout weight with a row per code, and that the rendered code token ids are the checkpoint's `token_ids`. It then calls `forward` once with the shared state and every question, and with the images if there are any, reads the answers from the stage the backend names, and returns a `SystemOneResponse` as JSON. Its parts are public: `read(rows, readout, config, rendered, stage=stage)` gives the answers and `question_probabilities` the code probabilities, from rows of any stage, where `stage` is required (`inputs`, its former name, still works and warns that it is deprecated); `readout_logits` is the bf16 GEMM; `answer(rendered_question, probabilities)` formats one answer. As with v1's backend, a runtime may batch, cache the state's keys and values (keyed as section 6 says), or split the work across devices, provided each question's result is what it would be alone.
 

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 import numpy as np
 
@@ -33,13 +33,30 @@ class Backend(Protocol):
         "final_logits"   tanh(z / c) * c / T, both applied (as strands-decider-vllm returns them)
         "probabilities"  the codes' probabilities: the question's k, or all 255
 
-    An optional attribute, `inputs`, says what `forward` takes, as decision_config.json's
-    `inputs` names it: ("text",), or ("text", "image") for a backend with an image path. A
-    backend without it takes text only, and the core refuses image requests for it. It is
-    not a member of this protocol, so that a text-only backend need not define it.
+    A text-only backend is this protocol. A backend with an image path is also an
+    `ImageBackend`: it has `inputs`, and its `forward` takes `images`.
     """
 
     outputs: str
+
+    def forward(
+        self, state: list[int], questions: list[list[int]]
+    ) -> np.ndarray | Sequence[np.ndarray]:
+        """Run each question as a continuation of the state, under the prefix_bidir mask,
+        seeing no other question: positions 0..S-1 for the state, S.. for the question.
+        Return one row per question, in the order of `questions`, of the stage `outputs`
+        names: an array [len(questions), width], or a sequence of rows (whose widths may
+        differ, as each question's k does)."""
+        ...
+
+
+class ImageBackend(Backend, Protocol):
+    """A backend with an image path. `inputs` says what `forward` takes, as
+    decision_config.json's `inputs` names it: ("text", "image"). The core passes `images`
+    only when the request has some, and only to a backend whose `inputs` hold "image"; a
+    backend without `inputs` takes text only, and the core refuses image requests for it."""
+
+    inputs: tuple[str, ...]
 
     def forward(
         self,
@@ -47,17 +64,10 @@ class Backend(Protocol):
         questions: list[list[int]],
         images: Sequence[RenderedImage] = (),
     ) -> np.ndarray | Sequence[np.ndarray]:
-        """Run each question as a continuation of the state, under the prefix_bidir mask,
-        seeing no other question: positions 0..S-1 for the state, S.. for the question.
-        Return one row per question, in the order of `questions`, of the stage `outputs`
-        names: an array [len(questions), width], or a sequence of rows (whose widths may
-        differ, as each question's k does).
-
-        `images` are the state's images in order: each one's file (`data`), and the span
-        `[start, end)` of its N placeholders in `state`, which the backend fills with its
-        vision encoder's output for the image, preprocessed by the checkpoint's image
-        processor. The core passes `images` only when there are some, and only to a
-        backend whose `inputs` hold "image"."""
+        """As `Backend.forward`, with the state's images in order: each one's file (`data`),
+        and the span `[start, end)` of its N placeholders in `state`, which the backend fills
+        with its vision encoder's output for the image, preprocessed by the checkpoint's
+        image processor."""
         ...
 
 
@@ -123,7 +133,7 @@ def evaluate(
     state = list(rendered.state_ids)
     questions = [list(q.question_ids) for q in rendered.questions.values()]
     if rendered.images:
-        out = backend.forward(state, questions, images=rendered.images)
+        out = cast("ImageBackend", backend).forward(state, questions, images=rendered.images)
     else:
         out = backend.forward(state, questions)
     answers = read(out, readout, config, rendered, stage=stage, ordinal_smoothing=ordinal_smoothing)
