@@ -7,9 +7,12 @@
 #               probabilities from a reference, which gates top-1 agreement), prompts of about 1K tokens
 #   OUT_DIR     logs and JSON summaries, one directory per server
 # env: GPUS (default "0 1 2 3 4 5 6 7"; at least 6), PORT_BASE (8100), MAX_MODEL_LEN (8192), READY_S (1500)
+#      MM_MODEL       the same checkpoint in the multimodal layout, inputs ["text", "image"]: runs the image checks
+#      MM_TEXT_MODEL  a multimodal-layout checkpoint with inputs ["text"] (the image checks' text-only server)
 #
-# Run it with the vLLM environment active (vllm and ninja on PATH) and the plugin installed. Every server binds
-# 127.0.0.1, with vLLM's internal sockets on loopback, runs in its own process group and is stopped on exit.
+# Run it with the vLLM environment active (vllm and ninja on PATH) and the plugin installed, and with the core
+# library (strands_decider.core) importable for the image checks. Every server binds 127.0.0.1, with vLLM's internal
+# sockets on loopback, runs in its own process group and is stopped on exit.
 #
 # Servers, one GPU each unless noted:
 #   main      the README flags: malformed requests get 400 and the server stays healthy; cache and mixed batches
@@ -19,6 +22,12 @@
 #   resume    the same small cache, max_tokens check bypassed (tests/gpu/bypass_max_tokens): requests preempted
 #             mid-generation and resumed, without stopping the engine
 #   refusals  each unsafe flag in turn: the server must stop at startup with the plugin's message
+# Then, with MM_MODEL set, on the first GPUs once those servers have stopped:
+#   images    strands-decider-vllm serve on MM_MODEL (tests/gpu/server_client.py images): text, one, two and four
+#             images, refusals with the server still healthy, and the image-content cache test (a different image of
+#             the same size reuses nothing; a further question on the same image reuses its state)
+#   textonly  strands-decider-vllm serve on MM_TEXT_MODEL: images refused with the specification's message
+#   mmtext    vllm serve on MM_MODEL with the multimodal architecture: the text rows of main answered alike
 set -u
 MODEL=$(cd "$1" && pwd); ROWS=$(cd "$(dirname "$2")" && pwd)/$(basename "$2"); OUT=$3
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -144,4 +153,35 @@ cat "$OUT/refusals_a.txt" "$OUT/refusals_b.txt"
 for n in main nocache hub preempt resume; do
   grep -E "Traceback|EngineDeadError|EngineCore encountered" "$OUT/$n/server.log" > /dev/null && { echo "$n: engine error in server.log"; FAILED+=("$n-log"); }
 done
+
+if [ -n "${MM_MODEL:-}" ]; then
+  # Phase 2, on GPUs the first phase has released.
+  cleanup; PIDS=()
+  MM=$(cd "$MM_MODEL" && pwd)
+  SERVE=(python -m strands_decider_vllm serve)
+  startserve() {  # NAME GPU PORT MODEL [flags]: the plugin's own server
+    local name=$1 gpu=$2 port=$3 model=$4; shift 4
+    mkdir -p "$OUT/$name"
+    env CUDA_VISIBLE_DEVICES="$gpu" setsid "${SERVE[@]}" "$model" --host 127.0.0.1 --port "$port" \
+      --max-model-len "$MAXLEN" --gpu-memory-utilization 0.85 "$@" > "$OUT/$name/server.log" 2>&1 &
+    echo $! > "$OUT/$name/pid"; PIDS+=($!)
+  }
+  startserve images "${GPU[0]}" $((P + 60)) "$MM"
+  [ -n "${MM_TEXT_MODEL:-}" ] && startserve textonly "${GPU[1]}" $((P + 61)) "$(cd "$MM_TEXT_MODEL" && pwd)"
+  start mmtext "${GPU[2]}" $((P + 62)) VLLM_SERVER_DEV_MODE=0 -- "$MM" "${FLAGS[@]}" \
+    --hf-overrides '{"architectures": ["StrandsDeciderForConditionalGeneration"], "text_config": {"use_bidirectional_attention": null}}' \
+    --limit-mm-per-prompt '{"image": 4, "video": 0, "audio": 0}'
+  TEXTONLY=()
+  if [ -n "${MM_TEXT_MODEL:-}" ] && ready textonly $((P + 61)); then TEXTONLY=(--text-only "http://127.0.0.1:$((P + 61))"); fi
+  if ready images $((P + 60)); then
+    python -I "$HERE/server_client.py" images --url "http://127.0.0.1:$((P + 60))" "${TEXTONLY[@]}" \
+      --out "$OUT/images/client.json" > "$OUT/images/client.txt" 2>&1 || FAILED+=(images)
+    tail -1 "$OUT/images/client.txt"
+  else FAILED+=(images); fi
+  ready mmtext $((P + 62)) && client mmtext compare $((P + 62)) --expect "$OUT/main/client.json"
+  audit
+  for n in images mmtext; do
+    grep -E "Traceback|EngineDeadError|EngineCore encountered" "$OUT/$n/server.log" > /dev/null && { echo "$n: engine error in server.log"; FAILED+=("$n-log"); }
+  done
+fi
 if [ ${#FAILED[@]} -eq 0 ]; then echo "GPU checks: PASS"; else echo "GPU checks: FAIL (${FAILED[*]})"; exit 1; fi
