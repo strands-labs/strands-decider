@@ -27,13 +27,16 @@ import struct
 import zlib
 from dataclasses import dataclass, field
 
+from .text import strip
+
 # What v1 accepts (vision.IMAGE_FORMATS), named as Pillow names them.
 IMAGE_FORMATS = ("PNG", "JPEG", "WEBP", "GIF")
 # v1's limits (vision.VisionEngineConfig): images per request, and pixels per image.
 MAX_IMAGES = 4
 MAX_IMAGE_PIXELS = 4096 * 4096
-# v1's prefix rule (vision.decode_image), applied after stripping surrounding whitespace.
-DATA_URI = re.compile(r"^data:image/[\w.+-]+;base64,")
+# v1's prefix rule (vision.decode_image), applied after stripping surrounding whitespace, with
+# `\w` written out in ASCII so that it does not follow the interpreter's Unicode tables.
+DATA_URI = re.compile(r"^data:image/[A-Za-z0-9_.+-]+;base64,")
 
 # Gemma 4's image processor, as every Gemma 4 base's processor_config.json sets it
 # (Gemma4ImageProcessor for E2B, E4B, 26B-A4B and 31B; Gemma4UnifiedImageProcessor for 12B).
@@ -127,7 +130,7 @@ def decode_image(data: str, max_pixels: int = MAX_IMAGE_PIXELS) -> EncodedImage:
 
     `data` is base64, optionally behind a `data:image/...;base64,` prefix. The pixels are
     not decoded."""
-    payload = DATA_URI.sub("", data.strip())
+    payload = DATA_URI.sub("", strip(data))
     try:
         raw = _strict_b64decode(payload)
     except (binascii.Error, ValueError) as e:

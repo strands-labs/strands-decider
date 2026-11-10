@@ -10,6 +10,8 @@ read a request.
 
 from __future__ import annotations
 
+import math
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -30,6 +32,14 @@ NOUL_DEFAULT_CRITERIA = {
 }
 
 KINDS = ("noul", "choice", "score")
+# Request content is JSON, rendered by docs/spec.md's rules (Rendering content). Beyond v1's
+# checks the core refuses what those rules cannot render the same way everywhere: nesting
+# past MAX_DEPTH, non-finite numbers, integers past MAX_INT_DIGITS digits (Python's own
+# limit for int-to-str, from 3.10.7), lone surrogates, and anything that is not JSON.
+MAX_DEPTH = 100
+MAX_INT_DIGITS = 4300
+_INT_LIMIT = 10**MAX_INT_DIGITS
+_SURROGATE = re.compile("[\ud800-\udfff]")
 # v1's text-only engine refuses images with this message (hidden_engine.HiddenStateEngine);
 # `runtime.evaluate` gives it for a backend without an image path.
 NO_VISION = "this engine has no vision tower; images are not supported"
@@ -66,6 +76,44 @@ def _is_content(v: Any) -> bool:
     return isinstance(v, (str, dict, list))
 
 
+def check_json(value: Any, where: str) -> None:
+    """That `value` is JSON the template renders alike everywhere (docs/spec.md, Rendering
+    content): strings without lone surrogates, finite numbers, integers of at most 4,300
+    digits, objects with string keys, and nesting at most 100 levels deep (an object or an
+    array is one level deeper than the deepest value in it). ValueError, naming `where`,
+    otherwise."""
+    stack: list[tuple[Any, int]] = [(value, 1)]
+    while stack:
+        v, depth = stack.pop()
+        if isinstance(v, str):
+            if _SURROGATE.search(v):
+                raise ValueError(
+                    f"{where}: a string holds a lone surrogate (U+D800 to U+DFFF), which has "
+                    "no UTF-8 form"
+                )
+        elif v is None or isinstance(v, bool):
+            pass
+        elif isinstance(v, int):
+            if abs(v) >= _INT_LIMIT:
+                raise ValueError(f"{where}: an integer has more than {MAX_INT_DIGITS:,} digits")
+        elif isinstance(v, float):
+            if not math.isfinite(v):
+                raise ValueError(f"{where}: {v!r} is not a JSON number; numbers must be finite")
+        elif isinstance(v, (dict, list)):
+            if depth > MAX_DEPTH:
+                raise ValueError(f"{where}: JSON nested more than {MAX_DEPTH} levels deep")
+            if isinstance(v, dict):
+                for k in v:
+                    if not isinstance(k, str):
+                        raise ValueError(f"{where}: object keys must be strings, not {k!r}")
+                    stack.append((k, depth))
+                stack.extend((x, depth + 1) for x in v.values())
+            else:
+                stack.extend((x, depth + 1) for x in v)
+        else:
+            raise ValueError(f"{where}: a {type(v).__name__} is not a JSON value")
+
+
 def _infer_kind(q: Mapping[str, Any]) -> str:
     """v1 lets a question omit `type`; its union then picks the first model that fits."""
     crit = q.get("criteria")
@@ -90,7 +138,15 @@ def parse_question(name: str, q: Any) -> Question:
     if not _is_content(instructions):
         raise ValueError(f"question {name!r}: instructions must be a string, object or array")
     crit = q.get("criteria")
+    question = _parse_question(name, kind, instructions, crit)
+    check_json(question.instructions, f"question {name!r} instructions")
+    for option, description in zip(question.options, question.criteria, strict=True):
+        check_json(option, f"question {name!r} option {option!r}")
+        check_json(description, f"question {name!r} option {option!r}")
+    return question
 
+
+def _parse_question(name: str, kind: str, instructions: Any, crit: Any) -> Question:
     if kind == "noul":
         if crit is None:
             crit = {}
@@ -159,6 +215,7 @@ def parse_request(request: Any) -> Request:
     state = request["state"]
     if not _is_content(state):
         raise ValueError("state must be a string, object or array")
+    check_json(state, "state")
     questions = request.get("questions")
     if not isinstance(questions, Mapping) or not questions:
         raise ValueError("a request needs at least one question")

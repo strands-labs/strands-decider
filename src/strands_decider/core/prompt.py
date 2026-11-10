@@ -39,6 +39,7 @@ from typing import TYPE_CHECKING, Any
 from .codes import codes_for
 from .images import IMAGE_CLOSE, IMAGE_OPEN, IMAGE_SOFT, EncodedImage
 from .request import Question, Request, parse_request
+from .text import one_line, strip
 
 if TYPE_CHECKING:
     from tokenizers import Tokenizer
@@ -68,19 +69,17 @@ Piece = tuple[bool, str]
 def render_content(content: Any) -> str:
     """A state, instruction or description as text: v1's `prompting.render_content`.
 
-    A string is stripped; structured data is indented JSON with its key order kept, so
-    the same state always renders, and so tokenises, the same way.
+    A string is stripped of whitespace (`text.WHITESPACE`, the spec's); structured data is
+    indented JSON with its key order kept, as Python's `json.dumps(indent=2,
+    ensure_ascii=False)` writes it, so the same state always renders, and so tokenises, the
+    same way. docs/spec.md spells out the JSON, number by number and escape by escape, and
+    `request.check_json` refuses what it cannot render alike everywhere.
     """
     if content is None:
         return ""
     if isinstance(content, str):
-        return content.strip()
+        return strip(content)
     return json.dumps(content, indent=2, ensure_ascii=False, sort_keys=False)
-
-
-def one_line(text: str) -> str:
-    """Whitespace runs, newlines included, as one space: an option is always one line."""
-    return " ".join(text.split())
 
 
 def state_block(state: Any) -> str:
