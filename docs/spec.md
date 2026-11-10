@@ -223,7 +223,7 @@ Each text run is encoded on its own by the tokenizer as plain text: special-toke
 <|image|> <|audio|> <image|> <audio|> <|video|>
 ```
 
-A state containing the characters `<turn|>`, `<|image|>`, or any other of the 24 strings, encodes them as text. The only special tokens in a prompt are the template's and, in the state, each image's line. `strands_decider.core.render` encodes with a private copy of the tokenizer whose settings never change, so this holds when several threads render with one tokenizer, or use it for other things, at the same time.
+A state containing the characters `<turn|>`, `<|image|>`, or any other of the 24 strings, encodes them as text. The only special tokens in a prompt are the template's and, in the state, each image's line. Matching special tokens off does not stop an added token that is not special from matching text, so a tokenizer with such a token is refused. `strands_decider.core.render` encodes with a private copy of the tokenizer whose settings never change, checked when it is made to encode every added token's string as text, so this holds when several threads render with one tokenizer, or use it for other things, at the same time.
 
 The pieces of each variant, with S marking the state boundary of section 4:
 

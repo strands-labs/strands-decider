@@ -20,6 +20,7 @@ import random
 import subprocess
 import sys
 import threading
+from collections import OrderedDict
 from collections.abc import Mapping
 
 import pytest
@@ -740,23 +741,42 @@ def test_concurrent_use_of_the_tokenizer_cannot_make_control_tokens(
 ):
     """A render paused inside its encoding, while another thread uses the same tokenizer
     with special-token matching on (its default) or with padding, gets the ids it gets
-    alone. The pause is forced with events, not left to timing. An encoder that switched
-    matching off on the caller's tokenizer, as this one once did, would resume with it
-    switched back on and encode the state's `<turn|>` as a control token, or pad the text."""
+    alone. The pause is forced with events, not left to timing, and falls inside the
+    tokenizer's own `encode_batch`, after anything the encoder does to set it up. An encoder
+    that switched matching off on the caller's tokenizer, as this one once did, would resume
+    with it switched back on and encode the state's `<turn|>` as a control token, or pad the
+    text."""
     from strands_decider.core import prompt
 
     tok = _tokenizer(which)
     req = CASES["control_strings"]
     alone = render(req, tok, variant)
     paused, resume = threading.Event(), threading.Event()
-    texts = prompt._Encoder.texts
+    init = prompt._Encoder.__init__
 
-    def paused_texts(self, runs):
-        paused.set()
-        assert resume.wait(timeout=30)
-        return texts(self, runs)
+    class Pausing:
+        """The encoder's tokenizer, whatever it is, paused at its first encode_batch."""
 
-    monkeypatch.setattr(prompt._Encoder, "texts", paused_texts)
+        def __init__(self, inner):
+            object.__setattr__(self, "inner", inner)
+
+        def encode_batch(self, *args, **kw):
+            if not paused.is_set():
+                paused.set()
+                assert resume.wait(timeout=30)
+            return self.inner.encode_batch(*args, **kw)
+
+        def __getattr__(self, name):
+            return getattr(self.inner, name)
+
+        def __setattr__(self, name, value):
+            setattr(self.inner, name, value)
+
+    def pausing_init(self, t):
+        init(self, t)
+        self.tok = Pausing(self.tok)
+
+    monkeypatch.setattr(prompt._Encoder, "__init__", pausing_init)
     out: dict = {}
 
     def work():
@@ -785,6 +805,83 @@ def test_concurrent_use_of_the_tokenizer_cannot_make_control_tokens(
         assert q.ids == alone.questions[name].ids, q.text
         n_controls = sum(i in _control_ids(tok) for i in q.ids)
         assert n_controls == {PLAIN: 1, CHAT: 4}[variant], q.text
+
+
+def test_first_renders_race_to_one_copy_without_blocking_others(monkeypatch):
+    """Threads that render with a new tokenizer at once make one private copy between them,
+    and the copy is made outside the cache's lock: a render with another tokenizer, whose
+    copy exists, runs while the first copy is being made."""
+    from strands_decider.core import prompt
+
+    other = toy_tokenizer()
+    want = render(CASES["support_ticket"], other, PLAIN)
+    tok = toy_tokenizer()
+    made, started, release = [], threading.Event(), threading.Event()
+    real = prompt._make_plain_text_copy
+
+    def slow(t):
+        made.append(t)
+        started.set()
+        assert release.wait(timeout=30)
+        return real(t)
+
+    monkeypatch.setattr(prompt, "_make_plain_text_copy", slow)
+    out: list = []
+    workers = [
+        threading.Thread(target=lambda: out.append(render(CASES["support_ticket"], tok, PLAIN)))
+        for _ in range(3)
+    ]
+    for w in workers:
+        w.start()
+    try:
+        assert started.wait(timeout=30)
+        assert render(CASES["support_ticket"], other, PLAIN) == want  # not blocked
+    finally:
+        release.set()
+        for w in workers:
+            w.join(timeout=30)
+    assert made == [tok] and out == [want] * 3
+
+
+def test_the_copy_cache_keeps_the_most_recently_used(monkeypatch):
+    from strands_decider.core import prompt
+
+    monkeypatch.setattr(prompt, "_PLAIN_TEXT", OrderedDict())
+    made: list = []
+    real = prompt._make_plain_text_copy
+    monkeypatch.setattr(prompt, "_make_plain_text_copy", lambda t: made.append(t) or real(t))
+    toks = [toy_tokenizer() for _ in range(prompt._PLAIN_TEXT_MAX + 1)]
+    for t in toks[:-1]:
+        prompt._plain_text_copy(t)
+    prompt._plain_text_copy(toks[0])  # a hit makes it the most recently used
+    prompt._plain_text_copy(toks[-1])  # so this evicts toks[1], not toks[0]
+    assert made == toks
+    prompt._plain_text_copy(toks[0])
+    assert made == toks
+    prompt._plain_text_copy(toks[1])
+    assert made == [*toks, toks[1]]
+
+
+@pytest.mark.parametrize("which", ["toy", "gemma4"])
+def test_the_private_copy_encodes_every_added_token_as_text(which):
+    """The copy's special-token matching is off: each added token's string encodes as text,
+    never as its own id, which _make_plain_text_copy also checks when it makes the copy."""
+    from strands_decider.core import prompt
+
+    tok = _tokenizer(which)
+    copy = prompt._plain_text_copy(tok)
+    for added in tok.get_added_tokens_decoder().values():
+        ids = copy.encode(added.content, add_special_tokens=False).ids
+        assert ids != [tok.token_to_id(added.content)], added.content
+
+
+def test_a_tokenizer_with_added_tokens_that_are_not_special_is_refused():
+    """Special-token matching off does not stop a plain added token from matching request
+    text, so a tokenizer with one could turn a state's words into it."""
+    tok = toy_tokenizer()
+    tok.add_tokens(["state"])
+    with pytest.raises(ValueError, match="not special"):
+        render(CASES["support_ticket"], tok, PLAIN)
 
 
 def test_render_leaves_the_callers_tokenizer_as_it_was():
