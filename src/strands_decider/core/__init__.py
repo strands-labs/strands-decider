@@ -47,6 +47,7 @@ from .images import (
     resize_image,
     resized_size,
     soft_tokens,
+    spec_resize,
 )
 from .prompt import (
     CHAT,
@@ -80,13 +81,14 @@ from .readout import (
 )
 from .request import parse_request
 from .runtime import Backend, ImageBackend, attention_mask, evaluate
-from .tokenizer import CONTROL_TOKEN_IDS, check_tokenizer, load_tokenizer
+from .tokenizer import CODE_TOKEN_IDS, CONTROL_TOKEN_IDS, check_tokenizer, load_tokenizer
 
 __all__ = [
     "BOUNDS",
     "CAPPED_LOGITS",
     "CHAT",
     "CODES",
+    "CODE_TOKEN_IDS",
     "CONTROL_TOKEN_IDS",
     "FINAL_LOGITS",
     "FORMAT_VERSION",
@@ -142,4 +144,5 @@ __all__ = [
     "round_to_bf16",
     "soft_tokens",
     "softcap",
+    "spec_resize",
 ]

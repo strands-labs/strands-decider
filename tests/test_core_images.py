@@ -642,6 +642,19 @@ EXACT_DECODES = {"checker-64x48.png", "dots-50x50.gif", "lossless-33x17.webp", "
                  "offset-frame.gif", "tall-1080x2400.png", "wide-1600x1000.png"}  # fmt: skip
 
 
+def test_spec_resize_is_the_cores_and_takes_rgb_arrays():
+    np = pytest.importorskip("numpy")
+    from strands_decider.core import spec_resize as exported
+
+    assert exported is spec_resize
+    a = np.arange(4 * 6 * 3, dtype=np.uint8).reshape(4, 6, 3)
+    assert spec_resize(a, 6, 4).tobytes() == a.tobytes()  # no pass when nothing changes
+    assert spec_resize(a, 12, 2).shape == (2, 12, 3)
+    for bad, size in ((a[..., 0], (6, 4)), (a, (0, 4)), (a, (6, 1.5))):
+        with pytest.raises(ValueError):
+            spec_resize(bad, *size)
+
+
 def test_the_pixel_goldens_hold_without_pillow():
     """The procedure a runtime without Pillow follows: the goldens' decoded pixels, read from
     tests/fixtures/core/pixels with zlib, have the goldens' hash, and the spec's resize of
