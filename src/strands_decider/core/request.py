@@ -141,8 +141,9 @@ def parse_question(name: str, q: Any) -> Question:
     question = _parse_question(name, kind, instructions, crit)
     check_json(question.instructions, f"question {name!r} instructions")
     for option, description in zip(question.options, question.criteria, strict=True):
-        check_json(option, f"question {name!r} option {option!r}")
-        check_json(description, f"question {name!r} option {option!r}")
+        where = f"question {name!r} option {option[:40]!r}"  # a name may be long
+        check_json(option, where)
+        check_json(description, where)
     return question
 
 
