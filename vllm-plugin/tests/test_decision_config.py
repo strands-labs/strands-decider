@@ -128,11 +128,39 @@ def test_bad_provenance_is_refused(provenance, match):
         read(released(provenance=provenance), layout=MULTIMODAL)
 
 
-def test_a_decoder_checkpoint_with_provenance_has_it_checked():
-    with pytest.raises(DecisionConfigError, match="base_revision"):
-        read(dc(provenance={"base_model": "google/gemma-4-E2B-it", "base_revision": "x"}))
+@pytest.mark.parametrize(
+    "provenance, match",
+    [
+        (None, "leave the field out instead of null"),
+        ([], "must be an object"),
+        ({"base_model": "/data/checkpoints/gemma-4-E2B-it"}, "base_model must be a Hub id"),
+        ({"base_model": "google/gemma-4-E2B-it", "base_revision": "x"}, "base_revision"),
+        ({"note": "made before provenance had fields"}, "base_model must be a Hub id"),
+    ],
+)
+def test_a_decoder_checkpoint_loads_text_only_whatever_its_provenance(provenance, match):
+    # The intermediate checkpoints loaded on 0.2.1 whatever they carried here; the engine uses neither field.
+    spec = read(dc(provenance=provenance))
+    assert spec.inputs == ("text",) and any(match in w for w in spec.warnings), spec.warnings
+    with pytest.raises(DecisionConfigError, match=match):
+        read(released(provenance=provenance), layout=MULTIMODAL)
+
+
+def test_a_decoder_checkpoint_keeps_the_well_formed_provenance_fields():
     spec = read(dc(provenance=dict(PROVENANCE)))
-    assert spec.base_model == "google/gemma-4-E2B-it"
+    assert (spec.base_model, spec.base_revision) == (
+        PROVENANCE["base_model"],
+        PROVENANCE["base_revision"],
+    )
+    assert not any("provenance" in w for w in spec.warnings)
+    partial = read(dc(provenance={"base_model": PROVENANCE["base_model"], "base_revision": "main"}))
+    assert (partial.base_model, partial.base_revision) == (PROVENANCE["base_model"], None)
+
+
+@pytest.mark.parametrize("inputs", ["text", [], ["text", "text"], ["text", "audio"], [1]])
+def test_a_decoder_checkpoint_with_malformed_inputs_loads_text_only(inputs):
+    spec = read(dc(inputs=inputs))
+    assert spec.inputs == ("text",) and any("inputs must be" in w for w in spec.warnings)
 
 
 def test_the_interface_is_checked_before_any_other_field():

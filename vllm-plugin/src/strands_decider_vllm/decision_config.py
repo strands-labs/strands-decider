@@ -10,9 +10,10 @@ Two layouts are served:
   ``Gemma4UnifiedForConditionalGeneration`` for the 12B), the released format. ``interface``, ``inputs``,
   ``final_logit_softcapping`` and ``provenance`` (``base_model``, ``base_revision``) are required.
 - ``decoder``: a bare ``Gemma4TextModel``, the layout of the intermediate checkpoints made before the multimodal one.
-  They predate ``interface``, ``inputs`` and ``provenance``: each missing field is a one-line warning, and the
-  checkpoint is served as text-only. A decoder checkpoint that names ``"image"`` in ``inputs`` is refused, because it
-  has no vision encoder.
+  They predate ``interface``, ``inputs`` and ``provenance``, and they load as 0.2.1 loaded them: a missing, malformed
+  or partial ``inputs`` or ``provenance`` is a one-line warning (the engine uses neither), and the checkpoint is
+  served as text-only. A decoder checkpoint that names ``"image"`` in ``inputs`` is refused, because it has no vision
+  encoder.
 
 The plugin checks what the engine needs. The core library (``strands_decider.core.DecisionConfig``) validates the
 whole schema strictly; the plugin's server loads it that way.
@@ -87,51 +88,65 @@ def _inputs(dc: dict, layout: str, warnings: list[str]) -> tuple[str, ...]:
         )
         return (TEXT,)
     value = dc["inputs"]
+    if layout == DECODER and (value == IMAGE or (isinstance(value, list) and IMAGE in value)):
+        raise DecisionConfigError(
+            'inputs names "image", but the checkpoint is a bare text decoder (Gemma4TextModel) with no vision '
+            "encoder; an image checkpoint has the base model's multimodal layout"
+        )
     if (
         not isinstance(value, list)
         or not all(isinstance(i, str) and i in INPUTS for i in value)
         or len(set(value)) != len(value)
         or TEXT not in value
     ):
-        raise DecisionConfigError(
-            f"inputs must be an array of distinct strings from {list(INPUTS)} that holds {TEXT!r}, got {value!r}"
+        message = f"inputs must be an array of distinct strings from {list(INPUTS)} that holds {TEXT!r}, got {value!r}"
+        if layout == MULTIMODAL:
+            raise DecisionConfigError(message)
+        warnings.append(
+            f'decision_config.json: {message}; serving it as text-only, inputs ["text"]'
         )
-    if IMAGE in value and layout == DECODER:
-        raise DecisionConfigError(
-            'inputs names "image", but the checkpoint is a bare text decoder (Gemma4TextModel) with no vision '
-            "encoder; an image checkpoint has the base model's multimodal layout"
-        )
+        return (TEXT,)
     return tuple(value)
 
 
 def _provenance(dc: dict, layout: str, warnings: list[str]) -> tuple[str | None, str | None]:
+    """provenance.base_model and provenance.base_revision: required and checked for the multimodal layout. A decoder
+    checkpoint's are informational (the engine uses neither): a missing, partial or free-form one is a warning, and
+    only the fields that are well formed are kept."""
+    problems: list[str] = []
     prov = dc.get("provenance")
+    base_model = base_revision = None
     if prov is None:
         if "provenance" in dc:
-            raise DecisionConfigError(
-                "provenance must be an object; leave the field out instead of null"
-            )
-        if layout == MULTIMODAL:
-            raise DecisionConfigError(
+            problems.append("provenance must be an object; leave the field out instead of null")
+        elif layout == MULTIMODAL:
+            problems.append(
                 "provenance is required, with base_model (the base's Hub id) and base_revision (its 40-character "
                 "commit): the checkpoint's image processor and tokenizer are the base's at that revision"
             )
-        warnings.append(
-            'decision_config.json has no "provenance" field (an intermediate decoder checkpoint)'
-        )
-        return None, None
-    if not isinstance(prov, dict):
-        raise DecisionConfigError(f"provenance must be an object, got {type(prov).__name__}")
-    base_model, base_revision = prov.get("base_model"), prov.get("base_revision")
-    if layout == MULTIMODAL or base_model is not None or base_revision is not None:
+        else:
+            warnings.append(
+                'decision_config.json has no "provenance" field (an intermediate decoder checkpoint)'
+            )
+    elif not isinstance(prov, dict):
+        problems.append(f"provenance must be an object, got {type(prov).__name__}")
+    else:
+        base_model, base_revision = prov.get("base_model"), prov.get("base_revision")
         if not isinstance(base_model, str) or not _HUB_ID.match(base_model):
-            raise DecisionConfigError(
+            problems.append(
                 f"provenance.base_model must be a Hub id such as google/gemma-4-E2B-it, got {base_model!r}"
             )
+            base_model = None
         if not isinstance(base_revision, str) or not _COMMIT.match(base_revision):
-            raise DecisionConfigError(
+            problems.append(
                 f"provenance.base_revision must be a 40-character commit hash, got {base_revision!r}"
             )
+            base_revision = None
+    if problems and layout == MULTIMODAL:
+        raise DecisionConfigError(problems[0])
+    warnings.extend(
+        f"decision_config.json: {p} (ignored for a decoder checkpoint)" for p in problems
+    )
     return base_model, base_revision
 
 
@@ -148,7 +163,8 @@ def read_decision_config(
       without it loads with a warning. Checked before any other field.
     - ``format_version`` 1, ``attention_mode: prefix_bidir``, ``pooling: last``.
     - ``inputs``: see :func:`_inputs`.
-    - ``provenance``: ``base_model`` (a Hub id) and ``base_revision`` (a commit), required for the multimodal layout.
+    - ``provenance``: ``base_model`` (a Hub id) and ``base_revision`` (a commit), required for the multimodal layout;
+      see :func:`_provenance`.
     - ``token_ids``: 255 distinct integers in ``[0, vocab_size)``.
     - ``temperature``: finite and above 0.
     - the soft-cap: ``final_logit_softcapping``, finite and above 0. Required in this file for the multimodal layout;
