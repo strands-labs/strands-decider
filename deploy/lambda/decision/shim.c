@@ -33,9 +33,11 @@
 
 #include "ggml-backend.h"
 #include "ggml.h"
+#include "gguf.h"
 #include "llama.h"
 #include "mtmd.h"
 
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -44,6 +46,7 @@
 typedef struct {
     struct llama_model *           model;
     mtmd_context *                 mtmd;  // the vision tower, after sd_load_vision; NULL without one
+    char *                         mmproj_path;
     int                            n_embd;
     int                            n_embd_inp;
     int                            n_threads;
@@ -95,7 +98,9 @@ static void sd_override_int(struct llama_model_kv_override * o, const char * key
 
 // Load a Gemma 4 GGUF, mapped. The per-layer embedding table, half of E2B's weights, is read
 // lazily (LLAMA_LAZY_MODE_ON): only the rows of a batch's tokens, from the mapped file, never a
-// copy of the whole table. Sets *n_embd_out to the hidden size. NULL on failure.
+// copy of the whole table. Sets *n_embd_out to the hidden size. NULL on failure, and for a GGUF
+// whose general.architecture is not gemma4: the overrides name gemma4's keys, and another
+// architecture would ignore them and run causally.
 void * sd_load(const char * path, int n_threads, int * n_embd_out) {
     sd_verbose = getenv("STRANDS_DECIDER_LLAMA_VERBOSE") != NULL;
     llama_log_set(sd_log, NULL);
@@ -115,6 +120,14 @@ void * sd_load(const char * path, int n_threads, int * n_embd_out) {
         free(h);
         return NULL;
     }
+    char arch[64] = { 0 };
+    if (llama_model_meta_val_str(h->model, "general.architecture", arch, sizeof(arch)) < 0 ||
+        strcmp(arch, "gemma4") != 0) {
+        fprintf(stderr, "strands-decider: %s is a %s model, not gemma4\n", path, arch[0] ? arch : "unnamed");
+        llama_model_free(h->model);
+        free(h);
+        return NULL;
+    }
     h->n_embd     = llama_model_n_embd_out(h->model);
     h->n_embd_inp = llama_model_n_embd_inp(h->model);
     h->n_threads  = n_threads > 0 ? n_threads : 1;
@@ -126,6 +139,7 @@ void sd_free(void * handle) {
     sd_handle * h = (sd_handle *) handle;
     if (!h) return;
     if (h->mtmd) mtmd_free(h->mtmd);
+    free(h->mmproj_path);
     llama_model_free(h->model);
     free(h);
 }
@@ -149,8 +163,35 @@ int sd_load_vision(void * handle, const char * mmproj_path, int image_max_tokens
         mtmd_free(m);
         return 3;
     }
-    h->mtmd = m;
-    return 0;
+    h->mtmd        = m;
+    h->mmproj_path = strdup(mmproj_path);
+    return h->mmproj_path ? 0 : 4;
+}
+
+// The vision tower's preprocessing, from its mmproj GGUF: mean[3] and std[3], by which mtmd
+// normalises pixels scaled to [0, 1], and *patch_size. 0 on success.
+int sd_vision_info(void * handle, float * mean, float * std, int * patch_size) {
+    sd_handle * h = (sd_handle *) handle;
+    if (!h || !h->mmproj_path) return 1;
+    struct gguf_init_params gp = { /*no_alloc =*/ true, /*ctx =*/ NULL };
+    struct gguf_context *   g  = gguf_init_from_file(h->mmproj_path, gp);
+    if (!g) return 2;
+    int                rc   = 0;
+    const char *       keys[2] = { "clip.vision.image_mean", "clip.vision.image_std" };
+    float *            dst[2]  = { mean, std };
+    for (int k = 0; k < 2 && rc == 0; k++) {
+        const int64_t id = gguf_find_key(g, keys[k]);
+        if (id < 0 || gguf_get_arr_type(g, id) != GGUF_TYPE_FLOAT32 || gguf_get_arr_n(g, id) != 3) {
+            rc = 3;
+        } else {
+            memcpy(dst[k], gguf_get_arr_data(g, id), 3 * sizeof(float));
+        }
+    }
+    const int64_t ps = gguf_find_key(g, "clip.vision.patch_size");
+    if (rc == 0 && (ps < 0 || gguf_get_kv_type(g, ps) != GGUF_TYPE_UINT32)) rc = 4;
+    if (rc == 0) *patch_size = (int) gguf_get_val_u32(g, ps);
+    gguf_free(g);
+    return rc;
 }
 
 // The width of an image row: the decoder's input embedding size.
@@ -158,10 +199,13 @@ int sd_n_embd_inp(void * handle) { return ((sd_handle *) handle)->n_embd_inp; }
 
 // Run one image, w x hgt RGB bytes already at the size the image processor gives it, through the
 // vision tower and its projection. *n_tok gets its soft-token count, and its rows are copied to out
-// if out holds that many (cap_rows). wrap[0] and wrap[1] get the token mtmd puts before and after
-// the image, or -1. ms[0] gets mtmd's preprocessing time and ms[1] the encode time. 0 on success.
+// if out holds that many (cap_rows). grid[0] and grid[1] get mtmd's grid of soft tokens across and
+// down, which shows the size mtmd encoded the image at where mtmd reports one (for Gemma 4 it
+// reports the run of N tokens as N x 1). wrap[0] and wrap[1] get the token mtmd puts
+// before and after the image, or -1. ms[0] gets mtmd's preprocessing time and ms[1] the encode
+// time. 0 on success.
 int sd_encode_image(void * handle, const unsigned char * rgb, int w, int hgt, float * out, int cap_rows,
-                    int * n_tok, int * wrap, double * ms) {
+                    int * n_tok, int * grid, int * wrap, double * ms) {
     sd_handle * h = (sd_handle *) handle;
     if (!h || !h->mtmd || !rgb || w <= 0 || hgt <= 0) return 1;
     double        t0     = sd_ms();
@@ -190,6 +234,12 @@ int sd_encode_image(void * handle, const unsigned char * rgb, int w, int hgt, fl
     double t1 = sd_ms();
     if (rc == 0) {
         *n_tok = (int) mtmd_input_chunk_get_n_tokens(image);
+        const mtmd_image_tokens * it = mtmd_input_chunk_get_tokens_image(image);
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+        grid[0] = it ? (int) mtmd_image_tokens_get_nx(it) : -1;
+        grid[1] = it ? (int) mtmd_image_tokens_get_ny(it) : -1;
+#pragma GCC diagnostic pop
         if (cap_rows < *n_tok) {
             rc = 6;
         } else if (mtmd_encode_chunk(h->mtmd, image) != 0) {
@@ -218,10 +268,17 @@ static void sd_fill(struct llama_batch * b, const int * ids, int n, int pos0) {
 }
 
 // The state as one mixed batch: positions 0..n_state-1, each position whose id is image_token
-// replaced, in order, by the next row of embd; rows[i] is image i's row count, which must equal the
-// length of its run of placeholders. 0 on success.
+// replaced, in order, by the next row of embd; rows[i] (above 0) is image i's row count, which must
+// equal the length of its run of placeholders, and the rows add up to n_rows. 0 on success.
 static int sd_decode_mixed_state(sd_handle * h, struct llama_context * ctx, const int * state_ids, int n_state,
-                                 int image_token, const float * embd, const int * rows, int n_images) {
+                                 int image_token, const float * embd, const int * rows, int n_images,
+                                 int n_rows) {
+    long total = 0;
+    for (int i = 0; i < n_images; i++) {
+        if (rows[i] <= 0) return 14;
+        total += rows[i];
+    }
+    if (total != n_rows) return 14;
     struct llama_batch_ext * be = llama_batch_ext_init(ctx);
     if (!be) return 12;
     const size_t ne  = (size_t) h->n_embd_inp;
@@ -266,14 +323,15 @@ static int sd_decode_mixed_state(sd_handle * h, struct llama_context * ctx, cons
 // Decode the state (n_state ids) once, then each question after it on the same cache, and write
 // each question's last-token final hidden state to out ([n_q, n_embd], in question order).
 // n_images > 0 needs a vision tower: the state's runs of image_token are then filled with embd, the
-// images' rows end to end, rows[i] of them for image i (see sd_decode_mixed_state). ms, if not
-// NULL, gets n_q + 2 timings in milliseconds: the context's creation, the state's decode, then each
-// question's decode. 0 on success.
+// images' n_rows rows end to end, rows[i] of them for image i (see sd_decode_mixed_state). ms, if
+// not NULL, gets n_q + 2 timings in milliseconds: the context's creation, the state's decode, then
+// each question's decode. 0 on success.
 int sd_forward(void * handle, const int * state_ids, int n_state, int image_token, const float * embd,
-               const int * rows, int n_images, const int * q_ids, const int * q_lens, int n_q, float * out,
-               double * ms) {
+               const int * rows, int n_images, int n_rows, const int * q_ids, const int * q_lens, int n_q,
+               float * out, double * ms) {
     sd_handle * h = (sd_handle *) handle;
-    if (!h || n_state <= 0 || n_q <= 0 || n_images < 0 || (n_images > 0 && (!h->mtmd || !embd || !rows))) {
+    if (!h || !state_ids || !q_ids || !q_lens || !out || n_state <= 0 || n_q <= 0 || n_images < 0 ||
+        (n_images > 0 && (!h->mtmd || !embd || !rows || n_rows <= 0))) {
         return 1;
     }
     int longest = 0;
@@ -281,6 +339,7 @@ int sd_forward(void * handle, const int * state_ids, int n_state, int image_toke
         if (q_lens[i] <= 0) return 1;
         if (q_lens[i] > longest) longest = q_lens[i];
     }
+    if (n_state > INT_MAX - longest) return 1;  // the context holds the state and one question
     // A non-causal decode must fit one ubatch, so the ubatch holds the whole state.
     const int  n_batch = n_state > longest ? n_state : longest;
     sd_capture cap     = { NULL, h->n_embd, 0 };
@@ -308,10 +367,15 @@ int sd_forward(void * handle, const int * state_ids, int n_state, int image_toke
     llama_memory_t     mem = llama_get_memory(ctx);
     double             t1  = sd_ms();
     if (ms) ms[0] = t1 - t0;
+    if (!b.token || !b.pos || !b.n_seq_id || !b.seq_id || !b.logits) {
+        llama_batch_free(b);
+        llama_free(ctx);
+        return 7;
+    }
 
     int rc;
     if (n_images > 0) {
-        rc = sd_decode_mixed_state(h, ctx, state_ids, n_state, image_token, embd, rows, n_images);
+        rc = sd_decode_mixed_state(h, ctx, state_ids, n_state, image_token, embd, rows, n_images, n_rows);
     } else {
         sd_fill(&b, state_ids, n_state, 0);
         rc = llama_decode(ctx, b) == 0 ? 0 : 3;
