@@ -250,11 +250,11 @@ mismatch.
 ### After each deploy, warm the function
 
 A new image's files reach a new execution environment lazily, and the function reads its 5.2 GB
-of model files before it answers. Right after a deploy that read is slow: in two deploys, the
-first request ran 826 s and, the other time, past the 15-minute timeout, which the Function URL
-returns as a 502; the next environments took 6 to 10 minutes. Later ones read the files in 20 to
-40 s and answer their first request in 30 to 80 s, though an environment on a host that has not
-cached the image still takes 6 to 8 minutes. So after each deploy, call `GET /health` until it
+of model files, checking them, before it answers. Right after a deploy that read is slow: in three
+deploys, the first request ran 826 s once and past the 15-minute timeout twice, which the Function
+URL returns as a 502; the next environments took 4 to 10 minutes. Later ones read the files in 20
+to 40 s and answer their first request in 30 to 80 s, though an environment on a host that has
+not cached the image still takes 6 to 8 minutes. So after each deploy, call `GET /health` until it
 answers, before sending traffic.
 
 SnapStart is not offered for decision checkpoints (`snapstart=true` is refused): it has not been
@@ -271,8 +271,8 @@ assumes the environment read the files itself.
   16,384 by default, and the function applies the same limit when `DECIDER_MAX_REQUEST_TOKENS` is
   unset; `0` lifts it. That keeps the slowest request inside the 15-minute timeout on Graviton2,
   the slowest host Lambda gives: 4 images and an 8,000-token state, then 137 questions up to the
-  limit, took 557 s there, and with the shortest questions, 121 of them, 499 s on Graviton3, about
-  640 s on Graviton2. A question after a long state costs about as much as 50 state tokens, so v1's
+  limit, took 549 to 557 s there, and with the shortest questions, 121 of them, 499 s on
+  Graviton3, about 640 s on Graviton2. A question after a long state costs about as much as 50 state tokens, so v1's
   24,576 is too many here: the same request at 24,540 tokens ran past the timeout on Graviton2.
 - Every limit is checked before any image is decoded or any token is run. A request that breaks one,
   or carries an image that cannot be read, gets a 422 that says why; anything else is a 500.
@@ -293,13 +293,14 @@ Q8_0 decoder and Q8_0 vision tower the build makes. Warm requests, server-side m
 
 A request costs $0.000133 per second it runs (10 GB of arm64 at $0.0000133334 per GB-second). Each
 image takes 8.8 s to encode on Graviton2 and 6.3 s on Graviton3, before its 250 to 280 state
-tokens. As with v1, ask several questions in one request: the state is decoded once.
+tokens. Graviton4 hosts, which Lambda also gives, ran 250 tokens in 1.5 s and one photo with three
+questions in 8.1 s. As with v1, ask several questions in one request: the state is decoded once.
 
-Max Memory Used, which counts the page cache, stayed at 8,111 to 8,115 MB on every one of 140
-requests, the 16,384-token ones included: 2.1 GB under the 10,240 MB limit. That figure is the
-environment's peak while it loads, when it reads the whole model file. Afterwards the handler drops
-the per-layer embedding table, 2.5 GB of the decoder's file of which a request reads a few rows, from
-the page cache (`DECIDER_PAGE_CACHE=hot`, the default); `all` keeps it. With it kept, and the f16
+Max Memory Used, which counts the page cache, was 8,388 MB on every one of 75 requests, the
+16,384-token ones and those with four images included: 1.8 GB under the 10,240 MB limit. That
+figure is the environment's peak while it loads, when it reads the whole model file. Afterwards
+the handler drops the per-layer embedding table, 2.5 GB of the decoder's file of which a request
+reads a few rows, from the page cache (`DECIDER_PAGE_CACHE=hot`, the default); `all` keeps it. With it kept, and the f16
 vision tower, a prompt of 8,131 tokens with four images reached 10,077 MB. Warm latency is the
 same either way: 2.3 s against 2.9 s at 250 tokens on Graviton2.
 
@@ -314,6 +315,10 @@ pixels) and with the same files on x86:
 Both differences from the reference are near-ties, a gap of at most 0.007 between its top two
 answers. The text rows include the f16 tower's deploy; the decoder, and so the text answers, are
 the same.
+
+A later deploy, whose function checks its files as it loads, agreed as closely: 53 of 53 text
+questions and 104 of 104 image questions gave the reference's top answer, with mean largest
+probability differences of 0.008 and 0.008.
 
 Each response carries `x-decider-cpu-part`, `x-decider-load-wait-ms` (above 0 on a new
 environment) and `x-decider-timings` (the images', the state's and each question's milliseconds),
