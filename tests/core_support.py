@@ -448,16 +448,13 @@ def spec_resize(pixels, width: int, height: int):
 
 
 def reference_resize(img, width: int, height: int):
-    """docs/spec.md's resize with Pillow: bicubic, the width first and then the height, in two
-    calls. Pillow 10 to 12 do the same in one call; Pillow 13 does the height first when it
-    shrinks by more than twice as much as the width, which changes the pixels."""
-    from PIL import Image
+    """docs/spec.md's resize with Pillow: the core's `resize_image`, the width first and then
+    the height, in two single-axis calls. Pillow 10 to 12 do the same in one call; Pillow 13
+    does the height first when it shrinks by more than twice as much as the width, which
+    changes the pixels."""
+    from strands_decider.core import resize_image
 
-    if img.width != width:
-        img = img.resize((width, img.height), Image.Resampling.BICUBIC)
-    if img.height != height:
-        img = img.resize((width, height), Image.Resampling.BICUBIC)
-    return img
+    return resize_image(img, width, height)
 
 
 def _write_pixel_goldens() -> None:
