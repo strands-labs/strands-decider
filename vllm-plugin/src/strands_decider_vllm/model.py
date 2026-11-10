@@ -289,7 +289,7 @@ class _Decider:
 
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
         # The bf16 GEMM, rounded to bf16, then the soft-cap and the temperature in float32 (specification, 7.1).
-        codes = self.readout(hidden_states.to(self.readout.weight.dtype)).float()
+        codes = self.readout(hidden_states.to(torch.bfloat16)).float()
         codes = torch.tanh(codes / self.softcap) * self.softcap
         codes = codes / self.temperature
         out = torch.full(
@@ -330,11 +330,14 @@ class _Decider:
             raise ValueError(
                 f"strands-decider: readout {tuple(w.shape)} != {tuple(self.readout.weight.shape)}"
             )
+        if self.readout.weight.dtype != torch.bfloat16:
+            raise ValueError(
+                f"strands-decider: the readout is {self.readout.weight.dtype}; it must stay a bf16 GEMM "
+                "(specification, 7.1)"
+            )
         with torch.no_grad():
             # A float32 or float16 readout is rounded to bf16 here (specification, 7.1).
-            self.readout.weight.copy_(
-                w.to(device=self.readout.weight.device, dtype=self.readout.weight.dtype)
-            )
+            self.readout.weight.copy_(w.to(device=self.readout.weight.device, dtype=torch.bfloat16))
         loaded.add(READOUT_WEIGHT)
         return loaded
 
