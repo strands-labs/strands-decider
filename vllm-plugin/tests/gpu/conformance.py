@@ -161,7 +161,7 @@ def main() -> None:
             ours[(i, n)] = vector(r["answers"][n])
     agreement = None if failed else cc.agreement(ours, reference)
     minimum = cc.MIN_QUESTIONS if a.min_questions is None else a.min_questions
-    top1, mean_dp = cc.BOUNDS["bf16"]
+    top1, mean_dp = cc.bounds()  # bf16's, at every size
     result = {
         "checkpoint": str(a.ckpt),
         "render_mismatches": render_bad[:20],
@@ -174,7 +174,7 @@ def main() -> None:
     ok = (
         not render_bad
         and agreement is not None
-        and agreement.conforms(top1=top1, mean_abs_dp=mean_dp, min_questions=minimum)
+        and agreement.conforms(min_questions=minimum)  # bf16's bounds
     )
     print(json.dumps(result))
     print("CONFORMS" if ok else "DOES NOT CONFORM")

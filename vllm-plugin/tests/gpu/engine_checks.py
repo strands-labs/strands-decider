@@ -11,7 +11,11 @@ socket is opened. Each check is a PASS/FAIL line:
 4. vLLM itself refuses a prompt of exactly ``max_model_len`` tokens with ``VLLMValidationError``: the reason the
    default context is one token longer than the longest prompt;
 5. a request the engine core refuses (no ``prefix_end``) makes ``AsyncLLM.generate`` raise ``VLLMValidationError``,
-   which the server answers with HTTP 400 (``server.refusal``); the engine keeps serving.
+   which the server answers with HTTP 400 (``server.refusal``); the engine keeps serving;
+6. with a checkpoint that takes images, a burst of image requests through the server's HTTP app (in process, on
+   httpx's ASGI transport): vLLM's own image preprocessing (every call of the plugin's multimodal processor, which
+   vLLM's renderer makes) runs on a thread other than the event loop's, and ``GET /ping`` keeps answering, timed
+   throughout.
 """
 
 from __future__ import annotations
@@ -115,6 +119,99 @@ async def run(d, length: int, max_model_len: int) -> None:
     check(again["answers"] == out["answers"], "the engine serves on, with the same answer")
 
 
+def photo(seed: int, w: int = 1600, h: int = 1200) -> str:
+    """A synthetic photo as base64 PNG, different for every seed."""
+    import base64
+    import io
+    import random
+
+    from PIL import Image, ImageDraw
+
+    rng = random.Random(seed)
+    img = Image.new("RGB", (w, h), tuple(rng.randrange(256) for _ in range(3)))
+    draw = ImageDraw.Draw(img)
+    for _ in range(60):
+        x, y = rng.randrange(w), rng.randrange(h)
+        draw.rectangle(
+            (x, y, x + rng.randrange(1, w // 3), y + rng.randrange(1, h // 3)),
+            fill=tuple(rng.randrange(256) for _ in range(3)),
+        )
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return base64.b64encode(buf.getvalue()).decode()
+
+
+async def images_off_the_loop(d, requests: int = 8, per_request: int = 2) -> None:
+    import threading
+    import time
+
+    import httpx
+
+    from strands_decider_vllm import processing, server
+
+    loop_thread = threading.get_ident()
+    calls: list[tuple[int, float]] = []
+    cls = processing.DeciderMultiModalProcessor
+    original = cls.apply
+
+    def apply(self, *args, **kwargs):
+        t = time.perf_counter()
+        try:
+            return original(self, *args, **kwargs)
+        finally:
+            calls.append((threading.get_ident(), time.perf_counter() - t))
+
+    cls.apply = apply
+    app = server.build_app(None)
+    app.state.decider = d
+    question = {"q": {"type": "noul", "instructions": "Is the parcel damaged?"}}
+    bodies = [
+        {
+            "state": "Photos of the parcel.",
+            "images": [photo(100 * i + k) for k in range(per_request)],
+            "questions": question,
+        }
+        for i in range(requests)
+    ]
+    pings: list[tuple[float, int]] = []
+    try:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://check", timeout=600
+        ) as c:
+            stop = asyncio.Event()
+
+            async def pinger():
+                while not stop.is_set():
+                    t = time.perf_counter()
+                    r = await c.get("/ping")
+                    pings.append((time.perf_counter() - t, r.status_code))
+                    await asyncio.sleep(0.005)
+
+            ping = asyncio.ensure_future(pinger())
+            rs = await asyncio.gather(*(c.post("/v1/systemone", json=b) for b in bodies))
+            stop.set()
+            await ping
+    finally:
+        cls.apply = original
+    check(
+        [r.status_code for r in rs] == [200] * requests,
+        f"{requests} requests of {per_request} new photos each answered over HTTP: "
+        f"{sorted({r.status_code for r in rs})}",
+    )
+    longest = max((dt for _, dt in calls), default=0.0)
+    check(
+        bool(calls) and all(t != loop_thread for t, _ in calls),
+        f"vLLM's image preprocessing ran off the event loop: {len(calls)} processor calls, none on its thread "
+        f"(the longest {longest * 1000:.0f} ms)",
+    )
+    worst = max((dt for dt, _ in pings), default=float("inf"))
+    check(
+        bool(pings) and all(st == 200 for _, st in pings) and worst < 1.0,
+        f"/ping answered {len(pings)} times during the image requests, the slowest in {worst * 1000:.0f} ms",
+    )
+
+
 def main() -> None:
     from strands_decider_vllm import server
     from strands_decider_vllm.cli import parser
@@ -134,7 +231,13 @@ def main() -> None:
     engine = AsyncLLM.from_engine_args(s.engine_args)
     d = server.decider(engine, s, a)
     try:
-        asyncio.run(run(d, a.max_length, max_model_len))
+
+        async def checks():  # one event loop: AsyncLLM's output handler lives on the loop it started on
+            await run(d, a.max_length, max_model_len)
+            if d.takes_images and not d.image_problem:
+                await images_off_the_loop(d)
+
+        asyncio.run(checks())
     finally:
         d.close()
         engine.shutdown()
