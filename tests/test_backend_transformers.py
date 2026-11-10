@@ -717,6 +717,24 @@ def test_cuda_question_batches_of_64k_plus_1_tokens_over_a_cached_state(tmp_path
 REAL = os.environ.get("STRANDS_DECIDER_TEST_CHECKPOINT")
 
 
+def _code_probabilities(ck, rows, k: int = 4) -> np.ndarray:
+    """The first k codes' probabilities of each row, in the core's readout regime."""
+    from strands_decider.core import code_probabilities
+
+    z = readout_logits(ck.readout.weight, rows)
+    return np.stack([
+        code_probabilities(r, k, inputs="raw_logits", softcap_c=ck.readout.softcap,
+                           temperature=ck.temperature)
+        for r in z
+    ])  # fmt: skip
+
+
+def _fits_in_float32(backend) -> bool:
+    """Whether the bf16 model, cast to float32 in place, fits the GPU's free memory."""
+    extra = sum(p.numel() for p in backend.model.parameters()) * 2  # bf16 -> float32
+    return extra < 0.8 * torch.cuda.mem_get_info()[0]
+
+
 @pytest.mark.skipif(not REAL, reason="set STRANDS_DECIDER_TEST_CHECKPOINT to a decision checkpoint")
 def test_a_real_checkpoint():
     """A real decision checkpoint, on CUDA when there is one: it loads in the spec's layout,
@@ -738,12 +756,24 @@ def test_a_real_checkpoint():
     a = evaluate(request(images), tok, ck.readout, ck.config, full)
     b = evaluate(request(images), tok, ck.readout, ck.config, reuse)
     assert a["answers"]["team"]["choice"] == b["answers"]["team"]["choice"]
-    # Question batches over the reused state at 64k+1 widths, on the real weights.
+    # Question batches over the reused state at 64k+1 widths, on the real weights. In bf16 the
+    # two paths differ by rounding (on an H100, up to 0.06 relative in the hidden state and
+    # 0.04 in probability at widths 64 to 257, with no peak at 64k+1), so they are compared
+    # through the readout; float32 is the kernel's check, where the model fits the device.
     state, cases = _question_batches(reuse, WIDTHS_64K_PLUS_1)
     for width, qs in cases:
-        ra, rb = full.forward(state, qs), reuse.forward(state, qs)
-        rel = float(np.abs(ra - rb).max()) / max(1.0, float(np.abs(ra).max()))
-        assert rel < (0.05 if full.dtype == torch.bfloat16 else 1e-3), (width, rel)
+        pa, pb = (_code_probabilities(ck, b.forward(state, qs)) for b in (full, reuse))
+        assert np.abs(pa - pb).max() < (0.1 if full.dtype == torch.bfloat16 else 1e-3), width
+    if CUDA and _fits_in_float32(full):
+        del reuse
+        f32 = tb.TransformersBackend(
+            full.model.float(), ck, device=device, dtype=torch.float32, reuse_state=False
+        )
+        f32_reuse = tb.TransformersBackend(f32.model, ck, device=device, dtype=torch.float32)
+        for width, qs in cases:
+            ra, rb = f32.forward(state, qs), f32_reuse.forward(state, qs)
+            rel = float(np.abs(ra - rb).max()) / max(1.0, float(np.abs(ra).max()))
+            assert rel < 1e-3, (width, rel)
 
 
 # ---- model goldens (docs/spec.md, section 10) ---------------------------------------------
