@@ -168,6 +168,34 @@ def test_loads_the_artifact_and_warms_up_text_and_images(load, model_dir):
     assert model.config.final_logit_softcapping == 30.0 and model.readout.softcap == 30.0
 
 
+@pytest.mark.parametrize(("setting", "dropped"), [(None, True), ("hot", True), ("all", False)])
+def test_the_lazy_tables_pages_leave_the_page_cache(load, model_dir, monkeypatch, setting, dropped):
+    calls = []
+    monkeypatch.setattr(
+        handler_os(),
+        "posix_fadvise",
+        lambda fd, off, n, advice: calls.append((off, n)),
+        raising=False,
+    )
+    monkeypatch.setattr(handler_os(), "POSIX_FADV_DONTNEED", 4, raising=False)
+    artifact = json.loads((model_dir / "artifact.json").read_text())
+    (model_dir / "artifact.json").write_text(json.dumps({**artifact, "lazy_ranges": [[100, 900]]}))
+    load(**({} if setting is None else {"DECIDER_PAGE_CACHE": setting}))
+    # The vision tower's file, whole, after mtmd reads it; the table's range after the warm-ups.
+    assert calls == ([(0, 0), (100, 800)] if dropped else [(0, 0)])
+
+
+def test_a_bad_page_cache_setting_is_refused(load):
+    with pytest.raises(ValueError, match="DECIDER_PAGE_CACHE"):
+        load(DECIDER_PAGE_CACHE="none")
+
+
+def handler_os():
+    import os
+
+    return os
+
+
 def test_health(load):
     assert call(load(DECIDER_MAX_REQUEST_TOKENS="5000"), url_event("GET", "/health")) == (
         200,
