@@ -50,6 +50,17 @@ def spec_size(w: int, h: int) -> tuple[int, int]:
     return W, H
 
 
+def bicubic(im, width, height):
+    """Section 11.1's resize, for a core library without ``resize_image`` (which is the same): Pillow's bicubic
+    resampling, the width's pass and then the height's, each left out when its size does not change. Two calls,
+    because Pillow 13 does the height's pass first in some downscales."""
+    if im.size[0] != width:
+        im = im.resize((width, im.size[1]), resample=3)  # 3 = Image.BICUBIC
+    if im.size[1] != height:
+        im = im.resize((width, height), resample=3)
+    return im
+
+
 def decode(data: bytes):
     """v1's decode: first frame, EXIF orientation, transparency onto white, RGB (specification, section 11.1)."""
     from PIL import Image, ImageOps
@@ -131,9 +142,11 @@ class Reference:
         if not images:
             return None
         if resize == "pil":
-            prepared = [
-                im.resize(spec_size(*im.size), resample=3) for im in images
-            ]  # 3 = Image.BICUBIC
+            try:  # the specification's resize, from the core library
+                from strands_decider.core import resize_image
+            except ImportError:
+                resize_image = bicubic
+            prepared = [resize_image(im, *spec_size(*im.size)) for im in images]
             out = self.processor(images=prepared, do_resize=False, return_tensors="pt")
         else:
             out = self.torchvision(images=images, return_tensors="pt")

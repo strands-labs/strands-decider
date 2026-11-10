@@ -163,7 +163,7 @@ if [ -n "${MM_MODEL:-}" ]; then
     local name=$1 gpu=$2 port=$3 model=$4; shift 4
     mkdir -p "$OUT/$name"
     env CUDA_VISIBLE_DEVICES="$gpu" setsid "${SERVE[@]}" "$model" --host 127.0.0.1 --port "$port" \
-      --max-model-len "$MAXLEN" --gpu-memory-utilization 0.85 "$@" > "$OUT/$name/server.log" 2>&1 &
+      --max-length "$MAXLEN" --gpu-memory-utilization 0.85 "$@" > "$OUT/$name/server.log" 2>&1 &
     echo $! > "$OUT/$name/pid"; PIDS+=($!)
   }
   startserve images "${GPU[0]}" $((P + 60)) "$MM"
