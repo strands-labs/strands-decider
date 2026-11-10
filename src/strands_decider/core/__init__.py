@@ -33,6 +33,7 @@ from .images import (
     check_image_processor,
     decode_image,
     image_size,
+    resize_image,
     resized_size,
     soft_tokens,
 )
@@ -114,6 +115,7 @@ __all__ = [
     "render",
     "render_content",
     "render_text",
+    "resize_image",
     "resized_size",
     "round_to_bf16",
     "soft_tokens",

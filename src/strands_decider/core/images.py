@@ -80,8 +80,9 @@ def resized_size(
     (`get_aspect_ratio_preserving_size` in transformers' Gemma4ImageProcessor and
     Gemma4UnifiedImageProcessor, which size alike).
 
-    A runtime resizes to it before the processor, with the processor's own resize off
-    (docs/spec.md, section 11.1), and calls it with the decoded image's width and height,
+    A runtime resizes to it (`resize_image`) before the processor, with the processor's own
+    resize off (docs/spec.md, section 11.1), and calls it with the decoded image's width and
+    height,
     after its EXIF orientation, not the header's: swapping them swaps W and H.
     `check_decoded_size` checks the decoded size against the header and calls it so;
     `soft_tokens` counts its soft tokens, which do not swap."""
@@ -125,6 +126,26 @@ def soft_tokens(
     )
     side = pooling_kernel_size * patch_size
     return (h // side) * (w // side)
+
+
+def resize_image(image: Any, width: int, height: int) -> Any:
+    """`image`, a decoded PIL RGB image, resized to `width` x `height` by docs/spec.md's
+    bicubic resize: the width's pass first, then the height's, each a single-axis
+    `Image.Resampling.BICUBIC` call, so that the result is the spec's on every Pillow version.
+    (One call, `image.resize((W, H), BICUBIC)`, is the same before Pillow 13; from 13 it does
+    the height first when the height shrinks by more than twice as much as the width, and
+    its pixels differ.) A pass whose size does not change is left out. Pillow is imported
+    only here, so the core still needs no imaging library; a runtime may use this or any
+    implementation within 1 per channel of it."""
+    from PIL import Image
+
+    if not (isinstance(width, int) and isinstance(height, int)) or width < 1 or height < 1:
+        raise ValueError(f"a resized image is at least 1 x 1 pixels, not {width!r} x {height!r}")
+    if image.width != width:
+        image = image.resize((width, image.height), Image.Resampling.BICUBIC)
+    if image.height != height:
+        image = image.resize((width, height), Image.Resampling.BICUBIC)
+    return image
 
 
 def check_decoded_size(image: Any, width: int, height: int) -> tuple[int, int]:

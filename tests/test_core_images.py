@@ -637,10 +637,42 @@ def test_pillow_13_resizes_a_tall_image_height_first():
     img = Image.fromarray(a.astype(np.uint8), "RGB")
     single = np.asarray(img.resize((tw, th), Image.Resampling.BICUBIC)).astype(int)
     reference = np.asarray(reference_resize(img, tw, th)).astype(int)
+    assert np.array_equal(reference, spec_resize(np.asarray(img), tw, th))
     if int(PIL.__version__.split(".")[0]) < 13:
         assert np.array_equal(single, reference)
     else:
         assert np.abs(single - reference).max() > 1
+
+
+def test_resize_image_is_the_specs_resize_on_any_pillow():
+    """The core's resize_image, which every runtime may share, is the spec's resize byte for
+    byte, on the pixel goldens and on images shrunk and enlarged either way, whatever the
+    Pillow version (its two single-axis calls do not depend on Pillow's pass order)."""
+    pytest.importorskip("PIL")
+    np = pytest.importorskip("numpy")
+    from PIL import Image
+
+    from strands_decider.core import resize_image
+
+    for name, g in _pixel_goldens()["images"].items():
+        out = resize_image(reference_pixels(image_bytes(name)), *g["resized"])
+        assert list(out.size) == g["resized"], name
+        assert hashlib.sha256(out.tobytes()).hexdigest() == g["resized_sha256"], name
+    rng = np.random.default_rng(23)
+    for (w, h), (tw, th) in [
+        ((1080, 2400), resized_size(1080, 2400)),  # a tall screenshot, height first on Pillow 13
+        ((2400, 1080), resized_size(2400, 1080)),
+        ((600, 2000), resized_size(600, 2000)),
+        ((90, 7), (48, 48)),
+        ((31, 400), (64, 5)),
+        ((17, 17), (17, 17)),
+    ]:
+        a = rng.integers(0, 256, (h, w, 3), dtype=np.uint8)
+        out = resize_image(Image.fromarray(a, "RGB"), tw, th)
+        assert np.array_equal(np.asarray(out), spec_resize(a, tw, th)), ((w, h), (tw, th))
+    for bad in ((0, 5), (5, 0), (1.5, 2)):
+        with pytest.raises(ValueError):
+            resize_image(Image.new("RGB", (4, 4)), *bad)  # type: ignore[arg-type]
 
 
 def _png(
