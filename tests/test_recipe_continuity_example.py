@@ -92,7 +92,8 @@ def stub_server(rc: Any, monkeypatch: pytest.MonkeyPatch) -> Iterator[dict[str, 
             pass  # keep test output quiet
 
     server = HTTPServer(("127.0.0.1", 0), Handler)
-    threading.Thread(target=server.serve_forever, daemon=True).start()
+    poll = {"poll_interval": 0.05}  # a short poll keeps shutdown() fast
+    threading.Thread(target=server.serve_forever, kwargs=poll, daemon=True).start()
     monkeypatch.setattr(rc, "URL", f"http://127.0.0.1:{server.server_port}")
     try:
         yield seen
@@ -143,13 +144,13 @@ def test_candidates_tolerate_ocr_jitter(rc: Any) -> None:
     assert rc.candidates(boxes, rtl=True) == {"a": ["b"], "b": ["c"]}
 
 
-def test_header_is_found_by_layout_not_page_width(rc: Any, page: dict[str, Any]) -> None:
+def test_header_is_found_by_layout_on_a_shifted_page(rc: Any, page: dict[str, Any]) -> None:
     def shift(b: dict[str, Any]) -> dict[str, Any]:
         x0, y0, x1, y1 = b["bbox"]
         return {**b, "bbox": [x0 + 500, y0 + 500, x1 + 500, y1 + 500]}
 
-    wider = {"page": {**page["page"], "width": 1700}, "boxes": [shift(b) for b in page["boxes"]]}
-    assert rc.run(wider, "noul", oracle(page, [])) == EXPECTED
+    shifted = {"page": page["page"], "boxes": [shift(b) for b in page["boxes"]]}
+    assert rc.run(shifted, "noul", oracle(page, [])) == EXPECTED
     one_column = {  # every box is wide, but none lies over two columns
         "boxes": [
             {"id": "a", "bbox": [50, 100, 950, 200], "text": "a"},
@@ -160,8 +161,7 @@ def test_header_is_found_by_layout_not_page_width(rc: Any, page: dict[str, Any])
 
 
 def test_run_leaves_the_page_header_out(rc: Any, page: dict[str, Any]) -> None:
-    asked: list[str] = []
-    groups = rc.run(page, "noul", oracle(page, asked))
+    groups = rc.run(page, "noul", oracle(page, []))
     assert groups[-1] == ["k00"]
     assert all("k00" not in g for g in groups[:-1])
 
@@ -206,7 +206,26 @@ def test_choice_keeps_the_top_candidate_unless_none_wins(rc: Any) -> None:
         assert set(questions["next"]["criteria"]) == {*cands[a], "none"}
         return {"next": {"probabilities": answers[a]}}
 
-    assert rc.claims(by_id, cands, "auto", ask) == [(0.45, "a", "c")]
+    assert rc.claims(by_id, cands, "choice", ask) == [(0.45, "a", "c")]
+
+
+def test_auto_ranks_with_a_choice_then_decides_with_a_noul(rc: Any) -> None:
+    by_id = {i: {"id": i, "bbox": [0, 0, 10, 10], "text": i} for i in ("a", "b", "c", "x", "y")}
+    cands = {"a": ["b", "c"], "x": ["y"]}
+    asked: list[tuple[str, str]] = []
+
+    def ask(state: str, questions: dict[str, Any]) -> dict[str, Any]:
+        a = re.search(r'Block A ends: "(.*?)"', state).group(1)  # type: ignore[union-attr]
+        if "next" in questions:
+            asked.append(("choice", a))
+            assert set(questions["next"]["criteria"]) == {"b", "c"}  # no "none" when ranking
+            return {"next": {"probabilities": {"b": 0.3, "c": 0.7}}}
+        b = re.search(r'starts: "(.*?)"$', state).group(1)  # type: ignore[union-attr]
+        asked.append(("noul", f"{a}->{b}"))
+        return {"same": {"noul": 0.8 if b == "c" else 0.2}}
+
+    assert rc.claims(by_id, cands, "auto", ask) == [(0.8, "a", "c")]
+    assert asked == [("choice", "a"), ("noul", "a->c"), ("noul", "x->y")]
 
 
 @pytest.mark.parametrize(
@@ -220,7 +239,7 @@ def test_choice_keeps_the_top_candidate_unless_none_wins(rc: Any) -> None:
 def test_choice_edge_cases(rc: Any, probs: dict[str, float], expected: list[Any]) -> None:
     by_id = {i: {"id": i, "bbox": [0, 0, 10, 10], "text": i} for i in ("a", "b", "c")}
     ask = lambda state, questions: {"next": {"probabilities": probs}}  # noqa: E731
-    assert rc.claims(by_id, {"a": ["b", "c"]}, "auto", ask) == expected
+    assert rc.claims(by_id, {"a": ["b", "c"]}, "choice", ask) == expected
 
 
 def test_ask_server_posts_to_systemone(rc: Any, stub_server: dict[str, Any]) -> None:

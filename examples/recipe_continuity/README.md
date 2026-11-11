@@ -2,9 +2,9 @@
 
 **In short:** strands decider has two question types that fit this task. A `noul` is a yes/no
 question that returns P(yes); a `choice` picks one of several options (see the
-[main README](../../README.md#noul-question)). Use a `noul` to decide whether one link exists
-("does box B continue box A?"), and a `choice` only to pick between several real candidates.
-This example shows why, on a document task.
+[main README](../../README.md#how-to-start-using-strands-decider)). Use a `noul` to decide
+whether a link exists ("does box B continue box A?"), and a `choice` to rank several
+candidates. This example shows the difference on a document task.
 
 OCR on a scanned page gives you text boxes, a title here and a paragraph there, but not the
 recipes they belong to. Layout tells you where each box is. Strands decider reads the text and
@@ -21,7 +21,7 @@ python examples/recipe_continuity/recipe_continuity.py
 
 The script uses only the Python standard library. It expects a server on port 8099 unless
 `STRANDS_DECIDER_URL` is set, and refuses any address that is not `http://` or `https://`.
-A run asks about 14 questions and takes a minute or two on a laptop.
+A run asks 14 questions and takes a few seconds once the model is loaded (longer on CPU).
 
 ## The page
 
@@ -43,14 +43,16 @@ of your scans.
 ## How it works
 
 1. **Layout proposes.** For each box, the candidate is the box directly below it in the same
-   column, or, if nothing is below, the top of the next column. The page header lies over
+   column, or, if nothing is below, the top of the next column (or several tops, if that
+   column has gaps). The page header lies over
    several columns, belongs to no recipe, and is left out.
-2. **The decider judges.** Each request sends a *state*, the text the model reads (the end of
-   one box, one line of layout context, and the start of the next box), and the question.
-   The answer is a probability.
+2. **The decider judges.** Each request sends a *state*, the text the model reads, and one
+   question. For a `noul`, the state holds the end of one box, one line of layout context and
+   the start of the next box, and the answer is P(true). For a `choice`, the candidates go
+   into the options, and the answer is one probability per option.
 3. **Code settles the links.** Links are accepted strongest first, and a link that would
-   close a loop is skipped. Each box gets at most one
-   next box and at most one previous box, and the links chain into recipes.
+   close a loop is skipped. Each box gets at most one next box and at most one previous box,
+   and the links chain into recipes.
 
 A run prints each group of box ids and whether it matches a labelled recipe:
 
@@ -70,14 +72,16 @@ ok k13              نصيحة: يُحفظ الخبز في كيس
 
 Each question can carry *criteria*: short texts that say what each answer means. A `noul` has
 two, `true` and `false` (here, `SAME` at the top of the script). Its probability is the
-model's share for `true` against `false`, for the one pair it was asked about. A `choice` is one softmax over all the
-options you supply, so each value is a share of the total, and `none` is scored like any other
-option string.
+model's share for `true` against `false`, for the one pair it was asked about. A `choice` is
+one softmax over all the options you supply, so each value is a share of the total. A `none`
+option is scored like any other option string.
 
-So the script asks a `noul` when a box has one candidate, and a `choice` when it has several,
-keeping the top option unless that is `none` (`none` also wins a tie). On this page every box has at most one
-candidate, so the default run asks only `noul` questions. `--question choice` forces a `choice`
-everywhere, which here means one candidate against `none`:
+So by default the script uses a `noul` to decide whether a link exists. When a box has several
+candidates, it first asks a `choice` to rank them, without `none`, and then a `noul` about the
+top one. On this page every box has at most one candidate, so the default run asks only `noul`
+questions. `--question choice` instead asks a `choice` that also decides, with `none` as an
+option and the top option kept unless it is `none` (`none` also wins a tie). Here that means
+one candidate against `none`:
 
 ```bash
 python examples/recipe_continuity/recipe_continuity.py                    # 9/9 recipes
@@ -86,14 +90,20 @@ python examples/recipe_continuity/recipe_continuity.py --question choice  # 6/9 
 
 With `strands-decider-2B-qwen3.5-v1-2610`, the `choice` run misses the link from the recipe
 title to its text and the jump to the next column, and links two separate recipes. In our
-reading, the model is weighing a concrete text against an abstract `none`. The criteria wording
-matters too. The `false` criterion names what starts a new item on this page: a dish name
-followed by a full stop or a dash, or the word نصيحة (tip). With the generic "B starts a
-different recipe, a new title, or a separate tip." the default run rebuilds 5 of 9. This example
-answers [issue #132](https://github.com/strands-labs/strands-decider/issues/132), which asked
-for an example where, with a single candidate, a `noul` beats a "this or none" `choice`.
+reading, the model is weighing a concrete text against an abstract `none`. Adding the `noul`'s
+two criteria to the `choice` (the `true` text to its instructions, the `false` text to `none`)
+still gives 6/9.
+
+The criteria wording matters as much. The `false` criterion names what starts a new item on
+this page: a dish name followed by a full stop or a dash, or the word نصيحة (tip). With the
+generic "B starts a different recipe, a new title, or a separate tip." the default run rebuilds
+only 5 of 9, fewer than the `choice` run. So the `noul` wins here once its criteria fit the
+page. This example answers
+[issue #132](https://github.com/strands-labs/strands-decider/issues/132), which asked for an
+example where, with a single candidate, a `noul` beats a "this or none" `choice`.
 
 > This example is an illustration rather than a benchmark: one synthetic page, with questions,
 > criteria and thresholds tuned by hand to it. Every accepted link scores between 0.54 and
 > 0.86, and the closest rejected link scores 0.47, so treat the links as proposals to check,
-> not as decisions (see the [routing convention](../../docs/architecture.md#the-routing-convention)).
+> not as decisions (see the
+> [routing convention](../../docs/architecture.md#the-routing-convention)).

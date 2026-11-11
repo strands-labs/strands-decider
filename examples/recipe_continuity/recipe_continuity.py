@@ -7,9 +7,9 @@ recipes. Start a server, then run this file:
     strands-decider serve StrandsAgents/strands-decider-2B-qwen3.5-v1-2610 --port 8099
     python examples/recipe_continuity/recipe_continuity.py
 
-`--question` picks the question shape. `auto` (the default) asks a `noul` when a box has one
-candidate and a `choice` when it has several; `noul` and `choice` force one shape everywhere,
-to compare the two.
+`--question` picks the question shape. `auto` (the default) uses a `noul` to decide whether a
+link exists, and, when a box has several candidates, first a `choice` to rank them. `noul` and
+`choice` force one shape everywhere, to compare the two; `choice` then adds a "none" option.
 """
 
 from __future__ import annotations
@@ -111,7 +111,7 @@ def centre(b: Box) -> float:
 
 
 def spans_columns(b: Box, boxes: list[Box]) -> bool:
-    """True if b lies over two boxes that are in different columns, like a page header."""
+    """True if b overlaps, horizontally, two boxes in different columns (a header or footer)."""
     over = [c for c in boxes if c is not b and overlap(b, c) >= SAME_COLUMN]
     return any(overlap(c, d) < SAME_COLUMN for c in over for d in over)
 
@@ -161,15 +161,18 @@ def ask_noul(by_id: dict[str, Box], a: str, b: str, ask: Ask) -> float:
     return ask(state, {"same": question})["same"]["noul"]
 
 
-def ask_choice(by_id: dict[str, Box], a: str, bs: list[str], ask: Ask) -> dict[str, float]:
-    """Ask which candidate continues A's recipe, with "none" as one more option.
+def ask_choice(
+    by_id: dict[str, Box], a: str, bs: list[str], ask: Ask, with_none: bool
+) -> dict[str, float]:
+    """Ask which candidate continues A's recipe, optionally with "none" as one more option.
 
     Returns a probability per option. They are shares of one distribution: they add up to 1
-    across the candidates and "none".
+    across the options.
     """
     state = f'{CONTEXT}\nBlock A ends: "{by_id[a]["text"][-SNIPPET:]}"'
     options = {b: f'{where(by_id, a, b)}, starts: "{by_id[b]["text"][:SNIPPET]}"' for b in bs}
-    options["none"] = "None of them: Block A's recipe ends here."
+    if with_none:
+        options["none"] = "None of them: Block A's recipe ends here."
     question = {
         "type": "choice",
         "instructions": "Which block continues the same recipe as Block A? A sentence cut "
@@ -183,16 +186,26 @@ def claims(by_id: dict[str, Box], cands: dict[str, list[str]], mode: str, ask: A
     """Ask the decider about every box that has candidates; return the links it supports."""
     out: list[Claim] = []
     for a, bs in cands.items():
-        if mode == "noul" or (mode == "auto" and len(bs) == 1):
+        if mode == "auto":
+            # Rank with a choice only when there is something to rank, then decide with a noul.
+            top = bs[0]
+            if len(bs) > 1:
+                probs = ask_choice(by_id, a, bs, ask, with_none=False)
+                top = max(bs, key=lambda k: probs.get(k, 0.0))
+            p = ask_noul(by_id, a, top, ask)
+            if p >= ACCEPT:
+                out.append((p, a, top))
+        elif mode == "noul":
             # One yes/no question per candidate: keep each link that clears ACCEPT.
             for b in bs:
                 p = ask_noul(by_id, a, b, ask)
                 if p >= ACCEPT:
                     out.append((p, a, b))
         else:
-            # One ranking question: keep the top option, unless the top option is "none".
-            # "none" is listed first, so it also wins a tie; other keys are ignored.
-            probs = ask_choice(by_id, a, bs, ask)
+            # One choice that also decides: keep the top option unless it is "none".
+            # "none" comes first in this list, so it wins a tie (the request lists it last).
+            # Keys that are not options are ignored, and a missing option counts as 0.
+            probs = ask_choice(by_id, a, bs, ask, with_none=True)
             best = max(["none", *bs], key=lambda k: probs.get(k, 0.0))
             if best != "none":
                 out.append((probs[best], a, best))
@@ -203,7 +216,7 @@ def settle(boxes: list[Box], found: list[Claim]) -> list[list[str]]:
     """Accept links strongest first, and chain them into recipes.
 
     Each box gets at most one next box and at most one previous box, so a weaker link that
-    conflicts with a stronger one is dropped. Returns each recipe as box ids in reading
+    conflicts with a stronger one, or that would close a loop, is dropped. Returns each recipe as box ids in reading
     order; a box with no accepted link is a recipe on its own.
     """
     nxt: dict[str, str] = {}

@@ -384,7 +384,7 @@ the example's [README](examples/strands/README.md) for setup and the walk-throug
 
 [`examples/recipe_continuity/`](examples/recipe_continuity/README.md) uses strands decider
 without an agent: it groups the OCR text boxes of a synthetic Arabic cookbook page into recipes,
-using a `noul` to decide whether a link exists and a `choice` only to rank several candidates.
+using a `noul` to decide whether a link exists and a `choice` to rank several candidates.
 
 ## Customizing for your decisions
 
