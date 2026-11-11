@@ -68,6 +68,9 @@ def _load() -> HiddenStateEngine:
         raise ValueError(
             f"DECIDER_MAX_REQUEST_TOKENS must be 0 (no limit) or more, not {max_request_tokens}"
         )
+    image_long_side = int(os.environ.get("DECIDER_IMAGE_LONG_SIDE") or 448)
+    if image_long_side < 32:
+        raise ValueError(f"DECIDER_IMAGE_LONG_SIDE must be 32 or more, not {image_long_side}")
     model = os.path.join(MODEL_DIR, "decider-q8_0.gguf")
     # The vision tower, in an image built with vision on (README.md, Images).
     mmproj = os.path.join(MODEL_DIR, "mmproj-f16.gguf")
@@ -82,7 +85,9 @@ def _load() -> HiddenStateEngine:
         if vision
         else LlamaBackend(lib, model, threads)
     )
-    engine = HiddenStateEngine.from_assets(os.path.join(MODEL_DIR, "assets"), backend)
+    engine = HiddenStateEngine.from_assets(
+        os.path.join(MODEL_DIR, "assets"), backend, image_long_side=image_long_side
+    )
     # The first forward's one-time costs, paid before the snapshot is taken, and before the
     # request limit, which could refuse even this.
     warm_up: dict[str, Any] = {
@@ -161,6 +166,7 @@ def _http(event: dict[str, Any]) -> dict[str, Any]:
                 "temperature": engine.cfg.temperature,
                 "max_request_tokens": engine.cfg.max_request_tokens,
                 "vision": hasattr(engine.backend, "forward_images"),
+                "image_long_side": engine.cfg.image_long_side,
             },
         )
     body = event.get("body") or ""

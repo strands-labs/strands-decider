@@ -112,6 +112,7 @@ def load(model_dir, monkeypatch):
         monkeypatch.setenv("DECIDER_MODEL_DIR", str(model_dir))
         monkeypatch.delenv("AWS_LAMBDA_INITIALIZATION_TYPE", raising=False)
         monkeypatch.delenv("DECIDER_MAX_REQUEST_TOKENS", raising=False)
+        monkeypatch.delenv("DECIDER_IMAGE_LONG_SIDE", raising=False)
         for key, value in env.items():
             monkeypatch.setenv(key, value)
         monkeypatch.setitem(
@@ -168,6 +169,7 @@ def test_health_reports_the_model_and_settings(load):
             "temperature": 1.0,
             "max_request_tokens": None,
             "vision": False,
+            "image_long_side": 448,
         },
     )
     handler = load(DECIDER_MAX_REQUEST_TOKENS="24576")
@@ -328,3 +330,21 @@ def test_a_fault_in_the_function_is_a_500_with_its_traceback_logged(load, monkey
     assert "dh_forward failed with 4" in caplog.text  # the traceback, in the function's log
     with pytest.raises(RuntimeError, match="dh_forward failed"):
         handler.handler(REQUEST, None)  # a direct invocation fails, as Lambda reports it
+
+
+def test_the_image_size_setting_reaches_the_engine(load, model_dir):
+    pytest.importorskip("PIL")
+    (model_dir / "mmproj-f16.gguf").write_bytes(os.urandom(500))
+    handler = load(DECIDER_IMAGE_LONG_SIDE="768")
+    assert call(handler, url_event("GET", "/health"))[1]["image_long_side"] == 768
+    status, _ = call(
+        handler, url_event("POST", "/v1/systemone", {**REQUEST, "images": [_png(1200, 800)]})
+    )
+    assert status == 200
+    assert FakeVisionBackend.images[-1] == [(768, 512)]  # 768 x 512, already on the grid
+
+
+def test_an_image_size_under_the_grid_fails_the_init_before_the_load(load):
+    with pytest.raises(ValueError, match="DECIDER_IMAGE_LONG_SIDE must be 32 or more, not 16"):
+        load(DECIDER_IMAGE_LONG_SIDE="16")
+    assert not FakeBackend.calls

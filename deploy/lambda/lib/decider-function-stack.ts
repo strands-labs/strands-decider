@@ -68,6 +68,12 @@ export class DeciderFunctionStack extends Stack {
     if (!Number.isInteger(maxRequestTokens) || maxRequestTokens < 0) {
       throw new Error(`max_request_tokens must be a whole number, 0 for no limit, not ${ctx("max_request_tokens")}`);
     }
+    // The longest side an image is scaled to before the processor's 32-pixel grid: 448 is
+    // serve --vision's, 196 tokens for a square image; 768 is 576 (README.md, Images).
+    const imageLongSide = Number(ctx("image_long_side"));
+    if (!Number.isInteger(imageLongSide) || imageLongSide < 32) {
+      throw new Error(`image_long_side must be a whole number of pixels, 32 or more, not ${ctx("image_long_side")}`);
+    }
 
     // Builds the image in AWS CodeBuild during `cdk deploy` (deploy-time-build) and publishes it
     // to an ECR repository that belongs to the stack. The build downloads the model, folds its
@@ -110,7 +116,10 @@ export class DeciderFunctionStack extends Stack {
       timeout: Duration.minutes(15),
       snapStart: snapStart ? lambda.SnapStartConf.ON_PUBLISHED_VERSIONS : undefined,
       logGroup,
-      environment: { DECIDER_MAX_REQUEST_TOKENS: String(maxRequestTokens) },
+      environment: {
+        DECIDER_MAX_REQUEST_TOKENS: String(maxRequestTokens),
+        DECIDER_IMAGE_LONG_SIDE: String(imageLongSide),
+      },
       // Each deploy that changes the function publishes a version, and CloudFormation deletes the
       // one it replaces: Lambda bills a version's SnapStart snapshot for as long as it exists.
       currentVersionOptions: { removalPolicy: RemovalPolicy.DESTROY },

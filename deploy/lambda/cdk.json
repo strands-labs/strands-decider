@@ -5,6 +5,7 @@
     "model_revision": "main",
     "snapstart": false,
     "vision": false,
+    "image_long_side": 448,
     "max_request_tokens": 24576
   }
 }
