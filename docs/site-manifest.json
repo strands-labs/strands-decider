@@ -6,6 +6,17 @@
   },
   "pages": [
     {
+      "id": "overview",
+      "source": "docs/overview.md",
+      "slug": "overview",
+      "title": "Overview",
+      "description": "Understand what Strands Decider is, when to use it, and how to run your first decision.",
+      "nav": {
+        "group": "Get started",
+        "order": 1
+      }
+    },
+    {
       "id": "inference",
       "source": "docs/inference.md",
       "slug": "inference",
