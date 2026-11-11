@@ -6,6 +6,8 @@
     "snapstart": false,
     "vision": false,
     "image_long_side": 448,
+    "decoder_precision": "q8_0",
+    "vision_precision": "f16",
     "max_request_tokens": 24576
   }
 }

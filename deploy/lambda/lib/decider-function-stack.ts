@@ -31,6 +31,14 @@ function flag(value: unknown, key: string): boolean {
   return String(value) === "true";
 }
 
+/** One of `allowed`, from cdk.json or `-c key=value`. */
+function choice(value: unknown, key: string, allowed: string[]): string {
+  if (!allowed.includes(String(value))) {
+    throw new Error(`${key} must be ${allowed.join(" or ")}, not ${JSON.stringify(value)}`);
+  }
+  return String(value);
+}
+
 const REPO_ROOT = path.join(__dirname, "..", "..", "..");
 
 // The build uploads this directory to S3; keep only what the image needs, as
@@ -84,6 +92,8 @@ export class DeciderFunctionStack extends Stack {
       MODEL: ctx("model"),
       MODEL_REVISION: ctx("model_revision"),
       VISION: String(flag(ctx("vision"), "vision")),
+      DECODER_PRECISION: choice(ctx("decoder_precision"), "decoder_precision", ["q8_0", "f16"]),
+      VISION_PRECISION: choice(ctx("vision_precision"), "vision_precision", ["f16", "f32"]),
     };
     const image = new ContainerImageBuild(this, "Image", {
       directory: REPO_ROOT,

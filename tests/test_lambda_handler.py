@@ -78,7 +78,7 @@ def model_dir(tmp_path):
     """What the image holds in /opt/model: the GGUF (any bytes here) and the assets."""
     assets = tmp_path / "assets"
     assets.mkdir()
-    (tmp_path / "decider-q8_0.gguf").write_bytes(os.urandom(1000))
+    (tmp_path / "decider.gguf").write_bytes(os.urandom(1000))
     tok = Tokenizer(models.WordLevel({"<unk>": 0}, unk_token="<unk>"))
     tok.pre_tokenizer = pre_tokenizers.Whitespace()
     tok.save(str(assets / "tokenizer.json"))
@@ -154,7 +154,7 @@ def test_loads_the_model_from_the_image(load, model_dir):
     backend = handler._engine.result().backend
     lib_path, model_path, threads = backend.args
     assert lib_path == str(FUNCTION / "libdecider.so")
-    assert model_path == str(model_dir / "decider-q8_0.gguf")
+    assert model_path == str(model_dir / "decider.gguf")
     assert threads == os.cpu_count()
     assert len(FakeBackend.calls) == 1  # the warm-up, before any request
 
@@ -274,7 +274,7 @@ def test_prefetch_reads_every_byte_once(load, model_dir, monkeypatch):
         return data
 
     monkeypatch.setattr(os, "pread", recording_pread)
-    handler._prefetch(str(model_dir / "decider-q8_0.gguf"), chunk=64, readers=4)
+    handler._prefetch(str(model_dir / "decider.gguf"), chunk=64, readers=4)
     covered = sorted(read)
     assert covered[0][0] == 0
     assert all(a + n == b for (a, n), (b, _) in itertools.pairwise(covered))
@@ -291,11 +291,11 @@ def _png(width: int, height: int) -> str:
 
 def test_an_image_with_a_vision_tower_answers_over_images(load, model_dir):
     pytest.importorskip("PIL")
-    (model_dir / "mmproj-f16.gguf").write_bytes(os.urandom(500))
+    (model_dir / "vision.gguf").write_bytes(os.urandom(500))
     handler = load()
     backend = handler._engine.result().backend
     assert isinstance(backend, FakeVisionBackend)
-    assert backend.mmproj_path == str(model_dir / "mmproj-f16.gguf")
+    assert backend.mmproj_path == str(model_dir / "vision.gguf")
     # The image warm-up: 64 px, raised to the processor grid's least area, 256 x 256.
     assert FakeVisionBackend.images == [[(256, 256)]]
     assert call(handler, url_event("GET", "/health"))[1]["vision"] is True
@@ -334,7 +334,7 @@ def test_a_fault_in_the_function_is_a_500_with_its_traceback_logged(load, monkey
 
 def test_the_image_size_setting_reaches_the_engine(load, model_dir):
     pytest.importorskip("PIL")
-    (model_dir / "mmproj-f16.gguf").write_bytes(os.urandom(500))
+    (model_dir / "vision.gguf").write_bytes(os.urandom(500))
     handler = load(DECIDER_IMAGE_LONG_SIDE="768")
     assert call(handler, url_event("GET", "/health"))[1]["image_long_side"] == 768
     status, _ = call(

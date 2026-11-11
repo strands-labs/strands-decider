@@ -1,4 +1,4 @@
-# AWS Lambda image for strands-decider (README.md): the torso as a Q8_0 GGUF that llama.cpp runs,
+# AWS Lambda image for strands-decider (README.md): the torso as a GGUF that llama.cpp runs,
 # and the rest in the package's torch-free HiddenStateEngine. `cdk deploy` builds it; by hand, from
 # the repository root:
 #   docker build --platform linux/arm64 -f deploy/lambda/Dockerfile --build-arg MODEL=<Hub id> .
@@ -51,18 +51,26 @@ ARG MODEL
 ARG MODEL_REVISION=main
 # true adds the base model's vision tower, as an mmproj GGUF, for requests with images.
 ARG VISION=false
+# The weights' precision (README.md, Precision): the decoder q8_0 or f16, the vision tower f16 or f32.
+ARG DECODER_PRECISION=q8_0
+ARG VISION_PRECISION=f16
 # Each step deletes what the next does not read: the downloads and the merged torso are about
 # 4.5 and 3.8 GB. The GGUFs are written to memory (/tmp/gguf): written to Docker's storage in
 # CodeBuild, the converter's write fails with "Not enough free space" with hundreds of GB free.
 RUN --mount=type=tmpfs,target=/tmp/gguf \
-    python prepare_model.py "${MODEL}" "${MODEL_REVISION}" /tmp/out "${VISION}" && mkdir /model \
+    case "${DECODER_PRECISION}/${VISION_PRECISION}" in q8_0/f16|q8_0/f32|f16/f16|f16/f32) ;; \
+      *) echo "DECODER_PRECISION q8_0 or f16, VISION_PRECISION f16 or f32" >&2; exit 1;; esac \
+    && python prepare_model.py "${MODEL}" "${MODEL_REVISION}" /tmp/out "${VISION}" "${DECODER_PRECISION}" \
+    && mkdir /model \
     && if [ "${VISION}" = true ]; then \
-      python /llama/convert_hf_to_gguf.py /tmp/out/vision --mmproj --outtype f16 \
-        --outfile /tmp/gguf/mmproj-f16.gguf && mv /tmp/gguf/mmproj-f16.gguf /model/; fi \
+      python /llama/convert_hf_to_gguf.py /tmp/out/vision --mmproj --outtype "${VISION_PRECISION}" \
+        --outfile /tmp/gguf/vision.gguf && mv /tmp/gguf/vision.gguf /model/; fi \
     && rm -rf /tmp/hf \
     && python /llama/convert_hf_to_gguf.py /tmp/out/torso --outtype f16 --outfile /tmp/gguf/torso.gguf \
     && rm -rf /tmp/out/torso && mv /tmp/out/assets /model/ \
-    && llama-quantize /tmp/gguf/torso.gguf /model/decider-q8_0.gguf Q8_0 \
+    && if [ "${DECODER_PRECISION}" = q8_0 ]; then \
+      llama-quantize /tmp/gguf/torso.gguf /model/decider.gguf Q8_0; \
+    else mv /tmp/gguf/torso.gguf /model/decider.gguf; fi \
     && rm -rf /tmp/out \
     && chmod -R a+rX /model  # Lambda runs the function as a user other than root
 

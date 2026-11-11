@@ -71,9 +71,9 @@ def _load() -> HiddenStateEngine:
     image_long_side = int(os.environ.get("DECIDER_IMAGE_LONG_SIDE") or 448)
     if image_long_side < 32:
         raise ValueError(f"DECIDER_IMAGE_LONG_SIDE must be 32 or more, not {image_long_side}")
-    model = os.path.join(MODEL_DIR, "decider-q8_0.gguf")
+    model = os.path.join(MODEL_DIR, "decider.gguf")
     # The vision tower, in an image built with vision on (README.md, Images).
-    mmproj = os.path.join(MODEL_DIR, "mmproj-f16.gguf")
+    mmproj = os.path.join(MODEL_DIR, "vision.gguf")
     vision = os.path.exists(mmproj)
     for path in (model, mmproj) if vision else (model,):
         _prefetch(path)
