@@ -141,7 +141,11 @@ GRID_MAX_PIXELS = 16777216
 
 
 def smart_resize(height: int, width: int) -> tuple[int, int]:
-    """The processor's smart_resize: sides that are multiples of 32, the area in its bounds."""
+    """The processor's smart_resize: sides that are multiples of 32, the area in its bounds.
+    An image more than 200 times as long as it is wide is refused, as the processor refuses it."""
+    ratio = max(height, width) / min(height, width)
+    if ratio > 200:
+        raise ValueError(f"absolute aspect ratio must be smaller than 200, got {ratio}")
     f = GRID_FACTOR
     h_bar, w_bar = round(height / f) * f, round(width / f) * f
     if h_bar * w_bar > GRID_MAX_PIXELS:
@@ -166,8 +170,12 @@ def to_grid(img: Image.Image) -> tuple[bytes, int, int, int]:
 
 def state_segments(state: Content, n_images: int) -> list[str]:
     """render_image_state's text around its images: n_images + 1 segments, with image i
-    between segment i and segment i + 1."""
-    parts = render_image_state(state, n_images).split(f"{VISION_START}{IMAGE_PAD}{VISION_END}")
-    if len(parts) != n_images + 1:
-        raise ValueError("the state text holds a vision placeholder of its own")
-    return parts
+    between segment i and segment i + 1. A state that holds an `<|image_pad|>` of its own is
+    refused, as expand_image_tokens refuses it for VisionEngine, with the same message."""
+    text = render_image_state(state, n_images)
+    n_pads = text.count(IMAGE_PAD)
+    if n_pads != n_images:
+        raise ValueError(
+            f"prompt holds {n_pads} image placeholders but {n_images} token counts were given"
+        )
+    return text.split(f"{VISION_START}{IMAGE_PAD}{VISION_END}")

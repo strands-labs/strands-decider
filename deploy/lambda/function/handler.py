@@ -173,8 +173,11 @@ def _http(event: dict[str, Any]) -> dict[str, Any]:
         return _response(422, {"detail": [{**err, "loc": ["body", *err["loc"]]} for err in errors]})
     try:
         return _response(200, _evaluate(request))
-    except ValueError as e:  # over the window or the request limit
+    except ValueError as e:  # a request the engine refuses: over the window or the limit, say
         return _response(422, {"detail": str(e)})
+    except Exception:  # a fault in the function, such as a failed forward, as serve's 500
+        log.exception("request failed")
+        return _response(500, {"detail": "Internal Server Error"})
 
 
 def handler(event: Any, context: Any) -> dict[str, Any]:

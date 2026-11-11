@@ -565,8 +565,14 @@ def test_grid_is_the_processors(engines):
     rng = np.random.default_rng(0)
     for _ in range(2000):
         h, w = int(rng.integers(8, 5000)), int(rng.integers(8, 5000))
-        if max(h, w) / min(h, w) <= 200:
-            assert smart_resize(h, w) == hf(h, w, factor=32, min_pixels=65536, max_pixels=16777216)
+        try:
+            want = hf(h, w, factor=32, min_pixels=65536, max_pixels=16777216)
+        except ValueError as refused:  # an aspect ratio over 200: refused alike
+            with pytest.raises(ValueError) as got:
+                smart_resize(h, w)
+            assert str(got.value) == str(refused)
+            continue
+        assert smart_resize(h, w) == want
     for i, (w, h) in enumerate([(448, 448), (448, 301), (300, 448), (120, 90), (1000, 200)]):
         img = fit_image(decode_image(_b64(w, h, i)), 448)
         rgb, gw, gh, n = to_grid(img)
@@ -619,7 +625,11 @@ def test_hidden_engine_refuses_a_prompt_over_the_window_as_vision_does(engines, 
     assert str(got.value) == str(want.value)
 
 
-@pytest.mark.parametrize("sizes", [[(600, 800)], [(448, 448), (1000, 200)]])
+@pytest.mark.parametrize(
+    "sizes",
+    [[(600, 800)], [(448, 448), (1000, 200)], [(320, 320), (448, 200), (64, 64), (300, 448)]],
+    ids=["one image", "two images", "four images"],
+)
 def test_hidden_engine_answers_over_images_as_vision_does(engines, tmp_path, sizes):
     _, vision = engines
     req = SystemOneRequest(
@@ -646,6 +656,21 @@ def test_hidden_engine_sends_text_requests_to_forward(engines, tmp_path):
     have, expected = _probabilities(got), _probabilities(vision.evaluate(req))
     for name in expected:
         assert have[name] == pytest.approx(expected[name], abs=1.5e-4), name
+
+
+@pytest.mark.parametrize(
+    ("state", "size"),
+    [("Checkout.", (2000, 8)), (f"see {IMAGE_PAD} here", (320, 320))],
+    ids=["aspect ratio over 200", "an image pad in the state"],
+)
+def test_hidden_engine_refuses_what_vision_refuses_with_its_message(engines, tmp_path, state, size):
+    _, vision = engines
+    req = SystemOneRequest(state=state, questions=QUESTIONS, images=[_b64(*size, 3)])
+    with pytest.raises(ValueError) as want:
+        vision.evaluate(req)
+    with pytest.raises(ValueError) as got:
+        _hidden_engine(vision, tmp_path).evaluate(req)
+    assert str(got.value) == str(want.value)
 
 
 def test_hidden_engine_refuses_images_it_cannot_read(engines, tmp_path):

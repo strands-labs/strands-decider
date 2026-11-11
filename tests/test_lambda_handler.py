@@ -313,3 +313,18 @@ def test_an_image_without_a_vision_tower_refuses_images(load):
     )
     assert status == 422 and "images are not supported" in body["detail"]
     assert not FakeVisionBackend.images
+
+
+def test_a_fault_in_the_function_is_a_500_with_its_traceback_logged(load, monkeypatch, caplog):
+    handler = load()
+
+    def broken_forward(self, state, questions, rows):
+        raise RuntimeError("dh_forward failed with 4")
+
+    monkeypatch.setattr(FakeBackend, "forward", broken_forward)
+    with caplog.at_level("ERROR", logger="decider"):
+        status, body = call(handler, url_event("POST", "/v1/systemone", REQUEST))
+    assert (status, body) == (500, {"detail": "Internal Server Error"})
+    assert "dh_forward failed with 4" in caplog.text  # the traceback, in the function's log
+    with pytest.raises(RuntimeError, match="dh_forward failed"):
+        handler.handler(REQUEST, None)  # a direct invocation fails, as Lambda reports it

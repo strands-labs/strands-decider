@@ -39,8 +39,11 @@ requests as it does to text ones.
 
 Limits, fixed per server:
 
-- Each image is scaled down (never up) so its longer side is at most 448 px: 196 tokens
-  for a square image (patch 16, merge 2). At most 4 images per request.
+- Each image is scaled down so its longer side is at most 448 px, then fitted to the image
+  processor's grid: sides that are multiples of 32, and an area of at least 65,536 pixels, so a
+  small image is scaled up (a 64 px square becomes 256 x 256). A 448 px square is 196 tokens
+  (patch 16, merge 2). An image more than 200 times as long as it is wide is refused. At most 4
+  images per request.
 - An image over 4096 x 4096 pixels is refused from its header, before it is decoded.
   Other formats are refused before they are parsed. EXIF rotation is applied, and
   transparent areas are read as white.
