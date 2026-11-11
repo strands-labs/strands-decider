@@ -36,18 +36,20 @@ hand-labelled recipes and tips. It was written for this example and includes a f
 
 Each box has an `id`, a `bbox` of `[x0, y0, x1, y1]` in pixels, its `text`, and the
 hand label `recipe`, which the script uses only to score its output. The ids are not in
-reading order. `--page` takes another file in the same format; set `direction` to `"ltr"`
-for a left-to-right page, and tune the layout settings at the top of the script to its scale.
+reading order. `--page` takes another file in the same format. Set `page.direction` to `"rtl"`
+or `"ltr"` (the default is `"ltr"`), and tune `MAX_GAP` at the top of the script to the scale
+of your scans.
 
 ## How it works
 
 1. **Layout proposes.** For each box, the candidate is the box directly below it in the same
-   column, or, if nothing is below, the top of the next column. The page header spans the
-   page, belongs to no recipe, and is left out.
+   column, or, if nothing is below, the top of the next column. The page header lies over
+   several columns, belongs to no recipe, and is left out.
 2. **The decider judges.** Each request sends a *state*, the text the model reads (the end of
    one box, one line of layout context, and the start of the next box), and the question.
    The answer is a probability.
-3. **Code settles the links.** Links are accepted strongest first. Each box gets at most one
+3. **Code settles the links.** Links are accepted strongest first, and a link that would
+   close a loop is skipped. Each box gets at most one
    next box and at most one previous box, and the links chain into recipes.
 
 A run prints each group of box ids and whether it matches a labelled recipe:
@@ -73,7 +75,7 @@ options you supply, so each value is a share of the total, and `none` is scored 
 option string.
 
 So the script asks a `noul` when a box has one candidate, and a `choice` when it has several,
-keeping the top option unless that is `none`. On this page every box has at most one
+keeping the top option unless that is `none` (`none` also wins a tie). On this page every box has at most one
 candidate, so the default run asks only `noul` questions. `--question choice` forces a `choice`
 everywhere, which here means one candidate against `none`:
 

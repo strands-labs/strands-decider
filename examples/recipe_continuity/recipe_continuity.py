@@ -30,7 +30,6 @@ PAGE = Path(__file__).with_name("arabic_cookbook.json")
 # Layout settings, in the page's pixel units. Tune them to your scans.
 MAX_GAP = 60  # largest vertical gap between two boxes of the same column
 SAME_COLUMN = 0.5  # boxes overlapping this much horizontally are in the same column
-HEADER = 0.8  # a box wider than this share of the page is a header, not part of a recipe
 
 # Decision settings.
 ACCEPT = 0.5  # a noul link needs P(true) >= ACCEPT; pick it from your own labelled pages
@@ -65,18 +64,21 @@ def candidates(boxes: list[Box], rtl: bool) -> dict[str, list[str]]:
     of the nearest column in reading direction (to the left on a right-to-left page). A box
     gets no entry when nothing can follow it, like the last box of the last column.
     """
-    # below[a] = the box just under a: same column, and at most MAX_GAP pixels lower.
+    # below[a] = the box just under a: same column, starting below the middle of a (OCR boxes
+    # can overlap by a few pixels), and at most MAX_GAP pixels under its bottom edge.
     below: dict[str, Box] = {}
     for a in boxes:
+        _, y0, _, y1 = a["bbox"]
         under = [
             b
             for b in boxes
             if b is not a
             and overlap(a, b) >= SAME_COLUMN
-            and 0 <= b["bbox"][1] - a["bbox"][3] <= MAX_GAP
+            and b["bbox"][1] > (y0 + y1) / 2
+            and b["bbox"][1] - y1 <= MAX_GAP
         ]
-        if under:
-            below[a["id"]] = min(under, key=lambda b: b["bbox"][1])
+        if under:  # the highest one; on a tie, the one most in line with a
+            below[a["id"]] = min(under, key=lambda b: (b["bbox"][1], -overlap(a, b)))
 
     # A box that is not under any other box starts a column.
     under_ids = {b["id"] for b in below.values()}
@@ -87,23 +89,31 @@ def candidates(boxes: list[Box], rtl: bool) -> dict[str, list[str]]:
         if a["id"] in below:
             out[a["id"]] = [below[a["id"]]["id"]]
             continue
-        # a ends its column. Look for column tops in another column, on the reading side,
-        # that start above the bottom of a.
+        # a ends its column: look for column tops in another column, on the reading side
+        # (their centre is to the left of a's centre on a right-to-left page).
         side = [
             b
             for b in tops
             if overlap(a, b) < SAME_COLUMN
-            and b["bbox"][1] < a["bbox"][3]
-            and (b["bbox"][2] <= a["bbox"][0] if rtl else b["bbox"][0] >= a["bbox"][2])
+            and (centre(b) < centre(a) if rtl else centre(b) > centre(a))
         ]
         if side:
-            # Keep only the nearest column: the largest right edge (RTL) or smallest left (LTR).
-            def edge(b: Box) -> int:
-                return b["bbox"][2] if rtl else b["bbox"][0]
-
-            nearest = (max if rtl else min)(edge(b) for b in side)
-            out[a["id"]] = [b["id"] for b in side if edge(b) == nearest]
+            # Keep the tops of the nearest of those columns, in reading order.
+            nearest = min(side, key=lambda b: abs(centre(b) - centre(a)))
+            col = [b for b in side if overlap(b, nearest) >= SAME_COLUMN]
+            out[a["id"]] = [b["id"] for b in sorted(col, key=lambda b: b["bbox"][1])]
     return out
+
+
+def centre(b: Box) -> float:
+    """Horizontal centre of a box."""
+    return (b["bbox"][0] + b["bbox"][2]) / 2
+
+
+def spans_columns(b: Box, boxes: list[Box]) -> bool:
+    """True if b lies over two boxes that are in different columns, like a page header."""
+    over = [c for c in boxes if c is not b and overlap(b, c) >= SAME_COLUMN]
+    return any(overlap(c, d) < SAME_COLUMN for c in over for d in over)
 
 
 def ask_server(state: str, questions: dict[str, Any]) -> dict[str, Any]:
@@ -125,7 +135,10 @@ def ask_server(state: str, questions: dict[str, Any]) -> dict[str, Any]:
         if resp.status != 200:
             detail = resp.read(300).decode("utf-8", "replace")
             raise RuntimeError(f"server returned HTTP {resp.status}: {detail}")
-        return json.load(resp)["answers"]
+        try:
+            return json.load(resp)["answers"]
+        except (ValueError, KeyError, TypeError) as e:
+            raise RuntimeError(f"unexpected reply from the server: {e!r}") from None
     finally:
         conn.close()
 
@@ -178,8 +191,9 @@ def claims(by_id: dict[str, Box], cands: dict[str, list[str]], mode: str, ask: A
                     out.append((p, a, b))
         else:
             # One ranking question: keep the top option, unless the top option is "none".
+            # "none" is listed first, so it also wins a tie; other keys are ignored.
             probs = ask_choice(by_id, a, bs, ask)
-            best = max(probs, key=probs.__getitem__)
+            best = max(["none", *bs], key=lambda k: probs.get(k, 0.0))
             if best != "none":
                 out.append((probs[best], a, best))
     return out
@@ -194,7 +208,12 @@ def settle(boxes: list[Box], found: list[Claim]) -> list[list[str]]:
     """
     nxt: dict[str, str] = {}
     for _, a, b in sorted(found, reverse=True):
-        if a not in nxt and b not in nxt.values():
+        if a in nxt or b in nxt.values():
+            continue
+        end = b  # follow the chain from b: if it leads back to a, the link would close a loop
+        while end in nxt:
+            end = nxt[end]
+        if end != a:
             nxt[a] = b
     starts = [b["id"] for b in boxes if b["id"] not in nxt.values()]
     groups = []
@@ -208,13 +227,13 @@ def settle(boxes: list[Box], found: list[Claim]) -> list[list[str]]:
 
 def run(page: dict[str, Any], mode: str = "auto", ask: Ask = ask_server) -> list[list[str]]:
     """Group the boxes of one page; return the groups as lists of box ids."""
-    info = page.get("page", {})
-    width = info.get("width") or max(b["bbox"][2] for b in page["boxes"])
-    # A box that spans the page (the page header) belongs to no recipe: leave it out of the
-    # linking, and return it as a group of its own at the end.
-    body = [b for b in page["boxes"] if b["bbox"][2] - b["bbox"][0] <= HEADER * width]
-    headers = [[b["id"]] for b in page["boxes"] if b not in body]
-    cands = candidates(body, rtl=info.get("direction") == "rtl")
+    boxes = page["boxes"]
+    # A box that spans several columns (the page header) belongs to no recipe: leave it out of
+    # the linking, and return it as a group of its own at the end. This would also set aside a
+    # title spanning two columns, so change it if your pages have those.
+    body = [b for b in boxes if not spans_columns(b, boxes)]
+    headers = [[b["id"]] for b in boxes if b not in body]
+    cands = candidates(body, rtl=page.get("page", {}).get("direction") == "rtl")
     found = claims({b["id"]: b for b in body}, cands, mode, ask)
     return settle(body, found) + headers
 
@@ -224,9 +243,12 @@ def main() -> None:
     ap.add_argument("--page", type=Path, default=PAGE, help="page JSON (default: the cookbook)")
     ap.add_argument("--question", choices=["auto", "noul", "choice"], default="auto")
     args = ap.parse_args()
-    if not args.page.is_file():
-        raise SystemExit(f"No page file at {args.page}")
-    page = json.loads(args.page.read_text(encoding="utf-8"))
+    try:
+        page = json.loads(args.page.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        raise SystemExit(f"Could not read the page file {args.page} ({e})") from None
+    if not isinstance(page, dict) or not isinstance(page.get("boxes"), list):
+        raise SystemExit(f"{args.page} has no list of boxes; see the README for the format")
     try:
         groups = run(page, args.question)
     except OSError as e:
@@ -234,7 +256,7 @@ def main() -> None:
             f"Could not reach strands decider at {URL} ({e}). Start one with:\n"
             "  strands-decider serve StrandsAgents/strands-decider-2B-qwen3.5-v1-2610 --port 8099"
         ) from None
-    except (ValueError, RuntimeError) as e:  # a bad STRANDS_DECIDER_URL, or a server error
+    except (ValueError, RuntimeError, http.client.HTTPException) as e:  # bad URL or reply
         raise SystemExit(str(e)) from None
 
     # Compare with the hand labels: each box's `recipe` field (null for the page header).

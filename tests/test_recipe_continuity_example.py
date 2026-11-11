@@ -124,12 +124,39 @@ def test_candidates_follow_columns_left_to_right(rc: Any) -> None:
         {"id": "b", "bbox": [0, 60, 100, 300]},  # under a
         {"id": "c", "bbox": [120, 0, 220, 100]},  # top of the second column
         {"id": "d", "bbox": [120, 200, 220, 300]},  # same column as c, but too far below it
-        {"id": "e", "bbox": [120, 400, 220, 450]},  # starts below the bottom of b: not a jump
+        {"id": "e", "bbox": [121, 400, 220, 450]},  # a lower part of that column, 1 px off
+        {"id": "f", "bbox": [240, 0, 340, 100]},  # a third column, further away
     ]
     cands = rc.candidates(boxes, rtl=False)
     assert cands["a"] == ["b"]
-    assert cands["b"] == ["c", "d"]  # two column tops at the same edge: a choice is needed
-    assert "d" not in cands and "e" not in cands
+    assert cands["b"] == ["c", "d", "e"]  # the tops of the nearest column: a choice is needed
+    assert cands["c"] == cands["d"] == cands["e"] == ["f"]
+    assert "f" not in cands
+
+
+def test_candidates_tolerate_ocr_jitter(rc: Any) -> None:
+    boxes = [
+        {"id": "a", "bbox": [500, 0, 900, 300]},
+        {"id": "b", "bbox": [500, 298, 900, 400]},  # overlaps a by 2 px vertically
+        {"id": "c", "bbox": [95, 0, 505, 200]},  # next column, 5 px into the gutter
+    ]
+    assert rc.candidates(boxes, rtl=True) == {"a": ["b"], "b": ["c"]}
+
+
+def test_header_is_found_by_layout_not_page_width(rc: Any, page: dict[str, Any]) -> None:
+    def shift(b: dict[str, Any]) -> dict[str, Any]:
+        x0, y0, x1, y1 = b["bbox"]
+        return {**b, "bbox": [x0 + 500, y0 + 500, x1 + 500, y1 + 500]}
+
+    wider = {"page": {**page["page"], "width": 1700}, "boxes": [shift(b) for b in page["boxes"]]}
+    assert rc.run(wider, "noul", oracle(page, [])) == EXPECTED
+    one_column = {  # every box is wide, but none lies over two columns
+        "boxes": [
+            {"id": "a", "bbox": [50, 100, 950, 200], "text": "a"},
+            {"id": "b", "bbox": [50, 210, 950, 300], "text": "b"},
+        ]
+    }
+    assert rc.run(one_column, "noul", lambda s, q: {"same": {"noul": 0.9}}) == [["a", "b"]]
 
 
 def test_run_leaves_the_page_header_out(rc: Any, page: dict[str, Any]) -> None:
@@ -144,6 +171,14 @@ def test_settle_gives_each_box_one_next_and_one_previous(rc: Any) -> None:
     # b -> c loses to the stronger a -> c; a -> b loses because a already has a next box.
     found = [(0.9, "a", "c"), (0.6, "b", "c"), (0.7, "a", "b"), (0.8, "c", "d")]
     assert rc.settle(boxes, found) == [["a", "c", "d"], ["b"]]
+
+
+def test_settle_never_closes_a_loop(rc: Any) -> None:
+    boxes = [{"id": i} for i in ("a", "b", "c")]
+    assert rc.settle(boxes, [(0.9, "a", "b"), (0.8, "b", "a")]) == [["a", "b"], ["c"]]
+    assert rc.settle(boxes, [(0.9, "a", "a")]) == [["a"], ["b"], ["c"]]
+    found = [(0.9, "a", "b"), (0.8, "b", "c"), (0.7, "c", "a")]
+    assert rc.settle(boxes, found) == [["a", "b", "c"]]
 
 
 @pytest.mark.parametrize(
@@ -174,6 +209,20 @@ def test_choice_keeps_the_top_candidate_unless_none_wins(rc: Any) -> None:
     assert rc.claims(by_id, cands, "auto", ask) == [(0.45, "a", "c")]
 
 
+@pytest.mark.parametrize(
+    ("probs", "expected"),
+    [
+        ({"b": 0.5, "none": 0.5}, []),  # a tie with "none": no link
+        ({"b": 0.15, "zz": 0.8, "none": 0.05}, [(0.15, "a", "b")]),  # unknown keys are ignored
+        ({}, []),
+    ],
+)
+def test_choice_edge_cases(rc: Any, probs: dict[str, float], expected: list[Any]) -> None:
+    by_id = {i: {"id": i, "bbox": [0, 0, 10, 10], "text": i} for i in ("a", "b", "c")}
+    ask = lambda state, questions: {"next": {"probabilities": probs}}  # noqa: E731
+    assert rc.claims(by_id, {"a": ["b", "c"]}, "auto", ask) == expected
+
+
 def test_ask_server_posts_to_systemone(rc: Any, stub_server: dict[str, Any]) -> None:
     stub_server["reply"] = {"answers": {"same": {"type": "noul", "noul": 0.7}}}
     questions = {"same": {"type": "noul", "instructions": "نفس الوصفة؟"}}
@@ -187,6 +236,15 @@ def test_ask_server_reports_http_errors(rc: Any, stub_server: dict[str, Any]) ->
     stub_server["status"] = 422
     stub_server["reply"] = {"detail": "bad question"}
     with pytest.raises(RuntimeError, match=r"HTTP 422.*bad question"):
+        rc.ask_server("state", {})
+
+
+@pytest.mark.parametrize("reply", [{"no_answers": {}}, ["not", "a", "dict"]])
+def test_ask_server_reports_unexpected_replies(
+    rc: Any, stub_server: dict[str, Any], reply: Any
+) -> None:
+    stub_server["reply"] = reply
+    with pytest.raises(RuntimeError, match="unexpected reply"):
         rc.ask_server("state", {})
 
 
