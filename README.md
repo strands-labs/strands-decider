@@ -380,9 +380,11 @@ The repository includes a worked example of strands decider inside a Strands age
 weather-tool call on two yes/no decisions, so the agent asks which city instead of guessing. See
 the example's [README](examples/strands/README.md) for setup and the walk-through.
 
-[`examples/recipe_continuity/`](examples/recipe_continuity/README.md) is a document task without
-an agent: it groups OCR text boxes from a synthetic Arabic cookbook page into recipes, using a
-`noul` to decide whether a link exists and a `choice` only to rank several candidates.
+## A document example
+
+[`examples/recipe_continuity/`](examples/recipe_continuity/README.md) uses strands decider
+without an agent: it groups the OCR text boxes of a synthetic Arabic cookbook page into recipes,
+using a `noul` to decide whether a link exists and a `choice` only to rank several candidates.
 
 ## Customizing for your decisions
 
