@@ -5,7 +5,12 @@
     "model_revision": "main",
     "instance_type": "ml.g6.xlarge",
     "instance_count": 1,
+    "fallback_instance_types": "",
     "inference_ami_version": "",
+    "image": "",
+    "dlc_image_tag": "serve-sagemaker-cuda-v1",
+    "max_concurrency": "",
+    "device_map": "",
     "serve_args": ""
   }
 }

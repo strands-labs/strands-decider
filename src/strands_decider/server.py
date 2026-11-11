@@ -11,9 +11,10 @@ import contextlib
 import os
 import threading
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 
-from fastapi import FastAPI, HTTPException
+import anyio
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from . import __version__
@@ -28,21 +29,12 @@ from .schema import (
     SystemOneResponse,
 )
 
-_engine: SystemOneEngine | None = None
-_engine_lock = threading.Lock()
-
 
 def _needs_serialisation(device: str) -> bool:
     """MPS aborts the process with a Metal command-buffer assertion when two overlapping
     threads hit the same device. CUDA and CPU are thread-safe for inference, and the MLX
     engine runs every evaluation on a single worker thread."""
     return str(device).startswith("mps")
-
-
-def get_engine() -> SystemOneEngine:
-    if _engine is None:  # pragma: no cover - guarded by create_app
-        raise RuntimeError("engine not initialised")
-    return _engine
 
 
 def warm_up(engine: SystemOneEngine, max_batch: int, vision: bool = False) -> None:
@@ -99,28 +91,15 @@ def create_app(
     max_batch_tokens: int | None = None,
     device_map: str | None = None,
     warmup: bool = True,
+    build_engine: Callable[[], SystemOneEngine] | None = None,
+    max_concurrency: int | None = None,
 ) -> FastAPI:
-    global _engine
     if device_map and (vision or not device.startswith("cuda")):
         raise ValueError("--device-map splits the text torso across CUDA GPUs: use it with cuda")
-
-    @contextlib.asynccontextmanager
-    async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-        try:
-            yield
-        finally:
-            # The MLX engine owns a worker thread (see mlx_engine.MLXEngine); other engines
-            # have nothing to close.
-            close = getattr(_engine, "close", None)
-            if callable(close):
-                close()
-
-    app = FastAPI(
-        title="strands-decider System One",
-        version=__version__,
-        description="Typed, calibrated answers. Choice, Score and Noul over one state.",
-        lifespan=lifespan,
-    )
+    if vision and device == "mlx":
+        raise ValueError("--vision runs on torch devices (cuda, mps, cpu), not mlx")
+    if max_concurrency is not None and max_concurrency < 1:
+        raise ValueError("--max-concurrency must be at least 1")
 
     # Identify the response's `model` by the checkpoint served, so multiple servers
     # on the same host cannot be confused. HF repo ids ("org/name") collapse to `name`.
@@ -133,30 +112,65 @@ def create_app(
         max_batch=max_batch,
         max_batch_tokens=max_batch_tokens,
     )
-    if vision:
-        if device == "mlx":
-            raise ValueError("--vision runs on torch devices (cuda, mps, cpu), not mlx")
-        from .vision import load_vision_engine
 
-        _engine = load_vision_engine(checkpoint, config, attn_implementation=attn_implementation)
-    elif device == "mlx":
-        _engine = load_mlx(checkpoint, config)
-    else:
+    def _default_build_engine() -> SystemOneEngine:
+        if vision:
+            from .vision import load_vision_engine
+
+            return load_vision_engine(checkpoint, config, attn_implementation=attn_implementation)
+        if device == "mlx":
+            return load_mlx(checkpoint, config)
         model = StrandsDeciderModel.load(
             checkpoint, device_map=device_map, attn_implementation=attn_implementation
         )
-        _engine = SystemOneEngine(model, config)
+        return SystemOneEngine(model, config)
 
-    # serve() listens only after create_app returns, so /health (/ping) fails until this is done.
-    if warmup:
-        warm_up(_engine, max_batch, vision=vision)
+    # Tests inject a stub via `build_engine=...` to skip model loading. Construction
+    # still runs under the lifespan, so a half-built engine is still closed.
+    build = build_engine or _default_build_engine
+
+    @contextlib.asynccontextmanager
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        engine = build()
+        app.state.engine = engine
+        # None: requests share anyio's default worker pool (40 threads), as sync handlers do.
+        app.state.limiter = anyio.CapacityLimiter(max_concurrency) if max_concurrency else None
+        try:
+            # Listener binds only after lifespan startup returns, so /health (/ping)
+            # fails until this is done.
+            if warmup:
+                warm_up(engine, max_batch, vision=vision)
+            yield
+        finally:
+            # The MLX engine owns a worker thread (see mlx_engine.MLXEngine); other engines
+            # have nothing to close.
+            close = getattr(engine, "close", None)
+            if callable(close):
+                close()
+
+    app = FastAPI(
+        title="strands-decider System One",
+        version=__version__,
+        description="Typed, calibrated answers. Choice, Score and Noul over one state.",
+        lifespan=lifespan,
+    )
+
+    engine_lock = threading.Lock()
+    guard: contextlib.AbstractContextManager
+    guard = engine_lock if _needs_serialisation(device) else contextlib.nullcontext()
+
+    # async, like /ping below: FastAPI runs a sync dependency in the worker thread pool too.
+    async def get_engine(request: Request) -> SystemOneEngine:
+        engine: SystemOneEngine = request.app.state.engine
+        return engine
 
     # SageMaker and AgentCore Runtime call /ping and /invocations; each is the same
-    # handler as the path above it.
+    # handler as the path above it. /ping is async: a sync handler would wait for a free
+    # thread in the pool that /invocations fills (40 threads), and SageMaker allows a
+    # health check 2 s.
     @app.get("/health")
     @app.get("/ping")
-    def health() -> dict:
-        eng = get_engine()
+    async def health(eng: SystemOneEngine = Depends(get_engine)) -> dict:
         return {
             "status": "ok",
             "model": eng.cfg.model_name,
@@ -169,17 +183,22 @@ def create_app(
             "vision": vision,
         }
 
-    guard: contextlib.AbstractContextManager
-    guard = _engine_lock if _needs_serialisation(device) else contextlib.nullcontext()
+    def evaluate(eng: SystemOneEngine, request: SystemOneRequest) -> SystemOneResponse:
+        with guard:
+            return eng.evaluate(request)
 
+    # The engine runs in a worker thread. With --max-concurrency N, at most N requests run at
+    # once and the rest wait on the event loop, holding no thread and no GPU memory.
     @app.post("/v1/systemone", response_model=SystemOneResponse)
     @app.post("/invocations", response_model=SystemOneResponse)
-    def systemone(request: SystemOneRequest) -> JSONResponse:
-        eng = get_engine()
+    async def systemone(
+        request: SystemOneRequest, http: Request, eng: SystemOneEngine = Depends(get_engine)
+    ) -> JSONResponse:
         started = time.perf_counter()
         try:
-            with guard:
-                response = eng.evaluate(request)
+            response = await anyio.to_thread.run_sync(
+                evaluate, eng, request, limiter=http.app.state.limiter
+            )
         except ValueError as exc:
             # Malformed permutation, etc. -- caller error.
             raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -204,6 +223,7 @@ def serve(
     max_batch_tokens: int | None = None,
     device_map: str | None = None,
     warmup: bool = True,
+    max_concurrency: int | None = None,
 ) -> None:
     import uvicorn
 
@@ -217,6 +237,7 @@ def serve(
         max_batch_tokens=max_batch_tokens,
         device_map=device_map,
         warmup=warmup,
+        max_concurrency=max_concurrency,
     )
     # Single worker: the model owns the GPU, and forking more would just duplicate it.
     uvicorn.run(app, host=host, port=port, workers=1)
