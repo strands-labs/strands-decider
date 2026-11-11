@@ -2,7 +2,7 @@
 
 Three steps: layout proposes which box could come next after each box, strands decider judges
 whether the recipe really continues, and a few lines of plain Python settle the links into
-recipes. Start a server, then run this file from the repository root:
+recipes. Start a server, then run this file:
 
     strands-decider serve StrandsAgents/strands-decider-2B-qwen3.5-v1-2610 --port 8099
     python examples/recipe_continuity/recipe_continuity.py
@@ -46,6 +46,7 @@ SAME = {  # the noul's two criteria: what "same recipe" and "different recipe" l
 }
 
 Box = dict[str, Any]  # {"id": str, "bbox": [x0, y0, x1, y1], "text": str, ...}
+# The state is the text the model reads; the questions are named, e.g. {"same": {...}}.
 Ask = Callable[[str, dict[str, Any]], dict[str, Any]]  # (state, questions) -> answers
 Claim = tuple[float, str, str]  # (probability, id of box A, id of the box that continues A)
 
@@ -223,6 +224,8 @@ def main() -> None:
     ap.add_argument("--page", type=Path, default=PAGE, help="page JSON (default: the cookbook)")
     ap.add_argument("--question", choices=["auto", "noul", "choice"], default="auto")
     args = ap.parse_args()
+    if not args.page.is_file():
+        raise SystemExit(f"No page file at {args.page}")
     page = json.loads(args.page.read_text(encoding="utf-8"))
     try:
         groups = run(page, args.question)
@@ -231,6 +234,8 @@ def main() -> None:
             f"Could not reach strands decider at {URL} ({e}). Start one with:\n"
             "  strands-decider serve StrandsAgents/strands-decider-2B-qwen3.5-v1-2610 --port 8099"
         ) from None
+    except (ValueError, RuntimeError) as e:  # a bad STRANDS_DECIDER_URL, or a server error
+        raise SystemExit(str(e)) from None
 
     # Compare with the hand labels: each box's `recipe` field (null for the page header).
     by_id = {b["id"]: b for b in page["boxes"]}

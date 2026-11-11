@@ -1,8 +1,10 @@
 # Grouping OCR text into recipes
 
-**In short:** use a `noul` to decide whether one link exists ("does box B continue box A?"),
-and a `choice` only to pick between several real candidates. This example shows why, on a
-document task.
+**In short:** strands decider has two question types that fit this task. A `noul` is a yes/no
+question that returns P(yes); a `choice` picks one of several options (see the
+[main README](../../README.md#noul-question)). Use a `noul` to decide whether one link exists
+("does box B continue box A?"), and a `choice` only to pick between several real candidates.
+This example shows why, on a document task.
 
 OCR on a scanned page gives you text boxes, a title here and a paragraph there, but not the
 recipes they belong to. Layout tells you where each box is. Strands decider reads the text and
@@ -13,12 +15,13 @@ git clone https://github.com/strands-labs/strands-decider && cd strands-decider
 pip install -e .
 strands-decider serve StrandsAgents/strands-decider-2B-qwen3.5-v1-2610 --port 8099
 
-# in a second terminal, from the repository root
+# in a second terminal, once the server has loaded the model
 python examples/recipe_continuity/recipe_continuity.py
 ```
 
 The script uses only the Python standard library. It expects a server on port 8099 unless
 `STRANDS_DECIDER_URL` is set, and refuses any address that is not `http://` or `https://`.
+A run asks about 14 questions and takes a minute or two on a laptop.
 
 ## The page
 
@@ -41,8 +44,9 @@ for a left-to-right page, and tune the layout settings at the top of the script 
 1. **Layout proposes.** For each box, the candidate is the box directly below it in the same
    column, or, if nothing is below, the top of the next column. The page header spans the
    page, belongs to no recipe, and is left out.
-2. **The decider judges.** It sees the end of one box and the start of the next, plus one line
-   of layout context, and answers with a probability.
+2. **The decider judges.** Each request sends a *state*, the text the model reads (the end of
+   one box, one line of layout context, and the start of the next box), and the question.
+   The answer is a probability.
 3. **Code settles the links.** Links are accepted strongest first. Each box gets at most one
    next box and at most one previous box, and the links chain into recipes.
 
@@ -62,8 +66,9 @@ ok k13              نصيحة: يُحفظ الخبز في كيس
 
 ## `noul` to decide, `choice` to rank
 
-A `noul` is a softmax over its two criteria, `true` and `false`, so its probability is the
-share of `true` for the one pair it was asked about. A `choice` is one softmax over all the
+Each question can carry *criteria*: short texts that say what each answer means. A `noul` has
+two, `true` and `false` (here, `SAME` at the top of the script). Its probability is the
+model's share for `true` against `false`, for the one pair it was asked about. A `choice` is one softmax over all the
 options you supply, so each value is a share of the total, and `none` is scored like any other
 option string.
 
@@ -82,8 +87,9 @@ title to its text and the jump to the next column, and links two separate recipe
 reading, the model is weighing a concrete text against an abstract `none`. The criteria wording
 matters too. The `false` criterion names what starts a new item on this page: a dish name
 followed by a full stop or a dash, or the word نصيحة (tip). With the generic "B starts a
-different recipe, a new title, or a separate tip." the default run rebuilds 5 of 9. Background
-is in [issue #132](https://github.com/strands-labs/strands-decider/issues/132).
+different recipe, a new title, or a separate tip." the default run rebuilds 5 of 9. This example
+answers [issue #132](https://github.com/strands-labs/strands-decider/issues/132), which asked
+for an example where, with a single candidate, a `noul` beats a "this or none" `choice`.
 
 > This example is an illustration rather than a benchmark: one synthetic page, with questions,
 > criteria and thresholds tuned by hand to it. Every accepted link scores between 0.54 and
