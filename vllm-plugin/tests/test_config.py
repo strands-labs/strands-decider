@@ -20,6 +20,18 @@ from pathlib import Path  # noqa: E402
 
 from strands_decider_vllm import ARCH_FOR_BASE  # noqa: E402
 
+
+def _vllm_minor() -> int:
+    """The installed vLLM's minor version, or 0 without vLLM (the tiers that need it skip)."""
+    try:
+        import vllm
+    except ImportError:
+        return 0
+    return int(vllm.__version__.split(".")[1])
+
+
+VLLM_MINOR = _vllm_minor()
+
 CHECKPOINT = os.environ.get("STRANDS_DECIDER_TEST_CHECKPOINT")
 pytestmark = pytest.mark.skipif(not CHECKPOINT, reason="STRANDS_DECIDER_TEST_CHECKPOINT is not set")
 
@@ -164,6 +176,7 @@ def test_data_parallel_micro_batching_is_refused(dbo, ubatch):
     assert "micro-batching" in refused(config)
 
 
+@pytest.mark.skipif(VLLM_MINOR >= 34, reason="vLLM 0.34 removed Model Runner V1")
 def test_model_runner_v1_is_refused(monkeypatch):
     config = engine_config()
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")

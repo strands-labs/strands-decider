@@ -4,6 +4,7 @@ with a full encoder cache (skipped without vLLM; no GPU needed)."""
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from types import SimpleNamespace
 
@@ -12,6 +13,18 @@ import pytest
 from strands_decider_vllm import ARCH, ARCH_MULTIMODAL
 from strands_decider_vllm import scheduling as scheduling_mod
 from strands_decider_vllm.scheduling import wrap_schedule, wrap_try_schedule_encoder_inputs
+
+
+def _vllm_minor() -> int:
+    """The installed vLLM's minor version, or 0 without vLLM (the tiers that need it skip)."""
+    try:
+        import vllm
+    except ImportError:
+        return 0
+    return int(vllm.__version__.split(".")[1])
+
+
+VLLM_MINOR = _vllm_minor()
 
 
 class FakeEncoderCache:
@@ -277,14 +290,11 @@ def finish(s, out):
     from vllm.v1.outputs import ModelRunnerOutput
 
     ids = list(out.num_scheduled_tokens)
-    s.update_from_output(
-        out,
-        ModelRunnerOutput(
-            req_ids=ids,
-            req_id_to_index={r: i for i, r in enumerate(ids)},
-            sampled_token_ids=[[7] for _ in ids],
-        ),
-    )
+    kwargs: dict = {"req_ids": ids, "sampled_token_ids": [[7] for _ in ids]}
+    fields = {f.name for f in dataclasses.fields(ModelRunnerOutput)}
+    if "req_id_to_index" in fields:  # removed in vLLM 0.34
+        kwargs["req_id_to_index"] = {r: i for i, r in enumerate(ids)}
+    s.update_from_output(out, ModelRunnerOutput(**kwargs))
 
 
 @pytest.mark.parametrize("decider", [False, True])
@@ -302,8 +312,12 @@ def test_vllms_scheduler_cuts_before_an_image_and_the_wrapper_waits_for_the_whol
     s.add_request(mm_request("C", [], 300))  # text only, behind B
     second = s.schedule()  # before A's step is processed, as with asynchronous scheduling
     if not decider:
-        # vLLM alone schedules B up to its second image: half a prompt, which the mask cannot serve.
-        assert second.num_scheduled_tokens == {"B": 300, "C": 300}
+        if VLLM_MINOR < 34:
+            # vLLM 0.33 alone schedules B up to its second image: half a prompt, which the mask cannot serve.
+            assert second.num_scheduled_tokens == {"B": 300, "C": 300}
+        else:
+            # From vLLM 0.34 (#65399), with chunked prefill off, vLLM defers B whole, as the wrapper does.
+            assert second.num_scheduled_tokens == {"C": 300}
         return
     ecm = s.encoder_cache_manager
     assert second.num_scheduled_tokens == {"C": 300}, (

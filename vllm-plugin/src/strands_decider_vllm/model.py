@@ -87,7 +87,8 @@ def check_config(vllm_config: VllmConfig) -> None:
             f"already makes image tokens bidirectional with the whole state, replaces it. Add {override} to "
             "--hf-overrides (`strands-decider-vllm serve` does)"
         )
-    if not vllm_config.use_v2_model_runner:
+    # vLLM 0.34 removed Model Runner V1 and this attribute with it.
+    if not getattr(vllm_config, "use_v2_model_runner", True):
         problems.append(
             "Model Runner V1 is in use; prefix_bidir needs Model Runner V2 (VLLM_USE_V2_MODEL_RUNNER=1)"
         )
