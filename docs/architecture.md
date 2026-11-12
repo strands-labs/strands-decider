@@ -200,6 +200,9 @@ reference v2 decision models. Three keys select it:
 
 `lr_floor` sets where the cosine learning-rate schedule ends (the reference recipe uses 0.1), and
 `adam_betas` the AdamW betas (default `[0.9, 0.95]`; the reference recipe uses `[0.9, 0.999]`).
+With `save_every`, each save also writes `resume-<step>.pt` (the last two are kept): set
+`resume_from` to one to continue a stopped run, on the same config and number of GPUs, as the
+unbroken run would have.
 `python -m training.train`, `training.soup` and `training.evaluate calibrate` work with a token
 readout checkpoint. Serving does not: the engines in this repository refuse a token readout
 checkpoint, which a separate inference stack serves.

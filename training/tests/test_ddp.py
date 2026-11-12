@@ -424,6 +424,44 @@ def test_ddp_matches_single_process_variants(corpus, tmp_path, over):
     _assert_same_run(ref, _run(corpus, tmp_path / "b", 4, **over), 4)
 
 
+@pytest.mark.parametrize("world", [1, pytest.param(2, marks=pytest.mark.distributed)])
+def test_a_resumed_run_continues_as_the_unbroken_one(corpus, tmp_path, world):
+    """Stop after step k, resume, finish: the unbroken run's steps, losses and weights, exactly.
+
+    The run saves at steps 3 and 6 of 8: 3 is mid-epoch before an eval, 6 is in epoch 1 after
+    a step that spans the epoch boundary. With EMA, teacher KL and length grouping on.
+    """
+    from safetensors.torch import load_file
+
+    over = dict(save_every=3, ema_decay=0.9)
+    ref = _run(corpus, tmp_path / "a", world, **over)
+    saved = tmp_path / "a" / f"w{world}"
+    assert sorted(p.name for p in saved.glob("resume-*")) == [
+        "resume-0000003.pt",
+        "resume-0000006.pt",
+    ]
+    for k in (3, 6):
+        got = _run(
+            corpus, tmp_path / f"r{k}", world, resume_from=str(saved / f"resume-{k:07d}.pt"), **over
+        )
+        for r, g in zip(ref["ranks"], got["ranks"], strict=True):
+            n = len(g["grads"])
+            assert n == 8 - k
+            assert g["rows"][:n] == r["rows"][k : k + n]
+            assert all(
+                torch.equal(x, y)
+                for a, b in zip(g["grads"], r["grads"][k:], strict=True)
+                for x, y in zip(a, b, strict=True)
+            )
+        assert got["history"] == ref["history"]
+        out = tmp_path / f"r{k}" / f"w{world}"
+        files = sorted(p.relative_to(saved) for p in saved.rglob("*.safetensors"))
+        assert files and files == sorted(p.relative_to(out) for p in out.rglob("*.safetensors"))
+        for f in files:
+            a, b = load_file(saved / f), load_file(out / f)
+            assert a.keys() == b.keys() and all(torch.equal(a[x], b[x]) for x in a)
+
+
 @pytest.mark.distributed
 def test_ddp_init_from_matches_single_process(corpus, tmp_path):
     """init_from a trained checkpoint."""

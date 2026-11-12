@@ -14,6 +14,7 @@ at 4096 tokens; see training/hardware.md, "The Qwen3.5 torso" and "Larger torsos
 
 from __future__ import annotations
 
+import glob
 import json
 import math
 import os
@@ -116,6 +117,11 @@ class TrainConfig:
     # temperatures are reset to 1: calibrate the result. freeze_torso: true trains the head
     # alone on the checkpoint's frozen adapter.
     init_from: str | None = None
+    # Continue a stopped run from a `resume-<step>.pt` that save_every wrote in its output_dir
+    # (the last two are kept): trained weights, optimizer, schedule, step, data position and
+    # random states. Same config and world size; the run trains the steps it had left as the
+    # unbroken run would have.
+    resume_from: str | None = None
 
     # optimisation
     epochs: int = 1
@@ -341,6 +347,15 @@ class _Ema:
         for w, p in zip(self.live, self.params, strict=True):
             p.copy_(w)
         self.live = []
+
+
+def _save_resume(out_dir: str, state: dict[str, Any]) -> None:
+    """Write `out_dir`/resume-<step>.pt whole or not at all, and keep the last two."""
+    path = os.path.join(out_dir, f"resume-{state['step']:07d}.pt")
+    torch.save(state, path + ".tmp")
+    os.replace(path + ".tmp", path)
+    for old in sorted(glob.glob(os.path.join(out_dir, "resume-*.pt")))[:-2]:
+        os.remove(old)
 
 
 def _lr_lambda(step: int, warmup: int, total: int, floor: float = 0.0) -> float:
@@ -639,7 +654,8 @@ def train(cfg: TrainConfig) -> str:
         collate_fn=SystemOneCollator(model.tokenizer, coll_cfg, train=False),
     )
 
-    steps_per_epoch = max(1, len(train_loader) // cfg.grad_accum)
+    per_epoch = len(train_loader)  # micro-batches
+    steps_per_epoch = max(1, per_epoch // cfg.grad_accum)
     total_steps = cfg.max_steps or steps_per_epoch * cfg.epochs
     warmup = max(1, int(total_steps * cfg.warmup_ratio))
 
@@ -699,11 +715,63 @@ def train(cfg: TrainConfig) -> str:
     running_tkl = 0.0
     history: list[dict[str, float]] = []
     done = False
+    first_epoch, resumed = 0, None
+    if cfg.resume_from:
+        state = torch.load(cfg.resume_from, map_location="cpu", weights_only=False)
+        if (state["total_steps"], len(state["ranks"])) != (total_steps, world):
+            raise ValueError(
+                f"{cfg.resume_from}: {state['total_steps']} steps on {len(state['ranks'])} "
+                f"ranks; this run has {total_steps} on {world}"
+            )
+        params = dict(model.named_parameters())
+        with torch.no_grad():
+            for n, v in state["params"].items():
+                params[n].copy_(v)
+            for held, v in zip(ema.avg if ema else [], state["ema"] or [], strict=True):
+                held.copy_(v)
+        optim.load_state_dict(state["optim"])
+        sched.load_state_dict(state["sched"])
+        train_collate.rng.setstate(state["collate"])
+        step, history, resumed = state["step"], state["history"], state["ranks"][rank]
+        running, running_kl, running_tkl = resumed["running"]
+        micro = step * cfg.grad_accum
+        first_epoch, skip = divmod(micro, per_epoch)
+        done = step >= total_steps
+        if cfg.group_by_length:
+            sampler.epoch = first_epoch
+        # The epoch's order is drawn again from its starting random state, its done
+        # micro-batches pass uncollated, then the saved state comes back. At an epoch's
+        # end the saved state is the next epoch's starting one.
+        torch.set_rng_state(resumed["epoch_rng"] if skip else resumed["rng"])
+        if resumed["cuda"] is not None:  # dropout's; the order is drawn on the CPU
+            torch.cuda.set_rng_state(resumed["cuda"])
+        if not skip:
+            resumed = None
+        if world > 1:
+            train_loader.skip, train_loader.windows = skip, step
+        else:
 
-    for epoch in range(cfg.epochs):
+            def collate_after(rows: list[Example]) -> dict[str, Any] | None:
+                nonlocal skip
+                if skip:
+                    skip -= 1
+                    return None
+                return train_collate(rows)
+
+            train_loader.collate_fn = collate_after
+        print(f"[strands-decider] resumed from {cfg.resume_from} at step {step}")
+    step0 = step
+
+    for epoch in range(first_epoch, cfg.epochs):
         if done:
             break
+        epoch_rng = torch.get_rng_state()
         for batch in train_loader:
+            if batch is None:  # a done micro-batch of a resumed run
+                continue
+            if resumed is not None:
+                torch.set_rng_state(resumed["rng"])
+                resumed = None
             # Under torchrun a forward is this rank's slice of a micro-batch (distributed.py).
             part = batch.pop("part", distributed.WHOLE)
             batch = {k: v.to(device, non_blocking=True) for k, v in batch.items()}
@@ -780,7 +848,7 @@ def train(cfg: TrainConfig) -> str:
                     [float(running), float(running_kl), float(running_tkl)]
                 )  # each rank holds its slices' part
                 avg = running / (cfg.log_every * cfg.grad_accum)
-                rate = step / max(1e-6, time.time() - t0)
+                rate = (step - step0) / max(1e-6, time.time() - t0)
                 mem = torch.cuda.max_memory_allocated() / 2**30 if device == "cuda" else 0.0
                 mem = distributed.all_reduce([mem], "max")[0]
                 print(
@@ -804,6 +872,35 @@ def train(cfg: TrainConfig) -> str:
                 print(f"[strands-decider] eval @ {step}: {metrics}")
                 history.append({"step": step, **metrics})
 
+            if cfg.save_every and step % cfg.save_every == 0:
+                cuda = torch.cuda.get_rng_state() if device == "cuda" else None
+                ranks = distributed.all_gather(
+                    {
+                        "epoch_rng": epoch_rng,
+                        "rng": torch.get_rng_state(),
+                        "cuda": cuda,
+                        "running": [float(running), float(running_kl), float(running_tkl)],
+                    }
+                )
+                if rank == 0:
+                    _save_resume(
+                        cfg.output_dir,
+                        {
+                            "step": step,
+                            "total_steps": total_steps,
+                            "params": {
+                                n: p.detach().cpu()
+                                for n, p in model.named_parameters()
+                                if p.requires_grad
+                            },
+                            "ema": ema.avg if ema else None,
+                            "optim": optim.state_dict(),
+                            "sched": sched.state_dict(),
+                            "collate": train_collate.rng.getstate(),
+                            "history": history,
+                            "ranks": ranks,
+                        },
+                    )
             if cfg.save_every and step % cfg.save_every == 0 and rank == 0:
                 if ema is not None:
                     ema.apply()  # save the average, then train on from the live weights
