@@ -185,7 +185,10 @@ reference v2 decision models. Three keys select it:
   same cap as the LM head's (`final_logit_softcapping`), saved with the checkpoint as
   `readout_softcap`. The outputs past the question's option
   count are masked.
-- `render: lettered` (required with the token readout). The prompt goes through the
+- `render: strands-chat` or `lettered` (one of them is required with the token readout).
+  `strands-chat` is the reference v2 template, rendered by `strands_decider.core.render` as
+  `docs/spec.md` defines it; the prompt splits where `render` says the state ends. `lettered` is
+  the earlier v2 template: the prompt goes through the
   tokenizer's chat template, with thinking off: a system line, then `State:`, `Question:` and
   `Options:` in the user turn. The options are listed under letter codes: `A` to `Z`, then
   `AA`, `AB` and so on, the first 255 that the tokenizer encodes as one token. Training
@@ -204,8 +207,10 @@ With `save_every`, each save also writes `resume-<step>.pt` (the last two are ke
 `resume_from` to one to continue a stopped run, on the same config and number of GPUs, as the
 unbroken run would have.
 `python -m training.train`, `training.soup` and `training.evaluate calibrate` work with a token
-readout checkpoint. Serving does not: the engines in this repository refuse a token readout
-checkpoint, which a separate inference stack serves.
+readout checkpoint. The engines in this repository refuse one. To serve it, export it to the
+v2 package layout, `python -m training.export_v2 <checkpoint> <package>` (merged bf16 weights,
+`readout.safetensors`, `decision_config.json`; strands-chat with `prefix_bidir` only), and
+serve the package with the vLLM runtime, `strands-decider-vllm`.
 
 ## Design decisions worth knowing
 
