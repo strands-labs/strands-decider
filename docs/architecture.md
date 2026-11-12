@@ -198,7 +198,8 @@ reference v2 decision models. Three keys select it:
   linear-attention layers of Qwen3.5 stay causal. Other layer types are refused. It needs SDPA
   or eager attention.
 
-`lr_floor` sets where the cosine learning-rate schedule ends (the reference recipe uses 0.1).
+`lr_floor` sets where the cosine learning-rate schedule ends (the reference recipe uses 0.1), and
+`adam_betas` the AdamW betas (default `[0.9, 0.95]`; the reference recipe uses `[0.9, 0.999]`).
 `python -m training.train`, `training.soup` and `training.evaluate calibrate` work with a token
 readout checkpoint. Serving does not: the engines in this repository refuse a token readout
 checkpoint, which a separate inference stack serves.
