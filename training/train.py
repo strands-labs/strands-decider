@@ -571,8 +571,13 @@ def train(cfg: TrainConfig) -> str:
         # template). Drop what does not fit rather than stop on it mid-run.
         frame = chat_frame(model.tokenizer) if cfg.render == "lettered" else cfg.render
         sizes = len(train_examples), len(val_examples)
-        train_examples = fits(train_examples, model.tokenizer, cfg.max_length, frame)
-        val_examples = fits(val_examples, model.tokenizer, cfg.max_length, frame)
+
+        def fit(rows: list[Example]) -> list[Example]:
+            return fits(rows, model.tokenizer, cfg.max_length, frame)
+
+        # Shared out over the ranks: tokenising every row is hours on 17M rows.
+        train_examples = distributed.keep_where(train_examples, fit)
+        val_examples = distributed.keep_where(val_examples, fit)
         print(
             f"[strands-decider] {cfg.render} prompts over max_length {cfg.max_length}: dropped "
             f"{sizes[0] - len(train_examples):,} train and {sizes[1] - len(val_examples):,} val rows"
