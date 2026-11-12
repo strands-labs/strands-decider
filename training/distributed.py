@@ -136,6 +136,16 @@ def keep_where(examples: list[Any], keep: Callable[[list[Any]], list[Any]]) -> l
     return [examples[i] for i in flags.nonzero().flatten().tolist()]
 
 
+def all_gather(obj: Any) -> list[Any]:
+    """`obj` of every rank, in rank order; [obj] at world size 1."""
+    world = env()[2]
+    if world == 1:
+        return [obj]
+    out: list[Any] = [None] * world
+    dist.all_gather_object(out, obj)
+    return out
+
+
 def wrap(model: torch.nn.Module, seed: int) -> torch.nn.Module:
     """The module the training forward goes through: `model` itself, or DDP around it.
 
@@ -294,6 +304,7 @@ class StepSlices:
         self.kl_slots = kl_slots  # rows with at most this many options get the frozen KL
         self.open: list[list[int]] = []
         self.windows = 0  # steps (windows of grad_accum micro-batches) handed out so far
+        self.skip = 0  # micro-batches the next epoch passes over: a resumed run's done ones
 
         n_teacher = sum(getattr(ex, "teacher", None) is not None for ex in self.examples)
         facts = [
@@ -329,7 +340,8 @@ class StepSlices:
                 )
             )
         dist.broadcast_object_list(order, src=0)
-        for idx in order[0]:
+        skip, self.skip = self.skip, 0
+        for idx in order[0][skip:]:
             self.open.append(idx)
             if len(self.open) == self.grad_accum:
                 window, self.open = self.open, []
@@ -356,5 +368,11 @@ class StepSlices:
                     start=a,
                 )
                 done = b
-                yield batch
+                if batch["part"].last:
+                    final = batch
+                else:
+                    yield batch
             self.collate.skip(rows[done:])
+        # The step's last forward comes once the window's rows are all drawn for, so a
+        # checkpoint taken at it holds the collator's end-of-step state (train.py resume).
+        yield final
