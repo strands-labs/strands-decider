@@ -761,6 +761,8 @@ def train(cfg: TrainConfig) -> str:
             train_loader.collate_fn = collate_after
         print(f"[strands-decider] resumed from {cfg.resume_from} at step {step}")
     step0 = step
+    tokens: Any = 0.0  # real (non-pad) tokens this rank ran since the last log line
+    t_log = time.time()
 
     for epoch in range(first_epoch, cfg.epochs):
         if done:
@@ -775,6 +777,8 @@ def train(cfg: TrainConfig) -> str:
             # Under torchrun a forward is this rank's slice of a micro-batch (distributed.py).
             part = batch.pop("part", distributed.WHOLE)
             batch = {k: v.to(device, non_blocking=True) for k, v in batch.items()}
+            # Stays on the device until the log step.
+            tokens = tokens + batch["attention_mask"].sum()
             if world > 1:  # what DDP's no_sync() sets: all-reduce on the step's last forward
                 fwd.require_backward_grad_sync = part.last
             out = fwd(
@@ -844,9 +848,10 @@ def train(cfg: TrainConfig) -> str:
                 ema.update(step)
 
             if step % cfg.log_every == 0:
-                running, running_kl, running_tkl = distributed.all_reduce(
-                    [float(running), float(running_kl), float(running_tkl)]
+                running, running_kl, running_tkl, tokens = distributed.all_reduce(
+                    [float(running), float(running_kl), float(running_tkl), float(tokens)]
                 )  # each rank holds its slices' part
+                window_s, t_log = time.time() - t_log, time.time()
                 avg = running / (cfg.log_every * cfg.grad_accum)
                 rate = (step - step0) / max(1e-6, time.time() - t0)
                 mem = torch.cuda.max_memory_allocated() / 2**30 if device == "cuda" else 0.0
@@ -854,8 +859,11 @@ def train(cfg: TrainConfig) -> str:
                 print(
                     f"[strands-decider] epoch {epoch} step {step}/{total_steps} "
                     f"loss {avg:.4f} lr {sched.get_last_lr()[0]:.2e} "
-                    f"{rate:.2f} step/s peak_mem {mem:.1f}GiB"
+                    f"{rate:.2f} step/s peak_mem {mem:.1f}GiB "
+                    f"window {window_s:.2f}s tokens {int(tokens)} "
+                    f"{tokens / max(1e-6, window_s) / world:.0f} tok/s/gpu"
                 )
+                tokens = 0.0
                 entry = {"step": step, "loss": avg}
                 if cfg.kl_frozen_weight > 0:
                     entry["kl"] = running_kl / (cfg.log_every * cfg.grad_accum)
