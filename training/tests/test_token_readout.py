@@ -304,6 +304,7 @@ def test_train_soup_and_config_yaml(corpus, tmp_path, monkeypatch):
         render="lettered",
         attention_mode="prefix_bidir",
         lr_floor=0.1,
+        adam_betas=[0.9, 0.999],
         lora_r=2,
         lora_alpha=4,
         micro_batch_size=4,
@@ -314,10 +315,11 @@ def test_train_soup_and_config_yaml(corpus, tmp_path, monkeypatch):
     )
     (tmp_path / "c.yaml").write_text(yaml.safe_dump(raw))
     cfg = T.TrainConfig.from_yaml(str(tmp_path / "c.yaml"))
-    assert (cfg.head_type, cfg.attention_mode, cfg.lr_floor) == (
+    assert (cfg.head_type, cfg.attention_mode, cfg.lr_floor, cfg.adam_betas) == (
         "token_readout",
         "prefix_bidir",
         0.1,
+        [0.9, 0.999],
     )
     assert T._lr_lambda(10, 2, 10, 0.1) == pytest.approx(0.1)
     out = T.train(cfg)

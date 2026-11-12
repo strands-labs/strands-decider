@@ -127,6 +127,8 @@ class TrainConfig:
     # With init_from both start trained, and no value is measured for that yet.
     head_lr: float = 1e-3
     weight_decay: float = 0.01
+    # AdamW (beta1, beta2); the reference recipe trains with (0.9, 0.999).
+    adam_betas: tuple[float, float] = (0.9, 0.95)
     warmup_ratio: float = 0.03
     # The cosine schedule ends at lr_floor x the peak (0: at zero; the reference recipe: 0.1).
     lr_floor: float = 0.0
@@ -308,7 +310,7 @@ def _build_optimizer(model: StrandsDeciderModel, cfg: TrainConfig) -> torch.opti
     if torso_params:
         groups.append({"params": torso_params, "lr": cfg.lr, "weight_decay": 0.0})
     groups = [g for g in groups if g["params"]]
-    return torch.optim.AdamW(groups, betas=(0.9, 0.95), eps=1e-8)
+    return torch.optim.AdamW(groups, betas=(cfg.adam_betas[0], cfg.adam_betas[1]), eps=1e-8)
 
 
 class _Ema:
