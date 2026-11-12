@@ -743,7 +743,7 @@ def train(cfg: TrainConfig) -> str:
                     step_loss = step_loss + (coef * per_row).mean() * part.kl
                 else:
                     step_loss = step_loss + cfg.kl_frozen_weight * kl
-                running_kl += float(kl)
+                running_kl += kl.detach()
             if (
                 cfg.teacher_weight > 0
                 and "has_teacher" in batch
@@ -754,11 +754,11 @@ def train(cfg: TrainConfig) -> str:
                 tea = batch["teacher"][has][:, : stu.shape[-1]]
                 tkl = _teacher_kl(tea, stu, cfg.kl_direction).mean() * part.teacher
                 step_loss = step_loss + cfg.teacher_weight * tkl
-                running_tkl += float(tkl)
+                running_tkl += tkl.detach()
             # DDP averages the ranks' gradients; `* world` makes that the 1-GPU sum.
             loss = step_loss * world / cfg.grad_accum
             loss.backward()
-            running += float(step_loss)
+            running += step_loss.detach()  # on the device: no sync per forward
             micro += 1
 
             ends_step = part.last if world > 1 else micro % cfg.grad_accum == 0
@@ -777,7 +777,7 @@ def train(cfg: TrainConfig) -> str:
 
             if step % cfg.log_every == 0:
                 running, running_kl, running_tkl = distributed.all_reduce(
-                    [running, running_kl, running_tkl]
+                    [float(running), float(running_kl), float(running_tkl)]
                 )  # each rank holds its slices' part
                 avg = running / (cfg.log_every * cfg.grad_accum)
                 rate = step / max(1e-6, time.time() - t0)
