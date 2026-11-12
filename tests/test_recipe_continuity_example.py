@@ -1,5 +1,6 @@
 """Offline checks for examples/recipe_continuity: the page data, layout candidates, the linking
-rule, the question shape asked, and the HTTP call, with a stub decider or a local stub server."""
+rule, the question shape asked, the HTTP call (with a stub decider or a local stub server), and
+the walkthrough notebook and its pictures."""
 
 from __future__ import annotations
 
@@ -11,6 +12,7 @@ from collections.abc import Iterator
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any
+from xml.etree import ElementTree
 
 import pytest
 
@@ -274,3 +276,42 @@ def test_ask_server_refuses_non_http_addresses(
     monkeypatch.setattr(rc, "URL", url)
     with pytest.raises(ValueError, match="http"):
         rc.ask_server("state", {})
+
+
+@pytest.fixture(scope="module")
+def draw() -> Any:
+    spec = importlib.util.spec_from_file_location("draw", EXAMPLE / "draw.py")
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_page_svg_draws_every_box_and_flags(draw: Any, page: dict[str, Any]) -> None:
+    fill = draw.colours_for([[b["id"]] for b in page["boxes"]], skip=frozenset({"k00"}))
+    svg = draw.page_svg(page, fill, [("k03", "k04", draw.GREEN, "0.54")], flagged={"k08"})
+    root = ElementTree.fromstring(svg)  # well-formed XML
+    texts = "".join(root.itertext())
+    assert all(b["id"] in texts for b in page["boxes"])
+    assert svg.count(f'stroke="{draw.RED}"') == 1  # only k08 is outlined
+    assert "0.54" in texts
+
+
+def test_bars_svg_is_well_formed(draw: Any) -> None:
+    svg = draw.bars_svg([("k01→k02", [(0.61, "#3b78c4")])], [("same", "#3b78c4")], 0.5, "t")
+    assert "0.61" in "".join(ElementTree.fromstring(svg).itertext())
+
+
+def test_walkthrough_notebook_is_saved_with_outputs(rc: Any) -> None:
+    nb = json.loads((EXAMPLE / "walkthrough.ipynb").read_text(encoding="utf-8"))
+    code = [c for c in nb["cells"] if c["cell_type"] == "code"]
+    assert code and all(c["outputs"] for c in code)  # every cell was run before saving
+    assert not [o for c in code for o in c["outputs"] if o["output_type"] == "error"]
+    source = "\n".join("".join(c["source"]) for c in code)
+    used = set(re.findall(r"\brc\.([A-Za-z_]\w*)", source))
+    assert used and all(hasattr(rc, name) for name in used)  # no drift from the script
+
+
+@pytest.mark.parametrize("name", ["layout.svg", "result.svg"])
+def test_readme_pictures_are_well_formed(name: str) -> None:
+    ElementTree.parse(EXAMPLE / name)

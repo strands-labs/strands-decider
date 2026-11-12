@@ -1,0 +1,64 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="612" height="856" viewBox="0 0 612 856" font-family="Segoe UI, Arial, sans-serif">
+<defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="context-stroke"/></marker></defs>
+<rect width="612" height="856" fill="#ffffff"/>
+<text x="8" y="20" font-size="15" font-weight="600">Step 1: candidate links from layout</text>
+<rect x="26.0" y="40.0" width="560.0" height="20.0" rx="3" fill="#e4e4e4" stroke="#57606a" stroke-width="0.8"/>
+<text x="30.0" y="53.0" font-size="10.5" font-weight="600">k00 · Page header: Family Kitchen Book, p. 12, breakfast dishes</text>
+<rect x="406.0" y="70.0" width="180.0" height="25.0" rx="3" fill="#cfe3f7" stroke="#57606a" stroke-width="0.8"/>
+<text x="410.0" y="83.0" font-size="10.5" font-weight="600">k01 · Shakshuka (title)</text>
+<rect x="406.0" y="100.0" width="180.0" height="330.0" rx="3" fill="#cfe3f7" stroke="#57606a" stroke-width="0.8"/>
+<text x="410.0" y="113.0" font-size="10.5" font-weight="600">k02 · Shakshuka: serves 4</text>
+<text x="582.0" y="128.0" font-size="11" text-anchor="end" fill="#24292f">⁧طبق سريع يكفي أربعة أشخاص،…⁩</text>
+<rect x="406.0" y="437.5" width="180.0" height="387.5" rx="3" fill="#cfe3f7" stroke="#57606a" stroke-width="0.8"/>
+<text x="410.0" y="450.5" font-size="10.5" font-weight="600">k03 · Shakshuka method, cut off…</text>
+<text x="582.0" y="465.5" font-size="11" text-anchor="end" fill="#24292f">⁧طريقة التحضير: يُقطَّع…⁩</text>
+<rect x="216.0" y="70.0" width="180.0" height="160.0" rx="3" fill="#cfe3f7" stroke="#57606a" stroke-width="0.8"/>
+<text x="220.0" y="83.0" font-size="10.5" font-weight="600">k04 · …one egg; cover; serve</text>
+<text x="392.0" y="98.0" font-size="11" text-anchor="end" fill="#24292f">⁧بيضة واحدة، ثم تُغطّى…⁩</text>
+<rect x="216.0" y="245.0" width="180.0" height="25.0" rx="3" fill="#f9d9b6" stroke="#57606a" stroke-width="0.8"/>
+<text x="220.0" y="258.0" font-size="10.5" font-weight="600">k05 · Herb omelette (title)</text>
+<rect x="216.0" y="275.0" width="180.0" height="155.0" rx="3" fill="#f9d9b6" stroke="#57606a" stroke-width="0.8"/>
+<text x="220.0" y="288.0" font-size="10.5" font-weight="600">k06 · Omelette: baked; ingredients</text>
+<text x="392.0" y="303.0" font-size="11" text-anchor="end" fill="#24292f">⁧طبق خفيف يُخبز في الفرن…⁩</text>
+<rect x="216.0" y="437.5" width="180.0" height="117.5" rx="3" fill="#f9d9b6" stroke="#57606a" stroke-width="0.8"/>
+<text x="220.0" y="450.5" font-size="10.5" font-weight="600">k07 · Omelette method; 20 min</text>
+<text x="392.0" y="465.5" font-size="11" text-anchor="end" fill="#24292f">⁧يُخفق البيض مع الدقيق…⁩</text>
+<rect x="216.0" y="575.0" width="180.0" height="70.0" rx="3" fill="#d4ecd0" stroke="#57606a" stroke-width="0.8"/>
+<text x="220.0" y="588.0" font-size="10.5" font-weight="600">k13 · Tip: storing bread</text>
+<text x="392.0" y="603.0" font-size="11" text-anchor="end" fill="#24292f">⁧نصيحة: يُحفظ الخبز في كيس…⁩</text>
+<rect x="216.0" y="652.5" width="180.0" height="77.5" rx="3" fill="#f3cfd9" stroke="#57606a" stroke-width="0.8"/>
+<text x="220.0" y="665.5" font-size="10.5" font-weight="600">k14 · Tip: softening butter</text>
+<text x="392.0" y="680.5" font-size="11" text-anchor="end" fill="#24292f">⁧نصيحة: لتليين الزبدة…⁩</text>
+<rect x="216.0" y="737.5" width="180.0" height="87.5" rx="3" fill="#e3d7f2" stroke="#57606a" stroke-width="0.8"/>
+<text x="220.0" y="750.5" font-size="10.5" font-weight="600">k15 · Tip: crystallised honey</text>
+<text x="392.0" y="765.5" font-size="11" text-anchor="end" fill="#24292f">⁧نصيحة: إذا تبلّر العسل في…⁩</text>
+<rect x="26.0" y="70.0" width="180.0" height="160.0" rx="3" fill="#fbf0b5" stroke="#57606a" stroke-width="0.8"/>
+<text x="30.0" y="83.0" font-size="10.5" font-weight="600">k08 · Labneh with oil</text>
+<text x="202.0" y="98.0" font-size="11" text-anchor="end" fill="#24292f">⁧لبنة بالزيت. — تُفرد…⁩</text>
+<rect x="26.0" y="237.5" width="180.0" height="112.5" rx="3" fill="#cdeeee" stroke="#57606a" stroke-width="0.8"/>
+<text x="30.0" y="250.5" font-size="10.5" font-weight="600">k09 · Thyme manakish</text>
+<text x="202.0" y="265.5" font-size="11" text-anchor="end" fill="#24292f">⁧مناقيش الزعتر. — يُفرد…⁩</text>
+<rect x="26.0" y="357.5" width="180.0" height="172.5" rx="3" fill="#e8dccb" stroke="#57606a" stroke-width="0.8"/>
+<text x="30.0" y="370.5" font-size="10.5" font-weight="600">k10 · Spinach pies, cut off…</text>
+<text x="202.0" y="385.5" font-size="11" text-anchor="end" fill="#24292f">⁧فطائر السبانخ. — تُفرم…⁩</text>
+<rect x="26.0" y="537.5" width="180.0" height="142.5" rx="3" fill="#e8dccb" stroke="#57606a" stroke-width="0.8"/>
+<text x="30.0" y="550.5" font-size="10.5" font-weight="600">k11 · …a spoon of filling; bake</text>
+<text x="202.0" y="565.5" font-size="11" text-anchor="end" fill="#24292f">⁧ملعقة من الحشوة، ثم تُرفع…⁩</text>
+<rect x="26.0" y="687.5" width="180.0" height="137.5" rx="3" fill="#dfe7c4" stroke="#57606a" stroke-width="0.8"/>
+<text x="30.0" y="700.5" font-size="10.5" font-weight="600">k12 · Mint tea</text>
+<text x="202.0" y="715.5" font-size="11" text-anchor="end" fill="#24292f">⁧شاي بالنعناع. — يُغلى…⁩</text>
+<path d="M496.0,93.0 L496.0,102.0" fill="none" stroke="#8c959f" stroke-width="2" stroke-dasharray="4 3" marker-end="url(#head)"/>
+<path d="M496.0,428.0 L496.0,439.5" fill="none" stroke="#8c959f" stroke-width="2" stroke-dasharray="4 3" marker-end="url(#head)"/>
+<path d="M496.0,823.0 V831.0 H401.0 V64.0 H306.0 V72.0" fill="none" stroke="#8c959f" stroke-width="2" stroke-dasharray="4 3" marker-end="url(#head)"/>
+<path d="M306.0,228.0 L306.0,247.0" fill="none" stroke="#8c959f" stroke-width="2" stroke-dasharray="4 3" marker-end="url(#head)"/>
+<path d="M306.0,268.0 L306.0,277.0" fill="none" stroke="#8c959f" stroke-width="2" stroke-dasharray="4 3" marker-end="url(#head)"/>
+<path d="M306.0,428.0 L306.0,439.5" fill="none" stroke="#8c959f" stroke-width="2" stroke-dasharray="4 3" marker-end="url(#head)"/>
+<path d="M306.0,553.0 L306.0,577.0" fill="none" stroke="#8c959f" stroke-width="2" stroke-dasharray="4 3" marker-end="url(#head)"/>
+<path d="M306.0,643.0 L306.0,654.5" fill="none" stroke="#8c959f" stroke-width="2" stroke-dasharray="4 3" marker-end="url(#head)"/>
+<path d="M306.0,728.0 L306.0,739.5" fill="none" stroke="#8c959f" stroke-width="2" stroke-dasharray="4 3" marker-end="url(#head)"/>
+<path d="M306.0,823.0 V831.0 H211.0 V64.0 H116.0 V72.0" fill="none" stroke="#8c959f" stroke-width="2" stroke-dasharray="4 3" marker-end="url(#head)"/>
+<path d="M116.0,228.0 L116.0,239.5" fill="none" stroke="#8c959f" stroke-width="2" stroke-dasharray="4 3" marker-end="url(#head)"/>
+<path d="M116.0,348.0 L116.0,359.5" fill="none" stroke="#8c959f" stroke-width="2" stroke-dasharray="4 3" marker-end="url(#head)"/>
+<path d="M116.0,528.0 L116.0,539.5" fill="none" stroke="#8c959f" stroke-width="2" stroke-dasharray="4 3" marker-end="url(#head)"/>
+<path d="M116.0,678.0 L116.0,689.5" fill="none" stroke="#8c959f" stroke-width="2" stroke-dasharray="4 3" marker-end="url(#head)"/>
+</svg>

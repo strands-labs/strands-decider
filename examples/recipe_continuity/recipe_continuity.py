@@ -7,6 +7,20 @@ recipes. Start a server, then run this file:
     strands-decider serve StrandsAgents/strands-decider-2B-qwen3.5-v1-2610 --port 8099
     python examples/recipe_continuity/recipe_continuity.py
 
+Reading order of this file, top to bottom:
+
+    settings          the layout rules and the words the model sees (CONTEXT, QUESTION, SAME)
+    candidates()      step 1: which box could come next after each box, from layout alone
+    spans_columns()   finds the page header, which belongs to no recipe
+    ask_server()      the HTTP call to the server
+    ask_noul()        step 2: one yes/no question about one pair of boxes
+    ask_choice()      the same, as one question over several options
+    claims()          step 2 for every box: which links the decider supports
+    settle()          step 3: accept links strongest first and chain them into recipes
+    run(), main()     wire the steps together, and score the result against the labels
+
+walkthrough.ipynb, next to this file, runs these steps one at a time and shows each result.
+
 `--question` picks the question shape. `auto` (the default) uses a `noul` to decide whether a
 link exists, and, when a box has several candidates, first a `choice` to rank them. `noul` and
 `choice` force one shape everywhere, to compare the two; `choice` then adds a "none" option.

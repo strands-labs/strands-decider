@@ -10,6 +10,15 @@ OCR on a scanned page gives you text boxes, a title here and a paragraph there, 
 recipes they belong to. Layout tells you where each box is. Strands decider reads the text and
 says whether a recipe continues from one box to the next.
 
+| Layout proposes a next box for each box | The decider keeps the real links |
+|---|---|
+| ![Candidate links: dashed arrows from each box to the box below it, or to the top of the next column](layout.svg) | ![Result: nine recipes rebuilt, each in its own colour, with green arrows for the accepted links](result.svg) |
+
+**To see every step with its intermediate results** (the page, the candidates, one request and
+answer in full, the score for every pair, and `noul` against `choice`), open
+[`walkthrough.ipynb`](walkthrough.ipynb). Its outputs are saved, so it reads on GitHub without
+running anything.
+
 ```bash
 git clone https://github.com/strands-labs/strands-decider && cd strands-decider
 pip install -e .
@@ -17,11 +26,16 @@ strands-decider serve StrandsAgents/strands-decider-2B-qwen3.5-v1-2610 --port 80
 
 # in a second terminal, once the server has loaded the model
 python examples/recipe_continuity/recipe_continuity.py
+
+# or step by step, in the notebook
+pip install notebook
+jupyter notebook examples/recipe_continuity/walkthrough.ipynb
 ```
 
 The script uses only the Python standard library. It expects a server on port 8099 unless
 `STRANDS_DECIDER_URL` is set, and refuses any address that is not `http://` or `https://`.
-A run asks 14 questions and takes a few seconds once the model is loaded (longer on CPU).
+A run asks 14 questions and takes a few seconds once the model is loaded (longer on CPU). The
+notebook also needs Jupyter, and draws its pictures with `draw.py`.
 
 ## The page
 
