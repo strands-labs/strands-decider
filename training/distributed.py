@@ -77,9 +77,10 @@ def entry_point(fn: Callable[..., Any]) -> Callable[..., Any]:
         if torch.cuda.is_available():
             torch.cuda.set_device(local_rank)
         # The timeout is a backstop: under torchrun a rank that raises exits, and the
-        # launcher then stops the others rather than leaving them in a collective.
+        # launcher then stops the others rather than leaving them in a collective. Long
+        # enough for one rank's slow start (data loading on a large corpus) on a multi-node run.
         dist.init_process_group(
-            "nccl" if torch.cuda.is_available() else "gloo", timeout=timedelta(minutes=30)
+            "nccl" if torch.cuda.is_available() else "gloo", timeout=timedelta(hours=2)
         )
         try:
             with contextlib.ExitStack() as stack:
