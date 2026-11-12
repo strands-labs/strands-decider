@@ -382,7 +382,7 @@ the example's [README](examples/strands/README.md) for setup and the walk-throug
 
 ## A document example
 
-[`examples/recipe_continuity/`](examples/recipe_continuity/README.md) uses strands decider
+[`examples/ocr_grouping_noul_vs_choice/`](examples/ocr_grouping_noul_vs_choice/README.md) uses strands decider
 without an agent: it groups the OCR text boxes of a synthetic Arabic cookbook page into recipes,
 using a `noul` to decide whether a link exists and a `choice` to rank several candidates.
 

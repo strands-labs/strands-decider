@@ -1,4 +1,4 @@
-# Grouping OCR text into recipes
+# Grouping OCR text: `noul` to decide, `choice` to rank
 
 **In short:** strands decider has two question types that fit this task. A `noul` is a yes/no
 question that returns P(yes); a `choice` picks one of several options (see the
@@ -25,11 +25,11 @@ pip install -e .
 strands-decider serve StrandsAgents/strands-decider-2B-qwen3.5-v1-2610 --port 8099
 
 # in a second terminal, once the server has loaded the model
-python examples/recipe_continuity/recipe_continuity.py
+python examples/ocr_grouping_noul_vs_choice/group_ocr_text.py
 
 # or step by step, in the notebook
 pip install notebook
-jupyter notebook examples/recipe_continuity/walkthrough.ipynb
+jupyter notebook examples/ocr_grouping_noul_vs_choice/walkthrough.ipynb
 ```
 
 The script uses only the Python standard library. It expects a server on port 8099 unless
@@ -98,8 +98,8 @@ option and the top option kept unless it is `none` (`none` also wins a tie). Her
 one candidate against `none`:
 
 ```bash
-python examples/recipe_continuity/recipe_continuity.py                    # 9/9 recipes
-python examples/recipe_continuity/recipe_continuity.py --question choice  # 6/9 recipes
+python examples/ocr_grouping_noul_vs_choice/group_ocr_text.py                    # 9/9 recipes
+python examples/ocr_grouping_noul_vs_choice/group_ocr_text.py --question choice  # 6/9 recipes
 ```
 
 With `strands-decider-2B-qwen3.5-v1-2610`, the `choice` run misses the link from the recipe

@@ -5,7 +5,7 @@ whether the recipe really continues, and a few lines of plain Python settle the 
 recipes. Start a server, then run this file:
 
     strands-decider serve StrandsAgents/strands-decider-2B-qwen3.5-v1-2610 --port 8099
-    python examples/recipe_continuity/recipe_continuity.py
+    python examples/ocr_grouping_noul_vs_choice/group_ocr_text.py
 
 Reading order of this file, top to bottom:
 

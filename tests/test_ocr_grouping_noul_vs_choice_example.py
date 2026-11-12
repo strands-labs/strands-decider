@@ -1,4 +1,4 @@
-"""Offline checks for examples/recipe_continuity: the page data, layout candidates, the linking
+"""Offline checks for examples/ocr_grouping_noul_vs_choice: the page data, layout candidates, the linking
 rule, the question shape asked, the HTTP call (with a stub decider or a local stub server), and
 the walkthrough notebook and its pictures."""
 
@@ -16,7 +16,7 @@ from xml.etree import ElementTree
 
 import pytest
 
-EXAMPLE = Path(__file__).resolve().parents[1] / "examples" / "recipe_continuity"
+EXAMPLE = Path(__file__).resolve().parents[1] / "examples" / "ocr_grouping_noul_vs_choice"
 
 # The hand-labelled recipes on the page, each in reading order.
 EXPECTED = [
@@ -35,9 +35,7 @@ EXPECTED = [
 
 @pytest.fixture(scope="module")
 def rc() -> Any:
-    spec = importlib.util.spec_from_file_location(
-        "recipe_continuity", EXAMPLE / "recipe_continuity.py"
-    )
+    spec = importlib.util.spec_from_file_location("group_ocr_text", EXAMPLE / "group_ocr_text.py")
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
