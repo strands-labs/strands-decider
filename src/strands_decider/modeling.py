@@ -73,7 +73,8 @@ class StrandsDeciderConfig:
     # parse this field directly.
     head_type: str = "pointer"
     pointer_dim: int = 256
-    # Token readout only: the prompt format, "lettered" (prompting.lettered_prompt), and the
+    # Token readout only: the prompt format, "lettered" (prompting.lettered_prompt) or
+    # "strands-chat" (core.render, the reference's prompt), and the
     # attention, "causal" (the torso's own) or "prefix_bidir" (prefix_bidir_masks).
     render: str = "numbered"
     attention_mode: str = "causal"
@@ -118,8 +119,10 @@ class StrandsDeciderConfig:
 
     def __post_init__(self) -> None:
         readout = self.head_type == "token_readout"
-        if readout != (self.render == "lettered"):
-            raise ValueError('head_type "token_readout" goes with render "lettered", and only it')
+        if readout != (self.render in ("lettered", "strands-chat")):
+            raise ValueError(
+                'head_type "token_readout" goes with render "lettered" or "strands-chat", and only them'
+            )
         if self.attention_mode not in (("causal", "prefix_bidir") if readout else ("causal",)):
             raise ValueError(f"attention_mode {self.attention_mode!r} with head {self.head_type!r}")
 
@@ -476,9 +479,12 @@ class StrandsDeciderModel(nn.Module):
         torso = cls._load_torso(config, device_map, attn_implementation)
         model = cls(config, torso, tok)
         if config.head_type == "token_readout":
+            from .core import CODES
             from .prompting import option_codes
 
-            ids = [tok.encode(c, add_special_tokens=False)[0] for c in option_codes(tok)]
+            # Row k is the k-th code the prompt lists: core.render's for strands-chat.
+            codes = CODES if config.render == "strands-chat" else option_codes(tok)
+            ids = [tok.encode(c, add_special_tokens=False)[0] for c in codes]
             assert isinstance(model.head, TokenReadoutHead)
             model.head.proj.weight.data.copy_(lm_head_rows(config, torso, ids))
         if config.use_lora:

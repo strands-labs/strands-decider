@@ -72,7 +72,7 @@ class TrainConfig:
     host_embeddings: bool = False
     freeze_torso: bool = False
     # "pointer" (the default) or "token_readout" (modeling.TokenReadoutHead), which goes with
-    # render "lettered" and takes attention_mode "causal" or "prefix_bidir".
+    # render "lettered" or "strands-chat" and takes attention_mode "causal" or "prefix_bidir".
     head_type: str = "pointer"
     render: str = "numbered"
     attention_mode: str = "causal"
@@ -566,15 +566,15 @@ def train(cfg: TrainConfig) -> str:
         train_examples = train_examples + kl_rows
         random.Random(cfg.seed).shuffle(train_examples)
         print(f"[strands-decider] +{len(kl_rows):,} KL-only rows (weight {cfg.kl_only_weight})")
-    if cfg.render == "lettered":
-        # The data builds measure the numbered prompt; the lettered one is longer (chat
-        # template, system line). Drop what does not fit rather than stop on it mid-run.
-        frame = chat_frame(model.tokenizer)
+    if cfg.render in ("lettered", "strands-chat"):
+        # The data builds measure the numbered prompt; these are other lengths (chat
+        # template). Drop what does not fit rather than stop on it mid-run.
+        frame = chat_frame(model.tokenizer) if cfg.render == "lettered" else cfg.render
         sizes = len(train_examples), len(val_examples)
         train_examples = fits(train_examples, model.tokenizer, cfg.max_length, frame)
         val_examples = fits(val_examples, model.tokenizer, cfg.max_length, frame)
         print(
-            f"[strands-decider] lettered prompts over max_length {cfg.max_length}: dropped "
+            f"[strands-decider] {cfg.render} prompts over max_length {cfg.max_length}: dropped "
             f"{sizes[0] - len(train_examples):,} train and {sizes[1] - len(val_examples):,} val rows"
         )
     print(f"[strands-decider] train={len(train_examples):,} val={len(val_examples):,}")

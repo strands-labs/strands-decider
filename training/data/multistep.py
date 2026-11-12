@@ -249,8 +249,10 @@ def fits(
 
     With `frame` (prompting.chat_frame), measure the lettered prompt instead, with every
     phrasing of the question, because the collator samples one and refuses a prompt that is
-    too long.
+    too long. `frame` "strands-chat" measures core.render's prompt the same way; a row it
+    refuses is dropped too.
     """
+    from strands_decider import core
     from strands_decider.prompting import build_prompt, lettered_prompt
 
     if frame is None:
@@ -259,6 +261,20 @@ def fits(
             for e in examples
             if len(tokenizer(build_prompt(e.state, e.to_question())[0])["input_ids"]) <= max_tokens
         ]
+
+    if frame == core.CHAT:
+        tok = tokenizer.backend_tokenizer
+
+        def chat_len(e: Example) -> float:
+            try:
+                return max(
+                    len(core.render(e.to_request(i), tok, core.CHAT).questions["q"].ids)
+                    for i in e.all_instructions()
+                )
+            except ValueError:  # core.render refuses the row
+                return float("inf")
+
+        return [e for e in examples if chat_len(e) <= max_tokens]
 
     def longest(e: Example) -> int:
         texts = [
