@@ -53,7 +53,7 @@ class SystemOneCollator:
 
     def _option_order(self, ex: Example) -> list[int] | None:
         n = ex.n_options
-        if not self.cfg.shuffle_options or not self.train:
+        if not self.cfg.shuffle_options or not self.train or ex.fixed_order:
             return None
         if self.frame is not None and ex.kind != "choice":
             return None
@@ -133,12 +133,16 @@ class SystemOneCollator:
     def _target_distribution(
         self, ex: Example, label: int, n_options: int, order: Sequence[int] | None
     ) -> torch.Tensor | None:
-        """Soft target for score questions; None for noul/choice (plain NLL is right there).
+        """Soft target: ordinal smoothing for score questions, or a noul/choice row's own
+        `target`, in slot order. None otherwise (plain NLL is right there).
 
         The smoothing is applied in *level* space and then mapped through the slot
         permutation, so a reversed rubric still spreads mass onto the neighbouring
         levels rather than onto arbitrary slots.
         """
+        if ex.target is not None:
+            t = ex.target if order is None else [ex.target[i] for i in order]
+            return torch.tensor(t, dtype=torch.float32)
         if ex.kind != "score" or self.cfg.ordinal_smoothing <= 0:
             return None
 

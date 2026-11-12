@@ -45,12 +45,22 @@ class Example:
     # instruction string, so the model never saw a task asked two ways -- and held-out
     # accuracy on weak tasks moves by up to 0.15 on rewording alone.
     instruction_variants: list[str] = field(default_factory=list)
+    # A soft target for noul/choice: one probability per option, in canonical order. The
+    # collator permutes it with the options and trains on it (label_dist); `label` stays
+    # the argmax, for metrics. None: one-hot on `label`, as before.
+    target: list[float] | None = None
+    # Options whose order carries meaning (a score rubric stored as a choice): never shuffled.
+    fixed_order: bool = False
 
     def __post_init__(self) -> None:
         if self.kind not in ("noul", "choice", "score"):
             raise ValueError(f"unknown kind: {self.kind}")
         if not 0 <= self.label < len(self.options):
             raise ValueError(f"label {self.label} out of range for {len(self.options)} options")
+        if self.target is not None and (
+            self.kind == "score" or len(self.target) != len(self.options)
+        ):
+            raise ValueError(f"a {self.kind} target of {len(self.target)} for {self.n_options}")
 
     @property
     def n_options(self) -> int:
@@ -74,8 +84,21 @@ class Example:
             return ChoiceQuestion(instructions=instr, criteria=crit)
         return ScoreQuestion(instructions=instr, criteria=[desc for _, desc in self.options])
 
+    def to_request(self, instructions: str | None = None) -> dict[str, Any]:
+        """The question as a one-question request JSON, for `strands_decider.core.render`."""
+        instr = self.instructions if instructions is None else instructions
+        crit: Any = dict(self.options) if self.kind != "score" else [d for _, d in self.options]
+        q = {"type": self.kind, "instructions": instr, "criteria": crit}
+        return {"state": self.state, "questions": {"q": q}}
+
     def to_json(self) -> str:
-        return json.dumps(asdict(self), ensure_ascii=False)
+        d = asdict(self)
+        # Rows without the new fields write the JSON they always did.
+        if d["target"] is None:
+            del d["target"]
+        if not d["fixed_order"]:
+            del d["fixed_order"]
+        return json.dumps(d, ensure_ascii=False)
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> Example:
@@ -88,6 +111,8 @@ class Example:
             task=d.get("task", "unknown"),
             weight=float(d.get("weight", 1.0)),
             instruction_variants=list(d.get("instruction_variants") or []),
+            target=None if d.get("target") is None else [float(p) for p in d["target"]],
+            fixed_order=bool(d.get("fixed_order", False)),
         )
 
 
