@@ -29,6 +29,8 @@ from __future__ import annotations
 
 import contextlib
 import functools
+import heapq
+import math
 import os
 from collections.abc import Callable, Iterator
 from datetime import timedelta
@@ -168,21 +170,34 @@ def plan_step(
     per = [[lengths[i] for i in b] for b in batches]
     assert world <= sum(map(len, per)), "more ranks than rows in the step"
 
+    @functools.cache
+    def cuts(j: int, k: int) -> list[tuple[int, int, int]]:
+        lens = per[j]
+        return [
+            ((b - a) * max(lens[a:b]) + FORWARD_OVERHEAD, a, b) for a, b in _best_cuts(lens, k)[1]
+        ]
+
     def assign(n: list[int]) -> tuple[tuple[bool, int], list[list[tuple[int, int, int]]]]:
-        slices = []
-        for j, k in enumerate(n):
-            lens = per[j]
-            for a, b in _best_cuts(lens, k)[1]:
-                slices.append(((b - a) * max(lens[a:b]) + FORWARD_OVERHEAD, j, a, b))
+        slices = [(c, j, a, b) for j, k in enumerate(n) for c, a, b in cuts(j, k)]
         slices.sort(key=lambda t: (-t[0], t[1], t[2]))
-        load = [0] * world
+        heap = [(0, q) for q in range(world)]  # (load, rank): pops the least loaded, lowest rank
         ranks: list[list[tuple[int, int, int]]] = [[] for _ in range(world)]
         for c, j, a, b in slices:
-            r = min(range(world), key=lambda q: (load[q], q))
-            load[r] += c
+            load, r = heap[0]
+            heapq.heapreplace(heap, (load + c, r))
             ranks[r].append((j, a, b))
         # Fewer slices than ranks leaves a rank idle, so such a plan always scores worse.
-        return (len(slices) < world, max(load)), [sorted(x) for x in ranks]
+        return (len(slices) < world, max(load for load, _ in heap)), [sorted(x) for x in ranks]
+
+    if len(batches) >= world:
+        # Enough micro-batches to go round: LPT of whole ones, after cutting each that costs
+        # more than a mean rank load into that many slices. The search below costs seconds
+        # per step at this size (30 rows x 91 micro-batches: 7 s at 8 ranks, 55 s at 32).
+        whole = [len(lens) * max(lens) + FORWARD_OVERHEAD for lens in per]
+        mean = sum(whole) / world
+        plan = assign([min(len(per[j]), math.ceil(c / mean)) for j, c in enumerate(whole)])[1]
+        assert all(plan), "a rank got no slice"
+        return plan
 
     n = [1] * len(batches)
     best = assign(n)
