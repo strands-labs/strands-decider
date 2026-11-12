@@ -30,6 +30,15 @@ GREY = "#e4e4e4"
 GREEN, RED, DASHED = "#1a7f37", "#cf222e", "#8c959f"
 
 
+def ascii_only(svg: str) -> str:
+    """Write non-ASCII characters (Arabic, arrows) as XML character references.
+
+    GitHub shows a notebook's SVG output without saying it is UTF-8, so raw Arabic would come
+    out garbled there; character references read the same everywhere.
+    """
+    return svg.encode("ascii", "xmlcharrefreplace").decode("ascii")
+
+
 def colours_for(groups: list[list[str]], skip: frozenset[str] = frozenset()) -> dict[str, str]:
     """Give every box in a group the same fill; boxes in `skip` (the header) stay grey."""
     out: dict[str, str] = {}
@@ -125,7 +134,7 @@ def page_svg(
                 f"{escape(label)}</text>"
             )
     out.append("</svg>")
-    return "\n".join(out)
+    return ascii_only("\n".join(out))
 
 
 def bars_svg(
@@ -177,4 +186,4 @@ def bars_svg(
         f'<text x="{tx + 3:.1f}" y="{h - 8}" font-size="10" fill="#57606a">{threshold}</text>'
     )
     out.append("</svg>")
-    return "\n".join(out)
+    return ascii_only("\n".join(out))

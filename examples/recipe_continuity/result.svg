@@ -3,50 +3,50 @@
 <rect width="612" height="856" fill="#ffffff"/>
 <text x="8" y="20" font-size="15" font-weight="600">Result with --question auto: one colour per group, red outline = wrong group</text>
 <rect x="26.0" y="40.0" width="560.0" height="20.0" rx="3" fill="#e4e4e4" stroke="#57606a" stroke-width="0.8"/>
-<text x="30.0" y="53.0" font-size="10.5" font-weight="600">k00 · Page header: Family Kitchen Book, p. 12, breakfast dishes</text>
+<text x="30.0" y="53.0" font-size="10.5" font-weight="600">k00 &#183; Page header: Family Kitchen Book, p. 12, breakfast dishes</text>
 <rect x="406.0" y="70.0" width="180.0" height="25.0" rx="3" fill="#cfe3f7" stroke="#57606a" stroke-width="0.8"/>
-<text x="410.0" y="83.0" font-size="10.5" font-weight="600">k01 · Shakshuka (title)</text>
+<text x="410.0" y="83.0" font-size="10.5" font-weight="600">k01 &#183; Shakshuka (title)</text>
 <rect x="406.0" y="100.0" width="180.0" height="330.0" rx="3" fill="#cfe3f7" stroke="#57606a" stroke-width="0.8"/>
-<text x="410.0" y="113.0" font-size="10.5" font-weight="600">k02 · Shakshuka: serves 4</text>
-<text x="582.0" y="128.0" font-size="11" text-anchor="end" fill="#24292f">⁧طبق سريع يكفي أربعة أشخاص،…⁩</text>
+<text x="410.0" y="113.0" font-size="10.5" font-weight="600">k02 &#183; Shakshuka: serves 4</text>
+<text x="582.0" y="128.0" font-size="11" text-anchor="end" fill="#24292f">&#8295;&#1591;&#1576;&#1602; &#1587;&#1585;&#1610;&#1593; &#1610;&#1603;&#1601;&#1610; &#1571;&#1585;&#1576;&#1593;&#1577; &#1571;&#1588;&#1582;&#1575;&#1589;&#1548;&#8230;&#8297;</text>
 <rect x="406.0" y="437.5" width="180.0" height="387.5" rx="3" fill="#cfe3f7" stroke="#57606a" stroke-width="0.8"/>
-<text x="410.0" y="450.5" font-size="10.5" font-weight="600">k03 · Shakshuka method, cut off…</text>
-<text x="582.0" y="465.5" font-size="11" text-anchor="end" fill="#24292f">⁧طريقة التحضير: يُقطَّع…⁩</text>
+<text x="410.0" y="450.5" font-size="10.5" font-weight="600">k03 &#183; Shakshuka method, cut off&#8230;</text>
+<text x="582.0" y="465.5" font-size="11" text-anchor="end" fill="#24292f">&#8295;&#1591;&#1585;&#1610;&#1602;&#1577; &#1575;&#1604;&#1578;&#1581;&#1590;&#1610;&#1585;: &#1610;&#1615;&#1602;&#1591;&#1614;&#1617;&#1593;&#8230;&#8297;</text>
 <rect x="216.0" y="70.0" width="180.0" height="160.0" rx="3" fill="#cfe3f7" stroke="#57606a" stroke-width="0.8"/>
-<text x="220.0" y="83.0" font-size="10.5" font-weight="600">k04 · …one egg; cover; serve</text>
-<text x="392.0" y="98.0" font-size="11" text-anchor="end" fill="#24292f">⁧بيضة واحدة، ثم تُغطّى…⁩</text>
+<text x="220.0" y="83.0" font-size="10.5" font-weight="600">k04 &#183; &#8230;one egg; cover; serve</text>
+<text x="392.0" y="98.0" font-size="11" text-anchor="end" fill="#24292f">&#8295;&#1576;&#1610;&#1590;&#1577; &#1608;&#1575;&#1581;&#1583;&#1577;&#1548; &#1579;&#1605; &#1578;&#1615;&#1594;&#1591;&#1617;&#1609;&#8230;&#8297;</text>
 <rect x="216.0" y="245.0" width="180.0" height="25.0" rx="3" fill="#f9d9b6" stroke="#57606a" stroke-width="0.8"/>
-<text x="220.0" y="258.0" font-size="10.5" font-weight="600">k05 · Herb omelette (title)</text>
+<text x="220.0" y="258.0" font-size="10.5" font-weight="600">k05 &#183; Herb omelette (title)</text>
 <rect x="216.0" y="275.0" width="180.0" height="155.0" rx="3" fill="#f9d9b6" stroke="#57606a" stroke-width="0.8"/>
-<text x="220.0" y="288.0" font-size="10.5" font-weight="600">k06 · Omelette: baked; ingredients</text>
-<text x="392.0" y="303.0" font-size="11" text-anchor="end" fill="#24292f">⁧طبق خفيف يُخبز في الفرن…⁩</text>
+<text x="220.0" y="288.0" font-size="10.5" font-weight="600">k06 &#183; Omelette: baked; ingredients</text>
+<text x="392.0" y="303.0" font-size="11" text-anchor="end" fill="#24292f">&#8295;&#1591;&#1576;&#1602; &#1582;&#1601;&#1610;&#1601; &#1610;&#1615;&#1582;&#1576;&#1586; &#1601;&#1610; &#1575;&#1604;&#1601;&#1585;&#1606;&#8230;&#8297;</text>
 <rect x="216.0" y="437.5" width="180.0" height="117.5" rx="3" fill="#f9d9b6" stroke="#57606a" stroke-width="0.8"/>
-<text x="220.0" y="450.5" font-size="10.5" font-weight="600">k07 · Omelette method; 20 min</text>
-<text x="392.0" y="465.5" font-size="11" text-anchor="end" fill="#24292f">⁧يُخفق البيض مع الدقيق…⁩</text>
+<text x="220.0" y="450.5" font-size="10.5" font-weight="600">k07 &#183; Omelette method; 20 min</text>
+<text x="392.0" y="465.5" font-size="11" text-anchor="end" fill="#24292f">&#8295;&#1610;&#1615;&#1582;&#1601;&#1602; &#1575;&#1604;&#1576;&#1610;&#1590; &#1605;&#1593; &#1575;&#1604;&#1583;&#1602;&#1610;&#1602;&#8230;&#8297;</text>
 <rect x="216.0" y="575.0" width="180.0" height="70.0" rx="3" fill="#d4ecd0" stroke="#57606a" stroke-width="0.8"/>
-<text x="220.0" y="588.0" font-size="10.5" font-weight="600">k13 · Tip: storing bread</text>
-<text x="392.0" y="603.0" font-size="11" text-anchor="end" fill="#24292f">⁧نصيحة: يُحفظ الخبز في كيس…⁩</text>
+<text x="220.0" y="588.0" font-size="10.5" font-weight="600">k13 &#183; Tip: storing bread</text>
+<text x="392.0" y="603.0" font-size="11" text-anchor="end" fill="#24292f">&#8295;&#1606;&#1589;&#1610;&#1581;&#1577;: &#1610;&#1615;&#1581;&#1601;&#1592; &#1575;&#1604;&#1582;&#1576;&#1586; &#1601;&#1610; &#1603;&#1610;&#1587;&#8230;&#8297;</text>
 <rect x="216.0" y="652.5" width="180.0" height="77.5" rx="3" fill="#f3cfd9" stroke="#57606a" stroke-width="0.8"/>
-<text x="220.0" y="665.5" font-size="10.5" font-weight="600">k14 · Tip: softening butter</text>
-<text x="392.0" y="680.5" font-size="11" text-anchor="end" fill="#24292f">⁧نصيحة: لتليين الزبدة…⁩</text>
+<text x="220.0" y="665.5" font-size="10.5" font-weight="600">k14 &#183; Tip: softening butter</text>
+<text x="392.0" y="680.5" font-size="11" text-anchor="end" fill="#24292f">&#8295;&#1606;&#1589;&#1610;&#1581;&#1577;: &#1604;&#1578;&#1604;&#1610;&#1610;&#1606; &#1575;&#1604;&#1586;&#1576;&#1583;&#1577;&#8230;&#8297;</text>
 <rect x="216.0" y="737.5" width="180.0" height="87.5" rx="3" fill="#e3d7f2" stroke="#57606a" stroke-width="0.8"/>
-<text x="220.0" y="750.5" font-size="10.5" font-weight="600">k15 · Tip: crystallised honey</text>
-<text x="392.0" y="765.5" font-size="11" text-anchor="end" fill="#24292f">⁧نصيحة: إذا تبلّر العسل في…⁩</text>
+<text x="220.0" y="750.5" font-size="10.5" font-weight="600">k15 &#183; Tip: crystallised honey</text>
+<text x="392.0" y="765.5" font-size="11" text-anchor="end" fill="#24292f">&#8295;&#1606;&#1589;&#1610;&#1581;&#1577;: &#1573;&#1584;&#1575; &#1578;&#1576;&#1604;&#1617;&#1585; &#1575;&#1604;&#1593;&#1587;&#1604; &#1601;&#1610;&#8230;&#8297;</text>
 <rect x="26.0" y="70.0" width="180.0" height="160.0" rx="3" fill="#fbf0b5" stroke="#57606a" stroke-width="0.8"/>
-<text x="30.0" y="83.0" font-size="10.5" font-weight="600">k08 · Labneh with oil</text>
-<text x="202.0" y="98.0" font-size="11" text-anchor="end" fill="#24292f">⁧لبنة بالزيت. — تُفرد…⁩</text>
+<text x="30.0" y="83.0" font-size="10.5" font-weight="600">k08 &#183; Labneh with oil</text>
+<text x="202.0" y="98.0" font-size="11" text-anchor="end" fill="#24292f">&#8295;&#1604;&#1576;&#1606;&#1577; &#1576;&#1575;&#1604;&#1586;&#1610;&#1578;. &#8212; &#1578;&#1615;&#1601;&#1585;&#1583;&#8230;&#8297;</text>
 <rect x="26.0" y="237.5" width="180.0" height="112.5" rx="3" fill="#cdeeee" stroke="#57606a" stroke-width="0.8"/>
-<text x="30.0" y="250.5" font-size="10.5" font-weight="600">k09 · Thyme manakish</text>
-<text x="202.0" y="265.5" font-size="11" text-anchor="end" fill="#24292f">⁧مناقيش الزعتر. — يُفرد…⁩</text>
+<text x="30.0" y="250.5" font-size="10.5" font-weight="600">k09 &#183; Thyme manakish</text>
+<text x="202.0" y="265.5" font-size="11" text-anchor="end" fill="#24292f">&#8295;&#1605;&#1606;&#1575;&#1602;&#1610;&#1588; &#1575;&#1604;&#1586;&#1593;&#1578;&#1585;. &#8212; &#1610;&#1615;&#1601;&#1585;&#1583;&#8230;&#8297;</text>
 <rect x="26.0" y="357.5" width="180.0" height="172.5" rx="3" fill="#e8dccb" stroke="#57606a" stroke-width="0.8"/>
-<text x="30.0" y="370.5" font-size="10.5" font-weight="600">k10 · Spinach pies, cut off…</text>
-<text x="202.0" y="385.5" font-size="11" text-anchor="end" fill="#24292f">⁧فطائر السبانخ. — تُفرم…⁩</text>
+<text x="30.0" y="370.5" font-size="10.5" font-weight="600">k10 &#183; Spinach pies, cut off&#8230;</text>
+<text x="202.0" y="385.5" font-size="11" text-anchor="end" fill="#24292f">&#8295;&#1601;&#1591;&#1575;&#1574;&#1585; &#1575;&#1604;&#1587;&#1576;&#1575;&#1606;&#1582;. &#8212; &#1578;&#1615;&#1601;&#1585;&#1605;&#8230;&#8297;</text>
 <rect x="26.0" y="537.5" width="180.0" height="142.5" rx="3" fill="#e8dccb" stroke="#57606a" stroke-width="0.8"/>
-<text x="30.0" y="550.5" font-size="10.5" font-weight="600">k11 · …a spoon of filling; bake</text>
-<text x="202.0" y="565.5" font-size="11" text-anchor="end" fill="#24292f">⁧ملعقة من الحشوة، ثم تُرفع…⁩</text>
+<text x="30.0" y="550.5" font-size="10.5" font-weight="600">k11 &#183; &#8230;a spoon of filling; bake</text>
+<text x="202.0" y="565.5" font-size="11" text-anchor="end" fill="#24292f">&#8295;&#1605;&#1604;&#1593;&#1602;&#1577; &#1605;&#1606; &#1575;&#1604;&#1581;&#1588;&#1608;&#1577;&#1548; &#1579;&#1605; &#1578;&#1615;&#1585;&#1601;&#1593;&#8230;&#8297;</text>
 <rect x="26.0" y="687.5" width="180.0" height="137.5" rx="3" fill="#dfe7c4" stroke="#57606a" stroke-width="0.8"/>
-<text x="30.0" y="700.5" font-size="10.5" font-weight="600">k12 · Mint tea</text>
-<text x="202.0" y="715.5" font-size="11" text-anchor="end" fill="#24292f">⁧شاي بالنعناع. — يُغلى…⁩</text>
+<text x="30.0" y="700.5" font-size="10.5" font-weight="600">k12 &#183; Mint tea</text>
+<text x="202.0" y="715.5" font-size="11" text-anchor="end" fill="#24292f">&#8295;&#1588;&#1575;&#1610; &#1576;&#1575;&#1604;&#1606;&#1593;&#1606;&#1575;&#1593;. &#8212; &#1610;&#1615;&#1594;&#1604;&#1609;&#8230;&#8297;</text>
 <path d="M496.0,93.0 L496.0,102.0" fill="none" stroke="#1a7f37" stroke-width="2" marker-end="url(#head)"/>
 <path d="M496.0,428.0 L496.0,439.5" fill="none" stroke="#1a7f37" stroke-width="2" marker-end="url(#head)"/>
 <path d="M496.0,823.0 V831.0 H401.0 V64.0 H306.0 V72.0" fill="none" stroke="#1a7f37" stroke-width="2" marker-end="url(#head)"/>
