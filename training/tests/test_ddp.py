@@ -487,6 +487,29 @@ def test_plan_shares_out_exactly_the_steps_rows(world):
         assert plan == plan_step(step, lengths, world)  # deterministic
 
 
+def test_plan_of_a_large_step_is_fast_and_exact():
+    """30 rows x 91 micro-batches at 32 ranks (the E2B run): every row once, in well under 1 s.
+
+    The search used for few micro-batches took ~55 s per step here.
+    """
+    import time
+
+    rng = random.Random(0)
+    lengths = [
+        rng.choice([rng.randrange(150, 3000)] * 9 + [rng.randrange(3000, 30000)])
+        for _ in range(2730)
+    ]
+    order = sorted(range(2730), key=lambda i: -lengths[i])
+    step = [order[k : k + 30] for k in range(0, 2730, 30)]
+    rng.shuffle(step)
+    t = time.perf_counter()
+    plan = plan_step(step, lengths, 32)
+    assert time.perf_counter() - t < 0.5
+    assert len(plan) == 32 and all(plan)
+    seen = sorted((j, i) for p in plan for j, a, b in p for i in range(a, b))
+    assert seen == [(j, i) for j in range(91) for i in range(30)]
+
+
 def test_plan_balances_better_than_even_halves():
     """Slowest rank's padded load, planned vs the fixed layout (W=8: halves of each batch).
 
