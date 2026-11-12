@@ -33,6 +33,7 @@ import heapq
 import math
 import os
 from collections.abc import Callable, Iterator
+from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from typing import Any, NamedTuple
 
@@ -108,6 +109,30 @@ def all_reduce(values: list[float], op: str = "sum") -> list[float]:
     dist.all_reduce(t, op=dist.ReduceOp.SUM if op == "sum" else dist.ReduceOp.MAX)
     result: list[float] = t.tolist()
     return result
+
+
+def keep_where(examples: list[Any], keep: Callable[[list[Any]], list[Any]]) -> list[Any]:
+    """`keep(examples)` (a row filter returning a subset of its rows), shared out.
+
+    Each rank runs `keep` on every world-th row, in chunks on a pool of threads (this
+    host's CPUs over its ranks), and the ranks swap the verdicts. A length check that
+    tokenises every row then costs a fraction of the serial time: HF fast tokenizers
+    release the GIL. `keep` must be thread-safe and decide each row on its own. Every
+    rank must hold the same `examples`; all get the same rows back, in order.
+    """
+    rank, _, world = env()
+    mine = examples[rank::world]
+    threads = max(1, (os.cpu_count() or 1) // int(os.environ.get("LOCAL_WORLD_SIZE", "1")))
+    with ThreadPoolExecutor(threads) as pool:
+        chunks = pool.map(keep, [mine[i : i + 1000] for i in range(0, len(mine), 1000)])
+        kept = [ex for chunk in chunks for ex in chunk]
+    if world == 1:
+        return kept
+    ids = {id(ex) for ex in kept}
+    flags = torch.zeros(len(examples), dtype=torch.uint8, device=_device())
+    flags[rank::world] = torch.tensor([id(ex) in ids for ex in mine], dtype=torch.uint8)
+    dist.all_reduce(flags)
+    return [examples[i] for i in flags.nonzero().flatten().tolist()]
 
 
 def wrap(model: torch.nn.Module, seed: int) -> torch.nn.Module:
@@ -261,7 +286,10 @@ class StepSlices:
         self.collate = loader.collate_fn
         self.grad_accum = grad_accum
         self.rank, _, self.world = env()
-        self.lengths = [example_length(ex) for ex in self.examples]
+        # The length-grouped sampler has them already; recomputing is minutes on 17M rows.
+        self.lengths = getattr(loader.batch_sampler, "lengths", None) or [
+            example_length(ex) for ex in self.examples
+        ]
         self.kl_slots = kl_slots  # rows with at most this many options get the frozen KL
         self.open: list[list[int]] = []
         self.windows = 0  # steps (windows of grad_accum micro-batches) handed out so far

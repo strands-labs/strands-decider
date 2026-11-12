@@ -451,6 +451,32 @@ def test_ddp_refuses_ranks_that_hold_different_data(corpus, tmp_path):
     assert "ranks hold different training data" in res["stdout"] + res["stderr"]
 
 
+def _keep_where_rank(rank: int, world: int, port: int, out: str) -> None:
+    import torch.distributed as dist
+
+    from training.distributed import keep_where
+
+    os.environ.update(RANK=str(rank), WORLD_SIZE=str(world), LOCAL_WORLD_SIZE=str(world))
+    dist.init_process_group(
+        "gloo", init_method=f"tcp://127.0.0.1:{port}", rank=rank, world_size=world
+    )
+    rows = [{"n": n} for n in range(2501)]
+    kept = keep_where(rows, lambda xs: [x for x in xs if x["n"] % 7 not in (0, 3)])
+    torch.save([x["n"] for x in kept], f"{out}/{rank}.pt")
+    dist.destroy_process_group()
+
+
+@pytest.mark.distributed
+def test_keep_where_shares_a_filter_out_and_agrees(tmp_path):
+    """Every rank gets the serial filter's rows, in order, from its share of the work."""
+    world = 3
+    torch.multiprocessing.spawn(
+        _keep_where_rank, args=(world, _free_port(), str(tmp_path)), nprocs=world
+    )
+    want = [n for n in range(2501) if n % 7 not in (0, 3)]
+    assert all(torch.load(tmp_path / f"{r}.pt") == want for r in range(world))
+
+
 def test_train_refuses_more_ranks_than_rows(monkeypatch):
     from training.train import train
 
