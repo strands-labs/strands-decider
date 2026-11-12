@@ -15,11 +15,15 @@ from __future__ import annotations
 from typing import Any
 
 import torch
-from vllm import _custom_ops as ops
 from vllm import envs
 from vllm.v1.attention.backends.cpu_attn import CPUAttentionBackend, CPUAttentionBackendImpl
 
 from .attention import SPLIT_ATTR, _put, _take
+
+try:  # vLLM 0.34 moved the CPU ops wrappers to vllm._cpu_ops
+    from vllm import _cpu_ops as ops
+except ImportError:
+    from vllm import _custom_ops as ops
 
 #: The CPU impl's sliding_window for "no window".
 NO_WINDOW = -1
