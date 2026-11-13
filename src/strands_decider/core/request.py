@@ -41,7 +41,7 @@ MAX_INT_DIGITS = 4300
 _INT_LIMIT = 10**MAX_INT_DIGITS
 _SURROGATE = re.compile("[\ud800-\udfff]")
 # v1's text-only engine refuses images with this message (hidden_engine.HiddenStateEngine);
-# `runtime.evaluate` gives it for a backend without an image path.
+# a `runtime.Backend` without an image path raises it when `forward` is given images.
 NO_VISION = "this engine has no vision tower; images are not supported"
 NO_AUDIO = "audio input is not supported"
 
@@ -212,7 +212,8 @@ def parse_request(request: Any, *, images: bool = True) -> Request:
     image before the next image's. Every other check comes first, as v1 validates the
     request before its engine looks at the images. With `images=False` the images are
     neither counted nor decoded, and the request returned has none: a runtime that cannot
-    take images checks the rest so, and then refuses the images (`runtime.evaluate`)."""
+    take images checks the rest so, and then refuses the images (`runtime.evaluate` does so
+    for a checkpoint whose `inputs` lack "image")."""
     request = _as_mapping(request)
     if not isinstance(request, Mapping):
         raise ValueError("a request must be an object")

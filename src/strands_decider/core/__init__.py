@@ -14,11 +14,11 @@ docs/spec.md defines the interface; this package implements its torch-free half 
     load_tokenizer(checkpoint)             -> tokenizer.json, checked against the
                                               interface's control and code ids
 
-A runtime supplies the decoder (`Backend`, or `ImageBackend` with an image path), and for
-images the vision encoder and the pixel preprocessing; `evaluate` joins the pieces. Images
-are checked and counted from their file headers (`decode_image`, `soft_tokens`), never
-decoded here; `resize_image`, the spec's resize for a runtime's decoded pixels, is the one
-part that needs Pillow, which it imports when called. `agreement` measures a runtime's
+A runtime supplies the decoder (`Backend`, whose `forward` takes the state's images), and for
+images the vision encoder and the pixel preprocessing; `evaluate` joins the pieces. Images are
+checked and counted from their file headers (`decode_image`, `soft_tokens`), never decoded
+here; `resize_image`, the spec's resize for a runtime's decoded pixels, is the one part that
+needs Pillow, which it imports when called. `agreement` measures a runtime's
 probabilities against the reference's (docs/spec.md, Golden vectors and conformance). v1's
 engines are untouched: the core sits beside them.
 """
@@ -80,7 +80,7 @@ from .readout import (
     softcap,
 )
 from .request import parse_request
-from .runtime import Backend, ImageBackend, attention_mask, evaluate
+from .runtime import Backend, attention_mask, evaluate
 from .tokenizer import CODE_TOKEN_IDS, CONTROL_TOKEN_IDS, check_tokenizer, load_tokenizer
 
 __all__ = [
@@ -108,7 +108,6 @@ __all__ = [
     "Backend",
     "DecisionConfig",
     "EncodedImage",
-    "ImageBackend",
     "NoRecordedBound",
     "Provenance",
     "Readout",

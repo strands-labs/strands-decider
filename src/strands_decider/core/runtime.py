@@ -10,14 +10,14 @@ from __future__ import annotations
 
 import json
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, Any, Protocol, cast
+from typing import TYPE_CHECKING, Any, Protocol
 
 import numpy as np
 
-from .config import IMAGE, TEXT, DecisionConfig
+from .config import IMAGE, DecisionConfig
 from .prompt import RenderedImage, render
 from .readout import STAGES, Readout, check_rendered, check_stage, read
-from .request import NO_VISION, has_images, parse_request
+from .request import has_images, parse_request
 
 if TYPE_CHECKING:
     from tokenizers import Tokenizer
@@ -33,30 +33,12 @@ class Backend(Protocol):
         "final_logits"   tanh(z / c) * c / T, both applied (as strands-decider-vllm returns them)
         "probabilities"  the codes' probabilities: the question's k, or all 255
 
-    A text-only backend is this protocol. A backend with an image path is also an
-    `ImageBackend`: it has `inputs`, and its `forward` takes `images`.
+    Every backend takes images: `forward` gets the state's images, which are empty for a
+    request without them. A backend that has no image path (no vision encoder loaded)
+    raises ValueError(`request.NO_VISION`) when it is given images.
     """
 
     outputs: str
-
-    def forward(
-        self, state: list[int], questions: list[list[int]]
-    ) -> np.ndarray | Sequence[np.ndarray]:
-        """Run each question as a continuation of the state, under the prefix_bidir mask,
-        seeing no other question: positions 0..S-1 for the state, S.. for the question.
-        Return one row per question, in the order of `questions`, of the stage `outputs`
-        names: an array [len(questions), width], or a sequence of rows (whose widths may
-        differ, as each question's k does)."""
-        ...
-
-
-class ImageBackend(Backend, Protocol):
-    """A backend with an image path. `inputs` says what `forward` takes, as
-    decision_config.json's `inputs` names it: ("text", "image"). The core passes `images`
-    only when the request has some, and only to a backend whose `inputs` hold "image"; a
-    backend without `inputs` takes text only, and the core refuses image requests for it."""
-
-    inputs: tuple[str, ...]
 
     def forward(
         self,
@@ -64,10 +46,16 @@ class ImageBackend(Backend, Protocol):
         questions: list[list[int]],
         images: Sequence[RenderedImage] = (),
     ) -> np.ndarray | Sequence[np.ndarray]:
-        """As `Backend.forward`, with the state's images in order: each one's file (`data`),
-        and the span `[start, end)` of its N placeholders in `state`, which the backend fills
-        with its vision encoder's output for the image, preprocessed by the checkpoint's
-        image processor."""
+        """Run each question as a continuation of the state, under the prefix_bidir mask,
+        seeing no other question: positions 0..S-1 for the state, S.. for the question.
+        Return one row per question, in the order of `questions`, of the stage `outputs`
+        names: an array [len(questions), width], or a sequence of rows (whose widths may
+        differ, as each question's k does).
+
+        `images` are the state's, in order: each one's file (`data`), and the span
+        `[start, end)` of its N placeholders in `state`, which the backend fills with its
+        vision encoder's output for the image, preprocessed by the checkpoint's image
+        processor."""
         ...
 
 
@@ -103,10 +91,10 @@ def evaluate(
     The prompt is the checkpoint's (`config.prompt`). Prompts longer than
     `config.max_length_validated` are refused unless `max_length` raises the limit.
     `readout` may be None for a backend that applies the readout itself. A request with
-    images is refused, before its images are decoded, unless the checkpoint's `inputs`
-    and the backend's both hold "image". Everything that can be checked without the
-    decoder is checked before `forward` runs: the stage, the readout, and the rendered
-    request's prompt and code token ids.
+    images is refused, before its images are decoded, unless the checkpoint's `inputs` hold
+    "image"; the backend gets the images, and one without an image path refuses them.
+    Everything that can be checked without the decoder is checked before `forward` runs:
+    the stage, the readout, and the rendered request's prompt and code token ids.
     """
     stage = getattr(backend, "outputs", None)
     if stage not in STAGES:
@@ -115,27 +103,21 @@ def evaluate(
             f"of {STAGES}"
         )
     check_stage(stage, readout, config)
-    # v1's order: the request's own checks, then the refusal of images by an engine without
-    # them, then the images, each in turn.
+    # v1's order: the request's own checks, then the refusal of images by a checkpoint
+    # without them, then the images, each in turn.
     parse_request(request, images=False)
-    if has_images(request):
-        if IMAGE not in config.inputs:
-            raise ValueError(
-                "this checkpoint does not take images: its decision_config.json inputs are "
-                + json.dumps(list(config.inputs))
-            )
-        if IMAGE not in tuple(getattr(backend, "inputs", (TEXT,))):
-            raise ValueError(NO_VISION)
+    if has_images(request) and IMAGE not in config.inputs:
+        raise ValueError(
+            "this checkpoint does not take images: its decision_config.json inputs are "
+            + json.dumps(list(config.inputs))
+        )
     rendered = render(
         request, tokenizer, config.prompt, max_length=max_length or config.max_length_validated
     )
     check_rendered(config, rendered)
     state = list(rendered.state_ids)
     questions = [list(q.question_ids) for q in rendered.questions.values()]
-    if rendered.images:
-        out = cast("ImageBackend", backend).forward(state, questions, images=rendered.images)
-    else:
-        out = backend.forward(state, questions)
+    out = backend.forward(state, questions, images=rendered.images)
     answers = read(out, readout, config, rendered, stage=stage, ordinal_smoothing=ordinal_smoothing)
     return {
         "model": model_name,
