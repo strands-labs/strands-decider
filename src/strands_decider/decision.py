@@ -23,7 +23,7 @@ import sys
 import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from .core import (
     STAGES,
@@ -51,7 +51,7 @@ from .schema import (
 if TYPE_CHECKING:
     from tokenizers import Tokenizer
 
-    from .core import Backend, ImageBackend
+    from .core import Backend
 
 DECISION = "decision"  # decision_config.json with "interface": "strands-decider"
 INTERMEDIATE = "intermediate"  # decision_config.json from before the interface field
@@ -236,13 +236,13 @@ class DecisionEngine:
 
     @property
     def takes_images(self) -> bool:
-        return IMAGE in self.config.inputs and IMAGE in tuple(getattr(self.backend, "inputs", ()))
+        return IMAGE in self.config.inputs and not self.image_problem
 
     def _render(self, payload: Any) -> RenderedRequest:
         """The request rendered once, or the core's refusal of it, in the order the spec pins
         (section 11.1) and `core.evaluate` keeps: the request's own checks, its images left
-        out; then images the checkpoint or the backend cannot take, before any is decoded;
-        then the images' files and the prompt's length, by rendering it."""
+        out; then images the checkpoint, or a backend with an `image_problem`, cannot take,
+        before any is decoded; then the images' files and the prompt's length, by rendering it."""
         try:
             parse_request(payload, images=False)
         except ValueError as e:
@@ -255,8 +255,6 @@ class DecisionEngine:
                 )
             if self.image_problem:
                 raise RequestRefused(self.image_problem)
-            if IMAGE not in tuple(getattr(self.backend, "inputs", ())):
-                raise RequestRefused(NO_VISION)
         try:
             rendered = render(
                 payload,
@@ -283,14 +281,12 @@ class DecisionEngine:
                 f"({self.max_concurrency} request(s) at a time)"
             )
         try:
-            if rendered.images:  # only a backend whose inputs hold "image" gets here
-                image_backend = cast("ImageBackend", self.backend)
-                rows = image_backend.forward(state, questions, images=rendered.images)
-            else:
-                rows = self.backend.forward(state, questions)
+            rows = self.backend.forward(state, questions, images=rendered.images)
         except RequestRefused:
             raise  # an image file the backend cannot decode
         except ValueError as e:
+            if rendered.images and str(e) == NO_VISION:  # a backend without an image path
+                raise RequestRefused(NO_VISION) from e
             raise RuntimeError(f"answering an accepted request failed: {e}") from e
         finally:
             self._slots.release()
@@ -369,8 +365,9 @@ def warm_up_requests(*, images: bool) -> list[SystemOneRequest]:
 # loaded on that kind. A loader is called as
 #     loader(path, device=..., dtype=..., reuse_state=..., max_batch=..., max_batch_tokens=...)
 # with `path` the checkpoint's local directory, and returns a `strands_decider.core.Backend`;
-# the backend may have `image_problem` (why images are refused), `hidden_size` and
-# `describe()`. A loader may list the dtypes it takes in a `dtypes` attribute; `dtype` is then
+# the backend may have `image_problem` (why images are refused: a backend without an image
+# path sets it, so that image requests are refused before their files are read),
+# `hidden_size` and `describe()`. A loader may list the dtypes it takes in a `dtypes` attribute; `dtype` is then
 # checked before anything loads. Another runtime adds its device kinds here, or calls
 # `register_backend`, which takes precedence.
 BACKENDS: dict[str, str] = {
@@ -477,10 +474,11 @@ def load_decision_engine(
         )
     describe = getattr(backend, "describe", None)
     d = describe() if callable(describe) else {"device": device}
+    image_problem = getattr(backend, "image_problem", None)
+    inputs = list(config.inputs) if IMAGE in config.inputs and not image_problem else ["text"]
     print(
         f"[strands-decider] decision checkpoint: {d.get('backend', 'backend')} on "
-        f"{d.get('device', device)} in {d.get('dtype', 'its dtype')}, inputs "
-        f"{list(getattr(backend, 'inputs', ('text',)))}, "
+        f"{d.get('device', device)} in {d.get('dtype', 'its dtype')}, inputs {inputs}, "
         + ("state encoded once per request" if reuse_state else "one full pass per question"),
         file=sys.stderr,
     )
@@ -492,7 +490,7 @@ def load_decision_engine(
         readout,
         model_name=name,
         max_length=max_length,
-        image_problem=getattr(backend, "image_problem", None),
+        image_problem=image_problem,
         max_concurrency=max_concurrency,
         queue_timeout=queue_timeout,
     )

@@ -1,9 +1,8 @@
 """The transformers backend: decision checkpoints on PyTorch, on CPU, CUDA or Apple's MPS.
 
 It is the reference runtime of docs/spec.md (sections 10 and 11), the PyTorch model behind
-`strands_decider.core.evaluate`, and implements the core's `ImageBackend` (its `Backend`
-with an image path): given a state's token ids, its images with their spans, and each
-question's ids, it returns each question's final-norm hidden state at its last token
+`strands_decider.core.evaluate`, and implements the core's `Backend`: given a state's token
+ids, its images with their spans, and each question's ids, it returns each question's final-norm hidden state at its last token
 (`outputs = "hidden"`).
 
 Loading (section 9). A decision checkpoint is the base model's own multimodal checkpoint,
@@ -92,7 +91,7 @@ if TYPE_CHECKING:
     from PIL import Image
     from tokenizers import Tokenizer
 
-    from ..core import ImageBackend
+    from ..core import Backend
 
 # The two layouts a checkpoint may have.
 MULTIMODAL = "multimodal"  # the base's own multimodal checkpoint: the released layout
@@ -563,9 +562,10 @@ class TransformersBackend:
             self.image_ids = (-1, MEDIA_TOKEN_IDS[0], -1)
         has_vision = getattr(self.decoder, "embed_vision", None) is not None
         self.image_processor = image_processor if has_vision else None
-        self.image_problem = None if self.image_processor is not None else image_problem
-        self.inputs: tuple[str, ...] = (
-            (TEXT, IMAGE) if self.image_processor is not None else (TEXT,)
+        # Why image requests are refused, None when the backend has an image path; the
+        # decision engine refuses them with it before their files are read.
+        self.image_problem = (
+            None if self.image_processor is not None else (image_problem or NO_VISION)
         )
 
     @classmethod
@@ -639,7 +639,6 @@ class TransformersBackend:
             "device": self.device,
             "dtype": str(self.dtype).removeprefix("torch."),
             "layout": self.checkpoint.layout,
-            "inputs": list(self.inputs),
             "reuse_state": self.reuse_state,
         }
 
@@ -870,8 +869,8 @@ def _image_ids_problem(ckpt: Checkpoint) -> str | None:
 
 if TYPE_CHECKING:
 
-    def _implements_the_core_protocol(backend: TransformersBackend) -> ImageBackend:
-        return backend  # mypy checks TransformersBackend against the core's ImageBackend
+    def _implements_the_core_protocol(backend: TransformersBackend) -> Backend:
+        return backend  # mypy checks TransformersBackend against the core's Backend
 
 
 __all__ = [

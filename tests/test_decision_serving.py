@@ -219,7 +219,6 @@ class _StubBackend:
     """A backend another runtime might register: it returns each question's probabilities."""
 
     outputs = "probabilities"
-    inputs = ("text", "image")
     image_problem = None
 
     def __init__(self, path, **settings):
