@@ -192,5 +192,17 @@ def derive_confidence(probabilities: list[float]) -> float:
     n = len(probabilities)
     if n <= 1:
         return 1.0
-    p_max = max(probabilities)
-    return float(max(0.0, min(1.0, (n * p_max - 1.0) / (n - 1.0))))
+
+    if n == 2:
+        p_max = probabilities[1] if probabilities[1] > probabilities[0] else probabilities[0]
+        conf = 2 * p_max - 1.0
+    else:
+        p_max = max(probabilities)
+        conf = (n * p_max - 1.0) / (n - 1.0)
+
+    if not conf <= 1.0:
+        conf = 1.0
+    elif not conf > 0.0:
+        conf = 0.0
+
+    return float(conf)
