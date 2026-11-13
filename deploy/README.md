@@ -1,13 +1,13 @@
 # Deploying strands decider
 
 You can deploy the `strands-decider` pip server (`strands-decider serve`,
-[docs/inference.md, Serve](../docs/inference.md#serve)) as-is to any compute. Below is a list of
+[docs/designs/inference.md, Serve](../docs/designs/inference.md#serve)) as-is to any compute. Below is a list of
 recommended ways to host this model yourself.
 
 ## Your machine
 
 Run `strands-decider serve` on Linux with CUDA, on a Mac, or on CPU. See
-[docs/inference.md, Environments for serving](../docs/inference.md#environments-for-serving).
+[docs/designs/inference.md, Environments for serving](../docs/designs/inference.md#environments-for-serving).
 
 ## Amazon SageMaker
 

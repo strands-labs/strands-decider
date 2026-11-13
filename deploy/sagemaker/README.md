@@ -5,7 +5,7 @@ account. One AWS CDK stack runs the model on a SageMaker real-time endpoint, usi
 [strands-decider AWS Deep Learning Container](https://gallery.ecr.aws/deep-learning-containers/strands-decider)
 (DLC) on A10G, A100, L4, L40S, H100 and H200 instances, or an image built from this folder's `Dockerfile` on
 other instances (CPU, older GPUs). The endpoint takes the same request body as `POST /v1/systemone`
-([docs/inference.md, Serve](../../docs/inference.md#serve)) and returns the same response.
+([docs/designs/inference.md, Serve](../../docs/designs/inference.md#serve)) and returns the same response.
 
 To follow it you need:
 
@@ -114,7 +114,7 @@ npx cdk deploy -c model=StrandsAgents/strands-decider-E4B-gemma4-v1-2610 -c inst
 | Setting | Default | Meaning |
 | --- | --- | --- |
 | `model` | `StrandsAgents/strands-decider-2B-qwen3.5-v1-2610` | The strands-decider model, a Hugging Face Hub id ([Choosing a model](#choosing-a-model)). It also names the stack and the endpoint. |
-| `model_revision` | `main` | The model's revision. Use a release's date tag (`YYMMDD`) to pin it ([docs/inference.md, Model artifact](../../docs/inference.md#model-artifact)). |
+| `model_revision` | `main` | The model's revision. Use a release's date tag (`YYMMDD`) to pin it ([docs/designs/inference.md, Model artifact](../../docs/designs/inference.md#model-artifact)). |
 | `instance_type` | `ml.g6.xlarge` | The SageMaker instance type ([Choosing an instance](#choosing-an-instance)) |
 | `instance_count` | `1` | Instances behind the endpoint |
 | `fallback_instance_types` | empty | Up to four more instance types, comma-separated, that SageMaker tries in order when it has no capacity for `instance_type` (instance pools), e.g. `ml.g6e.xlarge,ml.g5.xlarge`. They must use the same device and image as `instance_type`, and each must hold the model ([Choosing a model](#choosing-a-model)): the endpoint uses the same settings (such as `device_map`) on all of them. |
@@ -156,7 +156,7 @@ Each endpoint runs, and is billed for, its own instances.
 The main [README](../../README.md#gemma-4-models) compares the models' accuracy. The DLC is
 tested with every v1 model on these GPUs (2B, E2B and E4B on one L4, 12B on one L40S, 26B-A4B
 split across L40S GPUs), and the default model on a SageMaker endpoint. The memory figures are
-from [docs/inference.md](../../docs/inference.md#gemma-4-models), and activations come on top.
+from [docs/designs/inference.md](../../docs/designs/inference.md#gemma-4-models), and activations come on top.
 
 ## Choosing an instance
 

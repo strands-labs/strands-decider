@@ -161,7 +161,7 @@ It cannot change a `choice` argmax, so choice accuracy is untouched. It *does* c
 the value returned for `noul` and `score`, since those are read off the distribution
 itself rather than its argmax — softening a score pulls it toward the midpoint. Skip
 calibration entirely and the thresholds of the
-[routing convention](../docs/architecture.md#the-routing-convention) will not hold, which is the failure
+[routing convention](../docs/designs/architecture.md#the-routing-convention) will not hold, which is the failure
 mode that matters: a model that is 70% accurate but reports 0.99 confidence fails
 silently in exactly the place you were relying on it.
 
@@ -182,5 +182,5 @@ and what they measure are in [Internal evaluations](../evaluation/README.md#inte
 
 ## 6. Serve
 
-`strands-decider serve` answers requests over HTTP. See [Serve](../docs/inference.md#serve).
+`strands-decider serve` answers requests over HTTP. See [Serve](../docs/designs/inference.md#serve).
 

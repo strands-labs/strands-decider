@@ -90,7 +90,7 @@ layers are Gated DeltaNet — linear attention carrying a recurrent state — an
 attention. LoRA covers the projections of both kinds (`lora_targets`). v7 and earlier
 ran Qwen3-1.7B-Base, all full attention. The architecture is the same either way; what
 the hybrid changes is serving ([Asking many questions is nearly free](inference.md#asking-many-questions-is-nearly-free)) and the
-training environment ([Setup](../training/README.md#setup)).
+training environment ([Setup](../../training/README.md#setup)).
 
 ### One mechanism, three primitives
 
@@ -120,7 +120,7 @@ These documents use the example bands of the public Jev API documentation
 check. From 0.5 to 0.9, confirm first. Below 0.5, send the answer to a person. That
 documentation says that the right thresholds depend on the consequences of each
 action. Measure them on your own traffic before you rely on them
-([Summary](../evaluation/results.md#summary) gives the measured bands).
+([Summary](../../evaluation/results.md#summary) gives the measured bands).
 
 **`score` uses a different measure**, because max-probability reads *spread* as
 *doubt* — and on an ordered scale, mass on adjacent levels is precision, not
@@ -152,14 +152,14 @@ The loss has three parts:
   model near what pretraining already knew, for one extra forward pass and no extra
   weights.
 - **KL to a frozen teacher** (weight 1.0), on the multi-step rows only: Qwen3.5-4B, read
-  without any training ([What the torso knows untrained](../research/history.md#what-the-torso-knows-untrained)), its option distributions
+  without any training ([What the torso knows untrained](../../research/history.md#what-the-torso-knows-untrained)), its option distributions
   computed once and stored (`data/teacher.py`). It is used only where it is measurably
   better than the student: distilled on short classification, where it is not, it moved
-  nothing ([v12](../research/history.md#v12-distilling-a-frozen-qwen35-4b)).
+  nothing ([v12](../../research/history.md#v12-distilling-a-frozen-qwen35-4b)).
 
 v14's corpus is 100,449 rows from 21 public classification tasks — topic, intent,
 sentiment, entailment, ordinal ratings, yes/no, rule chaining — plus 12,909 multi-step
-rows from ContractNLI, MuSiQue and BoardgameQA ([Data sources and licences](../data/README.md#data-sources-and-licences)).
+rows from ContractNLI, MuSiQue and BoardgameQA ([Data sources and licences](../../data/README.md#data-sources-and-licences)).
 The v19 reference recipe adds 3,815 generated document questions and 6,166
 answer-adequacy rows.
 

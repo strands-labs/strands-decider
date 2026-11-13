@@ -28,7 +28,7 @@ commands are written for WSL2; on native Linux, skip the `wsl.exe` line and the 
 - [`../data/README.md`](../data/README.md): what the recipe downloads, and what is committed.
 
 Evaluation is in [evaluation/README.md](../evaluation/README.md), serving in
-[docs/inference.md](../docs/inference.md). Paths are relative to the repository root
+[docs/designs/inference.md](../docs/designs/inference.md). Paths are relative to the repository root
 unless they are links.
 
 ## Two training routes
@@ -54,7 +54,7 @@ Frozen targets attach to corpus rows by position, so `recipe.sh` checks the corp
 Two environments for training, one per torso family. Both need an NVIDIA GPU. Development
 used one RTX 3090 (24 GiB), and the recipe also runs on 8-GPU AWS hosts
 ([Running the recipe on AWS](aws/README.md)). Serving also runs on an Apple-silicon Mac
-([Serving on a Mac](../docs/inference.md#serving-on-a-mac)).
+([Serving on a Mac](../docs/designs/inference.md#serving-on-a-mac)).
 
 **Qwen3 torsos (v7 and earlier): Windows or Linux.** Python 3.11, PyTorch 2.6 + CUDA 12.4 at
 the time. The package now needs PyTorch 2.7 or later:
@@ -131,7 +131,7 @@ The frozen option-number readout and the teacher labeller apply Gemma's final lo
 soft-cap, so both read the model's own distribution. At serving time, a 32,768-token
 window with several long questions in one forward can run a Gemma torso out of memory:
 `strands-decider serve --max-batch-tokens N` caps the tokens of one forward
-([Serve](../docs/inference.md#serve)).
+([Serve](../docs/designs/inference.md#serve)).
 
 ### Training on several GPUs
 

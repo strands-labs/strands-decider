@@ -54,7 +54,7 @@ pip install strands-decider
 On an Apple-silicon Mac, `--device mlx` runs the model through MLX, 1.4 to 1.6x faster than MPS.
 It needs the `mlx` extra, which ships with the next release; until then, install from a clone with
 `pip install -e ".[mlx]"`. The `cuda`, `mps` and `cpu` extras name the other devices
-([docs/inference.md](docs/inference.md#environments-for-serving)).
+([docs/designs/inference.md](docs/designs/inference.md#environments-for-serving)).
 The example outputs below are from `strands-decider-2B-qwen3.5-v1-2610`, recorded with
 `--device cpu`; other devices differ in the last digits.
 
@@ -189,8 +189,8 @@ v19 matches an image-trained 2B decider on accuracy, and on NaturalBench is much
 calibrated (ECE 0.014 against 0.080). v21 has v19's image accuracy, is better calibrated on
 POPE, and is more confident than v19 when the image is missing. v1 has v21's image accuracy;
 with the image missing it is more overconfident than v21 on POPE
-([docs/vision.md](docs/vision.md#v1)). See
-[docs/vision.md](docs/vision.md) for the request shape, how it works and the measurements.
+([docs/images.md](docs/images.md#v1)). See
+[docs/images.md](docs/images.md) for the request shape, how it works and the measurements.
 
 ### Deploying it
 
@@ -212,7 +212,7 @@ Model names now use the pattern `strands-decider-<size>-<base>-v<N>-<YYMM>`:
 Examples: `strands-decider-2B-qwen3.5-v1-2610` (Qwen3.5) and `strands-decider-E4B-gemma4-v1-2610`
 (Gemma 4). The earlier models keep their names: `strands-decider-2B-hobson-v19` and
 `strands-decider-2B-hobson-v21`. A second release in the same month updates the same Hub
-repository and adds a revision tag `YYMMDD`. [docs/naming.md](docs/naming.md) has the full rules.
+repository and adds a revision tag `YYMMDD`. [docs/designs/naming.md](docs/designs/naming.md) has the full rules.
 
 The models live in the [`StrandsAgents`](https://huggingface.co/StrandsAgents) organization on
 Hugging Face, their main home. The five v1 models are also in the
@@ -232,7 +232,7 @@ have the same pointer head and answer the same three question types as the Qwen3
 | [`strands-decider-26B-A4B-gemma4-v1-2610`](https://huggingface.co/StrandsAgents/strands-decider-26B-A4B-gemma4-v1-2610) | 207 | 0.162 | 0.708 | 0.859 | 48.69 | about 51 GB | 245 ms |
 
 For comparison, `strands-decider-2B-qwen3.5-v1-2610` scores 180, Brier 0.280. The E2B Decision Index
-was measured before the E2B attention fix (see [docs/inference.md](docs/inference.md#gemma-4-models)),
+was measured before the E2B attention fix (see [docs/designs/inference.md](docs/designs/inference.md#gemma-4-models)),
 so it may be off. Every model is a soup of three training runs, calibrated afterwards
 ([evaluation/results.md](evaluation/results.md#gemma-4-v1)).
 
@@ -240,7 +240,7 @@ so it may be off. Every model is a soup of three training runs, calibrated after
 The 12B and the 26B-A4B are the most accurate; the 26B-A4B is better calibrated, but needs about
 twice the memory and twice the latency of the 12B. The E4B is a good choice when the model
 must share one GPU with other work. The E2B is the smallest: use it where memory is tightest, or on
-CPU. All four serve on CPU ([docs/inference.md](docs/inference.md#gemma-4-models)).
+CPU. All four serve on CPU ([docs/designs/inference.md](docs/designs/inference.md#gemma-4-models)).
 
 **Install.** Gemma 4 support is on `main` and not yet in the package on PyPI:
 
@@ -284,7 +284,7 @@ The Gemma 4 models read text only: `--vision` is for the Qwen3.5 model.
 question in a median 115 ms on an RTX 3090 and also serves on an Apple-silicon Mac or on CPU,
 and many questions about one text are cheap, because the text is read once and each question
 adds only its own tokens
-([docs/inference.md](docs/inference.md#asking-many-questions-is-nearly-free)). Its
+([docs/designs/inference.md](docs/designs/inference.md#asking-many-questions-is-nearly-free)). Its
 accuracy and calibration are measured on JevBench, a third-party benchmark for this class of
 model ([Performance](#performance)).
 
@@ -308,7 +308,7 @@ As you browse the research, you will find that this is the second major iteratio
 architecture. The first used a slot head, which mapped the final hidden state to a fixed set
 of slots and performed significantly worse. Every change since is captured in the research
 so you can follow along with the work. The reference model today is **v1**
-(`strands-decider-2B-qwen3.5-v1-2610`; [docs/naming.md](docs/naming.md) explains the name).
+(`strands-decider-2B-qwen3.5-v1-2610`; [docs/designs/naming.md](docs/designs/naming.md) explains the name).
 It trains on a new, balanced data mix of 246,678 rows, about twice v21's: it adds code tasks,
 new rule-application rows (apply a written policy to a case) and rows from more public datasets,
 so that the mix follows the kinds of decisions in the evaluations. Its teacher is
@@ -317,7 +317,7 @@ checkpoint is a soup of three training runs: their LoRA updates and head scores 
 exactly, then calibrated
 ([evaluation/results.md](evaluation/results.md#v1-the-released-model)).
 `strands-decider-2B-hobson-v21` and `-v19` stay published.
-[docs/architecture.md](docs/architecture.md#the-architecture) has the full design, the
+[docs/designs/architecture.md](docs/designs/architecture.md#the-architecture) has the full design, the
 training objective, and the decisions behind them.
 
 ## Performance

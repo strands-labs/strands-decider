@@ -5,7 +5,7 @@ deploys the 2B Qwen3.5 strands decider as an AWS Lambda function in your AWS acc
 CPUs. Lambda starts execution environments as requests arrive, runs as many side by side as the
 traffic needs, and you pay per request. One AWS CDK stack builds the image and creates the
 function. The function serves `strands-decider serve`'s `POST /v1/systemone` and `GET /health`
-([docs/inference.md, Serve](../../docs/inference.md#serve)) behind an IAM-authenticated
+([docs/designs/inference.md, Serve](../../docs/designs/inference.md#serve)) behind an IAM-authenticated
 Function URL, and takes the same request as a direct invocation too.
 
 The torso runs in [llama.cpp](https://github.com/ggml-org/llama.cpp), quantized to Q8_0, and the
@@ -107,7 +107,7 @@ Every setting is a CDK context value. Change it in `cdk.json`, or pass `-c key=v
 | Setting | Default | Meaning |
 | --- | --- | --- |
 | `model` | `StrandsAgents/strands-decider-2B-qwen3.5-v1-2610` | The strands-decider model, a Hugging Face Hub id. Any Qwen3.5 model with a pointer head works. It names the stack. |
-| `model_revision` | `main` | The model's revision. Use a release's date tag (`YYMMDD`) to pin it ([docs/inference.md, Model artifact](../../docs/inference.md#model-artifact)). |
+| `model_revision` | `main` | The model's revision. Use a release's date tag (`YYMMDD`) to pin it ([docs/designs/inference.md, Model artifact](../../docs/designs/inference.md#model-artifact)). |
 | `snapstart` | `false` | `true` turns SnapStart on: new execution environments answer in about 6 s instead of up to 30 s, for about $39.50 a month while the stack exists ([What it costs](#what-it-costs)) |
 | `max_request_tokens` | `24576` | The most tokens one request may forward, the state once plus every question; `0` for no limit ([Limits](#limits)) |
 
@@ -170,7 +170,7 @@ went from 0.495 to 0.505. The quantization to Q8_0 accounts for most of that. Re
 
 - The state and the longest question must fit the model's window (`max_length`, 4,096 tokens for
   the v1 release). A prompt over it is handled as `serve` handles one
-  ([docs/inference.md](../../docs/inference.md)), with a 422 where `serve` refuses it.
+  ([docs/designs/inference.md](../../docs/designs/inference.md)), with a 422 where `serve` refuses it.
 - A request may forward at most `max_request_tokens` tokens, the state once plus every question.
   The default, 24,576, stays well inside the 15-minute timeout; a larger request is refused with
   a 422 before any work is done.

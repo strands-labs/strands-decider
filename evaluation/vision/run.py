@@ -24,7 +24,7 @@ rewritten after each system.
     python evaluation/vision/run.py --out results --systems strands,qwen,mapika \\
         --nb-groups 300 --pope 600 [--ijb-jsonl ijb_preview.jsonl]
 
-The recorded runs behind docs/vision.md, made with this script, are published as a
+The recorded runs behind docs/images.md, made with this script, are published as a
 release asset; README.md links them and gives the exact command.
 """
 

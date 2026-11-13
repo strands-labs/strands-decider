@@ -1,4 +1,4 @@
-"""Public model names, `strands-decider-{size}-{base}-v{N}-{YYMM}` (docs/naming.md).
+"""Public model names, `strands-decider-{size}-{base}-v{N}-{YYMM}` (docs/designs/naming.md).
 
     python -m training.naming BASE_MODEL N YYMM     (prints the release name)
 

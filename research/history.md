@@ -216,7 +216,7 @@ rather than a config change:
   a recurrent state rather than a KV cache. The cache expansion skips them, their
   `conv_states` stay at batch 1, and the question batch fails to concatenate. It
   failed loudly — the prefix-cache equivalence test would have caught a silent version.
-  (Fixed since: the fork now repeats the recurrent state too; [Design decisions](../docs/architecture.md#design-decisions-worth-knowing).)
+  (Fixed since: the fork now repeats the recurrent state too; [Design decisions](../docs/designs/architecture.md#design-decisions-worth-knowing).)
 - **LoRA reaches 6 of 24 layers.** The DeltaNet projections (`in_proj_qkv`,
   `in_proj_z`, `in_proj_a`, `in_proj_b`, `out_proj`) are not in the target list.
 - **Its fused kernels are not available here** (`causal_conv1d`, `chunk_gated_delta_rule`
@@ -380,7 +380,7 @@ v7's recipe with only the torso changed, to `Qwen3.5-2B-Base` (1.90B parameters,
 on their own projections (`lora_targets`), and it trains under WSL2, where the fused
 linear-attention kernels run: 0.28 steps/s, the same as v7, where the Windows fallback
 path is about 2.3x slower. Serving then used batched encoding, because the shared-prefix
-cache could not yet broadcast recurrent state; it can now ([Design decisions](../docs/architecture.md#design-decisions-worth-knowing)).
+cache could not yet broadcast recurrent state; it can now ([Design decisions](../docs/designs/architecture.md#design-decisions-worth-knowing)).
 
 **157/231 (0.6797) — the first retrain above v7, and a tie.** 17 gained, 14 lost,
 p = 0.72. Macro accuracy 0.685 is the best recorded; held-out accuracy 0.646 and

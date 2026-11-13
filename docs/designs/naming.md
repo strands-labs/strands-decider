@@ -21,7 +21,7 @@ for example `StrandsAgents/strands-decider-2B-qwen3.5-v1-2610`. Released so far:
   says what its model trained on. For example, `strands-decider-E4B-gemma4-v1-2610` and
   `strands-decider-2B-qwen3.5-v1-2610` are both v1: the Gemma 4 models train on hobson-v21's data
   with code tasks added, and the Qwen3.5 model on a new data mix with another teacher
-  ([evaluation/results.md](../evaluation/results.md#gemma-4-v1)).
+  ([evaluation/results.md](../../evaluation/results.md#gemma-4-v1)).
 - **A second release in the same month** goes to the same repository. Every upload is
   tagged on the Hub with its date, `YYMMDD`, and the card gets a changelog line. To pin a
   version, download it by its tag ([inference.md](inference.md#model-artifact)).
