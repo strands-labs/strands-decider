@@ -1,8 +1,6 @@
 """The trainer's dev-fold evaluation: the model's logits on the held-out rows, scored by training/metrics.py.
 
 Rows are sorted by length and cut into token-budget microbatches (less padding; the metrics do not depend on the order).
-With the base sharded (FSDP), every forward is collective, so the microbatches are spread over every rank and the logits
-gathered on rank 0.
 """
 
 from __future__ import annotations
@@ -12,7 +10,6 @@ from types import SimpleNamespace
 from typing import Any
 
 import torch
-import torch.distributed as dist
 
 from . import metrics
 from . import prompt as prompts
@@ -77,68 +74,5 @@ def evaluate(
     cal = sorted(temperature_rows, key=row_length) if temperature_rows else []
     cal_logits = option_logits(model, cal, settings) if cal else []
     out = score(rows, logits, cal, cal_logits)
-    out["seconds"] = round(time.monotonic() - began, 1)
-    return out
-
-
-def _logits_sharded(
-    model: Any, rows: list[dict], settings: SimpleNamespace, rank: int, world: int, primary: bool
-) -> list[list[float]]:
-    """option_logits() spread over every rank: microbatch k of the length-sorted rows runs on rank k % world, and every
-    rank runs the same number of forwards (a one-row filler once it has none left); rank 0 gets the logits in row
-    order."""
-    if not rows:
-        return []
-    order = sorted(range(len(rows)), key=lambda i: row_length(rows[i]))
-    micro = pack_microbatches(
-        order, settings.batch_size, settings.token_budget, length=lambda i: row_length(rows[i])
-    )
-    mine = micro[rank::world]
-    count = -(-len(micro) // world)
-    out: list[tuple[int, list[float]]] = []
-    was_training = model.training
-    model.eval()
-    with torch.no_grad():
-        for k in range(count):
-            indices = mine[k] if k < len(mine) else [order[0]]
-            logits = (
-                model(model.encode([rows[i] for i in indices], max_length=settings.max_length))
-                .float()
-                .cpu()
-            )
-            if k < len(mine):
-                out += [
-                    (i, v[: len(option_labels(rows[i]["question"]))].tolist())
-                    for i, v in zip(indices, logits, strict=True)
-                ]
-    model.train(was_training)
-    gathered: list[Any] | None = [None] * world if primary else None
-    dist.gather_object(out, gathered, dst=0)
-    if not primary:
-        return []
-    found = dict(item for part in gathered or [] for item in part)
-    return [found[i] for i in range(len(rows))]
-
-
-def evaluate_sharded(
-    model: Any,
-    dev_rows: list[dict],
-    temperature_rows: list[dict],
-    settings: SimpleNamespace,
-    rank: int,
-    world: int,
-    primary: bool,
-) -> dict:
-    """evaluate() for a sharded model: the same metrics, the forwards spread over every rank."""
-    began = time.monotonic()
-    logits = _logits_sharded(model, dev_rows, settings, rank, world, primary)
-    cal_logits = (
-        _logits_sharded(model, temperature_rows, settings, rank, world, primary)
-        if temperature_rows
-        else []
-    )
-    if not primary:
-        return {}
-    out = score(dev_rows, logits, temperature_rows, cal_logits)
     out["seconds"] = round(time.monotonic() - began, 1)
     return out

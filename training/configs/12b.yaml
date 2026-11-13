@@ -22,9 +22,7 @@ token_budget: 16384
 max_length: 16384
 save_every: 100
 eval_every: 100
-balance: true
 attn_split: 0
 # The seeds of one model: one run per seed with these settings, each merged, then averaged (training/README.md).
-# Two for the 12B: a run with seed 20261107 diverged (its loss rose from 0.29 to 1.4 near step 1,600).
 seeds: [20260920, 20261108]
 # The peak GPU memory one run of these settings measured: 42.8 GB per GPU.

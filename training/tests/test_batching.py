@@ -34,6 +34,10 @@ def test_microbatch_limits():
 
 
 def test_plans_match_previous(previous):
+    # The plan does not depend on the previous trainer's GPU-placement balancing, which this trainer does not have, so
+    # every case's plan is checked; the placement only where the case did not balance. The fixture's statistics also
+    # hold the balancing's keys, which this trainer does not report.
+    dropped = {"rank_load_max_over_mean", "balance", "attn_tokens"}
     for case in previous["plans"]:
         lengths = lengths_for(case)
         plan = batching.build_plan(
@@ -46,20 +50,13 @@ def test_plans_match_previous(previous):
             case["budget"],
             case["window"],
         )
-        placement = batching.Placement(
-            lengths, case["world"], case["accum"], case["balance"], 16000.0
-        )
+        placement = batching.Placement(case["world"], case["accum"])
         stats = batching.plan_statistics(plan, lengths, placement)
-        assert stats == case["statistics"]
-        steps = plan[:5] + plan[-3:]
-        work = [
-            [
-                [(mb, real, j) for mb, real, j in placement.local_work(s, r)]
-                for r in range(case["world"])
-            ]
-            for s in steps
-        ]
-        assert _sha(work) == case["work_sha"]
+        assert stats == {k: v for k, v in case["statistics"].items() if k not in dropped}
+        if not case["balance"]:
+            steps = plan[:5] + plan[-3:]
+            work = [[list(placement.local_work(s, r)) for r in range(case["world"])] for s in steps]
+            assert _sha(work) == case["work_sha"]
 
 
 def _sha(value):
@@ -80,17 +77,15 @@ def test_plan_depends_on_the_step_not_the_world():
     assert batching.plan_sha256(a) == batching.plan_sha256(b)
 
 
-def test_balance_moves_microbatches_not_rows():
+def test_placement_runs_every_microbatch_once():
     rnd = random.Random(6)
     lengths = [rnd.randint(30, 16000) for _ in range(2000)]
     plan = batching.build_plan(lengths, 1.0, 3, 8, 4, 8, 8192, 8 * 4 * 8)
-    plain = batching.Placement(lengths, 8, 4, balance=False)
-    balanced = batching.Placement(lengths, 8, 4, balance=True)
+    placement = batching.Placement(8, 4)
     for step in plan:
-        a = sorted(j for r in range(8) for _mb, real, j in plain.local_work(step, r) if real)
-        b = sorted(j for r in range(8) for _mb, real, j in balanced.local_work(step, r) if real)
-        assert a == b == list(range(len(step[1])))
-        assert all(len(balanced.local_work(step, r)) == 4 for r in range(8))
+        js = sorted(j for r in range(8) for _mb, real, j in placement.local_work(step, r) if real)
+        assert js == list(range(len(step[1])))
+        assert all(len(placement.local_work(step, r)) == 4 for r in range(8))
 
 
 def test_fractional_epoch_takes_its_first_steps():

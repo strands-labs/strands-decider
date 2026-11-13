@@ -25,7 +25,6 @@ token_budget: 8192
 max_length: 16384
 save_every: 100
 eval_every: 100
-balance: true
 attn_split: 0
 # The seeds of one model: one run per seed with these settings, each merged, then averaged (training/README.md).
 seeds: [20260920, 20261107, 20261108]

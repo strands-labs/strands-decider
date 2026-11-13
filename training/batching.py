@@ -10,14 +10,12 @@ same one, and a resumed run picks up the same sequence where it stopped:
     random.Random(seed + epoch + 7919);
   * one optimizer step is world * accum consecutive microbatches; the last step of an epoch may hold fewer, and the
     ranks without one run a zero-weight filler so every rank issues the same collectives;
-  * microbatch j of a step runs on rank j % world in accumulation slot j // world, or, with balancing, on the rank
-    `Placement` gives it: the same microbatches and rows; the rank, and so the dropout mask drawn there, changes.
+  * microbatch j of a step runs on rank j % world in accumulation slot j // world.
 """
 
 from __future__ import annotations
 
 import hashlib
-import heapq
 import json
 import math
 import random
@@ -111,87 +109,33 @@ def plan_sha256(plan: Sequence[Step]) -> str:
     ).hexdigest()
 
 
-def microbatch_cost(microbatch: Sequence[int], lengths: Sequence[int], attn_tokens: float) -> float:
-    """Estimated work of a microbatch: padded tokens x (1 + longest / attn_tokens), attention growing with length."""
-    longest = max(lengths[i] for i in microbatch)
-    return len(microbatch) * longest * (1.0 + longest / attn_tokens)
-
-
 class Placement:
-    """Which microbatches of a step each rank runs.
+    """Which microbatches of a step each rank runs: microbatch j goes to rank j % world, slot j // world. A
+    microbatch keeps its plan index j, and j seeds its augmentation, so the option orders do not depend on the GPU
+    count."""
 
-    Without balancing, microbatch j goes to rank j % world, slot j // world. With balancing, longest first, each
-    microbatch goes to the rank with the least estimated work among those with a free slot, so the busiest rank (the
-    step's duration) carries little more than the mean. A microbatch keeps its plan index j either way, and j seeds
-    its augmentation, so the option orders do not depend on the placement."""
-
-    def __init__(
-        self,
-        lengths: Sequence[int],
-        world: int,
-        accum: int,
-        balance: bool = False,
-        attn_tokens: float = 16000.0,
-    ) -> None:
-        self.lengths, self.world, self.accum = lengths, world, accum
-        self.balance, self.attn_tokens = balance, float(attn_tokens)
-        self._cache: dict[int, list[list[int]]] = {}
-
-    def _balanced(self, step: Step) -> list[list[int]]:
-        key = id(step)
-        if key in self._cache:
-            return self._cache[key]
-        _epoch, micro = step
-        costs = [microbatch_cost(mb, self.lengths, self.attn_tokens) for mb in micro]
-        heap = [(0.0, r) for r in range(self.world)]
-        slots: list[list[int]] = [[] for _ in range(self.world)]
-        for j in sorted(range(len(micro)), key=lambda j: (-costs[j], j)):
-            load, r = heapq.heappop(heap)
-            slots[r].append(j)
-            if len(slots[r]) < self.accum:
-                heapq.heappush(heap, (load + costs[j], r))
-        self._cache[key] = slots
-        return slots
+    def __init__(self, world: int, accum: int) -> None:
+        self.world, self.accum = world, accum
 
     def local_work(self, step: Step, rank: int) -> list[tuple[list[int], bool, int]]:
         """[(row indices, real, j)] for `rank`, one entry per accumulation slot; a zero-weight filler (the step's first
         microbatch, real False, j = -1) fills a slot the step has no microbatch for."""
         _epoch, micro = step
-        if self.balance:
-            mine = self._balanced(step)[rank]
-            return [(micro[j], True, j) for j in mine] + [(micro[0], False, -1)] * (
-                self.accum - len(mine)
-            )
         out = []
         for slot in range(self.accum):
             j = slot * self.world + rank
             out.append((micro[j], True, j) if j < len(micro) else (micro[0], False, -1))
         return out
 
-    def clear(self) -> None:
-        self._cache.clear()
-
 
 def plan_statistics(plan: Sequence[Step], lengths: Sequence[int], placement: Placement) -> dict:
-    """The plan's size, padding and load balance (the straggler factor: per step, the busiest rank's estimated work
-    over the mean), and its sha256."""
+    """The plan's size and padding, and its sha256."""
     world, accum = placement.world, placement.accum
     rows = [sum(len(mb) for mb in micro) for _e, micro in plan]
     micro = [mb for _e, m in plan for mb in m]
     padded = sum(max(lengths[i] for i in mb) * len(mb) for mb in micro)
     real = sum(lengths[i] for mb in micro for i in mb)
     epochs = sorted({e for e, _m in plan})
-    ratios = []
-    for step in plan:
-        loads = [
-            sum(
-                microbatch_cost(mb, lengths, placement.attn_tokens)
-                for mb, _real, _j in placement.local_work(step, r)
-            )
-            for r in range(world)
-        ]
-        ratios.append(max(loads) / (sum(loads) / world))
-    placement.clear()
     return {
         "optimizer_steps": len(plan),
         "steps_per_epoch": [sum(1 for e, _m in plan if e == epoch) for epoch in epochs],
@@ -202,8 +146,5 @@ def plan_statistics(plan: Sequence[Step], lengths: Sequence[int], placement: Pla
         "estimated_tokens": real,
         "estimated_padded_tokens": padded,
         "padding_fraction_estimate": 1 - real / padded if padded else 0.0,
-        "rank_load_max_over_mean": sum(ratios) / len(ratios),
-        "balance": placement.balance,
-        "attn_tokens": placement.attn_tokens,
         "sha256": plan_sha256(plan),
     }

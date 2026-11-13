@@ -22,10 +22,9 @@ token_budget: 8192
 max_length: 16384
 save_every: 100
 eval_every: 100
-balance: true
-shard_base: false
-reduce_dtype: float32
 attn_split: 0
 # The seeds of one model: one run per seed with these settings, each merged, then averaged (training/README.md).
 seeds: [20260920, 20261107, 20261108]
 # The peak GPU memory one run of these settings measured: 88.9 GB per GPU.
+# That is more than an 80 GB GPU holds, and this trainer does not shard the model: train the 31B on GPUs with
+# more memory.
