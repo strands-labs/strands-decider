@@ -7,8 +7,8 @@ Measured on an RTX 3090 with Qwen3-1.7B (v7's torso), `max_length` 1024, 40 opti
 steps each; the Qwen3.5 figures follow in their own subsection.
 
 These numbers still hold at the current 4096 default. The collator pads to the longest
-sequence in each batch, not to `max_length`, and the corpus is short — median 204
-tokens, p99 634, longest 1811 — so only ~0.15% of examples are affected by the cap at
+sequence in each batch, not to `max_length`, and the corpus is short (median 204
+tokens, p99 634, longest 1811), so only ~0.15% of examples are affected by the cap at
 all and no batch grows. Raising `max_length` is an inference-side change in practice;
 it costs p95 latency, not training time.
 
@@ -21,8 +21,8 @@ it costs p95 latency, not training time.
 
 Two results worth internalising before you tune anything:
 
-**Leave gradient checkpointing on.** Turning it off asks for 36 GiB, and on Windows
-that does not fail cleanly — WDDM silently spills the excess to host memory over
+**Gradient checkpointing stays on** (the trainer has no switch for it). Off, it asked for 36 GiB, and on Windows
+that does not fail cleanly: WDDM silently spills the excess to host memory over
 PCIe, and the run gets *6× slower* while still appearing to work. The loss curve is
 identical either way (1.4087 at step 40 in both), so this is purely a memory/speed
 trade and checkpointing wins it outright on this card.
@@ -77,13 +77,13 @@ Measured for Qwen3-4B, projected beyond it from those two points. Weights are ex
 | 1.7B | 3.2 GiB | 2.6 GiB | **5.8 GiB** (measured) | 9.6 ex/s | 1.2 h |
 | 4B | 7.5 GiB | 2.8 GiB | **10.3 GiB** (measured) | 5.1 ex/s | 2.2 h |
 | 8B | 15.3 GiB | ~3.0 GiB | ~18.3 GiB | ~3.0 ex/s | ~3.8 h |
-| 14B | 27.5 GiB | ~3.2 GiB | ~30.7 GiB — **does not fit** | — | — |
+| 14B | 27.5 GiB | ~3.2 GiB | ~30.7 GiB, **does not fit** | n/a | n/a |
 
 14B is a hard wall, not a tight squeeze: its weights alone exceed the ~23 GiB usable,
 so no batch size or sequence length recovers it. Going beyond 8B needs 4-bit QLoRA
-(14B weights drop to ~7.5 GiB) — but 4-bit degrades exactly the probability
+(14B weights drop to ~7.5 GiB), but 4-bit degrades exactly the probability
 calibration the confidence scores depend on, so measure ECE before trusting it.
 
-Throughput scales as params^-0.75, not linearly — larger torsos are cheaper than a
+Throughput scales as params^-0.75, not linearly: larger torsos are cheaper than a
 naive FLOP count suggests.
 

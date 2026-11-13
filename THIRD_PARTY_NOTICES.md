@@ -14,7 +14,16 @@ Copyright 2025 The Qwen Team and The HuggingFace Inc. team. All rights reserved.
 Licensed under the Apache License, Version 2.0. Changes made: the two triangular solves
 of the reference are replaced by one recursive block inversion of the unit-lower-triangular
 system, whose result is applied to both right-hand sides; the function was restructured
-around that change and its variables renamed. The text of the licence follows.
+around that change and its variables renamed.
+
+`training/expert_lora.py` adapts `grouped_mm_experts_forward`, the grouped-GEMM forward of fused experts, from
+`transformers/integrations/moe.py` of Transformers 5.17, which the Gemma 4 experts run.
+
+Copyright 2025 The HuggingFace Team. All rights reserved.
+
+Licensed under the Apache License, Version 2.0. Changes made: a low-rank adapter term is added to each expert's
+fused gate-and-up and down projections, and the grouped matrix product falls back to `torch._grouped_mm` where
+`torch.nn.functional.grouped_mm` is missing. The text of the licence follows.
 
 ```
                                  Apache License

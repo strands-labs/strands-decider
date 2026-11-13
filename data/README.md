@@ -109,7 +109,7 @@ characters.
 `data/SHA256SUMS` records the hashes above, the hashes of the committed `data/synthetic/`
 files and the hashes of the four raw downloads. `recipe.sh` checks the files it needs
 against this manifest. It checks them before each stage that attaches targets by row
-position or trains on the corpus: `teacher`, `parent`, `replay`, `distill` and `train`.
+position or converts the corpus: `teacher`, `distill` and `convert`.
 `calibrate` and `eval` check `data/holdout_v5_norule.jsonl`, and `eval` also checks
 `data/multistep_v14_eval.jsonl`. `recipe.sh` also checks the four downloads after `fetch`.
 A missing entry or a different hash stops the recipe. The Hugging Face datasets load

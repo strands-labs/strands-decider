@@ -241,7 +241,7 @@ def main(argv: list[str] | None = None) -> None:
         default=[],
         help="train files listed BEFORE --src in train_files; also writes "
         "<out>_train.jsonl with indices shifted past their rows, which is "
-        "what TrainConfig.teacher_file expects",
+        "what training.convert --teacher expects",
     )
     shards.add_args(ap)
     args = ap.parse_args(argv)

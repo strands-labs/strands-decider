@@ -23,15 +23,16 @@ Lambda (#138), and the vLLM plugin (`strands-decider-vllm`, #130) on GPU servers
 load a decision checkpoint once the transformers runtime is in; until then, install from its branch.
 
 Check a runtime against the checkpoint before trusting its scores: with the spec's golden vectors (section 10) when the
-export ships them, or by comparing two runtimes' probabilities on the same requests (`evaluation/device_parity.py`).
+export ships them, or by comparing two runtimes' probabilities on the same requests.
 
 ## Public benchmarks
 
-- **JevBench** (231 public tasks, 18 families, MIT): its `typesafe` adapter speaks `/v1/systemone`, so it runs against
-  `strands-decider serve` unchanged. `evaluation/jevbench/jevbench.sh <checkpoint> <out dir>` serves
-  the checkpoint on one GPU and runs the public set at the harness commit it pins; `evaluation/jevbench/paired.py`
-  compares two runs task by task with an exact McNemar test.
-- **DecisionPivot** (arXiv 2610.28522): minimal pairs of decisions that differ in one fact, scored by pair accuracy. Run
+- JevBench (231 public tasks, 18 families, MIT): its `typesafe` adapter speaks `/v1/systemone`, so it runs against
+  a served export unchanged ([`evaluation/jevbench.md`](../evaluation/jevbench.md), "Reproducing, and two caveats",
+  gives the harness commands). `evaluation/jevbench/jevbench.sh` automates that for v1 checkpoints only: it reads their
+  `strands_decider_config.json`. `evaluation/jevbench/paired.py` compares two runs task by task with an exact McNemar
+  test.
+- DecisionPivot (arXiv 2610.28522): minimal pairs of decisions that differ in one fact, scored by pair accuracy. Run
   its public harness against the server.
 
 Compare two checkpoints on the same items with a paired test (McNemar for accuracy, a paired bootstrap over items for

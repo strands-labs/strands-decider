@@ -7,7 +7,7 @@ label, so the student is only ever pulled toward answers that are right and what
 gains is the teacher's confidence. `score` rows are left out: the teacher agrees with
 gold on 39-53% of them.
 
-The output is one teacher file for `TrainConfig.teacher_file`: the agreeing rows of
+The output is one teacher file for `training.convert --teacher`: the agreeing rows of
 `--teacher` (indices into `--corpus`) followed by every row of each `--append` file
 (e.g. the replay distributions on the multi-step rows, already offset past the corpus).
 Indices must not overlap.

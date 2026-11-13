@@ -67,7 +67,7 @@ python3.12 -m venv .venv
 source .venv/bin/activate
 pip install torch==2.7.1 transformers==5.17.0 peft==0.21.0
 pip install -e ".[dev]"
-strands-decider serve checkpoints/hobson-2b-recipe --device mps --port 8099
+strands-decider serve checkpoints/pointer-2b-soup --device mps --port 8099
 ```
 
 Transformers' `causal_conv1d_fn` falls back to its reference PyTorch path. On CPU,
@@ -80,7 +80,7 @@ MLX is opt-in: with the extra installed, a command without `--device` still runs
 
 ```bash
 pip install -e ".[dev,mlx]"
-strands-decider serve checkpoints/hobson-2b-recipe --device mlx --port 8099
+strands-decider serve checkpoints/pointer-2b-soup --device mlx --port 8099
 ```
 
 **CPU only.** The same commands as on macOS, with `--device cpu`. On Linux without a GPU,
@@ -114,8 +114,8 @@ its date (`YYMMDD`), and a second release in the same month updates `main` of th
 repository. To pin one, download it by its tag and pass the folder:
 `hf download StrandsAgents/strands-decider-2B-qwen3.5-v1-2610 --revision YYMMDD --local-dir v1`,
 then `strands-decider serve v1`. You can equally train your own with the recipe
-([training/README.md](../training/README.md#usage)); `recipe.sh` writes it to
-`checkpoints/hobson-2b-recipe`.
+([training/README.md](../training/README.md#the-pointer-head)); `recipe.sh` writes it to
+`checkpoints/pointer-2b-seed-0/last/checkpoint`.
 
 A checkpoint directory holds these files. `StrandsDeciderModel.save_pretrained` in `modeling.py`
 writes them, `python -m training.evaluate calibrate` adds the temperatures, and `StrandsDeciderModel.load` reads them.
@@ -128,7 +128,7 @@ writes them, `python -m training.evaluate calibrate` adds the temperatures, and 
 | `tokenizer.json`, `tokenizer_config.json` | The tokenizer |
 | `chat_template.jinja` | The chat template, saved with the tokenizer. Inference does not read it. |
 
-Training also writes `train_config.json` and `history.json`. Inference does not read them.
+Training also writes its record, `training.json` (v1's trainer wrote `train_config.json` and `history.json`). Inference does not read them.
 
 The base weights are not in the checkpoint. At first use, `load` downloads
 `Qwen/Qwen3.5-2B-Base` (about 4.5 GB) from Hugging Face, at the revision in the config's
@@ -167,7 +167,7 @@ confidence is computed from the distribution, not predicted.
 
 The output below was recorded from a v19 checkpoint, which the v19 reference recipe
 trains. The command below names `checkpoints/hobson-2b-recipe`, the path
-`training/recipe.sh` (or `bash training/recipe.sh`) writes; pass
+v19's recipe wrote; pass
 `StrandsAgents/strands-decider-2B-hobson-v19` instead to run the published weights. On a Mac,
 add `--device mps`. A retrained checkpoint gives somewhat different numbers with the same
 answers: a later v19 retrain gives 0.809, `technical` at 0.783 and a score confidence
@@ -202,7 +202,7 @@ of the 0.9 at which that convention acts without a check.
 ## Serve
 
 ```bash
-strands-decider serve checkpoints/hobson-2b-recipe --port 8000
+strands-decider serve checkpoints/pointer-2b-soup --port 8000
 ```
 
 `POST /v1/systemone` takes a state and typed questions. JevBench's `typesafe` adapter

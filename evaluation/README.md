@@ -42,10 +42,10 @@ Paths are relative to the repository root unless they are links. A module path s
 These commands are step 5 of the [training steps](../training/steps.md#5-evaluate):
 
 ```bash
-python -m training.evaluate eval checkpoints/hobson-2b-recipe --data data/holdout_v5_norule.jsonl \
+python -m training.evaluate eval <checkpoint> --data data/holdout_v5_norule.jsonl \
   --limit 6000 --out reports/recipe_heldout.json
-python -m evaluation.multistep_eval checkpoints/hobson-2b-recipe
-python -m evaluation.question_sensitivity checkpoints/hobson-2b-recipe
+python -m evaluation.multistep_eval <checkpoint>
+python -m evaluation.question_sensitivity <checkpoint>
 ```
 
 The first reports accuracy, **ECE** (expected calibration error), NLL and score MAE on

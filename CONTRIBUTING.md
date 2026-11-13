@@ -67,12 +67,12 @@ source .venv/bin/activate
 pip install -e ".[dev]"
 pre-commit install -t pre-commit -t commit-msg   # once per clone; see below
 pytest -q                  # GPU tests skip automatically without CUDA
-pytest -q -m distributed   # multi-process training tests on CPU, several minutes
+pytest -q -m distributed   # multi-process training tests on CPU, about a minute
 ruff check .               # the whole tree, as CI does
-mypy ./src                 # the published package only, as CI does
+mypy ./src ./training --exclude training/tests   # the package and the trainer, as CI does
 ```
 
-On an Apple-silicon Mac, `pip install -e ".[dev,mlx]"` also runs `tests/test_mlx_engine.py`, which skips elsewhere, CI included. On Linux without an NVIDIA GPU, install the CPU build of torch first: `pip install torch --index-url https://download.pytorch.org/whl/cpu`. The suite downloads nothing from Hugging Face. CI runs `pytest -q` with `HF_HUB_OFFLINE=1` on Python 3.10 and 3.12; it does not run the distributed tests, so run those yourself. A separate CI job runs `ruff check .` over the whole tree and `mypy ./src`, with the latest ruff that `pyproject.toml` admits; both must pass.
+On an Apple-silicon Mac, `pip install -e ".[dev,mlx]"` also runs `tests/test_mlx_engine.py`, which skips elsewhere, CI included. On Linux without an NVIDIA GPU, install the CPU build of torch first: `pip install torch --index-url https://download.pytorch.org/whl/cpu`. The suite downloads nothing from Hugging Face. CI runs `pytest -q` with `HF_HUB_OFFLINE=1` on Python 3.10 and 3.12. One more CI job runs `training/tests`, the distributed tests included, under the versions of `training/requirements.txt` with Gemma 4's tokenizer, which the trainer's bit-for-bit checks and the token-readout tests need. A separate CI job runs `ruff check .` over the whole tree and `mypy ./src ./training`, with the latest ruff that `pyproject.toml` admits; both must pass.
 
 No test checks the documents. If you move a file or rename a heading, search the markdown files and the code comments for the old path or heading and fix every reference.
 
@@ -85,7 +85,7 @@ The wheel is built with setuptools; you do not need [hatch](https://hatch.pypa.i
 ```bash
 hatch run test               # pytest -q
 hatch run test-distributed   # pytest -q -m distributed
-hatch run lint:check         # ruff check . and mypy ./src, as CI runs them
+hatch run lint:check         # ruff and mypy, as CI runs them
 hatch run format             # ruff format
 ```
 
@@ -101,9 +101,9 @@ The `pre-commit` stage runs `ruff --fix` and `ruff format` on staged files. The 
 
 ## Experiments
 
-The reference model is v19, and its recipe is `configs/train.yaml` with `training/recipe.sh`. A change to the recipe, the data or the model is an experiment, and experiments here are preregistered ([research/README.md](research/README.md)): the predictions and the failure conditions are committed before training, and the outcome is appended after the run without editing what came before. By that rule, a run that misses its bar does not replace the reference model; the maintainers decide any exception, and the record says so.
+The reference model is v19. Its recipe, `configs/train.yaml`, was trained by v1's trainer, which `training/train.py` has replaced; `training/README.md` says what `training/train.py` does not have yet. A change to the recipe, the data or the model is an experiment, and experiments here are preregistered ([research/README.md](research/README.md)): the predictions and the failure conditions are committed before training, and the outcome is appended after the run without editing what came before. By that rule, a run that misses its bar does not replace the reference model; the maintainers decide any exception, and the record says so.
 
-To propose one, open an issue first. State the change, the predictions, and what would refute them, in the form of the files in `research/preregistrations/`. Once agreed, commit the preregistration file, with its configuration under `configs/experiments/`, before you train. Training the recipe needs an NVIDIA GPU on Linux or WSL2 for about 11 hours ([training/README.md](training/README.md)), so agree on the plan before you spend the compute. Rank the result on JevBench, not on the repository's own held-out sets ([evaluation/README.md](evaluation/README.md)).
+To propose one, open an issue first. State the change, the predictions, and what would refute them, in the form of the files in `research/preregistrations/`. Once agreed, commit the preregistration file, with its training configuration (a `training/configs/` file of `training/train.py`), before you train. Training needs an NVIDIA GPU on Linux or WSL2 ([training/README.md](training/README.md)), so agree on the plan before you spend the compute. Rank the result on JevBench, not on the repository's own held-out sets ([evaluation/README.md](evaluation/README.md)).
 
 ## Finding contributions to work on
 Looking at the existing issues is a great way to find something to contribute on. As our projects, by default, use the default GitHub issue labels (enhancement/bug/duplicate/help wanted/invalid/question/wontfix), looking at any 'help wanted' issues is a great place to start.

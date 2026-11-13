@@ -1,5 +1,16 @@
 # Changelog
 
+## One trainer (unreleased)
+
+`python -m training.train` is now one trainer for the token readout of the Strands Decider v2 models (Gemma 4,
+`prefix_bidir`, prompts rendered by `strands_decider.core`, merged, averaged and exported to the checkpoint of
+`docs/spec.md`) and for v1's pointer head, whose saves are v1 checkpoints. It replaces v1's trainer, which read the
+YAMLs in `configs/`. v1's examples feed it through `python -m training.convert --examples`. Not in it yet: the
+frozen-KL anchor, EMA, `init_from`, `freeze_torso` and `host_embeddings` ([training/README.md](training/README.md)).
+`training/recipe.sh` trains v20's data on the pointer config; its `parent` and `replay` stages are gone. Gone too:
+the runner and scripts that ran v1's trainer on an EC2 host (`training/run_recipe.sh`, `training/aws/`,
+`training/AGENTS.md`), and v7's route on Windows (`training/recipe_v7.sh`).
+
 ## Model names (2026-10)
 
 Model names now use the pattern `strands-decider-<size>-<base>-v<N>-<YYMM>`:

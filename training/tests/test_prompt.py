@@ -1,3 +1,4 @@
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -30,7 +31,8 @@ def test_the_option_separator_is_the_documented_one():
     from strands_decider.core import prompt as core_prompt
 
     assert core_prompt.DESCRIPTION_SEPARATOR == " \u2014 "
-    for text in (prompt.__doc__,):
+    readme = (Path(__file__).parents[1] / "README.md").read_text()
+    for text in (prompt.__doc__, readme):
         assert (
             "strands_decider.core.prompt.DESCRIPTION_SEPARATOR" in text and '`" \\u2014 "`' in text
         )

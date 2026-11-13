@@ -6,9 +6,10 @@ change for a user's own decisions.
 **Before you start.** This route fine-tunes a released model with `init_from` and anchors it to that model with
 the frozen-KL term, and runs on an EC2 host through `training/aws/`. All three belonged to v1's trainer.
 `training/train.py`, which replaced it, does not have `init_from` or the anchor term yet, and the host scripts are
-gone (training/README.md, "Open questions"). Until that is decided, run this route with v1's trainer from the
-repository's history: the commit before `training/train.py` became the one trainer. Everything else in this file
-describes that trainer.
+gone (training/README.md, "What differs from v1's trainer"). Until that is decided, run this route with v1's trainer at
+commit `79bf6e7` of `main` (`git worktree add <dir> 79bf6e7`). Everything else in this file describes that trainer
+and its files at that commit: `TrainConfig` in `training/train.py`, `training/aws/`, `training/AGENTS.md`, and the
+sections of its `training/README.md`.
 
 ## What to train
 
