@@ -46,16 +46,16 @@ import torch
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from metrics import image_dependence, naturalbench_paired, summarise
 
-from strands_decider.modeling import StrandsDeciderConfig, masked_log_softmax
-from strands_decider.prompting import option_token_index, render_question
-from strands_decider.schema import ChoiceQuestion, NoulQuestion, Question
-from strands_decider.vision import (
-    VisionDeciderModel,
+from strands_decider.images import (
     expand_image_tokens,
     fit_image,
     image_tokens_for_grid,
     render_image_state,
 )
+from strands_decider.modeling import StrandsDeciderConfig, masked_log_softmax
+from strands_decider.prompting import option_token_index, render_question
+from strands_decider.schema import ChoiceQuestion, NoulQuestion, Question
+from strands_decider.vision import VisionDeciderModel
 
 # Every download is pinned to the revision the published results were measured on.
 V19, V19_REV = (

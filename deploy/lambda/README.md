@@ -8,7 +8,7 @@ function. The function serves `strands-decider serve`'s `POST /v1/systemone` and
 ([docs/inference.md, Serve](../../docs/inference.md#serve)) behind an IAM-authenticated
 Function URL, and takes the same request as a direct invocation too.
 
-The torso runs in [llama.cpp](https://github.com/ggml-org/llama.cpp), quantized to Q8_0, and the
+The torso runs in [llama.cpp](https://github.com/ggml-org/llama.cpp), quantized to Q8_0 by default ([Precision](#precision)), and the
 rest is the package's torch-free `HiddenStateEngine`
 ([src/strands_decider/hidden_engine.py](../../src/strands_decider/hidden_engine.py)), which its
 tests hold to the torch engine's answers. A request with three questions about a short state
@@ -90,9 +90,9 @@ for the default. It holds:
    ([deploy-time-build](https://github.com/cdklabs/deploy-time-build)) and published to an ECR
    repository in the stack. The build downloads the model and its base model from the Hugging Face
    Hub, folds the model's LoRA into the torso (`scripts/prepare_model.py`), converts the torso to a
-   GGUF and quantizes it to Q8_0 (about 2 GB), and builds llama.cpp and `function/shim.c` into
+   GGUF and quantizes it to Q8_0 (about 2 GB; [Precision](#precision)), and builds llama.cpp and `function/shim.c` into
    one library. The image holds those, the pointer head, the tokenizer, and the package without
-   torch. It runs on the CodeBuild project's `LARGE` instance (16 GB of memory), as the merge
+   torch; with `vision=true`, also the base model's vision tower ([Images](#images)). It runs on the CodeBuild project's `LARGE` instance (16 GB of memory), as the merge
    takes about 8 GB.
 2. The function: arm64, 10,240 MB (the most Lambda gives, and the only size with 6 vCPUs), a
    15-minute timeout, SnapStart if you turn it on ([What it costs](#what-it-costs)), and a log
@@ -109,6 +109,10 @@ Every setting is a CDK context value. Change it in `cdk.json`, or pass `-c key=v
 | `model` | `StrandsAgents/strands-decider-2B-qwen3.5-v1-2610` | The strands-decider model, a Hugging Face Hub id. Any Qwen3.5 model with a pointer head works. It names the stack. |
 | `model_revision` | `main` | The model's revision. Use a release's date tag (`YYMMDD`) to pin it ([docs/inference.md, Model artifact](../../docs/inference.md#model-artifact)). |
 | `snapstart` | `false` | `true` turns SnapStart on: new execution environments answer in about 6 s instead of up to 30 s, for about $39.50 a month while the stack exists ([What it costs](#what-it-costs)) |
+| `vision` | `false` | `true` adds the base model's vision tower, for requests with images ([Images](#images)) |
+| `image_long_side` | `448` | The longest side, in pixels, an image is scaled to, as for `serve --vision`; `768` makes a square image 576 tokens instead of 196 ([Image size](#image-size)) |
+| `decoder_precision` | `q8_0` | `f16` keeps the decoder unquantized: closer to the torch engine, and slower ([Precision](#precision)) |
+| `vision_precision` | `f16` | `f32` for the vision tower ([Precision](#precision)) |
 | `max_request_tokens` | `24576` | The most tokens one request may forward, the state once plus every question; `0` for no limit ([Limits](#limits)) |
 
 ## What it costs
@@ -166,6 +170,88 @@ moved probabilities and confidences by at most 0.026 and changed no choice; one 
 went from 0.495 to 0.505. The quantization to Q8_0 accounts for most of that. Requests that
 `serve` refuses, this function refuses too, with the same status.
 
+## Images
+
+The 2B Qwen3.5 decider can answer over images: its base model is multimodal, and with the base
+model's vision tower beside it, the published checkpoint reads images with no image training
+([docs/vision.md](../../docs/vision.md)). Deploy with the vision tower:
+
+```bash
+npx cdk deploy -c vision=true
+```
+
+A request then takes `images`, as `serve --vision` does: up to 4 base64 PNG, JPEG, WebP or GIF
+images, each scaled so its longer side is at most 448 px (a square image is 196 tokens). They
+go first in the state, and count against the same window.
+
+```bash
+awscurl --service lambda --region <region> -X POST -H 'content-type: application/json' \
+  -d '{"state": "The checkout page after the user tapped Pay.",
+       "images": ["'"$(base64 < screenshot.png | tr -d '\n')"'"],
+       "questions": {"paid": {"type": "noul", "instructions": "Did the payment succeed?"}}}' \
+  <FunctionUrl>v1/systemone
+```
+
+The vision tower is the base model's, unchanged, since the decider's adapter never touched it.
+The build converts it to a GGUF (about 0.7 GB in f16, the default), and llama.cpp's multimodal library
+(`mtmd`) runs it. The engine sizes each image as the Qwen image processor does, so the vision
+tower sees the processor's pixels.
+
+Measured in us-east-1 with vision on: a request with one 448 px screenshot and three questions
+(411 tokens) takes 5.5 s on Graviton3 and 8.5 s on Graviton2 (medians of 15), against 1.6 s and
+2.4 s for three questions about a short text state. Over 13 requests (screenshots, photographs and
+charts from 60 to 1,280 px, non-square and upscaled images, one, two and four images, and a state
+over the window), the function's token counts matched `serve --vision`'s exactly, and its answers
+were within 0.048 of `serve --vision`'s in fp32 on CPU, with no choice changed. One yes/no answer,
+about a photograph scaled down from 1,280 px, went from 0.477 to 0.520: that is the quantization,
+and with both halves at full precision the function was within 0.016 of it
+([Precision](#precision)). A prompt over the window gets the same 422.
+
+The vision tower makes the image about 0.7 GB larger, and a new execution environment slower to
+start. Without SnapStart, 14 new environments loaded the model and the vision tower in 16 to 34 s,
+and the first one after the deploy took 3 minutes. With
+SnapStart, new environments answered in 6.6 to 8.9 s, so turn it on for image traffic
+(`npx cdk deploy -c vision=true -c snapstart=true`).
+
+### Image size
+
+`image_long_side` sets the longest side an image is scaled to before the processor's grid. At
+768, a square image is 576 tokens instead of 196, and the vision tower reads more of a large
+image's detail. Measured in us-east-1, with images larger than 768 px, three questions each
+(medians of 3 to 17 per cell):
+
+| Request | 448 px, Graviton2 | 768 px, Graviton2 | 448 px, Graviton3 | 768 px, Graviton3 |
+| --- | --- | --- | --- | --- |
+| 1 image | 8.6 s | 24.0 s | 5.5 s | 15.6 s |
+| 2 images | 12.3 s | 36.7 s | 7.9 s | 23.7 s |
+| 4 images (1,009 and 2,529 tokens) | 26.7 s | 90.1 s | 17.0 s | 57.8 s |
+
+At 768 the function's answers were within 0.016 of `VisionEngine`'s at the same size, with the
+same token counts, and memory stayed at 6.6 GB. But the size changes what the model sees, not only
+what it costs: `serve --vision`'s own answers moved by up to 0.21 from 448 to 768 on these images,
+and one yes/no answer crossed 0.5. The published measurements are all at 448 px
+([docs/vision.md](../../docs/vision.md)); whether 768 answers better has not been measured.
+
+## Precision
+
+The decoder is quantized to Q8_0 and the vision tower stored in f16 by default. `decoder_precision`
+and `vision_precision` keep either at full precision, for answers closer to the torch engine's, at a
+cost in speed and memory. Measured in us-east-1 with vision on and 448 px images, against
+`serve --vision` and `serve` in fp32 on CPU (13 image and 9 text requests; medians, Graviton2 /
+Graviton3):
+
+| `decoder_precision` / `vision_precision` | Images: largest difference | Text: largest difference | 1 image, 3 questions | 4 images | 4,061-token text | Peak memory |
+| --- | --- | --- | --- | --- | --- | --- |
+| `q8_0` / `f16` (the default) | 0.048, one yes/no answer across 0.5 | 0.026 | 8.6 / 5.5 s | 26.7 / 17.0 s | 45.3 / 28.8 s | 6.5 GB |
+| `q8_0` / `f32` | 0.041, the same answer across 0.5 | 0.026 | 11.4 / 7.0 s | 38.3 / 22.9 s | 45.6 / 28.8 s | 8.5 GB |
+| `f16` / `f16` | 0.038, the same answer across 0.5 | 0.004 | 12.8 / 7.3 s | 35.9 / 21.4 s | 77.9 / 44.1 s | 7.0 GB |
+| `f16` / `f32` | 0.016 | 0.004 | 15.7 / 8.9 s | 47.6 / 27.0 s | 77.8 / 44.0 s | 8.2 GB |
+
+The default is the fastest, and its answers are close to the torch engine's; the one answer that
+crossed 0.5 was at 0.48 in fp32. `f16` / `f32` gives the torch engine's answers to within 0.016,
+for 1.5 to 1.8 times the time and cost. For text only, `decoder_precision=f16` alone brings the
+text answers to within 0.004. An `f32` vision tower with the Q8_0 decoder is slower and no closer.
+
 ## Limits
 
 - The state and the longest question must fit the model's window (`max_length`, 4,096 tokens for
@@ -174,8 +260,9 @@ went from 0.495 to 0.505. The quantization to Q8_0 accounts for most of that. Re
 - A request may forward at most `max_request_tokens` tokens, the state once plus every question.
   The default, 24,576, stays well inside the 15-minute timeout; a larger request is refused with
   a 422 before any work is done.
-- No images: a request with `images` gets a 422.
-- A Function URL request or response is at most 6 MB.
+- Images need `vision=true` ([Images](#images)); without it, a request with `images` gets a 422.
+- A Function URL request or response is at most 6 MB, so send images at the size they are read
+  at, not as camera originals.
 - One request at a time per execution environment. Lambda scales by adding environments.
 
 ## Deleting it

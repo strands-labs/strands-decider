@@ -31,6 +31,14 @@ function flag(value: unknown, key: string): boolean {
   return String(value) === "true";
 }
 
+/** One of `allowed`, from cdk.json or `-c key=value`. */
+function choice(value: unknown, key: string, allowed: string[]): string {
+  if (!allowed.includes(String(value))) {
+    throw new Error(`${key} must be ${allowed.join(" or ")}, not ${JSON.stringify(value)}`);
+  }
+  return String(value);
+}
+
 const REPO_ROOT = path.join(__dirname, "..", "..", "..");
 
 // The build uploads this directory to S3; keep only what the image needs, as
@@ -68,11 +76,25 @@ export class DeciderFunctionStack extends Stack {
     if (!Number.isInteger(maxRequestTokens) || maxRequestTokens < 0) {
       throw new Error(`max_request_tokens must be a whole number, 0 for no limit, not ${ctx("max_request_tokens")}`);
     }
+    // The longest side an image is scaled to before the processor's 32-pixel grid: 448 is
+    // serve --vision's, 196 tokens for a square image; 768 is 576 (README.md, Images).
+    const imageLongSide = Number(ctx("image_long_side"));
+    if (!Number.isInteger(imageLongSide) || imageLongSide < 32) {
+      throw new Error(`image_long_side must be a whole number of pixels, 32 or more, not ${ctx("image_long_side")}`);
+    }
 
     // Builds the image in AWS CodeBuild during `cdk deploy` (deploy-time-build) and publishes it
     // to an ECR repository that belongs to the stack. The build downloads the model, folds its
     // LoRA into the torso and converts it, so the image holds the model.
-    const buildArgs = { MODEL: ctx("model"), MODEL_REVISION: ctx("model_revision") };
+    // Vision adds the base model's vision tower (about 0.7 GB) to the image, for requests with
+    // images; without it, they get a 422.
+    const buildArgs = {
+      MODEL: ctx("model"),
+      MODEL_REVISION: ctx("model_revision"),
+      VISION: String(flag(ctx("vision"), "vision")),
+      DECODER_PRECISION: choice(ctx("decoder_precision"), "decoder_precision", ["q8_0", "f16"]),
+      VISION_PRECISION: choice(ctx("vision_precision"), "vision_precision", ["f16", "f32"]),
+    };
     const image = new ContainerImageBuild(this, "Image", {
       directory: REPO_ROOT,
       file: "deploy/lambda/Dockerfile",
@@ -104,7 +126,10 @@ export class DeciderFunctionStack extends Stack {
       timeout: Duration.minutes(15),
       snapStart: snapStart ? lambda.SnapStartConf.ON_PUBLISHED_VERSIONS : undefined,
       logGroup,
-      environment: { DECIDER_MAX_REQUEST_TOKENS: String(maxRequestTokens) },
+      environment: {
+        DECIDER_MAX_REQUEST_TOKENS: String(maxRequestTokens),
+        DECIDER_IMAGE_LONG_SIDE: String(imageLongSide),
+      },
       // Each deploy that changes the function publishes a version, and CloudFormation deletes the
       // one it replaces: Lambda bills a version's SnapStart snapshot for as long as it exists.
       currentVersionOptions: { removalPolicy: RemovalPolicy.DESTROY },
