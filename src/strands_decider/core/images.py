@@ -30,8 +30,6 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
-from .text import strip
-
 # What v1 accepts (vision.IMAGE_FORMATS), named as Pillow names them.
 IMAGE_FORMATS = ("PNG", "JPEG", "WEBP", "GIF")
 # v1's limits (vision.VisionEngineConfig): images per request, and pixels per image.
@@ -322,7 +320,7 @@ def decode_image(data: str, max_pixels: int = MAX_IMAGE_PIXELS) -> EncodedImage:
 
     `data` is base64, optionally behind a `data:image/...;base64,` prefix. The pixels are
     not decoded."""
-    payload = DATA_URI.sub("", strip(data))
+    payload = DATA_URI.sub("", data.strip())
     try:
         raw = _strict_b64decode(payload)
     except (binascii.Error, ValueError) as e:

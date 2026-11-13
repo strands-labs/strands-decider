@@ -1058,7 +1058,6 @@ def test_validation_matches_v1():
     import sys
 
     from strands_decider.core.images import DATA_URI
-    from strands_decider.core.text import strip
 
     pytest.importorskip("PIL")
     pytest.importorskip("torch")
@@ -1086,7 +1085,7 @@ def test_validation_matches_v1():
             error = None
         except ValueError as e:
             error = str(e)
-        by_rule = _rfc4648(DATA_URI.sub("", strip(data)))
+        by_rule = _rfc4648(DATA_URI.sub("", data.strip()))
         if by_rule is None:  # the spec refuses the base64
             assert error is not None and error.startswith(NOT_BASE64), (data[:40], error)
             if sys.version_info[:2] == (3, 12):
