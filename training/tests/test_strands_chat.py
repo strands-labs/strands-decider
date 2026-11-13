@@ -127,14 +127,33 @@ def test_the_v2_converter_keeps_targets_and_fixed_order_and_drops_refusals(tmp_p
         return {"suite": "s", "state": "st", "question": q, "target": target, "label": label, "source": source}  # fmt: skip
 
     rows = [
-        row({"type": "noul", "criteria": {"false": None, "true": "t"}}, 0.25, False),
-        row({"type": "choice", "criteria": {"a": None, "b": "x"}}, [0, 1], "b", fixed_order=True),
-        row({"type": "choice", "criteria": {"a": None}}, [1], "a"),  # one option: refused
+        row(
+            {"type": "noul", "criteria": {"false": None, "true": "t"}, "instructions": ""},
+            0.25,
+            False,
+        ),
+        row(
+            {"type": "choice", "criteria": {"a": None, "b": "x"}, "instructions": "i"},
+            [0, 1],
+            "b",
+            fixed_order=True,
+        ),
+        row(
+            {"type": "choice", "criteria": {"a": None}, "instructions": "i"}, [1], "a"
+        ),  # one option: refused
+        row(
+            {"type": "noul", "criteria": {"false": None, "true": "t"}}, 0.5, True
+        ),  # no instructions: dropped
+        row(
+            {"type": "noul", "criteria": {"false": None, "true": "t"}, "instructions": None},
+            0.5,
+            True,
+        ),
     ]
     src, out = tmp_path / "v2.jsonl", tmp_path / "ex.jsonl"
     src.write_text("".join(json.dumps(r) + "\n" for r in rows) + '{"cut', encoding="utf-8")
     counts = strands_v2.main([str(src), str(out)])
-    assert counts == {"kept": 2, "not_renderable": 1, "not_json": 1}
+    assert counts == {"kept": 2, "not_renderable": 1, "no_instructions": 2, "not_json": 1}
     noul, choice = load_examples([str(out)])
     assert (noul.label, noul.target, noul.instructions) == (0, [0.75, 0.25], "")
     assert (choice.label, choice.target, choice.fixed_order) == (1, None, True)

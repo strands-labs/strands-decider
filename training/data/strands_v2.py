@@ -12,10 +12,13 @@ label, source: {..., fixed_order?}}. It becomes an Example the trainer reads, fo
 
 `label` is the row's label as an option index. `target` is kept only when it is not one-hot, so
 a one-hot row trains exactly as before. `source.fixed_order` (a score converted to a choice) is
-kept: such rows are never shuffled. Null instructions become "", as the reference does.
+kept: such rows are never shuffled.
 
-Rows that strands_decider.core refuses to render, rows with images (the Strands templates are
-text-only) and lines that are not JSON are dropped and counted. The file is streamed, so it may
+Rows without instructions (the key missing or null: 518 of the 17,480,970 v2 rows) are dropped,
+as the reference v2 runs dropped them: their length sidecar marked them not renderable, so the
+runs never trained on them (with them dropped, the reference trainer's plan is run-2's, sha
+94dee960...). Rows that strands_decider.core refuses to render, rows with images (the Strands
+templates are text-only) and lines that are not JSON are dropped and counted too. The file is streamed, so it may
 be larger than memory; `--workers` processes convert it in parallel, in order.
 """
 
@@ -80,7 +83,8 @@ def convert_line(line: str) -> tuple[str, str | None]:
     if row.get("images"):
         return "image_rows", None
     q = dict(row["question"])  # as the reference hands it to the core (autojev spec_question)
-    q["instructions"] = q.get("instructions") or ""
+    if q.get("instructions") is None:
+        return "no_instructions", None
     if q.get("type") == "score" and isinstance(q.get("criteria"), list):
         q["criteria"] = [c if isinstance(c, str) else core.render_content(c) for c in q["criteria"]]
     try:  # the core's refusals; they need no tokenizer
