@@ -78,6 +78,10 @@ class StrandsDeciderConfig:
     # attention, "causal" (the torso's own) or "prefix_bidir" (prefix_bidir_masks).
     render: str = "numbered"
     attention_mode: str = "causal"
+    # Micro-batches of at least this many padded tokens run prefix_bidir as two unmasked SDPA
+    # calls per row instead of one masked call (prefix_split_attention); 0 = always masked.
+    # The reference v2 recipe uses 1024.
+    attn_split: int = 0
     # Token readout only: the cap on its logits, cap * tanh(x / cap) (0.0: none). Recorded from
     # the base model's final_logit_softcapping when training starts, then read from here, so a
     # checkpoint keeps the cap it trained with whatever the base model's config says later.
@@ -627,7 +631,20 @@ class StrandsDeciderModel(nn.Module):
                 raise ValueError("attention_mode prefix_bidir needs prefix_end")
             dtype = self.torso.get_input_embeddings().weight.dtype
             mask = prefix_bidir_masks(self.torso.config, attention_mask, prefix_end, dtype)
-        hidden = self.encode(input_ids, mask, past_key_values=past_key_values)
+        split = None
+        if readout and self.config.attention_mode == "prefix_bidir" and self.config.attn_split:
+            # Long batches: the same attention as the mask above, as two unmasked SDPA calls
+            # per row, which runs on a faster kernel. The mask is still built and passed, and
+            # it is what short batches use.
+            from .prefix_split_attention import install
+
+            assert prefix_end is not None  # checked above
+            split = install(self.torso, prefix_end, attention_mask, self.config.attn_split)
+        try:
+            hidden = self.encode(input_ids, mask, past_key_values=past_key_values)
+        finally:
+            if split is not None:
+                split.remove()
         pooled = pool_last_token(hidden, attention_mask).to(torch.float32)
         if opt_idx is None or readout:
             logits = self.head(pooled, int(n_slots.max()))

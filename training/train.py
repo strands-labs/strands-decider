@@ -77,6 +77,10 @@ class TrainConfig:
     head_type: str = "pointer"
     render: str = "numbered"
     attention_mode: str = "causal"
+    # Micro-batches of at least this many padded tokens run prefix_bidir without its dense
+    # mask (strands_decider.prefix_split_attention); 0 = always masked. The reference v2
+    # recipe uses 1024. Speed only: the attention is the same up to rounding.
+    attn_split: int = 0
     pointer_dim: int = 256
     # A frozen teacher's option distribution per training row (data/teacher.py): JSONL of
     # {"i": row index in the concatenated train_files, "probs": [...canonical order]}.
@@ -561,6 +565,7 @@ def train(cfg: TrainConfig) -> str:
             head_type=cfg.head_type,
             render=cfg.render,
             attention_mode=cfg.attention_mode,
+            attn_split=cfg.attn_split,
         )
         if cfg.lora_targets:
             model_cfg.lora_targets = list(cfg.lora_targets)
