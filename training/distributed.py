@@ -195,13 +195,21 @@ def _best_cuts(lens: list[int], k: int) -> tuple[int, list[tuple[int, int]]]:
 
 
 def plan_step(
-    batches: list[list[int]], lengths: list[int], world: int
+    batches: list[list[int]], lengths: list[int], world: int, budget: int = 0
 ) -> list[list[tuple[int, int, int]]]:
     """Each rank's slices (micro-batch j of the step, row start, row stop) for one step.
 
     Every rank gets at least one slice and no forward exceeds a micro-batch, so no rank
     needs more memory than the 1-GPU run. Deterministic in its inputs: every rank
     computes the same plan.
+
+    `budget` > 0 caps a slice's padded size, rows x longest row, in the unit of `lengths`
+    (prompt characters): a micro-batch over the cap is cut into more slices until each is
+    under it, or until its rows are one per slice. The cap bounds a forward's activations
+    and its attention mask, which is what runs a GPU out of memory, and it changes nothing
+    else: the rows of a step, their order and the summed gradient are the same, because
+    how the rows are shared out is free (module docstring). A single row longer than the
+    cap is still forwarded whole.
     """
     per = [[lengths[i] for i in b] for b in batches]
     assert world <= sum(map(len, per)), "more ranks than rows in the step"
@@ -212,6 +220,14 @@ def plan_step(
         return [
             ((b - a) * max(lens[a:b]) + FORWARD_OVERHEAD, a, b) for a, b in _best_cuts(lens, k)[1]
         ]
+
+    def under_budget(j: int, k: int) -> int:
+        """The least number of slices >= k that keeps micro-batch j's slices under `budget`."""
+        if budget <= 0:
+            return k
+        while k < len(per[j]) and max(c for c, _, _ in cuts(j, k)) - FORWARD_OVERHEAD > budget:
+            k += 1
+        return k
 
     def assign(n: list[int]) -> tuple[tuple[bool, int], list[list[tuple[int, int, int]]]]:
         slices = [(c, j, a, b) for j, k in enumerate(n) for c, a, b in cuts(j, k)]
@@ -231,11 +247,13 @@ def plan_step(
         # per step at this size (30 rows x 91 micro-batches: 7 s at 8 ranks, 55 s at 32).
         whole = [len(lens) * max(lens) + FORWARD_OVERHEAD for lens in per]
         mean = sum(whole) / world
-        plan = assign([min(len(per[j]), math.ceil(c / mean)) for j, c in enumerate(whole)])[1]
+        plan = assign(
+            [under_budget(j, min(len(per[j]), math.ceil(c / mean))) for j, c in enumerate(whole)]
+        )[1]
         assert all(plan), "a rank got no slice"
         return plan
 
-    n = [1] * len(batches)
+    n = [under_budget(j, 1) for j in range(len(batches))]
     best = assign(n)
     # Greedy: add one slice at a time to the micro-batch where it lowers the slowest
     # rank's load most, up to a fixed budget of 2 * world extra slices, and keep the
@@ -291,8 +309,16 @@ class StepSlices:
     rows train some twice and some never, silently.
     """
 
-    def __init__(self, loader: DataLoader, kl_slots: int, grad_accum: int, total_steps: int):
+    def __init__(
+        self,
+        loader: DataLoader,
+        kl_slots: int,
+        grad_accum: int,
+        total_steps: int,
+        budget: int = 0,
+    ):
         self.loader = loader
+        self.budget = budget  # cap on a slice's padded size, in prompt characters (plan_step)
         self.examples = loader.dataset.examples
         self.collate = loader.collate_fn
         self.grad_accum = grad_accum
@@ -348,7 +374,7 @@ class StepSlices:
                 yield from self._step(window)
 
     def _step(self, window: list[list[int]]) -> Iterator[dict[str, Any]]:
-        mine = plan_step(window, self.lengths, self.world)[self.rank]
+        mine = plan_step(window, self.lengths, self.world, self.budget)[self.rank]
         first = self.windows * self.grad_accum
         self.windows += 1
         for j, idx in enumerate(window):
