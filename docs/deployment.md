@@ -17,7 +17,7 @@ Host Strands Decider behind a SageMaker model endpoint.
 | Trainium | _TBD_ | _TBD_ | _TBD_ |
 | GPU | _TBD_ | _TBD_ | _TBD_ |
 
-<!-- TODO: fill cost / latency / concurrency numbers from benchmarks -->
+_Cost, latency, and concurrency numbers coming soon from benchmarks._
 
 ### Lambda
 
@@ -39,7 +39,7 @@ Deploy to a GPU Lambda function.
 - **GCP** — deploy to Google Cloud.
 - **Azure** — deploy to Azure.
 
-<!-- TODO: add brief how-to or links for each of these targets -->
+_How-to guides for these targets coming soon._
 
 ## Choosing a model version
 
@@ -52,4 +52,4 @@ targets, image support, and benchmarks.
 | _Placeholder_ | _TBD_ | _TBD_ | _TBD_ | _TBD_ | _TBD_ |
 | _Placeholder_ | _TBD_ | _TBD_ | _TBD_ | _TBD_ | _TBD_ |
 
-<!-- TODO: generate matrix rows from benchmark data source -->
+_Model comparison data coming soon._

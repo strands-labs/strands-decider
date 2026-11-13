@@ -78,10 +78,10 @@ strands-decider serve StrandsAgents/strands-decider-2B-qwen3.5-v1-2610 --vision 
 - **Interventions.** Use a System One model to decide whether a human should
   intervene in an agent's action. If an agent might perform an action that
   cannot be deterministically identified as harmful, Decider can flag it for
-  human review. <!-- TODO: link to interventions docs -->
+  human review. _Interventions docs coming soon._
 - **Filtering.** Use a System One model inside a graph to decide whether a
   request should be processed by an LLM (expensive) or skipped to save cost.
-  <!-- TODO: link to McKinsey blog post -->
+  _Blog post link coming soon._
 
 ## Interested in learning or trying more?
 
