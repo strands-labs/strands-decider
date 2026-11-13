@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# The v19 recipe, end to end -- the reference recipe. Run it under WSL2 (see
-# training/README.md#setup): the Qwen3.5 torso's fused kernels need Linux.
+# v1's data, and the pointer head trained on it with training/train.py, end to end. Run it on Linux or WSL2 (see
+# training/README.md, "The pointer head"): the Qwen3.5 torso's fused kernels need Linux.
 #
 #   1. build     the v5 corpus and the held-out calibration file. A fresh build today
 #                gives the sha256 recorded in data/SHA256SUMS. Identity with the
@@ -14,47 +14,46 @@
 #                instruction-flip rows). No generator is rerun.
 #   5. adequacy  the answer-adequacy rows and eval sets: HelpSteer2 (4,866 rows, built from
 #                the download) and the generated items (1,300 rows, data/synthetic/)
-#   6. teacher   frozen Qwen3.5-4B distributions for the multi-step rows (~1 h)
-#   7. parent    the parent, v14's recipe: configs/train-parent.yaml (~5 h)
-#   8. replay    the parent's own distributions for the multi-step rows (~40 min)
-#   9. train     configs/train.yaml, toward those distributions (~6 h on one RTX 3090)
-#  10. calibrate, then eval: held-out short tasks, the multi-step sets (HotpotQA among
+#   6. catchall  v20's catch-all rows, from the short-task corpus
+#   7. distill   v20's teacher file, from the committed Qwen3.5-4B and replay distributions
+#                (`teacher` relabels the multi-step rows with the frozen Qwen3.5-4B instead, ~1 h)
+#   8. base      Qwen/Qwen3.5-2B-Base at training/configs/pointer-2b.yaml's revision, into $BASE
+#   9. convert   v20's training files and teacher into the trainer's rows (training/convert.py), into $ROWS
+#  10. train     training/configs/pointer-2b.yaml on those rows, into $RUN; the checkpoint is $CKPT
+#  11. calibrate, then eval: held-out short tasks, the multi-step sets (HotpotQA among
 #      them as the held-out transfer test), the generated held-out-domain sets and the
 #      two answer-adequacy sets
 #
-# Writes checkpoints/hobson-2b-recipe-parent and $CKPT (default checkpoints/hobson-2b-recipe):
-# `parent` always writes checkpoints/hobson-2b-recipe-parent, where `replay` reads it, and
-# `train` always writes to $CKPT, whatever the configs say.
+# `train` trains v20's data and teacher with v1's settings, without the frozen-KL anchor v20 named, which this
+# trainer does not have (training/README.md says what else differs from v1's trainer): it reproduces no released
+# model. SEED picks the run's seed (default 0); a model is three seeds souped (`python -m training.soup`).
 # Usage: training/recipe.sh STEP [STEP ...], each one of
-#   build fetch multistep generated adequacy catchall teacher distill parent replay train
-#   calibrate eval all
+#   build fetch multistep generated adequacy catchall teacher distill base convert train calibrate eval all
 #
 # Synthetic data is committed; public data is not. data/synthetic/ holds every generated
-# row and every model-produced label the recipes train on, as the exact files used: the
+# row and every model-produced label the recipe trains on, as the exact files used: the
 # generated questions and adequacy items (built from the data/generators/gen_*/ exports by
 # training.data.generated), v20's instruction flips, the frozen Qwen3.5-4B's distributions
 # on the short-task corpus and the multi-step rows, and v14's replay distributions.
 # Public sources are downloaded and converted by `build`, `fetch`, `multistep` and
 # `adequacy`, and v20's catch-all rows are derived from them by `catchall`.
 #
-# Retraining v20 (configs/experiments/v20.yaml) from the repo:
-#   training/recipe.sh build fetch multistep generated adequacy catchall distill
-#   TRAIN_CONFIG=configs/experiments/v20.yaml CKPT=checkpoints/hobson-2b-v20-retrain \
-#     training/recipe.sh train calibrate eval
-# `distill` uses the committed teacher and replay labels, so no parent is trained.
-# NGPU=8 uses eight GPUs: teacher and replay one shard per GPU, then a merge; parent and
-# train under torchrun (training/README.md#training-on-several-gpus). PARENT_CONFIG and TRAIN_CONFIG
-# replace the two training configs.
+# NGPU=N trains on N GPUs of this machine under torchrun (1, 2, 4 or 8: the config's 8 microbatches a step
+# divide over them), and labels with `teacher` one shard per GPU, then a merge.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."  # every path below is relative to the repo root
-CKPT="${CKPT:-checkpoints/hobson-2b-recipe}"
-export PY="${PY:-python}"  # the active environment; the AWS runner sets PY explicitly
+export PY="${PY:-python}"  # the active environment
 export PYTHONUNBUFFERED=1 HF_HUB_DISABLE_PROGRESS_BARS=1
 NGPU="${NGPU:-1}"
-PARENT_CONFIG="${PARENT_CONFIG:-configs/train-parent.yaml}"
-TRAIN_CONFIG="${TRAIN_CONFIG:-configs/train.yaml}"
-# Training/eval/calibrate/data commands moved out of the strands-decider CLI (inference
-# only). Call them with the Python interpreter as `python -m training.<module>`.
+SEED="${SEED:-0}"
+CONFIG="${CONFIG:-training/configs/pointer-2b.yaml}"
+BASE="${BASE:-checkpoints/base-qwen3.5-2b}"
+ROWS="${ROWS:-data/rows-v20}"
+RUN="${RUN:-checkpoints/pointer-2b-seed-$SEED}"
+CKPT="${CKPT:-$RUN/last/checkpoint}"
+# v20's training files, in the order the teacher file's row indices count them
+EXAMPLES=(data/train_v5.jsonl data/multistep_v14.jsonl data/generated_v16p.jsonl data/generated_v18p.jsonl
+  data/adequacy_hs2.jsonl data/adequacy_gen.jsonl data/catchall_v20.jsonl data/flips_v20.jsonl)
 
 # label MODULE ARGS...: one process, or with NGPU > 1 one shard per GPU and then --merge.
 label() {
@@ -66,13 +65,6 @@ label() {
   for i in "${pids[@]}"; do wait "$i" || bad=1; done
   [ "$bad" = 0 ] || { echo "$1: a shard failed" >&2; return 1; }
   "$PY" -m "$@" --merge --num-shards "$NGPU"
-}
-
-fit() {  # fit CONFIG [python -m training.train options]
-  local cfg="$1"; shift
-  if [ "$NGPU" -gt 1 ]; then
-    "$PY" -m torch.distributed.run --standalone --nproc_per_node="$NGPU" -m training.train --config "$cfg" "$@"
-  else "$PY" -u -m training.train --config "$cfg" "$@"; fi
 }
 
 # verify FILE...: stop unless data/SHA256SUMS has an entry for each FILE and FILE has that
@@ -175,20 +167,24 @@ distill() {
     --append data/replay_v14_multistep.jsonl --out data/teacher_v20.jsonl
 }
 
-parent() {
-  verify data/train_v5.jsonl data/multistep_v14.jsonl
-  fit "$PARENT_CONFIG" --output-dir checkpoints/hobson-2b-recipe-parent
+base() {
+  local revision
+  revision="$("$PY" -c 'import sys, yaml; print(yaml.safe_load(open(sys.argv[1]))["revision"])' "$CONFIG")"
+  hf download Qwen/Qwen3.5-2B-Base --revision "$revision" --local-dir "$BASE"
 }
 
-replay() {
+convert() {
   verify data/train_v5.jsonl data/multistep_v14.jsonl
-  label training.data.replay checkpoints/hobson-2b-recipe-parent --src data/multistep_v14.jsonl \
-    --out data/replay_parent_multistep.jsonl --shift-by data/train_v5.jsonl
+  "$PY" -m training.convert --examples "${EXAMPLES[@]}" --teacher 1.0 data/teacher_v20.jsonl \
+    --base "$BASE" --prompt numbered --max-length 4096 --out "$ROWS"
 }
 
 train() {
-  verify data/train_v5.jsonl data/multistep_v14.jsonl
-  fit "$TRAIN_CONFIG" --output-dir "$CKPT"
+  local args=(--config "$CONFIG" --base "$BASE" --train "$ROWS/train.jsonl" --dev "$ROWS/dev.jsonl"
+    --output "$RUN" --seed "$SEED" --resume)
+  if [ "$NGPU" -gt 1 ]; then
+    "$PY" -m torch.distributed.run --standalone --nproc_per_node="$NGPU" -m training.train "${args[@]}"
+  else "$PY" -u -m training.train "${args[@]}"; fi
 }
 
 calibrate() { verify data/holdout_v5_norule.jsonl; "$PY" -u -m training.evaluate calibrate "$CKPT" --data data/holdout_v5_norule.jsonl; }
@@ -215,9 +211,9 @@ evaluate() {
 [ $# -gt 0 ] || set -- all
 for STEP in "$@"; do
   case "$STEP" in
-    build|fetch|multistep|generated|adequacy|catchall|teacher|distill|parent|replay|train|calibrate) "$STEP" ;;
+    build|fetch|multistep|generated|adequacy|catchall|teacher|distill|base|convert|train|calibrate) "$STEP" ;;
     eval) evaluate ;;
-    all) build; fetch; multistep; generated; adequacy; teacher; parent; replay; train; calibrate; evaluate ;;
+    all) build; fetch; multistep; generated; adequacy; catchall; distill; base; convert; train; calibrate; evaluate ;;
     *) echo "unknown step: $STEP" >&2; exit 2 ;;
   esac
 done

@@ -1,10 +1,10 @@
-"""Training on a Gemma 4 torso, end to end on CPU, from tiny random-weight checkpoints on disk.
+"""The pointer head on a Gemma 4 torso, end to end on CPU, from tiny random-weight checkpoints on disk.
 
-The real loader (`from_pretrained_base`: the multimodal class, its text decoder kept,
-`host_embeddings`, `force_bos`), LoRA, gradient checkpointing, the frozen-KL anchor and
-two optimizer steps of `train()`, then `load()` of the saved checkpoint. One torso per
-Gemma 4 layout the configs use: E2B/E4B (per-layer embedding table, KV sharing), the
-12B (`gemma4_unified`) and the 26B-A4B (a mixture-of-experts block in every layer).
+The conversion of v1 examples, then the trainer's pointer head (training/pointer.py) through v1's real loader
+(`from_pretrained_base`: the multimodal class, its text decoder kept, `force_bos`), LoRA, gradient checkpointing and
+two optimizer steps, then `load()` of the saved v1 checkpoint. One torso per Gemma 4 layout v1's releases use: E2B/E4B
+(per-layer embedding table, KV sharing), the 12B (`gemma4_unified`) and the 26B-A4B (a mixture-of-experts block in
+every layer).
 """
 
 from __future__ import annotations
@@ -18,11 +18,10 @@ transformers = pytest.importorskip("transformers")
 if not hasattr(transformers, "Gemma4UnifiedConfig"):
     pytest.skip("this transformers has no Gemma 4 (unified)", allow_module_level=True)
 
-from test_ddp import _examples  # noqa: E402
+from tiny_support import _examples, convert, train_pointer  # noqa: E402
 
-import training.train as T  # noqa: E402
-from strands_decider.modeling import HostEmbedding, StrandsDeciderModel  # noqa: E402
-from training.data.format import write_jsonl  # noqa: E402
+from strands_decider.modeling import StrandsDeciderModel  # noqa: E402
+from training.data.collate import CollatorConfig, SystemOneCollator  # noqa: E402
 
 LAYERS = [
     "sliding_attention",
@@ -94,48 +93,32 @@ def _checkpoint(path, layout, vocab):
     model.save_pretrained(path)
 
 
-@pytest.mark.parametrize("layout", ["e2b", "unified", "moe"])
-def test_gemma4_trains_and_reloads(tmp_path, layout):
-    rows = [ex for ex in _examples(80, seed=1) if ex.n_options <= 9]
-    write_jsonl(str(tmp_path / "train.jsonl"), rows)
-    write_jsonl(str(tmp_path / "val.jsonl"), _examples(10, seed=2))
+def _trained(tmp_path, layout, n_rows=80, steps=2):
+    rows = [ex for ex in _examples(n_rows, seed=1) if ex.n_options <= 9]
     base = tmp_path / "base"
     tok = _tokenizer(base, rows)
     assert tok("x")["input_ids"][0] != tok.bos_token_id  # force_bos has work to do
     _checkpoint(base, layout, len(tok))
-    out = tmp_path / "out"
-    cfg = T.TrainConfig(
-        train_files=[str(tmp_path / "train.jsonl")],
-        val_files=[str(tmp_path / "val.jsonl")],
-        base_model=str(base),
-        pointer_dim=16,
-        lora_targets=GEMMA_TARGETS,
-        force_bos=True,
-        host_embeddings=True,
-        head_dropout=0.0,
-        max_length=2048,
-        micro_batch_size=4,
-        grad_accum=2,
-        max_steps=2,
-        group_by_length=True,
-        length_group_mega=2,
-        log_every=1,
-        eval_every=0,
-        gradient_checkpointing=True,
-        output_dir=str(out),
-    )
-    T.train(cfg)
-    history = json.loads((out / "history.json").read_text())
-    assert history and all(torch.isfinite(torch.tensor(h["loss"])) for h in history if "loss" in h)
+    converted = convert(tmp_path, base, rows, "--force-bos", "--val-fraction", "0.1")
+    out = train_pointer(
+        converted, base, tmp_path / "out", "--force-bos", "--targets", ",".join(GEMMA_TARGETS),
+        "--head-dropout", "0", "--stop-after", str(steps), "--eval-every", "1000",
+    )  # fmt: skip
+    return rows, out
 
-    model = StrandsDeciderModel.load(str(out))
+
+@pytest.mark.parametrize("layout", ["e2b", "unified", "moe"])
+def test_gemma4_trains_and_reloads(tmp_path, layout):
+    rows, out = _trained(tmp_path, layout)
+    log = [json.loads(line) for line in open(out / "train_log.jsonl")]
+    assert len(log) == 2 and all(torch.isfinite(torch.tensor(s["loss"])) for s in log)
+
+    model = StrandsDeciderModel.load(str(out / "last" / "checkpoint"))
     assert model.tokenizer("x")["input_ids"][0] == model.tokenizer.bos_token_id
     torso = getattr(model.torso, "base_model", model.torso)
     torso = getattr(torso, "model", torso)
-    table = getattr(torso, "embed_tokens_per_layer", None)
-    assert (table is not None) == (layout == "e2b")
-    assert table is None or isinstance(table, HostEmbedding)
-    b = T.SystemOneCollator(model.tokenizer, T.CollatorConfig(), train=False)(rows[:3])
+    assert (getattr(torso, "embed_tokens_per_layer", None) is not None) == (layout == "e2b")
+    b = SystemOneCollator(model.tokenizer, CollatorConfig(), train=False)(rows[:3])
     with torch.no_grad():
         lp = model(
             input_ids=b["input_ids"],
@@ -169,30 +152,8 @@ def test_a_token_budget_per_forward_keeps_the_answers(tmp_path):
     from strands_decider.infer import EngineConfig, SystemOneEngine
     from strands_decider.schema import ChoiceQuestion, NoulQuestion, SystemOneRequest
 
-    rows = [ex for ex in _examples(40, seed=1) if ex.n_options <= 9]
-    write_jsonl(str(tmp_path / "train.jsonl"), rows)
-    write_jsonl(str(tmp_path / "val.jsonl"), _examples(10, seed=2))
-    base = tmp_path / "base"
-    tok = _tokenizer(base, rows)
-    _checkpoint(base, "e2b", len(tok))
-    T.train(
-        T.TrainConfig(
-            train_files=[str(tmp_path / "train.jsonl")],
-            val_files=[str(tmp_path / "val.jsonl")],
-            base_model=str(base),
-            pointer_dim=16,
-            lora_targets=GEMMA_TARGETS,
-            force_bos=True,
-            head_dropout=0.0,
-            max_length=2048,
-            micro_batch_size=4,
-            grad_accum=1,
-            max_steps=1,
-            eval_every=0,
-            output_dir=str(tmp_path / "out"),
-        )
-    )
-    model = StrandsDeciderModel.load(str(tmp_path / "out")).eval()
+    rows, out = _trained(tmp_path, "e2b", n_rows=40, steps=1)
+    model = StrandsDeciderModel.load(str(out / "last" / "checkpoint")).eval()
     state = " ".join(ex.state if isinstance(ex.state, str) else "x" for ex in rows[:3])
     qs = {
         f"q{i}": (

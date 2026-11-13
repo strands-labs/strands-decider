@@ -38,7 +38,7 @@ import torch.nn.functional as F
 import typer
 from rich.console import Console
 from rich.table import Table
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Dataset
 
 from strands_decider.confidence import derive_confidence, derive_score_confidence
 from strands_decider.infer import EngineConfig, SystemOneEngine
@@ -51,7 +51,19 @@ from strands_decider.modeling import (
 
 from .data.collate import CollatorConfig, SystemOneCollator
 from .data.format import Example, read_jsonl
-from .train import ExampleDataset
+
+
+class ExampleDataset(Dataset):
+    """A list of examples as the DataLoader the collator batches."""
+
+    def __init__(self, examples: list[Example]):
+        self.examples = examples
+
+    def __len__(self) -> int:
+        return len(self.examples)
+
+    def __getitem__(self, idx: int) -> Example:
+        return self.examples[idx]
 
 
 def partition_examples(examples: list[Example], part: str, *, seed: int = 0) -> list[Example]:

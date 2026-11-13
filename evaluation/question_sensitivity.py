@@ -44,7 +44,7 @@ from strands_decider.modeling import (  # noqa: E402
 from strands_decider.prompting import NOUL_DEFAULT_CRITERIA, NOUL_SLOT_LABELS  # noqa: E402
 from training.data.collate import CollatorConfig, SystemOneCollator  # noqa: E402
 from training.data.format import Example  # noqa: E402
-from training.train import ExampleDataset  # noqa: E402
+from training.evaluate import ExampleDataset  # noqa: E402
 
 GENERIC_NOUL = [[lbl, NOUL_DEFAULT_CRITERIA[lbl]] for lbl in NOUL_SLOT_LABELS]
 

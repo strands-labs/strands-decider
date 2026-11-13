@@ -1,28 +1,17 @@
-"""Multi-GPU training and sharded labelling reproduce the single-process run.
+"""The trainer on several processes trains what one process trains, and v1's sharded labelling writes the
+single-process file.
 
-CPU only: DDP over gloo, a tiny randomly initialised Qwen3 torso with LoRA and a pointer
-head, and a byte-level BPE tokenizer trained in the test, so nothing is downloaded. The
-end-to-end checks launch `train()` under torchrun at world sizes 2 to 8 (8 splits each
-micro-batch across ranks) and compare against a plain process:
-
-  - every optimizer step's gradient (captured where train.py clips it, i.e. after the
-    all-reduce) equals the 1-process gradient, and every rank starts from its weights;
-  - every optimizer step trains on the same rows, rendered identically (same option
-    shuffles and instruction phrasings), as the 1-process step;
-  - the logged loss curve, epoch numbers and validation loss are the 1-process ones.
-
-Those end-to-end tests launch processes and take minutes, so they are marked
-`distributed` and run only with `pytest -m distributed` (`-m ""` runs everything).
-
-This file is also the torchrun worker: `python tests/test_ddp.py worker <cfg.json>`.
+CPU only: a tiny randomly initialised Qwen3 torso with LoRA and the pointer head, and a byte-level BPE tokenizer
+trained in the test, so nothing is downloaded. The trainer test launches `python -m training.train` under torchrun at
+2 ranks (DDP over gloo, rendezvous on 127.0.0.1) and as one process, dropout off (its masks are drawn per rank), and
+compares every step's rows, loss and gradient norm, the dev metrics and the trained weights. It takes about a minute,
+so it is marked `distributed` and runs only with `pytest -m distributed` (`-m ""` runs everything).
 """
 
 from __future__ import annotations
 
 import json
 import os
-import random
-import re
 import socket
 import subprocess
 import sys
@@ -30,300 +19,128 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from safetensors.torch import load_file
+from tiny_support import _examples, _load_tokenizer, _tokenizer_file, tiny_base
 
-from training.data.format import Example, write_jsonl
-from training.distributed import plan_step
-from training.train import TrainConfig
+from training.data.format import write_jsonl
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-WORDS = (
-    "the contract states that payment is due within thirty days of delivery and any "
-    "dispute must be raised in writing before the invoice date which party breached "
-    "clause obligations notice termination refund shipping order customer seller "
-    "question answer evidence claim supported refuted unknown true false option"
-).split()
-
-
-# ---------------------------------------------------------------- fixtures
-
-
-def _text(rng: random.Random, n_words: int) -> str:
-    return " ".join(rng.choice(WORDS) for _ in range(n_words)).capitalize() + "."
-
-
-def _examples(n: int, seed: int) -> list:
-    rng = random.Random(seed)
-    out = []
-    for k in range(n):
-        kind = ("noul", "choice", "score")[k % 3]
-        if kind == "noul":
-            options = [["false", _text(rng, 4)], ["true", _text(rng, 4)]]
-        elif kind == "choice":
-            m = rng.choice([2, 3, 5, 11, 12])  # >9 options: no frozen-KL reference
-            options = [[f"opt{j}", _text(rng, 3)] for j in range(m)]
-        else:
-            m = rng.choice([3, 5])
-            options = [[str(j), _text(rng, 3)] for j in range(m)]
-        out.append(
-            Example(
-                kind=kind,
-                # lengths from a few words to a few hundred, so length grouping matters
-                state=_text(rng, rng.choice([5, 20, 60, 150])),
-                instructions=_text(rng, 6),
-                options=options,
-                label=rng.randrange(len(options)),
-                task=f"task{k % 4}",
-                weight=rng.choice([1.0, 1.0, 0.5, 2.0]),
-                instruction_variants=[_text(rng, 6)] if k % 2 else [],
-            )
-        )
-    return out
-
-
-def _tokenizer_file(path: str, examples: list, vocab_size: int = 400) -> None:
-    from tokenizers import Tokenizer, decoders, models, pre_tokenizers, processors, trainers
-
-    tok = Tokenizer(models.BPE())
-    tok.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
-    tok.decoder = decoders.ByteLevel()
-    tok.post_processor = processors.ByteLevel(trim_offsets=True)
-    trainer = trainers.BpeTrainer(
-        vocab_size=vocab_size,
-        special_tokens=["<pad>", "<eos>"],
-        initial_alphabet=pre_tokenizers.ByteLevel.alphabet(),
-    )
-    from strands_decider.prompting import build_prompt
-
-    texts = [build_prompt(ex.state, ex.to_question())[0] for ex in examples]
-    tok.train_from_iterator(texts, trainer)
-    tok.save(path)
-
-
-def _load_tokenizer(path: str):
-    from transformers import PreTrainedTokenizerFast
-
-    return PreTrainedTokenizerFast(tokenizer_file=path, pad_token="<pad>", eos_token="<eos>")
-
-
-def _qwen3_config(vocab_size: int):
-    from transformers import Qwen3Config
-
-    return Qwen3Config(
-        vocab_size=vocab_size,
-        hidden_size=32,
-        intermediate_size=64,
-        num_hidden_layers=2,
-        num_attention_heads=4,
-        num_key_value_heads=2,
-        head_dim=8,
-        max_position_embeddings=4096,
-        tie_word_embeddings=True,
-    )
-
-
-def _tiny_torso(out: str, tokenizer_path: str) -> str:
-    """Save a tiny random Qwen3 torso, the base model of `_tiny_checkpoint`, to `out`."""
-    from transformers import Qwen3Model
-
-    with torch.random.fork_rng():
-        torch.manual_seed(0)
-        Qwen3Model(_qwen3_config(len(_load_tokenizer(tokenizer_path)))).save_pretrained(out)
-    return out
-
-
-def _load_saved_torso(torso_dir: str):
-    """Stands in for StrandsDeciderModel._load_torso: the torso `_tiny_torso` saved."""
-    from transformers import Qwen3Model
-
-    return lambda config, *a: Qwen3Model.from_pretrained(torso_dir)
-
-
-def _tiny_checkpoint(out: str, tokenizer_path: str, torso_dir: str, seed: int = 0, **over) -> str:
-    """A checkpoint as training saves one, over the torso in `torso_dir`: a LoRA adapter and
-    a pointer head with random weights (lora_B and the head's LayerNorm too, so that each
-    changes the outputs) and fitted temperatures."""
-    from strands_decider.modeling import StrandsDeciderConfig, StrandsDeciderModel
-
-    cfg = StrandsDeciderConfig(
-        **{
-            **dict(
-                base_model="tiny",
-                pointer_dim=16,
-                lora_r=2,
-                lora_alpha=4,
-                lora_dropout=0.0,
-                torch_dtype="float32",
-                max_length=2048,
-                temperature=1.7,
-                temperature_by_kind={"choice": 0.8},
-            ),
-            **over,
-        }
-    )
-    with torch.random.fork_rng():
-        torch.manual_seed(seed)
-        torso = _load_saved_torso(torso_dir)(cfg)
-        model = StrandsDeciderModel(cfg, torso, _load_tokenizer(tokenizer_path))
-        model.attach_lora()
-        with torch.no_grad():
-            for n, p in model.named_parameters():
-                if "lora_" in n or n.startswith("head.norm"):
-                    p.normal_(std=0.5)
-    model.save_pretrained(out)
-    return out
-
-
-def _tiny_model_factory(tokenizer_path: str):
-    """Stands in for StrandsDeciderModel.from_pretrained_base: same construction, tiny torso."""
-    from transformers import Qwen3Model
-
-    from strands_decider.modeling import StrandsDeciderModel
-
-    def build(config, *, device_map=None, attn_implementation=None):
-        tok = _load_tokenizer(tokenizer_path)
-        torso = Qwen3Model(_qwen3_config(len(tok)))  # float32, random after train()'s seed
-        config.lora_dropout = 0.0  # dropout masks cannot match across world sizes
-        model = StrandsDeciderModel(config, torso, tok)
-        if config.use_lora:
-            model.attach_lora()
-        return model
-
-    return build
 
 
 @pytest.fixture(scope="module")
 def corpus(tmp_path_factory):
     d = tmp_path_factory.mktemp("ddp_corpus")
-    train = _examples(150, seed=1)  # 18 micro-batches of 8: 4 steps + 2 left over
+    train = _examples(150, seed=1)
     write_jsonl(str(d / "train.jsonl"), train)
     write_jsonl(str(d / "val.jsonl"), _examples(20, seed=2))
-    # rows for the frozen-KL-only term: no label, at most 9 options
-    write_jsonl(str(d / "klonly.jsonl"), [ex for ex in _examples(80, seed=9) if ex.n_options <= 9])
-    rng = random.Random(3)
-    with open(d / "teacher.jsonl", "w", encoding="utf-8") as fh:
-        for i, ex in enumerate(train):
-            if rng.random() < 0.5:  # only some rows carry a teacher
-                p = [rng.random() + 0.01 for _ in range(ex.n_options)]
-                fh.write(json.dumps({"i": i, "probs": [x / sum(p) for x in p]}) + "\n")
     _tokenizer_file(str(d / "tokenizer.json"), train)
-    _tokenizer_file(str(d / "other_tokenizer.json"), _examples(60, seed=7), vocab_size=300)
     return d
 
 
-# ---------------------------------------------------------------- worker (torchrun)
-
-
-def worker(cfg_path: str) -> None:
-    """One rank: train with the tiny model, recording gradients and trained rows."""
-    torch.set_num_threads(1)
-    import training.train as T
-    from strands_decider.modeling import StrandsDeciderModel
-    from training.data.collate import SystemOneCollator
-
-    with open(cfg_path, encoding="utf-8") as fh:
-        spec = json.load(fh)
-    StrandsDeciderModel.from_pretrained_base = staticmethod(
-        _tiny_model_factory(spec.pop("tokenizer"))
-    )
-    torso_dir = spec.pop("torso", None)
-    if torso_dir:  # init_from: the base model of the checkpoint
-        StrandsDeciderModel._load_torso = staticmethod(_load_saved_torso(torso_dir))
-    rank = int(os.environ.get("RANK", "0"))
-
-    grads, init = [], []
-    rows = [[]]  # per optimizer step, the rows this rank collated: (unpadded ids, label)
-    real_clip = torch.nn.utils.clip_grad_norm_
-
-    def clip(params, max_norm, *a, **k):  # called once per optimizer step
-        params = list(params)
-        if not grads:  # before the first optimizer step: the initial trainable weights
-            init.extend(p.detach().clone() for p in params)
-        grads.append([p.grad.detach().clone() for p in params])
-        rows.append([])
-        return real_clip(params, max_norm, *a, **k)
-
-    torch.nn.utils.clip_grad_norm_ = clip
-
-    real_call = SystemOneCollator.__call__
-
-    def call(self, batch):
-        out = real_call(self, batch)
-        if self.train:
-            rows[-1].extend(
-                [
-                    (tuple(ids[m.bool()].tolist()), int(lab))
-                    for ids, m, lab in zip(
-                        out["input_ids"], out["attention_mask"], out["labels"], strict=True
-                    )
-                ]
-            )
-        return out
-
-    SystemOneCollator.__call__ = call
-    if spec.pop("skew_rank1", False) and rank == 1:  # this rank reads a longer last row
-        real_load = T.load_examples
-
-        def skewed(files):
-            rows = real_load(files)
-            rows[-1].state += " (edited while the run started)"
-            return rows
-
-        T.load_examples = skewed
-    cfg = TrainConfig(**spec)
-    T.train(cfg)
-    torch.save(
-        {"grads": grads, "rows": rows, "init": init}, os.path.join(cfg.output_dir, f"rank{rank}.pt")
-    )
+# ---------------------------------------------------------------- the trainer on several processes
 
 
 def _free_port() -> int:
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
+        return int(s.getsockname()[1])
 
 
-def _run(corpus, tmp_path, world: int, *, expect_ok: bool = True, **over) -> dict:
-    out = tmp_path / f"w{world}"
-    spec = dict(
-        train_files=[str(corpus / "train.jsonl")],
-        val_files=[str(corpus / "val.jsonl")],
-        base_model="tiny",
-        pointer_dim=16,
-        teacher_file=str(corpus / "teacher.jsonl"),
-        teacher_weight=1.0,
-        head_dropout=0.0,
-        max_length=2048,
-        micro_batch_size=8,
-        grad_accum=4,
-        epochs=2,
-        group_by_length=True,
-        length_group_mega=2,
-        log_every=1,
-        eval_every=4,
-        output_dir=str(out),
-        seed=0,
-        tokenizer=str(corpus / "tokenizer.json"),
-    )
-    spec.update(over)
-    tmp_path.mkdir(parents=True, exist_ok=True)
-    cfg_path = tmp_path / f"cfg{world}.json"
-    cfg_path.write_text(json.dumps(spec))
-    # src/ for strands_decider, the root for the training package (not in the wheel)
+def _env() -> dict:
     env = {
         **os.environ,
         "PYTHONPATH": os.pathsep.join([os.path.join(ROOT, "src"), ROOT]),
         "OMP_NUM_THREADS": "1",
         "TOKENIZERS_PARALLELISM": "false",
     }
-    for k in ("RANK", "LOCAL_RANK", "WORLD_SIZE", "MASTER_ADDR", "MASTER_PORT"):
+    for k in ("RANK", "LOCAL_RANK", "WORLD_SIZE", "LOCAL_WORLD_SIZE", "MASTER_ADDR", "MASTER_PORT"):
         env.pop(k, None)
-    me = os.path.abspath(__file__)
-    if world == 1:  # a plain process, not torchrun: the unchanged single-GPU path
-        cmd = [sys.executable, me, "worker", str(cfg_path)]
+    if sys.platform == "darwin":
+        env.setdefault("GLOO_SOCKET_IFNAME", "lo0")
+    return env
+
+
+@pytest.fixture(scope="module")
+def rows(corpus, tmp_path_factory):
+    """The corpus converted for the pointer head on the tiny base."""
+    d = tmp_path_factory.mktemp("ddp_rows")
+    base = tiny_base(d / "base", str(corpus / "tokenizer.json"))
+    examples = [*_examples(150, seed=1)]
+    for ex in examples:
+        ex.weight = 1.0
+    write_jsonl(str(d / "train.jsonl"), examples)
+    from training import convert
+
+    convert.main(
+        [
+            "--examples",
+            str(d / "train.jsonl"),
+            "--base",
+            str(base),
+            "--out",
+            str(d / "rows"),
+            "--prompt",
+            "numbered",
+            "--val-fraction",
+            "0.1",
+            "--max-length",
+            "2048",
+        ]
+    )
+    return base, d / "rows"
+
+
+def _train(base, rows, out, world: int) -> None:
+    flags = [
+        "--base",
+        str(base),
+        "--base-model",
+        str(base),
+        "--revision",
+        "0" * 40,
+        "--train",
+        str(rows / "train.jsonl"),
+        "--dev",
+        str(rows / "dev.jsonl"),
+        "--output",
+        str(out),
+        "--head",
+        "pointer",
+        "--prompt",
+        "numbered",
+        "--rank",
+        "2",
+        "--alpha",
+        "4",
+        "--dropout",
+        "0",
+        "--pointer-dim",
+        "16",
+        "--head-dropout",
+        "0",
+        "--rows-per-step",
+        "16",
+        "--batch-size",
+        "4",
+        "--token-budget",
+        "8192",
+        "--max-length",
+        "2048",
+        "--epochs",
+        "2",
+        "--eval-every",
+        "4",
+        "--save-every",
+        "1000",
+        "--seed",
+        "3",
+        "--cpu-threads",
+        "1",
+    ]
+    if world == 1:
+        cmd = [sys.executable, "-m", "training.train", *flags]
     else:
-        # Static rendezvous on loopback: --standalone resolves the hostname, which a
-        # laptop off its network may not.
+        # Static rendezvous on loopback: --standalone resolves the hostname, which a laptop off its network may not.
         cmd = [
             sys.executable,
             "-m",
@@ -332,181 +149,56 @@ def _run(corpus, tmp_path, world: int, *, expect_ok: bool = True, **over) -> dic
             f"--nproc_per_node={world}",
             "--master-addr=127.0.0.1",
             f"--master-port={_free_port()}",
-            me,
-            "worker",
-            str(cfg_path),
+            "-m",
+            "training.train",
+            *flags,
         ]
-        if sys.platform == "darwin":
-            env.setdefault("GLOO_SOCKET_IFNAME", "lo0")
-    res = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=300)
-    if not expect_ok:
-        assert res.returncode != 0
-        return {"stdout": res.stdout, "stderr": res.stderr}
+    res = subprocess.run(cmd, env=_env(), cwd=ROOT, capture_output=True, text=True, timeout=600)
     assert res.returncode == 0, res.stdout[-3000:] + res.stderr[-5000:]
-    with open(out / "history.json", encoding="utf-8") as fh:
-        history = json.load(fh)
-    ranks = [torch.load(out / f"rank{r}.pt") for r in range(world)]
-    return {"history": history, "ranks": ranks, "stdout": res.stdout}
 
 
-def _rows_per_step(ranks: list) -> list:
-    """For each optimizer step, the sorted rows all ranks trained on in it."""
-    n = len(ranks[0]["grads"])
-    return [sorted(row for r in ranks for row in r["rows"][s]) for s in range(n)]
-
-
-def _epoch_steps(stdout: str) -> list:
-    return re.findall(r"epoch (\d+) step (\d+)/", stdout)
-
-
-def _assert_same_run(ref: dict, got: dict, world: int, *, rtol: float = 1e-4) -> None:
-    # 1. composition and rendering of every optimizer step
-    n_steps = len(ref["ranks"][0]["grads"])
-    assert all(len(r["grads"]) == n_steps for r in got["ranks"])
-    assert _rows_per_step(got["ranks"]) == _rows_per_step(ref["ranks"])
-    assert all(len(rows) == 32 for rows in _rows_per_step(ref["ranks"]))
-    # 2. initial weights identical on every rank and to 1-process; gradients after the
-    #    all-reduce identical on every rank and equal to 1-process
-    for r in got["ranks"]:
-        assert all(
-            torch.equal(x, y) for x, y in zip(r["init"], ref["ranks"][0]["init"], strict=True)
-        )
-        assert all(
-            torch.equal(x, y)
-            for a, b in zip(r["grads"], got["ranks"][0]["grads"], strict=True)
-            for x, y in zip(a, b, strict=True)
-        )
-    g_ref = ref["ranks"][0]["grads"]
-    for s, (a, b) in enumerate(zip(got["ranks"][0]["grads"], g_ref, strict=True)):
-        num = sum(float((x - y).pow(2).sum()) for x, y in zip(a, b, strict=True)) ** 0.5
-        den = sum(float(y.pow(2).sum()) for y in b) ** 0.5
-        assert num <= rtol * den, f"step {s + 1}: relative gradient error {num / den:.2e}"
-    # 3. logged epoch and step numbers, loss curve, KL terms and validation loss
-    assert _epoch_steps(got["stdout"]) == _epoch_steps(ref["stdout"])
-    assert [h.keys() for h in got["history"]] == [h.keys() for h in ref["history"]]
-    for h, g in zip(ref["history"], got["history"], strict=True):
-        for k, v in h.items():
-            assert g[k] == pytest.approx(v, rel=rtol, abs=1e-7), (h["step"], k)
-
-
-@pytest.fixture(scope="module")
-def plain_run(corpus, tmp_path_factory):
-    return _run(corpus, tmp_path_factory.mktemp("w1"), 1)
+def _lines(path):
+    return [json.loads(line) for line in open(path, encoding="utf-8")]
 
 
 @pytest.mark.distributed
-@pytest.mark.parametrize("world", [2, 3, 4, 8])
-def test_ddp_matches_single_process(corpus, plain_run, tmp_path, world):
-    got = _run(corpus, tmp_path, world)
-    # 18 micro-batches an epoch, 4 whole steps each (the schedule's count), over 2
-    # epochs: 8 steps, step 5 straddling the epoch boundary (logged as epoch 1).
-    assert len(plain_run["ranks"][0]["grads"]) == 8
-    assert [e for e, _ in _epoch_steps(plain_run["stdout"])] == list("00001111")
-    _assert_same_run(plain_run, got, world)
+def test_two_ranks_train_what_one_process_trains(rows, tmp_path):
+    base, converted = rows
+    _train(base, converted, tmp_path / "one", 1)
+    _train(base, converted, tmp_path / "two", 2)
+    one, two = (
+        _lines(tmp_path / "one" / "train_log.jsonl"),
+        _lines(tmp_path / "two" / "train_log.jsonl"),
+    )
+    assert [s["rows"] for s in one] == [s["rows"] for s in two] and len(one) > 4
+    for a, b in zip(one, two, strict=True):
+        assert a["epoch"] == b["epoch"] and a["tokens"] == b["tokens"]
+        assert b["loss"] == pytest.approx(a["loss"], rel=1e-4)
+        assert b["grad_norm"] == pytest.approx(a["grad_norm"], rel=1e-3)
+    e1, e2 = (
+        _lines(tmp_path / "one" / "eval_log.jsonl"),
+        _lines(tmp_path / "two" / "eval_log.jsonl"),
+    )
+    assert [e["step"] for e in e1] == [e["step"] for e in e2]
+    assert e2[-1]["raw"]["nll"] == pytest.approx(e1[-1]["raw"]["nll"], rel=1e-3)
+    for name in ("head.safetensors", "lora/adapter_model.safetensors"):
+        w1 = load_file(str(tmp_path / "one" / "last" / "checkpoint" / name))
+        w2 = load_file(str(tmp_path / "two" / "last" / "checkpoint" / name))
+        for k in w1:
+            if k == "k.bias":
+                # It adds the same to every option's logit, so its gradient is zero up to rounding, and Adam turns
+                # that rounding into steps of full size: a random walk on any GPU count, which no logit sees.
+                continue
+            torch.testing.assert_close(w2[k], w1[k], rtol=1e-4, atol=1e-6)
 
 
-@pytest.mark.distributed
-@pytest.mark.parametrize(
-    "over",
-    [
-        dict(ema_decay=0.9, save_every=3, val_split_seed=5, val_files=[]),  # EMA; a fixed split
-        dict(group_by_length=False, eval_every=3),  # epoch 2's order is drawn after evals
-        dict(
-            epochs=1, max_steps=10, eval_every=3, save_every=2
-        ),  # runs out of data; saves on rank 0
-        dict(kl_direction="reverse"),  # both KL terms reversed
-    ],
-)
-def test_ddp_matches_single_process_variants(corpus, tmp_path, over):
-    ref = _run(corpus, tmp_path / "a", 1, **over)
-    if "max_steps" in over:  # the 2 left-over micro-batches never step
-        assert len(ref["ranks"][0]["grads"]) == 4
-    _assert_same_run(ref, _run(corpus, tmp_path / "b", 4, **over), 4)
+def test_a_world_across_machines_is_refused(monkeypatch):
+    from training import distributed
 
-
-@pytest.mark.distributed
-def test_ddp_init_from_matches_single_process(corpus, tmp_path):
-    """init_from a trained checkpoint."""
-    tok = str(corpus / "tokenizer.json")
-    torso = _tiny_torso(str(tmp_path / "torso"), tok)
-    ckpt = _tiny_checkpoint(str(tmp_path / "ckpt"), tok, torso)
-    over = dict(init_from=ckpt, torso=torso, epochs=1)
-    ref = _run(corpus, tmp_path / "a", 1, **over)
-    assert f"continuing from {ckpt}" in ref["stdout"]
-    _assert_same_run(ref, _run(corpus, tmp_path / "b", 3, **over), 3)
-
-
-@pytest.mark.distributed
-def test_ddp_frozen_torso(corpus, plain_run, tmp_path):
-    """Head-only training: no checkpointing, DDP over a torso with no trainable parameter."""
-    ref = _run(corpus, tmp_path / "a", 1, freeze_torso=True)
-    got = _run(corpus, tmp_path / "b", 2, freeze_torso=True)
-    assert len(ref["ranks"][0]["init"]) < len(plain_run["ranks"][0]["init"])  # no LoRA
-    _assert_same_run(ref, got, 2)
-
-
-@pytest.mark.distributed
-def test_ddp_refuses_ranks_that_hold_different_data(corpus, tmp_path):
-    res = _run(corpus, tmp_path, 2, expect_ok=False, skew_rank1=True)
-    assert "ranks hold different training data" in res["stdout"] + res["stderr"]
-
-
-def test_train_refuses_more_ranks_than_rows(monkeypatch):
-    from training.train import train
-
-    monkeypatch.setenv("WORLD_SIZE", "33")
-    with pytest.raises(ValueError, match="exceeds the 32 rows"):
-        train(TrainConfig(micro_batch_size=8, grad_accum=4))
-
-
-# ---------------------------------------------------------------- unit checks
-
-
-def _step_batches(seed: int = 0):
-    """Micro-batches of a v17-like corpus: mostly short rows, some long documents."""
-    from training.data.sampling import LengthGroupedBatchSampler
-
-    rng = random.Random(seed)
-    lengths = [
-        rng.choice([rng.randrange(150, 900)] * 9 + [rng.randrange(2000, 9000)]) for _ in range(4000)
-    ]
-    return lengths, LengthGroupedBatchSampler(lengths, 8, mega=50, seed=seed).batches(0)
-
-
-@pytest.mark.parametrize("world", [2, 3, 4, 5, 8, 16, 32])
-def test_plan_shares_out_exactly_the_steps_rows(world):
-    """Every row of the step exactly once; each rank >= 1 slice; no slice > a micro-batch."""
-    lengths, batches = _step_batches()
-    for s in range(0, len(batches) // 4, 7):
-        step = batches[4 * s : 4 * s + 4]
-        plan = plan_step(step, lengths, world)
-        assert len(plan) == world and all(plan)
-        seen = sorted((j, i) for p in plan for j, a, b in p for i in range(a, b))
-        assert seen == [(j, i) for j in range(4) for i in range(8)]
-        assert all(0 < b - a <= 8 for p in plan for _, a, b in p)
-        assert plan == plan_step(step, lengths, world)  # deterministic
-
-
-def test_plan_balances_better_than_even_halves():
-    """Slowest rank's padded load, planned vs the fixed layout (W=8: halves of each batch).
-
-    Documents the intent of the planner; the 0.8 threshold is a heuristic and may need
-    retuning with FORWARD_OVERHEAD.
-    """
-    from training.distributed import FORWARD_OVERHEAD
-
-    lengths, batches = _step_batches()
-
-    def load(rows):
-        return len(rows) * max(lengths[i] for i in rows) + FORWARD_OVERHEAD
-
-    planned, halves = [], []
-    for s in range(len(batches) // 4):
-        step = batches[4 * s : 4 * s + 4]
-        plan = plan_step(step, lengths, 8)
-        planned.append(max(sum(load(step[j][a:b]) for j, a, b in p) for p in plan))
-        halves.append(max(load(b[h : h + 4]) for b in step for h in (0, 4)))
-    assert sum(planned) < 0.8 * sum(halves), sum(planned) / sum(halves)
+    monkeypatch.setenv("WORLD_SIZE", "16")
+    monkeypatch.setenv("LOCAL_WORLD_SIZE", "8")
+    with pytest.raises(SystemExit, match="one machine"):
+        distributed.Process()
 
 
 def test_skipping_rows_matches_collating_them(corpus):
@@ -640,7 +332,3 @@ def test_replay_shards_merge_to_the_single_process_file(corpus, tmp_path, monkey
         assert open(out).read() == open(tmp_path / "one.jsonl").read()
     first = json.loads(open(tmp_path / "one.jsonl").readline())
     assert first["i"] == 20  # offset past the --shift-by file's 20 rows
-
-
-if __name__ == "__main__" and sys.argv[1:2] == ["worker"]:
-    worker(sys.argv[2])

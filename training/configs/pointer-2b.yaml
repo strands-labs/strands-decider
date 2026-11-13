@@ -1,0 +1,35 @@
+# v1's pointer head on Qwen3.5 2B: the settings of v1's released 2B (configs/v1/strands-decider-2B-qwen3.5-v1-2610.yaml)
+# in this trainer's terms. Flags given to training.train override any of them. training/README.md, "The pointer head",
+# lists what differs from v1's trainer.
+head: pointer
+prompt: numbered
+base_model: Qwen/Qwen3.5-2B-Base
+revision: b1485b2fa6dfa1287294f269f5fb618e03d52d7c
+tokenizer_sha256: fe000e3ed39ed12b8d2481d527d44f93c65d37e87645d2dcc80d1bf9d50d2927
+# The base's identity: sha256 of its config.json, tokenizer.json and tensor headers (training/merge.py base_digest)
+base_sha256: 9c5b0e34456adbe996b15019569ebdca3eaebb7997441bd052aa5afc7459521c
+# LoRA on the attention and MLP projections, and on the Gated DeltaNet layers' projections
+targets: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj, in_proj_qkv, in_proj_z, in_proj_a, in_proj_b,
+          out_proj]
+rank: 16
+alpha: 32
+dropout: 0.05
+pointer_dim: 256
+head_dropout: 0.05
+lr: 1.0e-4                   # the adapter
+head_lr: 1.0e-3              # the pointer head, which starts random
+weight_decay: 0.01           # the head's matrices only
+warmup_ratio: 0.03
+lr_floor: 0.0                # v1's cosine ends at zero
+max_grad_norm: 1.0
+brier_weight: 0.0
+epochs: 1
+rows_per_step: 32            # 8 microbatches of 4 rows: the same steps on 1, 2, 4 or 8 GPUs
+batch_size: 4
+token_budget: 16384
+max_length: 4096             # also the serving window the checkpoint records
+reverse_score_prob: 0.5
+save_every: 500
+eval_every: 500
+# The seeds of one model: one run per seed, souped with training.soup, then calibrated (training/README.md).
+seeds: [0, 1, 2]
