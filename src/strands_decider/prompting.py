@@ -21,6 +21,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from .confidence import derive_confidence, derive_score_confidence
 from .schema import (
     Answer,
     ChoiceAnswer,
@@ -31,8 +32,6 @@ from .schema import (
     Question,
     ScoreAnswer,
     ScoreQuestion,
-    derive_confidence,
-    derive_score_confidence,
 )
 
 if TYPE_CHECKING:

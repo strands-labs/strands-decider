@@ -2,7 +2,6 @@
 
 They live here, not in schema.py, so that code that cannot import pydantic (the torch-free
 core, `strands_decider.core`) computes confidence with the same functions as the v1 engines.
-schema.py re-exports both names.
 """
 
 from __future__ import annotations
