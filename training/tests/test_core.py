@@ -7,6 +7,7 @@ import json
 import pytest
 import torch
 
+from strands_decider.confidence import derive_confidence
 from strands_decider.modeling import (
     PointerHead,
     StrandsDeciderConfig,
@@ -27,7 +28,6 @@ from strands_decider.schema import (
     NoulQuestion,
     ScoreQuestion,
     SystemOneRequest,
-    derive_confidence,
 )
 from training.data.collate import CollatorConfig, SystemOneCollator
 from training.data.format import Example, split_examples
@@ -531,7 +531,7 @@ def test_score_confidence_reaches_one_under_smoothing():
     Max-probability confidence caps at (L*0.9-1)/(L-1) -- 0.68 for three levels --
     so the documented ">=0.9 act automatically" band was unreachable by construction.
     """
-    from strands_decider.schema import derive_score_confidence
+    from strands_decider.confidence import derive_score_confidence
 
     for n in (3, 4, 5):
         d = _smoothed(n, gold=1)
@@ -543,7 +543,7 @@ def test_score_confidence_reaches_one_under_smoothing():
 def test_score_confidence_adjacent_beats_bimodal():
     """Mass on neighbouring levels is precision, not doubt; mass at both ends is
     doubt of the worst kind, because the expected value falls where nothing is."""
-    from strands_decider.schema import derive_score_confidence
+    from strands_decider.confidence import derive_score_confidence
 
     adjacent = [0.0, 0.5, 0.5, 0.0, 0.0]
     uniform = [0.2] * 5
@@ -560,14 +560,14 @@ def test_score_confidence_adjacent_beats_bimodal():
 
 
 def test_score_confidence_one_hot_is_one_and_extremes_zero():
-    from strands_decider.schema import derive_score_confidence
+    from strands_decider.confidence import derive_score_confidence
 
     assert derive_score_confidence([0.0, 1.0, 0.0]) == pytest.approx(1.0)
     assert derive_score_confidence([0.5, 0.0, 0.5]) == pytest.approx(0.0, abs=1e-9)
 
 
 def test_score_confidence_is_bounded():
-    from strands_decider.schema import derive_score_confidence
+    from strands_decider.confidence import derive_score_confidence
 
     for d in ([1.0, 0.0], [0.3, 0.4, 0.3], [0.0] * 4 + [1.0], _smoothed(5, 0)):
         c = derive_score_confidence(d, ordinal_smoothing=0.1)

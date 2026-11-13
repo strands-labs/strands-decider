@@ -221,7 +221,7 @@ encoding rather than guess whether it has a batch dimension.
 ```
 src/strands_decider/              -- published package (inference only)
   schema.py       wire types
-  confidence.py   the confidence formulas, without dependencies (schema.py re-exports them)
+  confidence.py   the confidence formulas, without dependencies
   prompting.py    state/question rendering; slot <-> option binding
   modeling.py     LLM torso (Qwen3 or hybrid Qwen3.5) + pointer (or slot) readout;
                   masked softmax; KL reference; is_hybrid

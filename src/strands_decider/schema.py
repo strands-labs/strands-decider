@@ -23,10 +23,6 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
-# Re-exported: prompting.py and callers import them from here.
-from .confidence import derive_confidence as derive_confidence
-from .confidence import derive_score_confidence as derive_score_confidence
-
 # A `state` or `instructions` may be a bare string, or structured data that we
 # render deterministically (see strands_decider.prompting.render_content).
 Content = str | dict[str, Any] | list[Any]
