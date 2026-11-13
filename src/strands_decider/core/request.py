@@ -202,10 +202,10 @@ def _as_mapping(request: Any) -> Any:
 
 def has_images(request: Any) -> bool:
     """Whether the request carries a non-empty `images` list, before anything is checked.
-    A runtime that cannot take images checks the rest of the request first
-    (`parse_request(request, images=False)`), then refuses one with images before it decodes
-    them, as v1's text-only engine does after v1's validation (`runtime.evaluate` does so for
-    a checkpoint whose `inputs` lack "image")."""
+    For a checkpoint whose `inputs` lack "image", `runtime.evaluate` checks the rest of the
+    request first (`parse_request(request, images=False)`), then refuses one with images
+    before it decodes them, as v1's text-only engine does after v1's validation. A backend
+    with no image path refuses later, from `forward` (docs/spec.md, section 11.1)."""
     request = _as_mapping(request)
     return (
         isinstance(request, Mapping)
@@ -224,9 +224,8 @@ def parse_request(request: RequestJSON, *, images: bool = True) -> Request:
     4096 x 4096 pixels, read from its header (`images.decode_image`), every check of one
     image before the next image's. Every other check comes first, as v1 validates the
     request before its engine looks at the images. With `images=False` the images are
-    neither counted nor decoded, and the request returned has none: a runtime that cannot
-    take images checks the rest so, and then refuses the images (`runtime.evaluate` does so
-    for a checkpoint whose `inputs` lack "image")."""
+    neither counted nor decoded, and the request returned has none. `runtime.evaluate` checks
+    a request so for a checkpoint whose `inputs` lack "image", and then refuses its images."""
     request = _as_mapping(request)
     if not isinstance(request, Mapping):
         raise ValueError("a request must be an object")
