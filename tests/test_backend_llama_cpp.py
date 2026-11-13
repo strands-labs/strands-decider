@@ -274,7 +274,7 @@ def _state_with(images: list[bytes], text=(7, 8, 9)) -> tuple[list[int], list[Re
 def test_a_text_backend(shim):
     backend = LlamaCppBackend("lib.so", "model.gguf", threads=3)
     assert shim.loaded == (b"model.gguf", 3)
-    assert backend.outputs == HIDDEN and backend.inputs == ("text",)
+    assert backend.outputs == HIDDEN and not backend.has_vision
     out = backend.forward([2, 5, 6], [[20, 21], [22]])
     assert out.shape == (2, N_EMBD) and out.dtype == np.float32
     (call,) = shim.calls
@@ -283,7 +283,7 @@ def test_a_text_backend(shim):
     assert backend.last_timings == {"context_ms": 0.0, "state_ms": 1.0, "question_ms": [2.0, 3.0]}
     png = image_bytes("checker-64x48.png")
     state, images = _state_with([png])
-    with pytest.raises(RuntimeError, match="no vision tower"):
+    with pytest.raises(ValueError, match="no vision tower"):
         backend.forward(state, [[1]], images)
     with pytest.raises(RuntimeError, match="none of them empty"):
         backend.forward([1], [[]])
@@ -313,7 +313,7 @@ def test_a_vision_backend_needs_a_good_processor_config(shim, tmp_path, processo
     backend = LlamaCppBackend(
         "lib.so", "m.gguf", mmproj="mm.gguf", processor_config=processor_config
     )
-    assert backend.inputs == ("text", "image") and shim.vision == (b"mm.gguf", 280)
+    assert backend.has_vision and shim.vision == (b"mm.gguf", 280)
 
 
 def test_images_reach_the_shim_prepared_and_in_order(shim, processor_config):
