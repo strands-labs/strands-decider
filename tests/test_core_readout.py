@@ -47,6 +47,7 @@ from strands_decider.core import (
     round_to_bf16,
     softcap,
 )
+from strands_decider.core.request import NO_VISION
 
 C = 30.0  # Gemma 4's final_logit_softcapping
 
@@ -946,21 +947,21 @@ T = 0.8  # a checkpoint temperature other than 1, so that applying it twice woul
 
 class _FakeBackend:
     """Returns, for each question, the stage `outputs` of a decoder whose hidden state
-    points at one code: with the identity as readout, `W h` is 50 on that code only. With
-    `images`, it says it has an image path and records the images it is given."""
+    points at one code: with the identity as readout, `W h` is 50 on that code only. It
+    records the images it is given; with `images=False` it has no image path and refuses
+    them, as a backend without a vision encoder does."""
 
     def __init__(
-        self, picks: dict[tuple[int, ...], int], outputs: str = HIDDEN, *, images: bool = False
+        self, picks: dict[tuple[int, ...], int], outputs: str = HIDDEN, *, images: bool = True
     ):
         self.picks, self.outputs, self.calls = picks, outputs, []
-        if images:
-            self.inputs = ("text", "image")
+        self.vision = images
         self.images: list = []
 
-    def forward(self, state, questions, **kw):
-        if kw:
-            assert set(kw) == {"images"} and getattr(self, "inputs", ()) == ("text", "image")
-            self.images.append(kw["images"])
+    def forward(self, state, questions, images=()):
+        if images and not self.vision:
+            raise ValueError(NO_VISION)
+        self.images.append(images)
         self.calls.append((state, questions))
         rows = np.zeros((len(questions), 255))
         for i, q in enumerate(questions):
@@ -989,7 +990,8 @@ class _DecoderBackend:
     def __init__(self, hidden: dict[tuple[int, ...], np.ndarray], weight, outputs: str):
         self.hidden, self.weight, self.outputs, self.calls = hidden, weight, outputs, []
 
-    def forward(self, state, questions):
+    def forward(self, state, questions, images=()):
+        assert images == ()
         self.calls.append((state, questions))
         h = np.stack([self.hidden[tuple(q)] for q in questions])
         if self.outputs == HIDDEN:
@@ -1098,7 +1100,7 @@ def test_evaluate_checks_the_configuration_before_the_forward_pass():
     class Untouchable:
         outputs = HIDDEN
 
-        def forward(self, state, questions):
+        def forward(self, state, questions, images=()):
             raise AssertionError("forward ran before the configuration was checked")
 
     cases = [
@@ -1128,7 +1130,7 @@ def test_evaluate_hands_a_backend_the_images_with_their_spans():
     cfg = _config(token_ids=[tok.token_to_id(c) for c in CODES])
     rendered = render(IMAGE_REQUEST, tok, PLAIN)
     ids = {n: q.question_ids for n, q in rendered.questions.items()}
-    backend = _FakeBackend({ids["n"]: 1, ids["c"]: 0}, images=True)
+    backend = _FakeBackend({ids["n"]: 1, ids["c"]: 0})
     resp = evaluate(IMAGE_REQUEST, tok, Readout(np.eye(255, dtype=np.float32), C), cfg, backend)
     ((state, _),) = backend.calls
     (images,) = backend.images
@@ -1141,44 +1143,36 @@ def test_evaluate_hands_a_backend_the_images_with_their_spans():
     assert [state[i.start : i.end] for i in images] == [[soft] * 266, [soft] * 266]
     assert resp["answers"]["c"]["choice"] == "x" and resp["answers"]["n"]["noul"] > 0.99
     assert resp["usage"]["input_tokens"] == rendered.input_tokens
-    # A text request reaches the same backend without `images`.
+    # A text request reaches the same backend with no images.
     text = {k: v for k, v in IMAGE_REQUEST.items() if k != "images"}
     text_ids = {n: q.question_ids for n, q in render(text, tok, PLAIN).questions.items()}
-    backend = _FakeBackend({text_ids["n"]: 1, text_ids["c"]: 0}, images=True)
+    backend = _FakeBackend({text_ids["n"]: 1, text_ids["c"]: 0})
     evaluate(text, tok, Readout(np.eye(255, dtype=np.float32), C), cfg, backend)
-    assert backend.images == [] and len(backend.calls) == 1
+    assert backend.images == [()] and len(backend.calls) == 1
 
 
 def test_evaluate_refuses_images_without_an_image_path():
-    """Refused before the images are decoded, as v1's text-only engine refuses them: when
-    the checkpoint's `inputs` lack "image", and when the backend's do (or it has none)."""
-    from strands_decider.core.request import NO_VISION
-
+    """A checkpoint whose `inputs` lack "image" has its image requests refused before the
+    images are decoded, as v1's text-only engine refuses them. A backend without an image
+    path refuses them from `forward`, after the images' headers are checked."""
     tok = toy_tokenizer()
     ids = [tok.token_to_id(c) for c in CODES]
     readout = Readout(np.eye(255, dtype=np.float32), C)
     bad = {**IMAGE_REQUEST, "images": ["not base64!"]}
     for req in (IMAGE_REQUEST, bad):
+        backend = _FakeBackend({})
         with pytest.raises(ValueError, match="does not take images") as e:
-            evaluate(
-                req,
-                tok,
-                readout,
-                _config(token_ids=ids, inputs=["text"]),
-                _FakeBackend({}, images=True),
-            )
+            evaluate(req, tok, readout, _config(token_ids=ids, inputs=["text"]), backend)
         assert str(e.value).endswith('its decision_config.json inputs are ["text"]')
-        for backend in (_FakeBackend({}), _FakeBackend({}, images=False)):
-            with pytest.raises(ValueError) as e:
-                evaluate(req, tok, readout, _config(token_ids=ids), backend)
-            assert str(e.value) == NO_VISION
-    text_only = _FakeBackend({})
-    text_only.inputs = ("text",)
-    with pytest.raises(ValueError, match="no vision tower"):
+        assert backend.calls == []
+    text_only = _FakeBackend({}, images=False)
+    with pytest.raises(ValueError) as e:
         evaluate(IMAGE_REQUEST, tok, readout, _config(token_ids=ids), text_only)
-    # With an image path, a bad image is the request's error.
-    with pytest.raises(ValueError, match="image is not valid base64"):
-        evaluate(bad, tok, readout, _config(token_ids=ids), _FakeBackend({}, images=True))
+    assert str(e.value) == NO_VISION
+    # A checkpoint that takes images checks them first, whatever the backend.
+    for backend in (_FakeBackend({}), _FakeBackend({}, images=False)):
+        with pytest.raises(ValueError, match="image is not valid base64"):
+            evaluate(bad, tok, readout, _config(token_ids=ids), backend)
 
 
 def test_a_malformed_request_with_images_is_refused_for_what_is_malformed():
@@ -1189,8 +1183,8 @@ def test_a_malformed_request_with_images_is_refused_for_what_is_malformed():
     readout = Readout(np.eye(255, dtype=np.float32), C)
     bad = {**IMAGE_REQUEST, "questions": {"q": {"type": "noul"}}}
     for cfg, backend in (
-        (_config(token_ids=ids, inputs=["text"]), _FakeBackend({}, images=True)),
-        (_config(token_ids=ids), _FakeBackend({})),
+        (_config(token_ids=ids, inputs=["text"]), _FakeBackend({})),
+        (_config(token_ids=ids), _FakeBackend({}, images=False)),
     ):
         with pytest.raises(ValueError, match="has no instructions"):
             evaluate(bad, tok, readout, cfg, backend)
@@ -1202,7 +1196,7 @@ def test_evaluate_needs_the_backend_to_name_its_stage():
     req = {"state": "s", "questions": {"n": {"type": "noul", "instructions": "x"}}}
 
     class Unnamed:
-        def forward(self, state, questions):
+        def forward(self, state, questions, images=()):
             return np.zeros((len(questions), 255))
 
     for backend in (Unnamed(), _FakeBackend({}, outputs="logits")):

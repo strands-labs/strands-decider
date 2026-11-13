@@ -603,33 +603,23 @@ class Backend(Protocol):
     outputs: str
 
     def forward(
-        self, state: list[int], questions: list[list[int]]
-    ) -> np.ndarray | Sequence[np.ndarray]:
-        """One row per question, in order, of the stage `outputs` names: each question run
-        under prefix_bidir after the shared state, read at its last token."""
-
-
-class ImageBackend(Backend, Protocol):
-    # What forward takes: ("text", "image").
-    inputs: tuple[str, ...]
-
-    def forward(
         self,
         state: list[int],
         questions: list[list[int]],
         images: Sequence[RenderedImage] = (),
     ) -> np.ndarray | Sequence[np.ndarray]:
-        """As Backend.forward. `images` are the state's, in order, each with its file and
-        the span of its placeholders in `state`."""
+        """One row per question, in order, of the stage `outputs` names: each question run
+        under prefix_bidir after the shared state, read at its last token. `images` are the
+        state's, in order, each with its file and the span of its placeholders in `state`."""
 ```
 
-A text-only backend is a `Backend`: it need define neither `inputs` nor an `images` argument. A backend with an image path is also an `ImageBackend`: its `inputs` say what `forward` takes, `("text", "image")`, and its `forward` takes the images. The core passes `images` only when a request has some, and only to a backend whose `inputs` hold `image`; a backend without `inputs` takes text only.
+Every backend's `forward` takes the state's images, which are empty for a request without them. A backend with no image path refuses a call with images with v1's text-only message (section 11.1).
 
-`strands_decider.core.evaluate(request, tokenizer, readout, config, backend)` joins the pieces. It refuses a backend that does not name its stage, and refuses a request with images as section 11.1 says. It renders the request with the checkpoint's prompt and checks, before the decoder runs, everything that does not need it: the stage, that the readout's soft-cap is the checkpoint's, that a `hidden` backend has a readout weight with a row per code, and that the rendered code token ids are the checkpoint's `token_ids`. It then calls `forward` once with the shared state and every question, and with the images if there are any, reads the answers from the stage the backend names, and returns a `SystemOneResponse` as JSON. Its parts are public: `read(rows, readout, config, rendered, stage=stage)` gives the answers and `question_probabilities` the code probabilities, from rows of any stage, where `stage` is required (`inputs`, its former name, still works and warns that it is deprecated); `readout_logits` is the bf16 GEMM; `answer(rendered_question, probabilities)` formats one answer. As with v1's backend, a runtime may batch, cache the state's keys and values (keyed as section 6 says), or split the work across devices, provided each question's result is what it would be alone.
+`strands_decider.core.evaluate(request, tokenizer, readout, config, backend)` joins the pieces. It refuses a backend that does not name its stage, and refuses a request with images as section 11.1 says. It renders the request with the checkpoint's prompt and checks, before the decoder runs, everything that does not need it: the stage, that the readout's soft-cap is the checkpoint's, that a `hidden` backend has a readout weight with a row per code, and that the rendered code token ids are the checkpoint's `token_ids`. It then calls `forward` once with the shared state, every question and the state's images, reads the answers from the stage the backend names, and returns a `SystemOneResponse` as JSON. Its parts are public: `read(rows, readout, config, rendered, stage=stage)` gives the answers and `question_probabilities` the code probabilities, from rows of any stage, where `stage` is required (`inputs`, its former name, still works and warns that it is deprecated); `readout_logits` is the bf16 GEMM; `answer(rendered_question, probabilities)` formats one answer. As with v1's backend, a runtime may batch, cache the state's keys and values (keyed as section 6 says), or split the work across devices, provided each question's result is what it would be alone.
 
 ### 11.1 Images
 
-A runtime refuses a request with a non-empty `images` list, after the request's other checks (section 1) and before it decodes any image, as v1 validates a request before its text-only engine refuses the images: when the checkpoint's `inputs` lack `image` (`this checkpoint does not take images: its decision_config.json inputs are ["text"]`), and when the runtime has no image path: no vision encoder loaded, as with a text-only loader or an artifact without the encoder. The second refusal uses v1's text-only message, `this engine has no vision tower; images are not supported`. It also refuses image requests for a checkpoint whose image processor's settings differ from section 3.2's (section 9; `check_image_processor`). A malformed request with images therefore gets the message of what is malformed, whatever the runtime; `strands_decider.core.evaluate` keeps this order, through `parse_request(request, images=False)`.
+A runtime refuses a request with a non-empty `images` list, after the request's other checks (section 1), as v1 validates a request before its text-only engine refuses the images: when the checkpoint's `inputs` lack `image` (`this checkpoint does not take images: its decision_config.json inputs are ["text"]`), before it decodes any image, and when the runtime has no image path: no vision encoder loaded, as with a text-only loader or an artifact without the encoder. The second refusal uses v1's text-only message, `this engine has no vision tower; images are not supported`; a `Backend` without an image path gives it from `forward` (section 11), after the images' headers are checked. It also refuses image requests for a checkpoint whose image processor's settings differ from section 3.2's (section 9; `check_image_processor`). A malformed request with images therefore gets the message of what is malformed, whatever the runtime; `strands_decider.core.evaluate` keeps this order, through `parse_request(request, images=False)`.
 
 `render` gives, for each image in order, its file (`data`, the bytes decoded from base64), its format, width and height from the header, the sha256 of its file, N, and its span: state ids [`start`, `end`) are its N placeholders, with `<|image>` at `start` - 1 and `<image|>` at `end` (`strands_decider.core.RenderedImage`). The core does not decode pixels. The runtime does, and prepares them:
 
