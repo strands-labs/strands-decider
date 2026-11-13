@@ -609,8 +609,10 @@ def render(
     Raises:
         ValueError: When the request or one of its images is malformed (`parse_request`),
             the variant is unknown, `option_orders` names an unknown question or is not a
-            permutation, the tokenizer lacks a control token, splits a code or has an added
-            token that is not special, or a prompt is longer than `max_length`.
+            permutation, the tokenizer lacks a control token, splits a code, has an added
+            token that is not special or one that request text encodes to, or was handed
+            over by `plain_text_tokenizer` and has had its settings changed since, or a
+            prompt is longer than `max_length`.
     """
     prep = _prepare(request, variant, option_orders)
     names = list(prep.blocks)

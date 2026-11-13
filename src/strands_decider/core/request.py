@@ -204,7 +204,8 @@ def has_images(request: Any) -> bool:
     """Whether the request carries a non-empty `images` list, before anything is checked.
     A runtime that cannot take images checks the rest of the request first
     (`parse_request(request, images=False)`), then refuses one with images before it decodes
-    them, as v1's text-only engine does after v1's validation."""
+    them, as v1's text-only engine does after v1's validation (`runtime.evaluate` does so for
+    a checkpoint whose `inputs` lack "image")."""
     request = _as_mapping(request)
     return (
         isinstance(request, Mapping)

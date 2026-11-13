@@ -210,8 +210,9 @@ def code_probabilities(
     Raises:
         ValueError: For `hidden` or an unknown stage, a soft-cap or temperature that is not
             a number above 0 in float32's normal range, a row that is not a vector of at
-            least k values finite in float32, capped or final logits past the cap's range, probabilities outside
-            [0, 1] or all 0, or logits that overflow float32 when divided by T.
+            least k values finite in float32, capped or final logits past the cap's range,
+            probabilities outside [0, 1] or all 0, or logits that overflow float32 when
+            divided by T.
     """
     if stage not in STAGES or stage == HIDDEN:
         raise ValueError(

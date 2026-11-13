@@ -103,8 +103,8 @@ def evaluate(
             f"of {STAGES}"
         )
     check_stage(stage, readout, config)
-    # v1's order: the request's own checks, then the refusal of images by a checkpoint
-    # without them, then the images, each in turn.
+    # The request's own checks, then the refusal of images by a checkpoint without them,
+    # then the images, each in turn.
     parse_request(request, images=False)
     if has_images(request) and IMAGE not in config.inputs:
         raise ValueError(
