@@ -7,6 +7,7 @@ Compatibility with the Jev API itself is not verified.
 
 from __future__ import annotations
 
+import collections
 import contextlib
 import os
 import threading
@@ -18,7 +19,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from . import __version__
-from .infer import EngineConfig, SystemOneEngine, load_mlx
+from .infer import EngineConfig, PreparedRequest, SystemOneEngine, load_mlx
 from .modeling import StrandsDeciderModel
 from .schema import (
     ChoiceQuestion,
@@ -35,6 +36,117 @@ def _needs_serialisation(device: str) -> bool:
     threads hit the same device. CUDA and CPU are thread-safe for inference, and the MLX
     engine runs every evaluation on a single worker thread."""
     return str(device).startswith("mps")
+
+
+class _Pending:
+    __slots__ = ("done", "error", "prepared", "response", "t")
+
+    def __init__(self, prepared: PreparedRequest, t: float):
+        self.prepared = prepared
+        self.t = t
+        self.done = threading.Event()
+        self.response: SystemOneResponse | None = None
+        self.error: BaseException | None = None
+
+
+class MicroBatcher:
+    """Cross-request micro-batching: one thread owns the device and scores many requests
+    per forward.
+
+    Each request is prepared on its own handler thread (rendering, tokenisation, option
+    positions: a request the engine refuses raises there and never reaches the queue), then
+    queued. The device thread takes the oldest request, waits up to `wait_ms` from its
+    arrival for more (not at all once the queue holds a forward's worth, so under load it
+    never idles), takes queued requests in arrival order up to the engine's `batch_tokens`
+    / `batch_rows`, and scores them with `evaluate_prepared`. Forwards run one at a time,
+    so peak memory is bounded by the largest planned forward rather than by the number of
+    requests in flight.
+    """
+
+    def __init__(self, engine: SystemOneEngine, wait_ms: float = 0.0):
+        self.engine = engine
+        self.wait_s = max(0.0, float(wait_ms)) / 1000.0
+        self._queue: collections.deque[_Pending] = collections.deque()
+        self._cv = threading.Condition()
+        self.stats = {"cycles": 0, "requests": 0, "max_requests_per_cycle": 0}
+        self._stop = False
+        self._thread = threading.Thread(
+            target=self._loop, name="strands-decider-batcher", daemon=True
+        )
+        self._thread.start()
+
+    def submit(self, request: SystemOneRequest) -> SystemOneResponse:
+        prepared = self.engine.prepare(request)  # ValueError -> the caller's 422
+        item = _Pending(prepared, time.monotonic())
+        with self._cv:
+            self._queue.append(item)
+            self._cv.notify()
+        item.done.wait()
+        if item.error is not None:
+            raise item.error
+        assert item.response is not None
+        return item.response
+
+    def _cost(self, item: _Pending) -> tuple[int, int]:
+        p = item.prepared
+        if p.rows is not None:
+            return (p.tokens, len(p.rows))
+        if p.prefix is not None:
+            return (p.tokens, len(p.prefix.question_ids))
+        return (0, 1)
+
+    def _take(self) -> list[_Pending]:
+        cfg = self.engine.cfg
+        with self._cv:
+            while not self._queue and not self._stop:
+                self._cv.wait()
+            if self._stop and not self._queue:
+                return []
+            deadline = self._queue[0].t + self.wait_s
+            while True:
+                tokens = rows = 0
+                for it in self._queue:
+                    t, r = self._cost(it)
+                    tokens, rows = tokens + t, rows + r
+                now = time.monotonic()
+                if tokens >= cfg.batch_tokens or rows >= cfg.batch_rows or now >= deadline:
+                    break
+                self._cv.wait(timeout=deadline - now)
+            batch: list[_Pending] = []
+            tokens = rows = 0
+            while self._queue:
+                t, r = self._cost(self._queue[0])
+                if batch and (tokens + t > cfg.batch_tokens or rows + r > cfg.batch_rows):
+                    break
+                batch.append(self._queue.popleft())
+                tokens, rows = tokens + t, rows + r
+            return batch
+
+    def _loop(self) -> None:
+        while True:
+            batch = self._take()
+            if not batch:
+                return
+            try:
+                results = self.engine.evaluate_prepared([it.prepared for it in batch])
+            except BaseException as exc:  # the device thread must survive any error
+                results = [exc] * len(batch)
+            self.stats["cycles"] += 1
+            self.stats["requests"] += len(batch)
+            self.stats["max_requests_per_cycle"] = max(
+                self.stats["max_requests_per_cycle"], len(batch)
+            )
+            for it, res in zip(batch, results, strict=True):
+                if isinstance(res, BaseException):
+                    it.error = res
+                else:
+                    it.response = res
+                it.done.set()
+
+    def close(self) -> None:
+        with self._cv:
+            self._stop = True
+            self._cv.notify_all()
 
 
 def warm_up(engine: SystemOneEngine, max_batch: int, vision: bool = False) -> None:
@@ -89,6 +201,9 @@ def create_app(
     max_batch: int = 32,
     vision: bool = False,
     max_batch_tokens: int | None = None,
+    batching: bool | None = None,
+    batch_wait_ms: float = 0.0,
+    batch_tune: bool | None = None,
     device_map: str | None = None,
     warmup: bool = True,
     build_engine: Callable[[], SystemOneEngine] | None = None,
@@ -105,12 +220,17 @@ def create_app(
     # on the same host cannot be confused. HF repo ids ("org/name") collapse to `name`.
     resolved_name = model_name or os.path.basename(checkpoint.rstrip("/")) or checkpoint
 
+    # One set of forward budgets: --max-batch and --max-batch-tokens bound a forward whether
+    # its rows come from one request or from several. Unset, --max-batch-tokens leaves one
+    # request's own forwards uncapped as before, and caps shared forwards at 16,384 tokens.
     config = EngineConfig(
         device=device,
         use_prefix_cache=use_prefix_cache,
         model_name=resolved_name,
         max_batch=max_batch,
         max_batch_tokens=max_batch_tokens,
+        batch_rows=max_batch,
+        batch_tokens=max_batch_tokens or EngineConfig.batch_tokens,
     )
 
     def _default_build_engine() -> SystemOneEngine:
@@ -135,6 +255,26 @@ def create_app(
         app.state.engine = engine
         # None: requests share anyio's default worker pool (40 threads), as sync handlers do.
         app.state.limiter = anyio.CapacityLimiter(max_concurrency) if max_concurrency else None
+
+        # Batching defaults on for CUDA, where it was measured; MPS serialises anyway and MLX
+        # / vision override the low-level forward so batching would only queue them.
+        use_batching = batching
+        if use_batching is None:
+            use_batching = str(device).startswith("cuda") and engine.can_batch_rows()
+        tune_at_startup = batch_tune
+        if tune_at_startup is None:
+            tune_at_startup = bool(use_batching) and str(device).startswith("cuda")
+        if use_batching and tune_at_startup:
+            import torch
+
+            with torch.inference_mode():
+                tuned = engine.tune_batching()
+            print(
+                f"[strands-decider] batching tuned: rows per forward by width {tuned}",
+                flush=True,
+            )
+        app.state.batcher = MicroBatcher(engine, batch_wait_ms) if use_batching else None
+
         try:
             # Listener binds only after lifespan startup returns, so /health (/ping)
             # fails until this is done.
@@ -142,6 +282,8 @@ def create_app(
                 warm_up(engine, max_batch, vision=vision)
             yield
         finally:
+            if app.state.batcher is not None:
+                app.state.batcher.close()
             # The MLX engine owns a worker thread (see mlx_engine.MLXEngine); other engines
             # have nothing to close.
             close = getattr(engine, "close", None)
@@ -170,7 +312,19 @@ def create_app(
     # health check 2 s.
     @app.get("/health")
     @app.get("/ping")
-    async def health(eng: SystemOneEngine = Depends(get_engine)) -> dict:
+    async def health(http: Request, eng: SystemOneEngine = Depends(get_engine)) -> dict:
+        batcher = getattr(http.app.state, "batcher", None)
+        batching_info = None
+        if batcher is not None:
+            batching_info = {
+                "wait_ms": batch_wait_ms,
+                "batch_tokens": eng.cfg.batch_tokens,
+                "batch_rows": eng.cfg.batch_rows,
+                "rows_by_width": {str(k): v for k, v in (eng.cfg.batch_rows_by_width or {}).items()}
+                if eng.cfg.batch_rows_by_width
+                else None,
+                **batcher.stats,
+            }
         return {
             "status": "ok",
             "model": eng.cfg.model_name,
@@ -181,10 +335,17 @@ def create_app(
             "device": eng.cfg.device,
             "prefix_cache": eng.cfg.use_prefix_cache,
             "vision": vision,
+            "batching": batching_info,
         }
 
-    def evaluate(eng: SystemOneEngine, request: SystemOneRequest) -> SystemOneResponse:
+    def evaluate(
+        eng: SystemOneEngine,
+        request: SystemOneRequest,
+        batcher: MicroBatcher | None,
+    ) -> SystemOneResponse:
         with guard:
+            if batcher is not None:
+                return batcher.submit(request)
             return eng.evaluate(request)
 
     # The engine runs in a worker thread. With --max-concurrency N, at most N requests run at
@@ -197,7 +358,11 @@ def create_app(
         started = time.perf_counter()
         try:
             response = await anyio.to_thread.run_sync(
-                evaluate, eng, request, limiter=http.app.state.limiter
+                evaluate,
+                eng,
+                request,
+                http.app.state.batcher,
+                limiter=http.app.state.limiter,
             )
         except ValueError as exc:
             # Malformed permutation, etc. -- caller error.
@@ -221,6 +386,9 @@ def serve(
     max_batch: int = 32,
     vision: bool = False,
     max_batch_tokens: int | None = None,
+    batching: bool | None = None,
+    batch_wait_ms: float = 0.0,
+    batch_tune: bool | None = None,
     device_map: str | None = None,
     warmup: bool = True,
     max_concurrency: int | None = None,
@@ -235,6 +403,9 @@ def serve(
         max_batch=max_batch,
         vision=vision,
         max_batch_tokens=max_batch_tokens,
+        batching=batching,
+        batch_wait_ms=batch_wait_ms,
+        batch_tune=batch_tune,
         device_map=device_map,
         warmup=warmup,
         max_concurrency=max_concurrency,

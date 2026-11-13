@@ -84,6 +84,25 @@ def serve_cmd(
         "--max-batch-tokens",
         help="Also cap one forward's padded tokens (questions x longest state + question); for long-context torsos.",
     ),
+    batching: bool | None = typer.Option(
+        None,
+        "--batching/--no-batching",
+        help="Batch concurrent requests into shared forwards, bounded by --max-batch and "
+        "--max-batch-tokens. Default: on for --device cuda, off elsewhere.",
+    ),
+    batch_wait_ms: float = typer.Option(
+        0.0,
+        "--batch-wait-ms",
+        help="With batching: wait up to this many ms after a request arrives for others to "
+        "join its forward. 0 (default) takes only what is already queued.",
+    ),
+    batch_tune: bool | None = typer.Option(
+        None,
+        "--batch-tune/--no-batch-tune",
+        help="With batching: at startup, time forwards of 1, 2, 4, ... rows at 256 / 1k / 4k "
+        "tokens and cap shared forwards at the fastest size that fits (like vLLM's startup "
+        "profiling run). Default: on for --device cuda.",
+    ),
     device_map: str | None = typer.Option(
         None,
         "--device-map",
@@ -118,6 +137,9 @@ def serve_cmd(
         max_batch=max_batch,
         vision=vision,
         max_batch_tokens=max_batch_tokens,
+        batching=batching,
+        batch_wait_ms=batch_wait_ms,
+        batch_tune=batch_tune,
         device_map=device_map,
         max_concurrency=max_concurrency,
         warmup=warmup,
