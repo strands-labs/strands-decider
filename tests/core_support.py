@@ -97,16 +97,16 @@ def decision_config_fixture() -> dict:
     return json.loads((FIXTURES / "decision_config.json").read_text(encoding="utf-8"))
 
 
-def toy_tokenizer():
+def toy_tokenizer(extra_words=()):
     """A word-level tokenizer with Gemma 4's control tokens, its image tokens, and every
     code as one token: enough to drive render and evaluate where the real tokenizer is not
-    available."""
+    available. `extra_words` join the vocabulary (any other word is `<unk>`)."""
     from tokenizers import AddedToken, Regex, Tokenizer, models, pre_tokenizers
 
     from strands_decider.core import CODES
 
     words = ["<unk>", "\n", " ", ".", "<", ">", "/", '"', "=", "—", "answer", "model", "user"]
-    vocab = {w: i for i, w in enumerate(dict.fromkeys(words + list(CODES)))}
+    vocab = {w: i for i, w in enumerate(dict.fromkeys(words + list(CODES) + list(extra_words)))}
     tok = Tokenizer(models.WordLevel(vocab, unk_token="<unk>"))
     tok.pre_tokenizer = pre_tokenizers.Split(Regex(r"\w+|\s|[^\w\s]"), behavior="isolated")
     specials = ("<bos>", "<|turn>", "<turn|>", "<eos>", "<|image>", "<|image|>", "<image|>")

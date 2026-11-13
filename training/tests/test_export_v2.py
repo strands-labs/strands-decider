@@ -29,7 +29,6 @@ def test_export_writes_the_v2_package(tmp_path):
         base_model=str(base),
         base_revision="0" * 40,
         head_type="token_readout",
-        render="strands-chat",
         attention_mode="prefix_bidir",
         lora_r=4,
         lora_alpha=8,

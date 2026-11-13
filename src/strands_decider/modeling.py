@@ -327,7 +327,8 @@ def code_token_ids(tok: Any) -> tuple[int, ...]:
     from .core import CHAT, MAX_CODES, render
 
     criteria = {f"o{k}": None for k in range(MAX_CODES)}
-    request = {"state": "", "questions": {"q": {"type": "choice", "criteria": criteria}}}
+    question = {"type": "choice", "instructions": "", "criteria": criteria}
+    request = {"state": "", "questions": {"q": question}}
     return render(request, tok.backend_tokenizer, CHAT).questions["q"].code_token_ids
 
 

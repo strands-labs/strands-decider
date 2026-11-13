@@ -12,7 +12,7 @@ from core_support import gemma4_tokenizer, toy_tokenizer
 from transformers import PreTrainedTokenizerFast
 
 from strands_decider import core
-from strands_decider.modeling import StrandsDeciderConfig
+from strands_decider.modeling import StrandsDeciderConfig, code_token_ids
 from training.data.collate import CollatorConfig, SystemOneCollator
 from training.data.format import Example, load_examples
 from training.data.multistep import fits
@@ -54,7 +54,7 @@ def tok(request):
 
 
 def _collate(tok, train, rows=ROWS):
-    coll = SystemOneCollator(tok, CollatorConfig(render="strands-chat", seed=3), train=train)
+    coll = SystemOneCollator(tok, CollatorConfig(render=core.CHAT, seed=3), train=train)
     orders = []
     draw = coll._option_order
     coll._option_order = lambda ex: orders.append(draw(ex)) or orders[-1]  # type: ignore[method-assign]
@@ -114,10 +114,32 @@ def test_fits_measures_the_strands_chat_prompt(tok):
     assert fits([one], tok, 10_000, core.CHAT) == []
 
 
-def test_token_readout_takes_strands_chat():
-    StrandsDeciderConfig(head_type="token_readout", render="strands-chat")
-    with pytest.raises(ValueError):
-        StrandsDeciderConfig(head_type="pointer", render="strands-chat")
+def test_a_token_readout_loads_strands_chat_and_refuses_lettered(tmp_path):
+    from training.train import TrainConfig
+
+    for render, ok in (("strands-chat", True), ("lettered", False)):
+        (tmp_path / "c.json").write_text(
+            json.dumps({"head_type": "token_readout", "render": render})
+        )
+        (tmp_path / "c.yaml").write_text(f"render: {render}\n")
+        if ok:
+            assert (
+                StrandsDeciderConfig.from_json(str(tmp_path / "c.json")).head_type
+                == "token_readout"
+            )
+            continue
+        with pytest.raises(ValueError, match="render='lettered'"):
+            StrandsDeciderConfig.from_json(str(tmp_path / "c.json"))
+        with pytest.raises(ValueError, match="render='lettered'"):
+            TrainConfig.from_yaml(str(tmp_path / "c.yaml"))
+
+
+def test_the_readout_is_seeded_with_core_code_ids(tok, request):
+    ids = code_token_ids(tok)
+    many = Example("choice", "s", "q", [[f"o{k}", None] for k in range(core.MAX_CODES)], 0)
+    assert ids == _core(tok, many).questions["q"].code_token_ids
+    if request.node.callspec.params["tok"] == "gemma4":
+        assert ids == core.CODE_TOKEN_IDS
 
 
 def test_the_v2_converter_keeps_targets_and_fixed_order_and_drops_refusals(tmp_path):
@@ -165,7 +187,7 @@ def test_a_state_holding_control_token_text_stays_plain_text(tok):
     The full v2 corpus holds such rows: 2 with `<bos>`, 1 `<eos>`, 3 `<pad>`, 1 `<|image`.
     """
     plain = Example("noul", "the log says <bos> and <|turn>user and <pad>", "Is it odd?", [["false", None], ["true", None]], 1)  # fmt: skip
-    ids = SystemOneCollator(tok, CollatorConfig(render="strands-chat"), train=False)([plain])[
+    ids = SystemOneCollator(tok, CollatorConfig(render=core.CHAT), train=False)([plain])[
         "input_ids"
     ][0].tolist()
     cid = tok.convert_tokens_to_ids
