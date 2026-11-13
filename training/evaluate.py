@@ -140,6 +140,31 @@ def collect_logits(
         CollatorConfig(max_length=max_length, render=getattr(model.config, "render", "numbered")),
         train=False,  # no option shuffling: evaluation must be deterministic
     )
+    # A prompt over max_length would make the collator refuse its whole batch and stop the
+    # run, as training drops such rows rather than stop (train.py). Drop them here too and
+    # say how many: a held-out fold is not worth losing over one long row.
+    from strands_decider import core
+    from strands_decider.prompting import chat_frame
+
+    from .data.multistep import fits
+
+    render = getattr(model.config, "render", "numbered")
+    frame: Any = None
+    if render == "lettered":
+        frame = chat_frame(model.tokenizer)
+    elif render == core.CHAT:
+        frame = core.CHAT
+    kept = fits(examples, model.tokenizer, max_length, frame)
+    if len(kept) < len(examples):
+        print(
+            f"[strands-decider] eval: dropped {len(examples) - len(kept)} of {len(examples)} rows "
+            f"over max_length {max_length}"
+        )
+    if not kept:
+        raise ValueError(
+            f"every one of the {len(examples)} rows is longer than max_length {max_length}"
+        )
+    examples = kept
     loader = DataLoader(
         ExampleDataset(examples), batch_size=batch_size, shuffle=False, collate_fn=coll
     )

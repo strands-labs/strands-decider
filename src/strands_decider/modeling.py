@@ -374,6 +374,21 @@ def prefix_bidir_masks(
     return {t: attention_mask if t == "linear_attention" else mask for t in types}
 
 
+def serving_attn_override(
+    config: StrandsDeciderConfig, torso_cfg: Any, trainable: bool, attn_implementation: str | None
+) -> str | None:
+    """The attention a loaded checkpoint must be switched to, or None to keep what it has.
+
+    Serving only: training keeps the attention `from_pretrained_base` gives it, and a caller
+    that names one is obeyed. A token readout is never switched: this repository's engines
+    refuse to serve one (`refuse_token_readout`), so the override would only slow its
+    evaluation down with a dense additive mask over the whole batch.
+    """
+    if trainable or attn_implementation is not None or config.head_type == "token_readout":
+        return None
+    return serving_attn_implementation(torso_cfg)
+
+
 def refuse_token_readout(config: StrandsDeciderConfig) -> None:
     """The serving engines in this repository serve the pointer head only."""
     if getattr(config, "head_type", "pointer") == "token_readout":  # test stubs carry none
@@ -695,10 +710,9 @@ class StrandsDeciderModel(nn.Module):
             ensure_bos(tok)
 
         torso = cls._load_torso(config, device_map, attn_implementation)
-        # serving only: training keeps the attention from_pretrained_base gives it
-        serving = not trainable and attn_implementation is None
-        if serving and serving_attn_implementation(torso.config):
-            torso.set_attn_implementation(serving_attn_implementation(torso.config))
+        impl = serving_attn_override(config, torso.config, trainable, attn_implementation)
+        if impl:
+            torso.set_attn_implementation(impl)
 
         if config.use_lora:
             from peft import PeftModel

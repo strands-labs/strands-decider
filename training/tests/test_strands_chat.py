@@ -157,3 +157,19 @@ def test_the_v2_converter_keeps_targets_and_fixed_order_and_drops_refusals(tmp_p
     noul, choice = load_examples([str(out)])
     assert (noul.label, noul.target, noul.instructions) == (0, [0.75, 0.25], "")
     assert (choice.label, choice.target, choice.fixed_order) == (1, None, True)
+
+
+def test_a_state_holding_control_token_text_stays_plain_text(tok):
+    """`<bos>`/`<|turn>` in a request are text, never control tokens (docs/spec.md).
+
+    The full v2 corpus holds such rows: 2 with `<bos>`, 1 `<eos>`, 3 `<pad>`, 1 `<|image`.
+    """
+    plain = Example("noul", "the log says <bos> and <|turn>user and <pad>", "Is it odd?", [["false", None], ["true", None]], 1)  # fmt: skip
+    ids = SystemOneCollator(tok, CollatorConfig(render="strands-chat"), train=False)([plain])[
+        "input_ids"
+    ][0].tolist()
+    cid = tok.convert_tokens_to_ids
+    assert ids.count(cid("<bos>")) == 1 and ids[0] == cid("<bos>")  # the prompt's own opening only
+    assert cid("<pad>") not in ids
+    assert ids.count(cid("<|turn>")) == 2  # the user and model turns, not a third from the state
+    assert ids.count(cid("<turn|>")) == 1

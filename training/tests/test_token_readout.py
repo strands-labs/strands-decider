@@ -33,7 +33,7 @@ from strands_decider.prompting import (
 )
 from strands_decider.schema import ChoiceQuestion, NoulQuestion, ScoreQuestion, SystemOneRequest
 from training.data.collate import CollatorConfig, SystemOneCollator
-from training.data.format import load_examples, write_jsonl
+from training.data.format import Example, load_examples, write_jsonl
 from training.soup import soup
 
 # A stand-in chat template with Gemma 4's layout; content is a string or a list of text parts.
@@ -514,3 +514,44 @@ def test_the_schedule_starts_above_zero_and_ends_at_the_floor():
     assert all(
         a > b for a, b in zip(lrs[warmup - 1 :], lrs[warmup:], strict=False)
     )  # then monotone down
+
+
+def test_eval_drops_an_over_long_row_instead_of_stopping(corpus, monkeypatch, capsys):
+    """One long row must not cost the whole fold: `calibrate` and `eval` drop it and say so."""
+    import training.evaluate as E
+
+    model = _readout_factory(corpus)(
+        StrandsDeciderConfig(base_model="tiny", head_type="token_readout", render="lettered")
+    )
+    monkeypatch.setattr(E, "SystemOneEngine", lambda m, c: SimpleNamespace(model=m))
+    rows = load_examples([str(corpus / "a.jsonl")])
+    long = Example("noul", "x " * 4000, "Is it long?", [["false", None], ["true", None]], 1)
+    frame = chat_frame(model.tokenizer)
+
+    def longest(e):  # as training/data/multistep.fits measures a lettered row
+        texts = ["".join(lettered_prompt(e.state, e.to_question(i), frame)) for i in e.all_instructions()]  # fmt: skip
+        return max(len(x) for x in model.tokenizer(texts, add_special_tokens=False)["input_ids"])
+
+    cap = max(longest(e) for e in rows)
+    logits, labels, _slots, kept = E.collect_logits(
+        model, [*rows, long], device="cpu", batch_size=2, max_length=cap
+    )
+    assert len(kept) == len(rows) and long not in kept
+    assert logits.shape[0] == len(kept) == labels.shape[0]
+    assert "dropped 1" in capsys.readouterr().out
+    with pytest.raises(ValueError, match="longer than max_length"):
+        E.collect_logits(model, [long], device="cpu", max_length=cap)
+
+
+def test_a_token_readout_is_not_switched_to_serving_attention():
+    """`load` leaves a token readout's attention alone; a pointer head still gets the override."""
+    from strands_decider.modeling import serving_attn_implementation, serving_attn_override
+
+    e2b = SimpleNamespace(model_type="gemma4_text", num_key_value_heads=1)
+    assert serving_attn_implementation(e2b) == "eager"  # the serving default for E2B
+    readout = StrandsDeciderConfig(base_model="t", head_type="token_readout", render="lettered")
+    pointer = StrandsDeciderConfig(base_model="t")
+    assert serving_attn_override(readout, e2b, False, None) is None
+    assert serving_attn_override(pointer, e2b, False, None) == "eager"
+    assert serving_attn_override(pointer, e2b, True, None) is None  # training
+    assert serving_attn_override(pointer, e2b, False, "sdpa") is None  # the caller named one
