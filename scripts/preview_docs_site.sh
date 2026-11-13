@@ -2,7 +2,7 @@
 # Run the real strands-agents/harness-sdk Astro site locally, with this
 # checkout substituted for the published strands-decider product. This renders
 # the docs the way strandsagents.com does (Starlight theme, nav, search, code
-# blocks) rather than the simple preview in preview_docs.py.
+# blocks), so you can sanity-check docs/ edits before pushing.
 #
 # Astro's dev server daemonizes itself, so this script also owns teardown:
 #   scripts/preview_docs_site.sh start   # default — clones if needed, starts
