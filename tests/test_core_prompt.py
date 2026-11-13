@@ -18,6 +18,7 @@ import json
 import math
 import os
 import random
+import re
 import subprocess
 import sys
 import threading
@@ -57,6 +58,14 @@ SPECIAL_TOKENS = (
     "<image|>", "<audio|>", "<|video|>",
 )  # fmt: skip
 EVERY_SPECIAL = "".join(SPECIAL_TOKENS)
+# Whitespace as docs/spec.md section 3.1 lists it, code point by code point.
+SPEC_WHITESPACE = (
+    "\t\n\x0b\x0c\r"  # U+0009 to U+000D
+    "\x1c\x1d\x1e\x1f"  # U+001C to U+001F
+    " \x85\xa0\u1680"  # U+0020, U+0085, U+00A0, U+1680
+    "\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a"  # U+2000 to U+200A
+    "\u2028\u2029\u202f\u205f\u3000"  # U+2028, U+2029, U+202F, U+205F, U+3000
+)
 
 CASES: dict[str, dict] = {
     # All three types about one state: the state part is shared.
@@ -691,19 +700,25 @@ def test_json_renders_by_the_spec_rules():
 
 
 def test_whitespace_is_the_specs_29_code_points():
-    """WHITESPACE is Python's str.isspace set, which is the same on every Python the core
-    runs on; stripping and collapsing by it are str.strip and str.split's."""
+    """Section 3.1's whitespace is Python's str.isspace set, the same on every Python the core
+    runs on. Request text loses exactly it at its ends, an option has each run of it as one
+    space, and U+200B and U+FEFF, which are not whitespace, are kept."""
     from strands_decider.core.prompt import render_content
-    from strands_decider.core.text import WHITESPACE, one_line
 
-    assert len(WHITESPACE) == 29 == len(set(WHITESPACE))
-    assert set(WHITESPACE) == {chr(c) for c in range(sys.maxunicode + 1) if chr(c).isspace()}
-    assert "\u200b" not in WHITESPACE and "\ufeff" not in WHITESPACE
+    assert len(SPEC_WHITESPACE) == 29 == len(set(SPEC_WHITESPACE))
+    assert set(SPEC_WHITESPACE) == {chr(c) for c in range(sys.maxunicode + 1) if chr(c).isspace()}
+    run = re.compile(f"[{re.escape(SPEC_WHITESPACE)}]+")
     rng = random.Random(9)
-    pool = [*WHITESPACE, "a", "b", "\u200b", "\ufeff", "é"]
+    pool = [*SPEC_WHITESPACE, "a", "b", "\u200b", "\ufeff", "é"]
     for _ in range(2000):
         t = "".join(rng.choice(pool) for _ in range(rng.randint(0, 12)))
-        assert render_content(t) == t.strip() and one_line(t) == " ".join(t.split()), ascii(t)
+        assert render_content(t) == t.strip(SPEC_WHITESPACE), ascii(t)
+        name = run.sub(" ", t.strip(SPEC_WHITESPACE))
+        criteria = {t: None, "other": None}
+        req = {"state": "s", "questions": {"q": {"instructions": "x", "criteria": criteria}}}
+        _, parts = render_text(req, PLAIN)
+        assert "A." + (f" {name}" if name else "") in parts["q"].split("\n"), ascii(t)
+    assert render_content("\u200b a \ufeff") == "\u200b a \ufeff"
     # Request text is kept as sent: a carriage return inside it stays.
     s, _ = render_text({"state": "a\r\nb\r", "questions": {"q": {"instructions": "x"}}}, PLAIN)
     assert s == BOS + "<state>\na\r\nb\n</state>\n"
@@ -1844,11 +1859,10 @@ def test_request_parsing_matches_v1():
 def test_render_content_matches_v1():
     pytest.importorskip("pydantic")
     from strands_decider.core import render_content
-    from strands_decider.core.text import WHITESPACE
     from strands_decider.prompting import render_content as prompting_render_content
 
     values = [None, "", "  x \n", {"b": 1, "a": ["é", {"c": None}]}, [], [1, "two"], {}]
-    values += [f"{w}a{w}b{w}" for w in WHITESPACE] + ["\ufeffa\u200b", WHITESPACE + "x"]
+    values += [f"{w}a{w}b{w}" for w in SPEC_WHITESPACE] + ["\ufeffa\u200b", SPEC_WHITESPACE + "x"]
     values += [CASES[n]["state"] for n in ("json_rendering", "whitespace_edges", "json_reading")]
     values += [
         [x] for x in (1.0, -0.0, 1e-05, 1e16, 0.1 + 0.2, 5e-324, 1.7976931348623157e308, 10**30)

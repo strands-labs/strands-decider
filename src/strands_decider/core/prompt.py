@@ -40,7 +40,6 @@ from typing import TYPE_CHECKING, Any
 from .codes import codes_for
 from .images import IMAGE_CLOSE, IMAGE_OPEN, IMAGE_SOFT, EncodedImage
 from .request import Question, Request, parse_request
-from .text import one_line, strip
 
 if TYPE_CHECKING:
     from tokenizers import Tokenizer
@@ -70,7 +69,7 @@ Piece = tuple[bool, str]
 def render_content(content: Any) -> str:
     """A state, instruction or description as text: v1's `prompting.render_content`.
 
-    A string is stripped of whitespace (`text.WHITESPACE`, the spec's); structured data is
+    A string is stripped of whitespace (`str.strip`'s, the spec's); structured data is
     indented JSON with its key order kept, as Python's `json.dumps(indent=2,
     ensure_ascii=False)` writes it, so the same state always renders, and so tokenises, the
     same way. docs/spec.md spells out the JSON, number by number and escape by escape, and
@@ -79,7 +78,7 @@ def render_content(content: Any) -> str:
     if content is None:
         return ""
     if isinstance(content, str):
-        return strip(content)
+        return content.strip()
     return json.dumps(content, indent=2, ensure_ascii=False, sort_keys=False)
 
 
@@ -169,7 +168,8 @@ def question_block(question: Question, option_order: Sequence[int] | None = None
     codes = codes_for(len(names))
     lines = []
     for code, i in zip(codes, order, strict=True):
-        name, desc = one_line(names[i]), one_line(descs[i])
+        # Each run of whitespace, newlines included, becomes one space: an option is one line.
+        name, desc = " ".join(names[i].split()), " ".join(descs[i].split())
         line = f"{code}." + (f" {name}" if name else "")
         lines.append(line + (f"{DESCRIPTION_SEPARATOR}{desc}" if desc else ""))
 
