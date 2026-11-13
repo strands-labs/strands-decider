@@ -480,6 +480,27 @@ def _teacher_kl(tea: torch.Tensor, stu: torch.Tensor, direction: str) -> torch.T
     return _kl(target.clamp_min(1e-12).log(), stu, real, direction)
 
 
+def _dump_nonfinite(out_dir: str, step: int, rank: int, seen: list) -> str:
+    """Save the forwards of a step whose gradient is not finite (those with a non-finite loss,
+    else all of them) to `out_dir`, and return the error message."""
+    bad = [i for i, (loss, _) in enumerate(seen) if not torch.isfinite(loss)]
+    keep = bad or list(range(len(seen)))
+    path = os.path.join(out_dir, f"nonfinite-step{step}-rank{rank}.pt")
+    os.makedirs(out_dir, exist_ok=True)
+    torch.save(
+        [
+            {"forward": i, "loss": seen[i][0].cpu()}
+            | {k: v.cpu() if torch.is_tensor(v) else v for k, v in seen[i][1].items()}
+            for i in keep
+        ],
+        path,
+    )
+    return (
+        f"step {step}: gradient norm is not finite (rank {rank}; forwards with a non-finite "
+        f"loss: {bad or 'none'}); their batches are in {path}"
+    )
+
+
 @distributed.entry_point  # under torchrun, this process is one rank of the run
 def train(cfg: TrainConfig) -> str:
     rank, _, world = distributed.env()
@@ -761,6 +782,7 @@ def train(cfg: TrainConfig) -> str:
             train_loader.collate_fn = collate_after
         print(f"[strands-decider] resumed from {cfg.resume_from} at step {step}")
     step0 = step
+    seen: list[tuple[torch.Tensor, dict[str, Any]]] = []  # this step's (loss, batch) per forward
     tokens: Any = 0.0  # real (non-pad) tokens this rank ran since the last log line
     t_log = time.time()
 
@@ -831,15 +853,21 @@ def train(cfg: TrainConfig) -> str:
             loss = step_loss * world / cfg.grad_accum
             loss.backward()
             running += step_loss.detach()  # on the device: no sync per forward
+            seen.append((step_loss.detach(), batch))  # for the non-finite guard below
             micro += 1
 
             ends_step = part.last if world > 1 else micro % cfg.grad_accum == 0
             if not ends_step:
                 continue
 
-            torch.nn.utils.clip_grad_norm_(
+            norm = torch.nn.utils.clip_grad_norm_(
                 [p for p in model.parameters() if p.requires_grad], cfg.max_grad_norm
             )
+            # One sync per step. A non-finite gradient would turn every weight into NaN at
+            # optim.step() and the run would go on training on NaN: stop before it, loudly.
+            if not torch.isfinite(norm):
+                raise FloatingPointError(_dump_nonfinite(cfg.output_dir, step + 1, rank, seen))
+            seen.clear()
             optim.step()
             sched.step()
             optim.zero_grad(set_to_none=True)
