@@ -230,3 +230,70 @@ def test_a_token_budget_per_forward_keeps_the_answers(tmp_path):
     sizes = lambda e: [len(range(*c[0].indices(7))) for c in e._chunks(st, rendered)]  # noqa: E731
     assert sizes(tight) == [1] * 7  # the budget binds
     assert sizes(plain) == [4, 3]  # off: max_batch only, as before
+
+
+def _tiny_gemma4_torso(vocab=64):
+    """A Gemma 4 E2B-shaped text decoder: KV-shared layers, sliding layers, one KV head."""
+    torch.manual_seed(0)
+    text = transformers.Gemma4TextConfig(
+        vocab_size=vocab,
+        hidden_size=32,
+        intermediate_size=64,
+        num_hidden_layers=len(LAYERS),
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        head_dim=16,
+        global_head_dim=16,
+        layer_types=LAYERS,
+        sliding_window=8,
+        final_logit_softcapping=30.0,
+        tie_word_embeddings=True,
+        pad_token_id=0,
+        max_position_embeddings=4096,
+        hidden_size_per_layer_input=8,
+        vocab_size_per_layer_input=vocab,
+        num_kv_shared_layers=1,
+        attn_implementation="sdpa",
+    )
+    return transformers.Gemma4TextModel(text).eval()
+
+
+def test_split_attention_equals_the_dense_prefix_bidir_mask():
+    """Two unmasked calls per row == the masked call, on a padded batch of Gemma 4 layers.
+
+    Also the only test that a real Gemma 4 decoder honours the per-layer mask dict, including
+    its sliding-window layers (which prefix_bidir gives the full mask, without their window).
+    """
+    from strands_decider.modeling import prefix_bidir_masks
+    from strands_decider.prefix_split_attention import install
+
+    torso = _tiny_gemma4_torso()
+    lengths, ends = [40, 24, 33], [12, 7, 20]  # valid tokens and where each state ends
+    width = max(lengths)
+    ids = torch.zeros(3, width, dtype=torch.long)
+    attention_mask = torch.zeros(3, width, dtype=torch.long)
+    for i, n in enumerate(lengths):
+        ids[i, :n] = torch.randint(1, 64, (n,))
+        attention_mask[i, :n] = 1
+    prefix_end = torch.tensor(ends)
+    masks = prefix_bidir_masks(torso.config, attention_mask, prefix_end, torch.float32)
+
+    with torch.no_grad():
+        dense = torso(input_ids=ids, attention_mask=masks).last_hidden_state
+        handle = install(torso, prefix_end, attention_mask, min_length=1)  # force the split path
+        try:
+            split = torso(input_ids=ids, attention_mask=masks).last_hidden_state
+        finally:
+            handle.remove()
+
+    for i, n in enumerate(lengths):  # only the real positions are read
+        torch.testing.assert_close(split[i, :n], dense[i, :n], rtol=1e-4, atol=1e-4)
+    assert torso.config._attn_implementation == "sdpa"  # put back
+
+    with torch.no_grad():  # under min_length it must fall back to the masked call
+        handle = install(torso, prefix_end, attention_mask, min_length=width + 1)
+        try:
+            short = torso(input_ids=ids, attention_mask=masks).last_hidden_state
+        finally:
+            handle.remove()
+    torch.testing.assert_close(short, dense)
