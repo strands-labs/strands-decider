@@ -1,0 +1,30 @@
+# Gemma 4 12B: the recipe's settings for this size. Flags given to training.train override any of them.
+size: 12B
+base_model: google/gemma-4-12B-it
+revision: 5926caa4ec0cac5cbfadaf4077420520de1d5205
+tokenizer_sha256: cc8d3a0ce36466ccc1278bf987df5f71db1719b9ca6b4118264f45cb627bfe0f
+# The base's identity: sha256 of its config.json, tokenizer.json and tensor headers (training/merge.py base_digest)
+base_sha256: b80490044d2ac55771831292e43ccb36f215447e43f4307b78dd746eada46a3f
+prompt: strands-chat
+targets: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
+rank: 64
+alpha: 128
+dropout: 0.05
+lr: 3.0e-5                   # the 12B collapses at 1e-4
+warmup_ratio: 0.05
+weight_decay: 0.0
+max_grad_norm: 1.0
+brier_weight: 0.0
+epochs: 1
+rows_per_step: 3072          # 192 microbatches of 16 rows: accum = 192 / GPUs
+batch_size: 16
+token_budget: 16384
+max_length: 16384
+save_every: 100
+eval_every: 100
+balance: true
+attn_split: 0
+# The seeds of one model: one run per seed with these settings, each merged, then averaged (training/README.md).
+# Two for the 12B: a run with seed 20261107 diverged (its loss rose from 0.29 to 1.4 near step 1,600).
+seeds: [20260920, 20261108]
+# The peak GPU memory one run of these settings measured: 42.8 GB per GPU.

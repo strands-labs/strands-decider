@@ -1,0 +1,10 @@
+# The versions the token-readout recipe was trained and checked with (Python 3.12, Linux, NVIDIA GPUs), installed
+# beside this repository's package (`pip install -e .`). The package admits a wider range (pyproject.toml); under
+# these pins, with STRANDS_DECIDER_EXACT_FIXTURES=1, the tests in training/tests compare with the previous trainer's
+# outputs bit for bit (training/README.md, "How the token-readout path was checked").
+torch==2.14.0
+transformers==5.17.0
+safetensors==0.8.0
+tokenizers==0.23.3
+numpy==2.5.3
+pyyaml>=6.0

@@ -1,0 +1,30 @@
+# Gemma 4 E4B: the recipe's settings for this size. Flags given to training.train override any of them.
+size: E4B
+base_model: google/gemma-4-E4B-it
+revision: ee0ef6023621cff504d758262d4e04895a5af4a2
+tokenizer_sha256: cc8d3a0ce36466ccc1278bf987df5f71db1719b9ca6b4118264f45cb627bfe0f
+# The base's identity: sha256 of its config.json, tokenizer.json and tensor headers (training/merge.py base_digest)
+base_sha256: a028b779f2b4a0600589dc52352ff0042a3211d639461141ccd8a00ce23baacc
+prompt: strands-chat
+# LoRA on every linear of the decoder layers, and the per-layer input gate and projection of E2B and E4B
+targets: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj, per_layer_input_gate, per_layer_projection]
+rank: 64
+alpha: 128
+dropout: 0.05
+lr: 1.0e-4
+warmup_ratio: 0.05
+weight_decay: 0.0
+max_grad_norm: 1.0
+brier_weight: 0.0
+epochs: 1
+rows_per_step: 3072          # 96 microbatches of 32 rows: accum = 96 / GPUs
+batch_size: 32               # rows per microbatch
+token_budget: 32768          # padded tokens per microbatch
+max_length: 16384
+save_every: 100
+eval_every: 100
+balance: true
+attn_split: 1024
+# The seeds of one model: one run per seed with these settings, each merged, then averaged (training/README.md).
+seeds: [20260920, 20261107, 20261108]
+# The peak GPU memory one run of these settings measured: 36.8 GB per GPU.
