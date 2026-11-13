@@ -893,8 +893,7 @@ def test_decoding_follows_the_specs_rules():
 def test_the_processor_with_its_resize_off_takes_the_resized_pixels():
     """Gemma4ImageProcessorPil's own resize is Pillow's bicubic to (W, H): it gives the same
     pixel values as resizing first and calling it with do_resize=False, as section 11.1 has
-    the runtime do. Where torchvision is installed, the 12B's processor, which resizes with
-    torchvision, takes the Pillow-resized pixels with do_resize=False and counts N."""
+    the runtime do."""
     transformers = pytest.importorskip("transformers")
     pytest.importorskip("PIL")
     np = pytest.importorskip("numpy")
@@ -909,11 +908,15 @@ def test_the_processor_with_its_resize_off_takes_the_resized_pixels():
         ours = proc(images=[resized], do_resize=False, return_tensors="np")
         assert np.array_equal(own["pixel_values"], ours["pixel_values"]), name
         assert int(own["num_soft_tokens_per_image"][0]) == soft_tokens(*g["decoded"]), name
-    # The 12B's processor (torchvision only) takes the Pillow-resized pixels as they are.
-    try:
-        import torchvision  # noqa: F401
-    except ImportError:
-        return
+
+
+def test_the_12b_processor_takes_the_resized_pixels():
+    """The 12B's processor, which resizes with torchvision, takes the Pillow-resized pixels with
+    do_resize=False and counts N."""
+    transformers = pytest.importorskip("transformers")
+    pytest.importorskip("PIL")
+    pytest.importorskip("torchvision", reason="Gemma4UnifiedImageProcessor needs torchvision")
+    transformers.logging.set_verbosity_error()
     unified = transformers.Gemma4UnifiedImageProcessor(**PROCESSOR_SETTINGS)
     for name, g in _pixel_goldens()["images"].items():
         resized = reference_resize(reference_pixels(image_bytes(name)), *g["resized"])
