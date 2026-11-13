@@ -1,7 +1,7 @@
 """The Strands Decider core: the decision interface without torch.
 
 docs/spec.md defines the interface; this package implements its torch-free half with
-`tokenizers`, numpy and the standard library, and Pillow for images:
+`tokenizers`, numpy, pydantic and the standard library, and Pillow for images:
 
     render(request, tokenizer, variant)    -> RenderedRequest: ids, S, codes per question,
                                               and each image's span, N and sha256
@@ -44,6 +44,7 @@ from .images import (
     check_decoded_size,
     check_image_processor,
     decode_image,
+    decode_images,
     resize_image,
     resized_size,
     soft_tokens,
@@ -78,8 +79,8 @@ from .readout import (
     round_to_bf16,
     softcap,
 )
-from .request import NO_VISION, RequestJSON, parse_request
-from .runtime import Backend, attention_mask, evaluate
+from .request import Request, parse_request
+from .runtime import NO_VISION, Backend, attention_mask, evaluate
 from .tokenizer import CODE_TOKEN_IDS, CONTROL_TOKEN_IDS, check_tokenizer, load_tokenizer
 
 __all__ = [
@@ -115,7 +116,7 @@ __all__ = [
     "RenderedImage",
     "RenderedQuestion",
     "RenderedRequest",
-    "RequestJSON",
+    "Request",
     "agreement",
     "agreement_with_goldens",
     "answer",
@@ -126,6 +127,7 @@ __all__ = [
     "code_probabilities",
     "codes_for",
     "decode_image",
+    "decode_images",
     "evaluate",
     "load_safetensors",
     "load_tokenizer",

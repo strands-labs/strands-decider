@@ -1,10 +1,10 @@
 """The prompt template (docs/spec.md): goldens, the S boundary, and the rendering properties.
 
-Torch-free: tokenizers and numpy. The goldens' text is checked everywhere; their token ids,
-and the properties, need Gemma 4's tokenizer (tests/core_support.py says where to point it).
-Requests with images use the small test images in tests/fixtures/core/images; the image
-tokens are control tokens, emitted by id. Regenerate the goldens after an intended template
-change, and review the diff:
+Torch-free: tokenizers, numpy and pydantic. The goldens' text is checked everywhere; their
+token ids, and the properties, need Gemma 4's tokenizer (tests/core_support.py says where to
+point it). Requests with images use the small test images in tests/fixtures/core/images,
+whose headers Pillow reads; the image tokens are control tokens, emitted by id. Regenerate
+the goldens after an intended template change, and review the diff:
 
     STRANDS_DECIDER_REGEN_GOLDENS=1 STRANDS_DECIDER_GEMMA4_TOKENIZER=... \\
         pytest tests/test_core_prompt.py
@@ -58,7 +58,9 @@ SPECIAL_TOKENS = (
     "<image|>", "<audio|>", "<|video|>",
 )  # fmt: skip
 EVERY_SPECIAL = "".join(SPECIAL_TOKENS)
-# Whitespace as docs/spec.md section 3.1 lists it, code point by code point.
+# Whitespace: Python's str.isspace, 29 code points on every Python from 3.10. The template
+# strips it from the ends of request text and collapses it in an option (docs/spec.md, 3.1).
+# The whitespace_edges golden pins it.
 SPEC_WHITESPACE = (
     "\t\n\x0b\x0c\r"  # U+0009 to U+000D
     "\x1c\x1d\x1e\x1f"  # U+001C to U+001F
@@ -198,10 +200,11 @@ CASES: dict[str, dict] = {
         "images": [image_b64("dots-50x50.gif")],
         "questions": {"dots": {"type": "noul", "instructions": "Are there dots in the image?"}},
     },
-    # JSON as docs/spec.md writes it: numbers (a float, a whole float, both exponent forms, a
-    # large integer, -0.0), true, false, null, every kind of escape, `/`, non-ASCII text and
-    # separators kept, and empty containers nested; in the state, in instructions, and
-    # flattened to one line in a description, where whitespace collapses inside strings.
+    # JSON as json.dumps(indent=2, ensure_ascii=False) writes it: numbers (a float, a whole
+    # float, both exponent forms, a large integer, -0.0), true, false, null, every kind of
+    # escape, `/`, non-ASCII text and separators kept, and empty containers nested; in the
+    # state, in instructions, and flattened to one line in a description, where whitespace
+    # collapses inside strings.
     "json_rendering": {
         "state": {
             "float": 1.5,
@@ -312,8 +315,8 @@ CASES: dict[str, dict] = {
             }
         },
     },
-    # Whitespace is the spec's 29 code points: NBSP, U+2028 and U+001F are stripped from the
-    # state's edges and collapsed inside an option; U+FEFF is not whitespace and stays.
+    # Whitespace is Unicode's White_Space and U+001C to U+001F: NBSP, U+2028 and U+001F are
+    # stripped from the state's edges and collapsed inside an option; U+FEFF stays.
     "whitespace_edges": {
         "state": "\u00a0\u2028\u001f\ufeff Hello\u00a0\u00a0world\r\n \ufeff\u001f\u2028\u00a0",
         "questions": {
@@ -437,13 +440,13 @@ def test_goldens_cover_every_case_and_variant(goldens):
 
     assert sorted(goldens) == sorted(GOLDEN_IDS)
     kinds = {
-        (g["variant"], q.kind)
+        (g["variant"], q.type)
         for g in goldens.values()
         for q in parse_request(g["request"]).questions.values()
     }
     assert kinds == {(v, k) for v in VARIANTS for k in ("noul", "choice", "score")}
     inferred = {
-        parse_request({"state": "", "questions": {"q": q}}).questions["q"].kind
+        parse_request({"state": "", "questions": {"q": q}}).questions["q"].type
         for g in goldens.values()
         for q in g["request"]["questions"].values()
         if "type" not in q
@@ -550,11 +553,11 @@ def test_structured_content_follows_v1_render_content():
     )
 
 
-# ---- JSON and whitespace, as docs/spec.md spells them out ---------------------------------
+# ---- JSON and whitespace, by rules written out apart from the json module ---------------
 
 
 def _spec_float(x: float) -> str:
-    """A double as the spec writes it, built from its rule rather than from repr: the
+    """A double as the template writes it, built from a rule rather than from repr: the
     shortest digits that read back as the same double; positional with at least one digit
     after the point when its first digit's decimal exponent e is in [-4, 16), else
     d.ddde+XX with at least two exponent digits."""
@@ -595,7 +598,7 @@ def _spec_string(s: str) -> str:
 
 
 def _spec_json(v, level: int = 0) -> str:
-    """docs/spec.md's JSON, written from its rules, independently of the json module."""
+    """JSON as the template writes it, written from rules, independently of the json module."""
     pad, inner = "  " * level, "  " * (level + 1)
     if v is None:
         return "null"
@@ -678,10 +681,10 @@ def struct_float(rng: random.Random) -> float:
             return x
 
 
-def test_json_renders_by_the_spec_rules():
-    """The core's JSON is the spec's, checked against an implementation of its rules that
-    does not use the json module, on random values: every kind of number, escape and
-    nesting."""
+def test_json_renders_by_written_out_rules():
+    """The core's JSON, json.dumps(indent=2, ensure_ascii=False), checked against an
+    implementation of its rules that does not use the json module, on random values: every
+    kind of number, escape and nesting."""
     from strands_decider.core import render_content
 
     rng = random.Random(31)
@@ -699,11 +702,11 @@ def test_json_renders_by_the_spec_rules():
     assert render_content(json.loads('{"a": 1, "b": 2, "a": 3}')) == '{\n  "a": 3,\n  "b": 2\n}'
 
 
-def test_whitespace_is_the_specs_29_code_points():
-    """Section 3.1's whitespace is Python's str.isspace set, the same on every Python the core
-    runs on. Request text loses exactly it at its ends, an option has each run of it as one
-    space in its name and its description, and U+200B and U+FEFF, which are not whitespace,
-    are kept."""
+def test_whitespace_is_pythons_29_code_points():
+    """The whitespace stripped and collapsed is Python's str.isspace set, the same on every
+    Python the core runs on. Request text loses exactly it at its ends, an option has each
+    run of it as one space in its name and its description, and U+200B and U+FEFF, which
+    are not whitespace, are kept."""
     from strands_decider.core.prompt import DESCRIPTION_SEPARATOR, render_content
 
     assert len(SPEC_WHITESPACE) == 29 == len(set(SPEC_WHITESPACE))
@@ -740,10 +743,13 @@ def _nested(depth: int, leaf=1):
 @pytest.mark.parametrize(
     ("where", "make"),
     [
-        ("state", lambda v: {"state": {"v": v}, "questions": {"q": {"instructions": "x"}}}),
-        ("instructions", lambda v: {"state": "s", "questions": {"q": {"instructions": [v]}}}),
+        ("state: ", lambda v: {"state": {"v": v}, "questions": {"q": {"instructions": "x"}}}),
         (
-            "option",
+            "questions.q.noul.instructions: ",
+            lambda v: {"state": "s", "questions": {"q": {"instructions": [v]}}},
+        ),
+        (
+            "questions.q.choice.criteria.a: ",
             lambda v: {
                 "state": "s",
                 "questions": {
@@ -752,7 +758,7 @@ def _nested(depth: int, leaf=1):
             },
         ),
         (
-            "option",
+            "questions.q.noul.criteria.true: ",
             lambda v: {
                 "state": "s",
                 "questions": {
@@ -763,84 +769,100 @@ def _nested(depth: int, leaf=1):
     ],
 )
 def test_content_the_template_cannot_render_alike_is_refused(where, make):
-    """NaN and Infinity (which Python's JSON reads), integers past 4,300 digits, lone
-    surrogates, keys that are not strings, values that are not JSON, and nesting past 100
-    levels: refused with a ValueError, in the state, the instructions and the descriptions."""
+    """Content must nest at most 100 levels, and read back unchanged from the JSON the template
+    writes for it and encode as UTF-8. NaN and Infinity (which Python's JSON reads), integers
+    past 4,300 digits, lone surrogates, keys that are not strings, values that are not JSON,
+    and nesting past 100 levels are refused with a ValueError, and only a ValueError, naming
+    where: in the state, the instructions and the descriptions."""
     for bad, match in [
-        (math.nan, "not a JSON number"),
-        (math.inf, "not a JSON number"),
-        (-math.inf, "not a JSON number"),
-        (10**4300, "4,300 digits"),
-        (-(10**4300), "4,300 digits"),
-        ("lone \ud800 surrogate", "lone surrogate"),
-        ({"\udfff": 1}, "lone surrogate"),
-        ({1: "a"}, "keys must be strings"),
-        ((1, 2), "not a JSON value"),
-        ({1.5}, "not a JSON value"),
-        (b"bytes", "not a JSON value"),
-        (_nested(100), "nested more than 100 levels"),
+        (math.nan, "Out of range float"),
+        (math.inf, "Out of range float"),
+        (-math.inf, "Out of range float"),
+        (10**4300, "4300"),
+        (-(10**4300), "4300"),
+        ("lone \ud800 surrogate", "surrogates not allowed"),
+        ({"\udfff": 1}, "surrogates not allowed"),
+        ({1: "a"}, "reads back changed"),
+        ((1, 2), "reads back changed"),
+        ({1.5}, "not JSON serializable"),
+        (b"bytes", "not JSON serializable"),
+        (_nested(100), "nested more than 100 levels deep"),
+        (_nested(100_000), "nested more than 100 levels deep"),
     ]:
         with pytest.raises(ValueError, match=match) as e:
             render_text(make(bad), PLAIN)
-        assert where in str(e.value)
+        assert type(e.value) is ValueError and str(e.value).startswith(where), str(e.value)
     # Within the limits, they render: an array inside the request's own is one level deeper.
     render_text(make(10**4300 - 1), PLAIN)
     render_text(make(_nested(99)), PLAIN)
 
 
 def test_nesting_is_counted_from_the_outermost_container():
-    """An object or array is one level deeper than the deepest value in it, so an empty one
-    is level 1, and a number whose double is not finite, such as JSON's 1e400, is refused."""
-    assert render_text(
-        {"state": _nested(99, leaf=[]), "questions": {"q": {"instructions": "x"}}}, PLAIN
-    )
-    with pytest.raises(ValueError, match="nested more than 100 levels deep"):
-        render_text(
-            {"state": _nested(100, leaf={}), "questions": {"q": {"instructions": "x"}}}, PLAIN
-        )
+    """An object or array is one level deeper than the deepest value in it, so an empty one is
+    level 1; 100 levels render and 101 do not."""
+    x = {"q": {"instructions": "x"}}
+    assert render_text({"state": _nested(99, leaf=[]), "questions": x}, PLAIN)
+    assert render_text({"state": _nested(100), "questions": x}, PLAIN)
+    for deep in (_nested(100, leaf={}), _nested(101)):
+        with pytest.raises(ValueError, match=r"^state: nested more than 100 levels deep$"):
+            render_text({"state": deep, "questions": x}, PLAIN)
+
+
+def test_values_outside_json_are_refused_where_they_stand():
+    """A number too large for a double, such as JSON's 1e400, reads as infinity and is refused;
+    one too small, 1e-400, is 0.0 and kept. Option names and score levels are checked as text,
+    and a state that is not a string, object or array is refused, a tuple included."""
+    x = {"q": {"instructions": "x"}}
     for body in ('{"a": 1e400}', '{"a": [-1e400]}', '{"a": 1E999}'):
-        with pytest.raises(ValueError, match="not a JSON number"):
-            render_text(
-                {"state": json.loads(body), "questions": {"q": {"instructions": "x"}}}, PLAIN
-            )
-    assert (
-        "0.0"
-        in render_text(
-            {"state": json.loads('{"a": 1e-400}'), "questions": {"q": {"instructions": "x"}}}, PLAIN
-        )[0]
+        with pytest.raises(ValueError, match=r"^state: .*Out of range float"):
+            render_text({"state": json.loads(body), "questions": x}, PLAIN)
+    assert "0.0" in render_text({"state": json.loads('{"a": 1e-400}'), "questions": x}, PLAIN)[0]
+    choice = {"type": "choice", "instructions": "x", "criteria": {"\ud83d": None, "b": None}}
+    with pytest.raises(ValueError, match=r"^questions\.q\.choice\.criteria.*surrogates"):
+        render_text({"state": "s", "questions": {"q": choice}}, PLAIN)
+    score = {"type": "score", "instructions": "x", "criteria": ["\udc00", "b"]}
+    with pytest.raises(ValueError, match=r"^questions\.q\.score\.criteria\.0: .*surrogates"):
+        render_text({"state": "s", "questions": {"q": score}}, PLAIN)
+    for state in (None, 5, True, (1, 2), b"s"):
+        with pytest.raises(ValueError, match=r"^state: must be a string, object or array$"):
+            render_text({"state": state, "questions": x}, PLAIN)
+    # render_content, which the template uses, refuses content too deep to write as well.
+    from strands_decider.core import render_content
+
+    with pytest.raises(ValueError, match="nested too deeply"):
+        render_content(_nested(100_000))
+
+
+def test_the_state_is_optional_and_empty_by_default():
+    x = {"q": {"instructions": "x"}}
+    assert render_text({"questions": x}, PLAIN) == render_text({"state": "", "questions": x}, PLAIN)
+
+
+def test_a_request_is_a_json_object_and_its_errors_are_bounded():
+    """Anything but an object, or a pydantic model, is refused with one plain message. Errors
+    are listed by where they are, the first five and a count of the rest, each place cut to
+    40 characters and each message to 200."""
+    from types import MappingProxyType
+
+    x = {"q": {"instructions": "x"}}
+    for bad in (["a", "list"], "text", None, 3, MappingProxyType({"questions": x})):
+        with pytest.raises(ValueError) as e:
+            render_text(bad, PLAIN)  # type: ignore[arg-type]
+        assert type(e.value) is ValueError and str(e.value) == "a request must be a JSON object"
+    with pytest.raises(ValueError) as e:
+        render_text({"questions": x, "images": [1] * 20}, PLAIN)
+    parts = str(e.value).split("; ")
+    assert parts[0] == "images.0: Input should be a valid string" and parts[5] == "and 15 more"
+    name = "n" * 300
+    choice = {"type": "choice", "instructions": "x", "criteria": {name: 5, "b": None}}
+    with pytest.raises(ValueError) as e:
+        render_text({"questions": {"q": choice}}, PLAIN)
+    assert str(e.value) == (
+        f"questions.q.choice.criteria.{name[:40]}: must be a string, object or array"
     )
-    ok = {"state": _nested(100), "questions": {"q": {"instructions": "x"}}}
-    assert render_text(ok, PLAIN)
-    deep = {"state": _nested(101), "questions": {"q": {"instructions": "x"}}}
-    with pytest.raises(ValueError, match="nested more than 100 levels deep"):
-        render_text(deep, PLAIN)
-    # Far deeper than Python's recursion limit: still a ValueError, never a RecursionError.
-    with pytest.raises(ValueError, match="nested more than 100 levels deep"):
-        render_text({"state": _nested(100_000), "questions": {"q": {"instructions": "x"}}}, PLAIN)
-    with pytest.raises(ValueError, match="lone surrogate"):
-        render_text(
-            {
-                "state": "s",
-                "questions": {
-                    "q": {
-                        "type": "choice",
-                        "instructions": "x",
-                        "criteria": {"\ud83d": None, "b": None},
-                    }
-                },
-            },
-            PLAIN,
-        )
-    with pytest.raises(ValueError, match="lone surrogate"):
-        render_text(
-            {
-                "state": "s",
-                "questions": {
-                    "q": {"type": "score", "instructions": "x", "criteria": ["\udc00", "b"]}
-                },
-            },
-            PLAIN,
-        )
+    with pytest.raises(ValueError) as e:
+        render_text({"questions": {"q": {"type": "x" * 5000, "instructions": "x"}}}, PLAIN)
+    assert str(e.value).startswith("questions.q: Input tag 'xxx") and len(str(e.value)) <= 213
 
 
 @pytest.mark.parametrize("state", ["", "   \n\t "])
@@ -1020,11 +1042,11 @@ def test_image_spans_and_control_ids(which, variant):
     assert all(q.images == r.images for q in r.questions.values())
 
 
-def test_images_are_checked_when_parsed():
+def test_images_are_checked_when_rendered():
     """`images` is v1's: a list of strings, null or any other type refused; then at most 4
     images, each a PNG, JPEG, WebP or GIF file (tests/test_core_images.py has the rest)."""
-    for bad in (None, "", 0, {}, "aGk=", [1], [None]):
-        with pytest.raises(ValueError, match="list of strings"):
+    for bad in (None, "", 0, {}, "aGk=", [1], [None], ("aGk=",)):
+        with pytest.raises(ValueError, match=r"^images(\.0)?: Input should be a valid"):
             render_text({**CASES["support_ticket"], "images": bad}, PLAIN)
     assert render_text({**CASES["support_ticket"], "images": []}, PLAIN) == render_text(
         CASES["support_ticket"], PLAIN
@@ -1156,12 +1178,13 @@ IMAGES_WITH_CONTROLS = _with_images(WITH_CONTROLS[:20], seed=4)
 def _encode_across_s(tok, variant: str, req: dict, name: str) -> list[int]:
     """The prompt encoded with the two text runs that meet at S joined into one, control
     tokens by id and special-token matching off: what tokenizing across S gives."""
+    from strands_decider.core.images import decode_images
     from strands_decider.core.prompt import prompt_pieces, question_block, state_pieces
     from strands_decider.core.request import parse_request
 
     parsed = parse_request(req)
-    q = parsed.questions[name]
-    state = state_pieces(req["state"], parsed.images)
+    q = parsed.questions[name].normalised()
+    state = state_pieces(req["state"], decode_images(parsed.images))
     sp, qp = prompt_pieces(variant, state, question_block(q).text)
     assert not sp[-1][0] and not qp[0][0], "S must fall between two text runs"
     pieces = [*sp[:-1], (False, sp[-1][1] + qp[0][1]), *qp[1:]]
@@ -1779,9 +1802,9 @@ def test_chat_ids_match_hugging_face_apply_chat_template():
 
 
 def test_request_parsing_matches_v1():
-    """The torch-free parser accepts and refuses what v1's pydantic models do, and infers a
-    missing `type` the same way."""
-    pytest.importorskip("pydantic")
+    """The core accepts and refuses what v1's pydantic models do, and infers a missing `type`
+    the same way, but for a request without a state, which v1 refuses and the core reads as
+    one with an empty state. (Both count the images later: tests/test_core_images.py.)"""
     from strands_decider.core import parse_request
     from strands_decider.schema import SystemOneRequest
 
@@ -1828,26 +1851,26 @@ def test_request_parsing_matches_v1():
     for req in requests:
         try:
             validated = SystemOneRequest.model_validate(req)
-            # v1's image engine then counts the images before it decodes them.
-            n = len(validated.images)
-            schema_error = f"{n} images; this server takes at most 4" if n > 4 else None
-        except Exception as e:
-            validated, schema_error = None, str(e)
+        except Exception:
+            validated = None
         try:
-            parsed, parse_error = parse_request(req), None
+            parsed = parse_request(req)
         except ValueError as e:
-            parsed, parse_error = None, str(e)
-        assert (schema_error is None) == (parse_error is None), req
-        if schema_error is None:
-            assert validated is not None and parsed is not None
+            assert type(e) is ValueError, req  # never pydantic's ValidationError
+            parsed = None
+        if "state" not in req:
+            assert validated is None and parsed is not None and parsed.state == "", req
+            continue
+        assert (validated is None) == (parsed is None), req
+        if validated is not None and parsed is not None:
             assert [q.type for q in validated.questions.values()] == [
-                q.kind for q in parsed.questions.values()
+                q.type for q in parsed.questions.values()
             ], req
-        elif validated is not None:  # the schema accepts it and the engine refuses its images
-            assert parse_error == schema_error, req
-        if parsed is not None and validated is not None:
-            assert len(parsed.images) == len(validated.images), req
-    assert parse_request(SystemOneRequest.model_validate(CASES["support_ticket"])).questions
+            assert parsed.images == validated.images, req
+    # Every golden renders the same given as v1's model.
+    for name, case in CASES.items():
+        v1 = SystemOneRequest.model_validate(case)
+        assert render_text(v1, PLAIN) == render_text(case, PLAIN), name
 
 
 def test_v1_text_only_engine_refuses_images_with_no_vision():
@@ -1861,7 +1884,6 @@ def test_v1_text_only_engine_refuses_images_with_no_vision():
 
 
 def test_render_content_matches_v1():
-    pytest.importorskip("pydantic")
     from strands_decider.core import render_content
     from strands_decider.prompting import render_content as prompting_render_content
 
@@ -1877,10 +1899,11 @@ def test_render_content_matches_v1():
         assert render_content(c) == prompting_render_content(c), ascii(c)[:80]
 
 
-def test_core_imports_without_torch_pydantic_or_jinja():
+def test_core_imports_without_torch_jinja_or_pillow():
+    """The core needs pydantic, and Pillow only for images, which it imports when one comes."""
     code = (
         "import sys, strands_decider.core; "
-        "heavy = {'torch', 'transformers', 'pydantic', 'jinja2', 'safetensors', 'PIL'}; "
+        "heavy = {'torch', 'transformers', 'jinja2', 'safetensors', 'PIL'}; "
         "assert not heavy & set(sys.modules), sorted(heavy & set(sys.modules))"
     )
     subprocess.run([sys.executable, "-c", code], check=True)

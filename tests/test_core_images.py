@@ -63,6 +63,7 @@ from strands_decider.core.images import (
     MAX_SOFT_TOKENS,
     PATCH_SIZE,
     POOLING_KERNEL_SIZE,
+    decode_images,
 )
 
 COULD_NOT_READ = "image could not be read as PNG/JPEG/WEBP/GIF: "
@@ -352,16 +353,18 @@ def test_images_need_pillow_and_the_core_does_not(monkeypatch):
 
 def test_each_image_is_checked_in_turn_after_everything_else():
     """The request's own checks come first, then the count, then every check of the first
-    image before any of the second's."""
+    image before any of the second's. `parse_request` checks the request and leaves the
+    images as they came."""
     req = {"state": "", "questions": {"q": {"instructions": "x"}}}
     big, bad = _b64(_png_header(4097, 4096)), "not base64!"
     with pytest.raises(ValueError, match="image is 4097x4096"):
-        parse_request({**req, "images": [big, bad]})
+        render_text({**req, "images": [big, bad]}, PLAIN)
     with pytest.raises(ValueError, match="image is not valid base64"):
-        parse_request({**req, "images": [bad, big]})
-    with pytest.raises(ValueError, match="no instructions"):
-        parse_request({"state": "", "questions": {"q": {"type": "noul"}}, "images": [bad] * 5})
-    assert parse_request({**req, "images": [bad] * 5}, images=False).images == ()
+        render_text({**req, "images": [bad, big]}, PLAIN)
+    bad_question = {"state": "", "questions": {"q": {"type": "noul"}}, "images": [bad] * 5}
+    with pytest.raises(ValueError, match=r"^questions\.q\.noul\.instructions: Field required$"):
+        render_text(bad_question, PLAIN)
+    assert parse_request({**req, "images": [bad] * 5}).images == [bad] * 5
 
 
 def test_the_image_processors_settings_are_checked(tmp_path):
@@ -388,26 +391,23 @@ def test_the_image_processors_settings_are_checked(tmp_path):
 
 
 def test_more_than_four_images_are_refused_before_any_is_decoded():
-    req = {"state": "", "questions": {"q": {"instructions": "x"}}}
     with pytest.raises(ValueError) as e:
-        parse_request({**req, "images": ["not base64!"] * 5})
+        decode_images(["not base64!"] * 5)
     assert str(e.value) == "5 images; this server takes at most 4"
     with pytest.raises(ValueError, match="image is not valid base64"):
-        parse_request({**req, "images": ["not base64!"] * 4})
-    parsed = parse_request({**req, "images": [image_b64(n) for n in list(IMAGE_FILES)[:4]]})
-    assert [i.data for i in parsed.images] == [image_bytes(n) for n in list(IMAGE_FILES)[:4]]
+        decode_images(["not base64!"] * 4)
+    images = decode_images([image_b64(n) for n in list(IMAGE_FILES)[:4]])
+    assert [i.data for i in images] == [image_bytes(n) for n in list(IMAGE_FILES)[:4]]
 
 
 def test_audio_is_refused_rather_than_ignored():
-    """Refused unless absent or empty by the spec's rule: null, false, a number equal to 0,
-    or an empty string, array or object."""
+    """Any `audio` but null is refused, an empty one included; null is as if it were absent."""
     req = {"state": "a call", "questions": {"q": {"instructions": "x"}}}
-    for given in (["UklGRg=="], "UklGRg==", {"data": "x"}, True, 1, 0.5, [None], [""]):
+    for given in (["UklGRg=="], "UklGRg==", {"data": "x"}, True, 1, 0.5, [None], [], False, 0, ""):
         with pytest.raises(ValueError) as e:
             parse_request({**req, "audio": given})
         assert str(e.value) == "audio input is not supported", given
-    for empty in (None, [], False, 0, 0.0, "", {}):
-        assert parse_request({**req, "audio": empty}).images == ()
+    assert parse_request({**req, "audio": None}) == parse_request(req)
 
 
 # ---- N ---------------------------------------------------------------------------------------
