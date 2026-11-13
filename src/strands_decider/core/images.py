@@ -24,7 +24,7 @@ import json
 import math
 import os
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -281,3 +281,11 @@ def decode_image(
         raise ValueError(f"image is {width}x{height}; at most {max_pixels:,} pixels are accepted")
     # A JPEG with more pictures after the first (MPO, as some cameras write) is a JPEG here.
     return EncodedImage(raw, "JPEG" if fmt == "MPO" else fmt, width, height)
+
+
+def decode_images(images: Sequence[str]) -> tuple[EncodedImage, ...]:
+    """A request's images, checked as v1 checks them: at most MAX_IMAGES, counted before any is
+    decoded, then each in turn, every check of one before the next's (`decode_image`)."""
+    if len(images) > MAX_IMAGES:
+        raise ValueError(f"{len(images)} images; this server takes at most {MAX_IMAGES}")
+    return tuple(decode_image(i) for i in images)

@@ -151,9 +151,9 @@ jobs:
           echo "$GEMMA4_TEMPLATE_SHA256  $dir/chat_template.jinja" | sha256sum -c -
           echo "available=true" >> "$GITHUB_OUTPUT"
           echo "dir=$dir" >> "$GITHUB_OUTPUT"
-      # No torch. pydantic, jinja2 and transformers (which runs without torch) un-skip the
-      # v1-parity, chat-template and apply_chat_template tests; Pillow with transformers
-      # un-skips the image header checks against Pillow and N against Gemma4ImageProcessor.
+      # No torch. The core needs pydantic, and Pillow for the image tests. jinja2 and
+      # transformers (which runs without torch) un-skip the chat-template and
+      # apply_chat_template tests, and N against Gemma4ImageProcessor.
       # The checks that need torchvision or torch (the 12B's processor, Gemma4Processor,
       # v1's decode_image) skip here.
       - if: steps.fetch.outputs.available == 'true'

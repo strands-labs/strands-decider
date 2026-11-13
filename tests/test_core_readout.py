@@ -1,9 +1,10 @@
 """The readout (docs/spec.md, The readout) on small arrays, and the runtime glue.
 
-Torch-free: numpy and tokenizers. Nothing here needs Gemma 4's tokenizer; the end-to-end
-test uses a toy one. The precision regime (a bf16 GEMM, then float32) is checked against an
-independent reimplementation of the arithmetic of strands-decider-vllm, the vLLM runtime,
-which rounds by arithmetic where the core rounds by bits.
+Torch-free: numpy, tokenizers and pydantic, and Pillow for the image requests. Nothing here
+needs Gemma 4's tokenizer; the end-to-end test uses a toy one. The precision regime (a bf16
+GEMM, then float32) is checked against an independent reimplementation of the arithmetic of
+strands-decider-vllm, the vLLM runtime, which rounds by arithmetic where the core rounds by
+bits.
 """
 
 from __future__ import annotations
@@ -27,6 +28,7 @@ from strands_decider.core import (
     CODES,
     FINAL_LOGITS,
     HIDDEN,
+    NO_VISION,
     PLAIN,
     PROBABILITIES,
     RAW_LOGITS,
@@ -47,7 +49,6 @@ from strands_decider.core import (
     round_to_bf16,
     softcap,
 )
-from strands_decider.core.request import NO_VISION
 
 C = 30.0  # Gemma 4's final_logit_softcapping
 
@@ -771,7 +772,6 @@ def test_a_rendered_scores_legend_is_its_stripped_rubric():
 
 def test_answers_match_v1():
     """The same numbers as v1's `prompting.to_answer`, the confidence formulas included."""
-    pytest.importorskip("pydantic")
     from strands_decider.prompting import render_question, to_answer
     from strands_decider.schema import ChoiceQuestion, NoulQuestion, ScoreQuestion
 
@@ -1158,7 +1158,7 @@ def test_a_malformed_request_with_images_is_refused_for_what_is_malformed():
         (_config(token_ids=ids, inputs=["text"]), _FakeBackend({})),
         (_config(token_ids=ids), _FakeBackend({}, images=False)),
     ):
-        with pytest.raises(ValueError, match="has no instructions"):
+        with pytest.raises(ValueError, match="instructions: Field required"):
             evaluate(bad, tok, readout, cfg, backend)
 
 

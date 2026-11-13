@@ -38,10 +38,11 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from .codes import codes_for
-from .images import IMAGE_CLOSE, IMAGE_OPEN, IMAGE_SOFT, EncodedImage
-from .request import Question, Request, RequestJSON, parse_request
+from .images import IMAGE_CLOSE, IMAGE_OPEN, IMAGE_SOFT, EncodedImage, decode_images
+from .request import Question, Request, parse_request
 
 if TYPE_CHECKING:
+    from pydantic import BaseModel
     from tokenizers import Tokenizer
 
 PLAIN = "strands-plain"
@@ -69,17 +70,20 @@ Piece = tuple[bool, str]
 def render_content(content: Any) -> str:
     """A state, instruction or description as text: v1's `prompting.render_content`.
 
-    A string is stripped of whitespace (`str.strip`'s, the spec's); structured data is
-    indented JSON with its key order kept, as Python's `json.dumps(indent=2,
-    ensure_ascii=False)` writes it, so the same state always renders, and so tokenises, the
-    same way. docs/spec.md spells out the JSON, number by number and escape by escape, and
-    `request.check_json` refuses what it cannot render alike everywhere.
+    A string is stripped of whitespace (`str.strip`'s); structured data is indented JSON with
+    its key order kept, as Python's `json.dumps(indent=2, ensure_ascii=False)` writes it, so
+    the same state always renders, and so tokenises, the same way. A request's content is
+    checked to render alike everywhere (`request.Request`); content nested too deeply to
+    write is a ValueError here too.
     """
     if content is None:
         return ""
     if isinstance(content, str):
         return content.strip()
-    return json.dumps(content, indent=2, ensure_ascii=False, sort_keys=False)
+    try:
+        return json.dumps(content, indent=2, ensure_ascii=False, sort_keys=False)
+    except RecursionError:
+        raise ValueError("content nested too deeply to render") from None
 
 
 def state_block(state: Any) -> str:
@@ -539,25 +543,33 @@ def _rendered_images(
 @dataclass(frozen=True)
 class _Prepared:
     request: Request
+    images: tuple[EncodedImage, ...]
+    questions: dict[str, Question]
     state_pieces: list[Piece]
     blocks: dict[str, QuestionBlock]
     question_pieces: dict[str, list[Piece]]
 
 
 def _prepare(
-    request: RequestJSON, variant: str, option_orders: Mapping[str, Sequence[int]] | None
+    request: dict[str, Any] | BaseModel,
+    variant: str,
+    option_orders: Mapping[str, Sequence[int]] | None,
 ) -> _Prepared:
     if variant not in VARIANTS:
         raise ValueError(f"unknown prompt variant {variant!r}; this runtime implements {VARIANTS}")
     req = parse_request(request)
+    images = decode_images(req.images)
+    questions = {n: q.normalised() for n, q in req.questions.items()}
     orders = dict(option_orders or {})
-    unknown = set(orders) - set(req.questions)
+    unknown = set(orders) - set(questions)
     if unknown:
         raise ValueError(f"option_orders names unknown questions {sorted(unknown)}")
-    sblock = state_pieces(req.state, req.images)
-    blocks = {n: question_block(q, orders.get(n)) for n, q in req.questions.items()}
+    sblock = state_pieces(req.state, images)
+    blocks = {n: question_block(q, orders.get(n)) for n, q in questions.items()}
     return _Prepared(
         request=req,
+        images=images,
+        questions=questions,
         state_pieces=prompt_pieces(variant, sblock, "")[0],
         blocks=blocks,
         question_pieces={n: prompt_pieces(variant, sblock, b.text)[1] for n, b in blocks.items()},
@@ -565,7 +577,7 @@ def _prepare(
 
 
 def render_text(
-    request: RequestJSON,
+    request: dict[str, Any] | BaseModel,
     variant: str,
     *,
     option_orders: Mapping[str, Sequence[int]] | None = None,
@@ -578,7 +590,7 @@ def render_text(
 
 
 def render(
-    request: RequestJSON,
+    request: dict[str, Any] | BaseModel,
     tokenizer: Tokenizer,
     variant: str,
     *,
@@ -590,7 +602,8 @@ def render(
 
     Args:
         request: The request: the JSON object of `POST /v1/systemone`, as `json.loads` reads
-            it, or a v1 `SystemOneRequest`. It is checked as `parse_request` checks it.
+            it, a v1 `SystemOneRequest`, or a `Request` from `parse_request`. It is checked
+            as `parse_request` checks it, and then its images (`images.decode_images`).
         tokenizer: A `tokenizers.Tokenizer`, Gemma 4's: the checkpoint's own. Render never
             changes it, and may run on several threads at once with the same one.
         variant: The prompt, `strands-plain` or `strands-chat` (`VARIANTS`): the
@@ -607,12 +620,13 @@ def render(
         state ids, its own ids, its codes and their token ids, and the state's images.
 
     Raises:
-        ValueError: When the request or one of its images is malformed (`parse_request`),
-            the variant is unknown, `option_orders` names an unknown question or is not a
-            permutation, the tokenizer lacks a control token, splits a code, has an added
-            token that is not special or one that request text encodes to, or was handed
-            over by `plain_text_tokenizer` and has had its settings changed since, or a
-            prompt is longer than `max_length`.
+        ValueError: When the request or one of its images is malformed (`parse_request`,
+            `images.decode_images`), the variant is unknown, `option_orders` names an
+            unknown question or is not a permutation, the tokenizer lacks a control token,
+            splits a code, has an added token that is not special or one that request text
+            encodes to, or was handed over by `plain_text_tokenizer` and has had its
+            settings changed since, or a prompt is longer than `max_length`.
+        ImportError: When the request has images and Pillow is not installed.
     """
     prep = _prepare(request, variant, option_orders)
     names = list(prep.blocks)
@@ -624,7 +638,7 @@ def render(
 
     state_ids = tuple(encoded[0])
     state_text = _text(prep.state_pieces)
-    images = _rendered_images(state_ids, prep.request.images, enc)
+    images = _rendered_images(state_ids, prep.images, enc)
     out: dict[str, RenderedQuestion] = {}
     for n, qids in zip(names, encoded[1:], strict=True):
         b = prep.blocks[n]
@@ -636,7 +650,7 @@ def render(
             )
         out[n] = RenderedQuestion(
             name=n,
-            kind=prep.request.questions[n].kind,
+            kind=prep.questions[n].kind,
             variant=variant,
             state_ids=state_ids,
             question_ids=tuple(qids),
