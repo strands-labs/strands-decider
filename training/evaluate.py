@@ -40,6 +40,7 @@ from rich.console import Console
 from rich.table import Table
 from torch.utils.data import DataLoader
 
+from strands_decider.confidence import derive_confidence, derive_score_confidence
 from strands_decider.infer import EngineConfig, SystemOneEngine
 from strands_decider.modeling import (
     MASK_VALUE,
@@ -47,7 +48,6 @@ from strands_decider.modeling import (
     config_path,
     masked_log_softmax,
 )
-from strands_decider.schema import derive_confidence, derive_score_confidence
 
 from .data.collate import CollatorConfig, SystemOneCollator
 from .data.format import Example, read_jsonl

@@ -31,6 +31,12 @@ jobs:
     steps:
       - run: echo "No src/tests changes; skipping tests."
 
+  core-tokenizer:
+    name: core tokenizer (gemma 4)
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "No src/tests changes; skipping the core tokenizer tests."
+
   lint:
     name: lint
     runs-on: ubuntu-latest

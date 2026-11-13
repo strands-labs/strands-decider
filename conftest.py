@@ -18,7 +18,10 @@ os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
 @pytest.fixture(autouse=True)
 def _deterministic():
-    import torch
-
+    try:
+        import torch
+    except ModuleNotFoundError:  # the torch-free tests (tests/test_core_*.py) run without it
+        yield
+        return
     torch.manual_seed(0)
     yield
