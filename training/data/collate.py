@@ -17,7 +17,7 @@ from typing import Any
 import torch
 
 from strands_decider import core
-from strands_decider.prompting import build_prompt, chat_frame, lettered_prompt
+from strands_decider.prompting import build_prompt
 
 from .format import Example
 
@@ -25,9 +25,8 @@ from .format import Example
 @dataclass
 class CollatorConfig:
     max_length: int = 3072
-    # "numbered" (the default), or for a token readout "lettered" (prompting.lettered_prompt)
-    # or "strands-chat" (strands_decider.core.render, the reference's prompt). The two token
-    # readout renders shuffle only a choice's options, as the reference recipe does.
+    # "numbered" (the default), or for a token readout "strands-chat" (strands_decider.core.render),
+    # which shuffles only a choice's options, as the v2 recipe does.
     render: str = "numbered"
     shuffle_options: bool = True
     # Score levels are ordered, so they are never permuted -- but reversing the whole
@@ -49,8 +48,9 @@ class SystemOneCollator:
         self.cfg = config
         self.train = train
         self.rng = random.Random(config.seed)
-        self.frame = chat_frame(tokenizer) if config.render == "lettered" else None
-        self.chat = config.render == "strands-chat"
+        if config.render not in ("numbered", core.CHAT):
+            raise ValueError(f"render {config.render!r}: numbered or {core.CHAT} only")
+        self.chat = config.render == core.CHAT
 
     # ---- option ordering -------------------------------------------------
 
@@ -58,7 +58,7 @@ class SystemOneCollator:
         n = ex.n_options
         if not self.cfg.shuffle_options or not self.train or ex.fixed_order:
             return None
-        if (self.frame is not None or self.chat) and ex.kind != "choice":
+        if self.chat and ex.kind != "choice":
             return None
         if ex.kind == "score":
             if self.rng.random() < self.cfg.reverse_score_prob:
@@ -178,7 +178,6 @@ class SystemOneCollator:
         teachers: list[list[float] | None] = []
 
         spans: list[Any] = []
-        states: list[str] = []
         rendered: list[core.RenderedQuestion] = []
         for ex in batch:
             order = self._option_order(ex)
@@ -192,10 +191,6 @@ class SystemOneCollator:
                     option_orders=orders,
                 )
                 rendered.append(req.questions["q"])
-            elif self.frame is not None:
-                state, rest = lettered_prompt(ex.state, ex.to_question(instr), self.frame, order)
-                states.append(state)
-                texts.append(state + rest)
             else:
                 prompt, rq = build_prompt(ex.state, ex.to_question(instr), option_order=order)
                 texts.append(prompt)
@@ -210,7 +205,6 @@ class SystemOneCollator:
             t = getattr(ex, "teacher", None)
             teachers.append(None if t is None else (t if order is None else [t[i] for i in order]))
 
-        lettered = self.frame is not None
         # A strands-chat prompt is core.render's ids as they are, padded like the others.
         enc: Any
         if self.chat:
@@ -219,17 +213,15 @@ class SystemOneCollator:
             enc = self.tok(
                 texts,
                 padding=True,
-                # A lettered prompt is read at its last token: refuse it whole rather than cut it.
-                truncation=not lettered,
-                max_length=None if lettered else self.cfg.max_length,
+                truncation=True,
+                max_length=self.cfg.max_length,
                 return_tensors="pt",
                 # Right padding: pool_last_token finds the final real token by mask length,
                 # and the shared-prefix cache in infer.py assumes the prompt starts at 0.
                 padding_side="right",
-                return_offsets_mapping=not lettered,
-                add_special_tokens=not lettered,  # the chat template writes its own BOS
+                return_offsets_mapping=True,
             )
-        if (lettered or self.chat) and enc["input_ids"].size(1) > self.cfg.max_length:
+        if self.chat and enc["input_ids"].size(1) > self.cfg.max_length:
             raise ValueError(
                 f"a {self.cfg.render} prompt is longer than max_length {self.cfg.max_length}"
             )
@@ -244,13 +236,6 @@ class SystemOneCollator:
         if self.chat:
             # The state part's length, the prefix_bidir boundary, as core.render gives it.
             out["prefix_end"] = torch.tensor([q.state_len for q in rendered], dtype=torch.long)
-            width = max(n_slots)
-        elif lettered:
-            # Each row's first question token, where its tokens stop matching its state's own
-            # (a token across the boundary goes to the question); attention_mode prefix_bidir.
-            own = self.tok(states, add_special_tokens=False)["input_ids"]
-            ends = [_shared_len(r, o) for r, o in zip(enc["input_ids"].tolist(), own, strict=True)]
-            out["prefix_end"] = torch.tensor(ends, dtype=torch.long)
             width = max(n_slots)
         else:
             offs = enc["offset_mapping"].tolist()
@@ -290,9 +275,3 @@ def _pad_right(rows: list[list[int]], pad_id: int) -> dict[str, torch.Tensor]:
         ids[i, : len(r)] = torch.tensor(r, dtype=torch.long)
         mask[i, : len(r)] = 1
     return {"input_ids": ids, "attention_mask": mask}
-
-
-def _shared_len(a: Sequence[int], b: Sequence[int]) -> int:
-    """The length of the longest common start of `a` and `b`."""
-    n = min(len(a), len(b))
-    return next((i for i in range(n) if a[i] != b[i]), n)

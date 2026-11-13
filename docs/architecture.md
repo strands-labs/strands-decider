@@ -176,34 +176,30 @@ ordinal, so they are only ever *reversed* (rubric and label together), never per
 
 ### Opt-in: the token readout
 
-A training config can replace the pointer head with a token readout, the readout of the
-reference v2 decision models. Three keys select it:
+A training config can replace the pointer head with a token readout, the spec's 255-code
+readout (`docs/spec.md`) read at the last prompt token. Two keys select it:
 
 - `head_type: token_readout`. The head is one linear map, 255 outputs and no bias, on the
-  hidden state of the last prompt token. Output k scores the option listed under code k. Each
+  hidden state of the last prompt token. Output k scores the option listed under code k of
+  `strands_decider.core` (`A` to `IV`). The prompt is always `strands-chat`, rendered by
+  `strands_decider.core.render` as `docs/spec.md` defines it. Training shuffles the options of
+  a choice question only; a yes/no or score question keeps its order. Each
   output starts as the base model's LM head row of that code's token, so before training the
   head gives the base model's own preference among the codes. On Gemma 4 its logits get the
   same cap as the LM head's (`final_logit_softcapping`), saved with the checkpoint as
   `readout_softcap`. The outputs past the question's option
   count are masked.
-- `render: strands-chat` or `lettered` (one of them is required with the token readout).
-  `strands-chat` is the reference v2 template, rendered by `strands_decider.core.render` as
-  `docs/spec.md` defines it; the prompt splits where `render` says the state ends. `lettered` is
-  the earlier v2 template: the prompt goes through the
-  tokenizer's chat template, with thinking off: a system line, then `State:`, `Question:` and
-  `Options:` in the user turn. The options are listed under letter codes: `A` to `Z`, then
-  `AA`, `AB` and so on, the first 255 that the tokenizer encodes as one token. Training
-  shuffles the options of a choice question only; a yes/no or score question keeps its order.
 - `attention_mode: causal` (the default) or `prefix_bidir`. With `prefix_bidir` the prompt
-  splits where the state ends. A state token sees all of the state, in both directions, and
-  never the question. A question token sees the state and all of its own question. The
+  splits where `strands_decider.core.render` says the state ends. A state token sees all of
+  the state, in both directions, and never the question. A question token sees the state and
+  all of its own question. The
   full-attention layers take this mask. The sliding-window layers of Gemma 4 take it too,
-  without their window (512 or 1,024 tokens), as the reference v2 models train. The
+  without their window (512 or 1,024 tokens), as the v2 recipe trains. The
   linear-attention layers of Qwen3.5 stay causal. Other layer types are refused. It needs SDPA
   or eager attention.
 
-`lr_floor` sets where the cosine learning-rate schedule ends (the reference recipe uses 0.1), and
-`adam_betas` the AdamW betas (default `[0.9, 0.95]`; the reference recipe uses `[0.9, 0.999]`).
+`lr_floor` sets where the cosine learning-rate schedule ends (the v2 recipe uses 0.1), and
+`adam_betas` the AdamW betas (default `[0.9, 0.95]`; the v2 recipe uses `[0.9, 0.999]`).
 With `save_every`, each save also writes `resume-<step>.pt` (the last two are kept): set
 `resume_from` to one to continue a stopped run, on the same config and number of GPUs, as the
 unbroken run would have.

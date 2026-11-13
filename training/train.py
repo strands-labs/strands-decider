@@ -27,6 +27,7 @@ import torch
 import typer
 from torch.utils.data import DataLoader, Dataset
 
+from strands_decider import core
 from strands_decider.modeling import (
     HEAD_TYPES,
     StrandsDeciderConfig,
@@ -34,7 +35,6 @@ from strands_decider.modeling import (
     checkpoint_dir,
     config_path,
 )
-from strands_decider.prompting import chat_frame
 
 from . import distributed
 from .data.collate import CollatorConfig, SystemOneCollator
@@ -72,10 +72,9 @@ class TrainConfig:
     # (modeling.HostEmbedding). For one GPU: under torchrun every rank would hold a copy.
     host_embeddings: bool = False
     freeze_torso: bool = False
-    # "pointer" (the default) or "token_readout" (modeling.TokenReadoutHead), which goes with
-    # render "lettered" or "strands-chat" and takes attention_mode "causal" or "prefix_bidir".
+    # "pointer" (the default) or "token_readout" (modeling.TokenReadoutHead), which renders
+    # strands-chat (strands_decider.core) and takes attention_mode "causal" or "prefix_bidir".
     head_type: str = "pointer"
-    render: str = "numbered"
     attention_mode: str = "causal"
     # Micro-batches of at least this many padded tokens run prefix_bidir without its dense
     # mask (strands_decider.prefix_split_attention); 0 = always masked. The reference v2
@@ -142,10 +141,10 @@ class TrainConfig:
     # With init_from both start trained, and no value is measured for that yet.
     head_lr: float = 1e-3
     weight_decay: float = 0.01
-    # AdamW (beta1, beta2); the reference recipe trains with (0.9, 0.999).
+    # AdamW (beta1, beta2); the v2 recipe trains with (0.9, 0.999).
     adam_betas: tuple[float, float] = (0.9, 0.95)
     warmup_ratio: float = 0.03
-    # The cosine schedule ends at lr_floor x the peak (0: at zero; the reference recipe: 0.1).
+    # The cosine schedule ends at lr_floor x the peak (0: at zero; the v2 recipe: 0.1).
     lr_floor: float = 0.0
     max_grad_norm: float = 1.0
     # > 0 keeps an exponential moving average of the trained weights (adapter and head), in
@@ -164,7 +163,7 @@ class TrainConfig:
     # Cap on one forward's padded size (rows x longest row) under torchrun, in prompt
     # characters (training.data.sampling.example_length); 0 = no cap. It bounds activations
     # and the attention mask without changing the rows of a step or the gradient: only how
-    # the ranks share the step's rows out. 56000 is about the reference trainer's 32,768
+    # the ranks share the step's rows out. 56000 is about the v2 trainer's 32,768
     # padded tokens on the v2 data (measured: at least 1.735 characters per token).
     slice_char_budget: int = 0
     length_group_mega: int = 50
@@ -196,6 +195,9 @@ class TrainConfig:
                     f"{path}: head_type={v!r}; this version trains "
                     "pointer-head and token-readout-head checkpoints only"
                 )
+            # Earlier token-readout recipes named their prompt; strands-chat is the only one now.
+            if k == "render" and v not in ("numbered", "strands-chat"):
+                raise ValueError(f"{path}: render={v!r}; this version trains strands-chat only")
             if k not in known and k not in RETIRED_YAML_KEYS:
                 raise ValueError(f"{path}: unknown config key {k!r}")
         raw = {k: v for k, v in raw.items() if k in known}
@@ -204,16 +206,16 @@ class TrainConfig:
         return cfg
 
 
-# Slot-era TrainConfig keys the current dataclass no longer carries. Dropped silently by
+# Slot-era TrainConfig keys, and the token readout's render (checked above), that the current
+# dataclass no longer carries. Dropped silently by
 # from_yaml so a published recipe still parses; a typo in any other key raises.
-RETIRED_YAML_KEYS = frozenset({"num_slots", "head_hidden", "head_init"})
+RETIRED_YAML_KEYS = frozenset({"num_slots", "head_hidden", "head_init", "render"})
 
 
 # The fields of a TrainConfig that a checkpoint fixes: with init_from they are the checkpoint's.
 INIT_FROM_ARCH = (
     "base_model",
     "head_type",
-    "render",
     "attention_mode",
     "pointer_dim",
     "use_lora",
@@ -379,7 +381,7 @@ def _scheduler(
     """Linear warmup then cosine to `floor`, counting optimizer steps from 1.
 
     LambdaLR passes the number of completed steps, so the first update would run at
-    `_lr_lambda(0)` = 0 and the last would stop short of the floor. The reference recipe
+    `_lr_lambda(0)` = 0 and the last would stop short of the floor. The v2 recipe
     counts from 1: update 1 runs at 1/warmup and update `total` runs exactly at the floor.
     """
     return torch.optim.lr_scheduler.LambdaLR(
@@ -568,7 +570,6 @@ def train(cfg: TrainConfig) -> str:
             ordinal_smoothing=cfg.ordinal_smoothing,
             pointer_dim=cfg.pointer_dim,
             head_type=cfg.head_type,
-            render=cfg.render,
             attention_mode=cfg.attention_mode,
             attn_split=cfg.attn_split,
         )
@@ -639,20 +640,20 @@ def train(cfg: TrainConfig) -> str:
         train_examples = train_examples + kl_rows
         random.Random(cfg.seed).shuffle(train_examples)
         print(f"[strands-decider] +{len(kl_rows):,} KL-only rows (weight {cfg.kl_only_weight})")
-    if cfg.render in ("lettered", "strands-chat"):
-        # The data builds measure the numbered prompt; these are other lengths (chat
-        # template). Drop what does not fit rather than stop on it mid-run.
-        frame = chat_frame(model.tokenizer) if cfg.render == "lettered" else cfg.render
+    render = core.CHAT if cfg.head_type == "token_readout" else "numbered"
+    if render == core.CHAT:
+        # The data builds measure the numbered prompt; strands-chat has other lengths. Drop
+        # what does not fit rather than stop on it mid-run.
         sizes = len(train_examples), len(val_examples)
 
         def fit(rows: list[Example]) -> list[Example]:
-            return fits(rows, model.tokenizer, cfg.max_length, frame)
+            return fits(rows, model.tokenizer, cfg.max_length, render)
 
         # Shared out over the ranks: tokenising every row is hours on 17M rows.
         train_examples = distributed.keep_where(train_examples, fit)
         val_examples = distributed.keep_where(val_examples, fit)
         print(
-            f"[strands-decider] {cfg.render} prompts over max_length {cfg.max_length}: dropped "
+            f"[strands-decider] {render} prompts over max_length {cfg.max_length}: dropped "
             f"{sizes[0] - len(train_examples):,} train and {sizes[1] - len(val_examples):,} val rows"
         )
     print(f"[strands-decider] train={len(train_examples):,} val={len(val_examples):,}")
@@ -665,7 +666,7 @@ def train(cfg: TrainConfig) -> str:
         ordinal_smoothing=cfg.ordinal_smoothing,
         reverse_score_prob=cfg.reverse_score_prob,
         seed=cfg.seed,
-        render=cfg.render,
+        render=render,
     )
     train_collate = SystemOneCollator(model.tokenizer, coll_cfg, train=True)
     if cfg.group_by_length:

@@ -2,8 +2,7 @@
 
     python -m training.export_v2 <checkpoint> <out>
 
-The package is what the v2 reference packages hold and their `source/` code
-(`autojev.model.DecisionModel(<out>)`) loads: the torso with its LoRA adapter merged in,
+The package is the spec's checkpoint layout (docs/spec.md): the torso with its LoRA adapter merged in,
 saved in bfloat16 as a text-only Gemma 4 decoder (`config.json`, `model-*.safetensors`,
 no `model.` prefix), `readout.safetensors` (one bfloat16 tensor `weight`, [255, hidden]),
 `decision_config.json` (prompt, codes, token ids, temperature, attention, pooling and a
@@ -49,10 +48,10 @@ def export_v2(checkpoint: str, out: str) -> str:
         raise FileExistsError(f"{out}: not empty")
     model = StrandsDeciderModel.load(checkpoint, host_embeddings=False)
     cfg = model.config
-    if (cfg.head_type, cfg.render, cfg.attention_mode) != ("token_readout", CHAT, "prefix_bidir"):
+    if (cfg.head_type, cfg.attention_mode) != ("token_readout", "prefix_bidir"):
         raise ValueError(
-            "a v2 package is a token_readout checkpoint rendered strands-chat under prefix_bidir, "
-            f"not {cfg.head_type} / {cfg.render} / {cfg.attention_mode}"
+            "a v2 package is a token_readout checkpoint under prefix_bidir, "
+            f"not {cfg.head_type} / {cfg.attention_mode}"
         )
     if cfg.temperature_by_kind:
         raise ValueError(
@@ -98,7 +97,7 @@ def export_v2(checkpoint: str, out: str) -> str:
         "backbone": "LoRA merged, bfloat16" if cfg.use_lora else "as released, bfloat16",
         "readout": "trained, F32 master, saved bfloat16",
         "attention_mode": cfg.attention_mode,
-        "prompt": cfg.render,
+        "prompt": CHAT,
         "readout_mode": "trained",
         "pooling": "last",
         "optimizer_steps": max(steps, default=None),
@@ -106,7 +105,7 @@ def export_v2(checkpoint: str, out: str) -> str:
     }
     decision = {
         "finetune": finetune,
-        "prompt": cfg.render,
+        "prompt": CHAT,
         "format_version": 1,
         "base_model": cfg.base_model,
         "revision": revision,

@@ -73,10 +73,8 @@ class StrandsDeciderConfig:
     # parse this field directly.
     head_type: str = "pointer"
     pointer_dim: int = 256
-    # Token readout only: the prompt format, "lettered" (prompting.lettered_prompt) or
-    # "strands-chat" (core.render, the reference's prompt), and the
-    # attention, "causal" (the torso's own) or "prefix_bidir" (prefix_bidir_masks).
-    render: str = "numbered"
+    # Token readout only: the attention, "causal" (the torso's own) or "prefix_bidir"
+    # (prefix_bidir_masks). Its prompt is always strands-chat (core.render).
     attention_mode: str = "causal"
     # Micro-batches of at least this many padded tokens run prefix_bidir as two unmasked SDPA
     # calls per row instead of one masked call (prefix_split_attention); 0 = always masked.
@@ -123,10 +121,6 @@ class StrandsDeciderConfig:
 
     def __post_init__(self) -> None:
         readout = self.head_type == "token_readout"
-        if readout != (self.render in ("lettered", "strands-chat")):
-            raise ValueError(
-                'head_type "token_readout" goes with render "lettered" or "strands-chat", and only them'
-            )
         if self.attention_mode not in (("causal", "prefix_bidir") if readout else ("causal",)):
             raise ValueError(f"attention_mode {self.attention_mode!r} with head {self.head_type!r}")
 
@@ -134,7 +128,6 @@ class StrandsDeciderConfig:
         d = asdict(self)
         # A pointer config's JSON stays the one earlier versions wrote and read.
         for key, default in (
-            ("render", "numbered"),
             ("attention_mode", "causal"),
             ("readout_softcap", None),
         ):
@@ -160,6 +153,10 @@ class StrandsDeciderConfig:
                 f"{path}: head_type={head_type!r}; this version loads "
                 "pointer-head and token-readout-head checkpoints only"
             )
+        # Earlier token-readout builds wrote the prompt here; strands-chat is the only one now.
+        render = d.pop("render", "numbered")
+        if render not in ("numbered", "strands-chat"):
+            raise ValueError(f"{path}: render={render!r}; this version loads strands-chat only")
         # Drop any key the current dataclass does not know (e.g. legacy head_type="pointer",
         # num_slots, head_hidden, head_init, kl_frozen_weight on a released config).
         allowed = set(cls.__dataclass_fields__)
@@ -272,10 +269,11 @@ class PointerHead(nn.Module):
 
 
 class TokenReadoutHead(nn.Module):
-    """The reference decider's readout: Linear(hidden, 255), no bias, on the last prompt token.
+    """The spec's 255-code readout (docs/spec.md): Linear(hidden, 255), no bias, read at the
+    last prompt token.
 
-    Row k scores the option listed under code k (prompting.option_codes); the row is seeded
-    from the LM head's row of that code's token (lm_head_rows), so the untrained readout gives
+    Row k scores the option listed under code k (core.CODES); the row is seeded from the LM
+    head's row of that code's token (lm_head_rows), so the untrained readout gives
     the base model's own distribution over the codes. A torso whose LM head caps its logits
     (Gemma 4: final_logit_softcapping) has these capped the same way: cap * tanh(x / cap). The
     cap is StrandsDeciderConfig.readout_softcap, saved with the checkpoint.
@@ -283,10 +281,10 @@ class TokenReadoutHead(nn.Module):
 
     def __init__(self, hidden_size: int, dropout: float = 0.0, softcap: float | None = None):
         super().__init__()
-        from .prompting import NUM_OPTION_CODES
+        from .core import MAX_CODES
 
         self.dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
-        self.proj = nn.Linear(hidden_size, NUM_OPTION_CODES, bias=False)
+        self.proj = nn.Linear(hidden_size, MAX_CODES, bias=False)
         self.softcap = softcap
 
     def forward(self, decide: torch.Tensor, n_options: int) -> torch.Tensor:
@@ -324,6 +322,15 @@ def logit_softcap(torso: nn.Module) -> float | None:
     return float(cap) if cap else None
 
 
+def code_token_ids(tok: Any) -> tuple[int, ...]:
+    """The token id of each of core.CODES, as core.render encodes them for `tok`."""
+    from .core import CHAT, MAX_CODES, render
+
+    criteria = {f"o{k}": None for k in range(MAX_CODES)}
+    request = {"state": "", "questions": {"q": {"type": "choice", "criteria": criteria}}}
+    return render(request, tok.backend_tokenizer, CHAT).questions["q"].code_token_ids
+
+
 def lm_head_rows(config: StrandsDeciderConfig, torso: nn.Module, ids: list[int]) -> torch.Tensor:
     """The base model's LM head rows for token `ids` [len(ids), hidden]: the torso's input
     embeddings when the base ties them (Qwen3.5-2B, Gemma 4 E2B), else the base
@@ -355,7 +362,7 @@ def prefix_bidir_masks(
     whole state, both ways, and never to the question; a question token attends to the state
     and to its own question, both ways. Full-attention layers take this mask. So do
     sliding-window layers, without their window: under prefix_bidir no layer is cut to its
-    window, as the reference v2 models train (Gemma 4: 512 tokens on E2B and E4B, 1,024 on 12B).
+    window, as the v2 recipe trains (Gemma 4: 512 tokens on E2B and E4B, 1,024 on 12B).
     Linear-attention layers (Qwen3.5) keep the padding mask and stay causal. Any other layer
     type is refused.
     """
@@ -500,13 +507,8 @@ class StrandsDeciderModel(nn.Module):
         torso = cls._load_torso(config, device_map, attn_implementation)
         model = cls(config, torso, tok)
         if config.head_type == "token_readout":
-            from .core import CODES
-            from .prompting import option_codes
-
-            # Row k is the k-th code the prompt lists: core.render's for strands-chat.
-            codes = CODES if config.render == "strands-chat" else option_codes(tok)
-            ids = [tok.encode(c, add_special_tokens=False)[0] for c in codes]
             assert isinstance(model.head, TokenReadoutHead)
+            ids = list(code_token_ids(tok))
             model.head.proj.weight.data.copy_(lm_head_rows(config, torso, ids))
         if config.use_lora:
             model.attach_lora()

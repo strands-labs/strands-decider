@@ -15,8 +15,8 @@ a one-hot row trains exactly as before. `source.fixed_order` (a score converted 
 kept: such rows are never shuffled.
 
 Rows without instructions (the key missing or null: 518 of the 17,480,970 v2 rows) are dropped,
-as the reference v2 runs dropped them: their length sidecar marked them not renderable, so the
-runs never trained on them (with them dropped, the reference trainer's plan is run-2's, sha
+as the v2 runs dropped them: their length sidecar marked them not renderable, so the
+runs never trained on them (with them dropped, the v2 trainer's plan is run-2's, sha
 94dee960...). Rows that strands_decider.core refuses to render, rows with images (the Strands
 templates are text-only) and lines that are not JSON are dropped and counted too. The file is streamed, so it may
 be larger than memory; `--workers` processes convert it in parallel, in order.
@@ -82,7 +82,7 @@ def convert_line(line: str) -> tuple[str, str | None]:
         return "not_json", None
     if row.get("images"):
         return "image_rows", None
-    q = dict(row["question"])  # as the reference hands it to the core (autojev spec_question)
+    q = dict(row["question"])  # as the v2 trainer hands it to the core
     if q.get("instructions") is None:
         return "no_instructions", None
     if q.get("type") == "score" and isinstance(q.get("criteria"), list):
