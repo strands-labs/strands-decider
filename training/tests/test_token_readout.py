@@ -446,3 +446,53 @@ def test_prefix_bidir_refuses_an_unknown_layer_type():
     cfg = SimpleNamespace(_attn_implementation="sdpa", layer_types=["chunked_attention"])
     with pytest.raises(ValueError, match="chunked_attention"):
         prefix_bidir_masks(cfg, torch.ones(1, 3), torch.tensor([1]), torch.float32)
+
+
+def _tiny_run(corpus, tmp_path, monkeypatch, **extra):
+    monkeypatch.setattr(StrandsDeciderModel, "from_pretrained_base", _readout_factory(corpus))
+    raw = dict(
+        train_files=[str(corpus / "a.jsonl")],
+        val_files=[str(corpus / "val.jsonl")],
+        base_model="tiny",
+        head_type="token_readout",
+        render="lettered",
+        attention_mode="prefix_bidir",
+        lora_r=2,
+        lora_alpha=4,
+        micro_batch_size=4,
+        grad_accum=1,
+        max_steps=2,
+        eval_every=0,
+        output_dir=str(tmp_path / "run"),
+    )
+    return T.TrainConfig(**(raw | extra))
+
+
+def test_training_turns_off_cudnn_attention(corpus, tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        torch.backends.cuda, "enable_cudnn_sdp", torch.backends.cuda.enable_cudnn_sdp
+    )
+    torch.backends.cuda.enable_cudnn_sdp(True)
+    try:
+        T.train(_tiny_run(corpus, tmp_path, monkeypatch))
+        assert not torch.backends.cuda.cudnn_sdp_enabled()
+    finally:
+        torch.backends.cuda.enable_cudnn_sdp(True)
+
+
+def test_a_non_finite_gradient_stops_the_run_before_the_update(corpus, tmp_path, monkeypatch):
+    real_clip = torch.nn.utils.clip_grad_norm_
+    steps = []
+
+    def clip(params, max_norm):
+        real_clip(params, max_norm)
+        return torch.tensor(float("nan"))
+
+    monkeypatch.setattr(torch.nn.utils, "clip_grad_norm_", clip)
+    monkeypatch.setattr(torch.optim.AdamW, "step", lambda self, *a, **k: steps.append(1))
+    cfg = _tiny_run(corpus, tmp_path, monkeypatch)
+    with pytest.raises(FloatingPointError, match="step 1: gradient norm is not finite"):
+        T.train(cfg)
+    assert steps == []  # the optimizer never took the NaN step
+    saved = torch.load(os.path.join(cfg.output_dir, "nonfinite-step1-rank0.pt"), weights_only=False)
+    assert [f["forward"] for f in saved] == [0] and saved[0]["input_ids"].shape[0] == 4

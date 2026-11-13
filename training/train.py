@@ -515,6 +515,11 @@ def train(cfg: TrainConfig) -> str:
     torch.manual_seed(cfg.seed)
     random.seed(cfg.seed)
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    # No cuDNN attention in training. With a boolean attention mask (prefix_bidir, padding) SDPA
+    # may dispatch to it, and its backward has returned NaN gradients from a finite loss: torch
+    # 2.14 + cuDNN 9.24 on B200, Gemma 4 E2B, a micro-batch of short rows. The memory-efficient
+    # and math kernels give finite gradients on the same rows; only the kernel choice changes.
+    torch.backends.cuda.enable_cudnn_sdp(False)
 
     if cfg.init_from:
         model = _init_from(cfg)
