@@ -364,6 +364,20 @@ def _save_resume(out_dir: str, state: dict[str, Any]) -> None:
         os.remove(old)
 
 
+def _scheduler(
+    optim: torch.optim.Optimizer, warmup: int, total: int, floor: float
+) -> torch.optim.lr_scheduler.LambdaLR:
+    """Linear warmup then cosine to `floor`, counting optimizer steps from 1.
+
+    LambdaLR passes the number of completed steps, so the first update would run at
+    `_lr_lambda(0)` = 0 and the last would stop short of the floor. The reference recipe
+    counts from 1: update 1 runs at 1/warmup and update `total` runs exactly at the floor.
+    """
+    return torch.optim.lr_scheduler.LambdaLR(
+        optim, lambda s: _lr_lambda(s + 1, warmup, total, floor)
+    )
+
+
 def _lr_lambda(step: int, warmup: int, total: int, floor: float = 0.0) -> float:
     if step < warmup:
         return step / max(1, warmup)
@@ -692,9 +706,7 @@ def train(cfg: TrainConfig) -> str:
     warmup = max(1, int(total_steps * cfg.warmup_ratio))
 
     optim = _build_optimizer(model, cfg)
-    sched = torch.optim.lr_scheduler.LambdaLR(
-        optim, lambda s: _lr_lambda(s, warmup, total_steps, cfg.lr_floor)
-    )
+    sched = _scheduler(optim, warmup, total_steps, cfg.lr_floor)
 
     if rank == 0:
         os.makedirs(cfg.output_dir, exist_ok=True)
