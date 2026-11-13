@@ -1,13 +1,13 @@
 import math
 
 import pytest
-from trainer_support import SAME_PYTHON_SUM
+from trainer_support import exact
 
 from training import metrics
 
 
 def close(a, b) -> bool:
-    """Equal, but for floats summed in another order (trainer_support.SAME_PYTHON_SUM)."""
+    """Equal, but for floats rounded differently in their last bits (trainer_support.py)."""
     if isinstance(a, float) and isinstance(b, float):
         return math.isclose(a, b, rel_tol=1e-12, abs_tol=1e-15)
     if isinstance(a, dict) and isinstance(b, dict):
@@ -23,7 +23,7 @@ def test_metrics_match_previous(previous):
         got = metrics.score_predictions(
             metrics.predictions_from_logits(case["rows"], case["logits"], float(temp))
         )
-        if SAME_PYTHON_SUM:
+        if exact():
             assert got == expected["full"]
             assert metrics.summary(got) == expected["summary"]
         else:
@@ -43,7 +43,11 @@ def test_calibrate_temperature_matches_previous(previous):
             [v * c["scale"] for v in row[: len(metrics.option_labels(r["question"]))]]
             for row, r in zip(case["logits"], rows, strict=True)
         ]
-        assert repr(metrics.calibrate_temperature(lg, idx)) == c["out"]
+        got = metrics.calibrate_temperature(lg, idx)
+        if exact():
+            assert repr(got) == c["out"]
+        else:  # a golden-section search: a last-bit difference can move it within its flat optimum
+            assert math.isclose(got, float(c["out"]), rel_tol=1e-6)
 
 
 def test_duplicate_ids_are_refused():
