@@ -157,6 +157,10 @@ The loss has three parts:
   better than the student: distilled on short classification, where it is not, it moved
   nothing ([v12](../research/history.md#v12-distilling-a-frozen-qwen35-4b)).
 
+That is v19's loss as v1's trainer computed it. `training/train.py`, which replaced that trainer, trains the pointer
+head with cross-entropy against each row's target: the label, smoothed for a score, mixed with a teacher's
+distribution where the row has one. It has no frozen-KL term ([training/README.md](../training/README.md)).
+
 v14's corpus is 100,449 rows from 21 public classification tasks — topic, intent,
 sentiment, entailment, ordinal ratings, yes/no, rule chaining — plus 12,909 multi-step
 rows from ContractNLI, MuSiQue and BoardgameQA ([Data sources and licences](../data/README.md#data-sources-and-licences)).
@@ -238,16 +242,22 @@ src/strands_decider/              -- published package (inference only)
                   rendering, the code readout, decision_config.json, the runtime contract
 
 training/                         -- not published; run as `python -m training.<module>`
-  train.py        LoRA + readout training loop (`python -m training.train`)
+  train.py        the trainer, for the token readout and the pointer head (`python -m training.train`)
+  pointer.py      v1's pointer model and numbered render behind the trainer's interface
+  model.py, attention.py, prompt.py  the token readout's model, prefix_bidir mask and core rendering
+  lora.py, expert_lora.py  the token readout's adapters
+  batching.py, targets.py, loss.py, schedule.py  the step plan, targets and augmentation, loss, schedule
+  folds.py, dev_eval.py, metrics.py  the training rows and held-out folds, the dev evaluation
+  convert.py      decision rows or v1 examples into the trainer's rows
+  merge.py, average.py, export.py  the token readout's merge, average of runs, export to the spec's checkpoint
   evaluate.py     accuracy, ECE, NLL, MAE; temperature fitting; calib/test split
                   (`python -m training.evaluate eval|calibrate`)
   soup.py         average same-recipe checkpoints (`python -m training.soup`)
-  distributed.py  multi-GPU training under torchrun: the 1-GPU steps, shared across ranks
+  distributed.py  the GPUs of one machine under torchrun (DDP over the trainable parameters)
   data/           corpus building and inspection (`python -m training.data …`)
     format.py     Example, JSONL io, stratified and held-out-task splits
     recipes.py    HF dataset -> training examples
     collate.py    option shuffling, tokenisation, ordinal targets, option positions
-    sampling.py   length-grouped batching
     synth.py      v9 stated-rule generators (not used by the current recipes)
     synth_pairs.py  v10 minimal-pair generators (not used by the current recipes)
     question_transforms.py  v11 question-varied rows (not used by the current recipes)
@@ -262,18 +272,17 @@ training/                         -- not published; run as `python -m training.<
     distill.py    teacher distributions only where the teacher agrees with gold (v20)
     shards.py     one labelling process per GPU, and the merge
 
-configs/          train.yaml (the v19 recipe, WSL2), train-parent.yaml (its parent,
-                  v14's recipe), train-v7.yaml (v7, Windows)
-                  experiments/ -- v11a ... v20 (pre-registered runs)
-training/         README.md -- setup, the recipe step by step, several GPUs, hardware notes
-                  recipe.sh -- v19 end to end under WSL2: corpus, downloads, multi-step rows,
-                  generated and adequacy rows, teacher labels, the parent, replay labels,
-                  train, calibrate, eval; and the steps that retrain v20 (catchall, distill)
-                  run_recipe.sh -- recipe.sh on one multi-GPU host, timed per stage, with
-                  row-count checks and an optional S3 copy
-                  recipe_v7.sh -- v7 end to end on Windows (recipe.sh reuses its corpus build)
-                  aws/ -- the recipe on one 8-GPU EC2 host over SSM, as run for v17 and v19:
-                  README.md, scripts/ (bucket, host, code sync, teardown), image/ (host setup)
+configs/          the records of the runs v1's trainer made: train.yaml (the v19 recipe),
+                  train-parent.yaml (its parent, v14's recipe), train-v7.yaml (v7),
+                  experiments/ (v11a ... v20, pre-registered runs), v1/ (the v1 releases);
+                  training/train.py does not read them (training/README.md)
+training/         README.md -- the trainer, both heads, one machine; steps.md -- v1's data and the
+                  pointer head step by step; hardware.md -- memory and throughput notes;
+                  configs/ -- one config per Gemma 4 size for the token readout, and the
+                  pointer head's (pointer-2b, pointer-e2b);
+                  recipe.sh -- v1's corpora, downloads, multi-step, generated, adequacy and
+                  catch-all rows, v20's teacher file (distill), the base, then convert, train,
+                  calibrate, eval
 evaluation/       README.md -- how the model is measured, and the results;
                   multistep_eval.py (v14's evaluation sets), pair_eval.py (v20's paired
                   evals), question_sensitivity.py (does the answer follow the question?),
@@ -309,11 +318,11 @@ research/         README.md -- the preregistration practice and the version tabl
                   tasks and results, latencies); figures/, and research/scripts/ that
                   collect the data and draw the figures
 tests/            pytest only: test_core (no GPU), test_server (stubbed), test_gpu_smoke,
-                  test_sampling, test_question_transforms, test_teacher, test_cpu_kernels,
+                  test_question_transforms, test_teacher, test_cpu_kernels,
                   test_multistep, test_hybrid, test_policy, test_generated,
                   test_prefix_cache, test_adequacy, test_mps_kernels, test_engine_dtype,
                   test_catchall, test_distill, test_hf_export, test_checkpoint_load,
-                  test_cli_build, test_data_identity, test_configs, test_run_recipe,
+                  test_cli_build, test_data_identity,
                   test_llm_client, test_cli_exit,
                   test_ddp (`-m distributed` for the multi-GPU runs);
                   test_core_prompt, test_core_readout, test_core_config (the torch-free core)

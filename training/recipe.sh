@@ -48,7 +48,7 @@ NGPU="${NGPU:-1}"
 SEED="${SEED:-0}"
 CONFIG="${CONFIG:-training/configs/pointer-2b.yaml}"
 BASE="${BASE:-checkpoints/base-qwen3.5-2b}"
-ROWS="${ROWS:-data/rows-v20}"
+ROWS="${ROWS:-data/rows}"
 RUN="${RUN:-checkpoints/pointer-2b-seed-$SEED}"
 CKPT="${CKPT:-$RUN/last/checkpoint}"
 # v20's training files, in the order the teacher file's row indices count them
@@ -82,7 +82,29 @@ verify() {
     { echo "stop: the files above do not match data/SHA256SUMS" >&2; return 1; }
 }
 
-build() { bash training/recipe_v7.sh build; }
+build() {
+  # Seven whole tasks are held out: four with label sets and rubrics never seen in
+  # training, and three RuleTaker depths (in-family transfer, reported separately).
+  "$PY" -u -m training.data build --out data/train_v5.jsonl --max-options 24 \
+    -r ag_news -r banking77 -r clinc150 -r dbpedia -r lang_id -r yahoo_topics \
+    -r spam -r toxicity -r mnli_entail -r boolq \
+    -r paws -r vitaminc -r wnli -r pubmed_qa \
+    -r yelp_stars -r sst5_sentiment -r app_reviews -r formality \
+    -r ruletaker_d0 -r ruletaker_d1 -r ruletaker_d2 \
+    -r emotion -r massive_intent -r sarcasm -r hate_severity \
+    -r ruletaker_d3 -r ruletaker_d5 -r ruletaker_natlang \
+    --holdout emotion --holdout massive_intent --holdout sarcasm --holdout hate_severity \
+    --holdout ruletaker_d3 --holdout ruletaker_d5 --holdout ruletaker_natlang
+  # The calibration and evaluation file: the held-out tasks but RuleTaker, whose depths share a
+  # generator with the trained ones. Filtered as bytes so each line keeps its own ending.
+  "$PY" - <<'PYTHON'
+import json
+src = open("data/train_v5.holdout.jsonl", "rb").read().splitlines(keepends=True)
+keep = [ln for ln in src if not json.loads(ln)["task"].startswith("ruletaker")]
+open("data/holdout_v5_norule.jsonl", "wb").write(b"".join(keep))
+print(f"data/holdout_v5_norule.jsonl: {len(keep):,} of {len(src):,} held-out rows")
+PYTHON
+}
 
 # download FILE URL: get URL into FILE, unless FILE exists. curl fails on an HTTP error and
 # writes to FILE.part. Only a complete download becomes FILE, so a rerun never keeps a failed
@@ -158,7 +180,7 @@ teacher() {
 # data/teacher_v5_qwen35-4b.jsonl`; the committed copy omits the score rows, which
 # `distill` never kept), kept where they agree with gold, then v14's replay
 # distributions on the multi-step rows (`python -m training.data.replay
-# checkpoints/hobson-2b-v14 ...`, as in `replay`).
+# checkpoints/hobson-2b-v14 ...`).
 distill() {
   verify data/train_v5.jsonl data/synthetic/teacher_v5_qwen35-4b.jsonl \
     data/synthetic/replay_v14_multistep.jsonl
@@ -168,9 +190,10 @@ distill() {
 }
 
 base() {
-  local revision
+  local model revision
+  model="$("$PY" -c 'import sys, yaml; print(yaml.safe_load(open(sys.argv[1]))["base_model"])' "$CONFIG")"
   revision="$("$PY" -c 'import sys, yaml; print(yaml.safe_load(open(sys.argv[1]))["revision"])' "$CONFIG")"
-  hf download Qwen/Qwen3.5-2B-Base --revision "$revision" --local-dir "$BASE"
+  hf download "$model" --revision "$revision" --local-dir "$BASE"
 }
 
 convert() {

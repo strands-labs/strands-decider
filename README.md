@@ -355,7 +355,7 @@ position with its caveats.
 ## Why 2B?
 
 Two reasons. First, **experimentation**: at 1.9 billion parameters you can serve the model,
-and retrain the whole recipe, on hardware you already have — about 11 hours on one RTX 3090,
+and train it, on hardware you already have (v19's recipe took about 11 hours on one RTX 3090),
 and serving works on an Apple-silicon Mac. That makes trying an idea fast and low-risk.
 Second, ~2B parameters looks like a sweet spot: small enough to experiment with, large enough
 to do meaningful work.
@@ -413,20 +413,11 @@ Full runs also create environment-level throughput and latency graphs with one l
 
 ## Training
 
-Two entry points, both on a Linux or WSL2 host with NVIDIA GPUs and the training
-environment of [training/README.md](training/README.md#setup) (the `train` extra, the
-pinned torch and `flash-linear-attention`):
-
-- `training/recipe.sh all`: one host, local, 1 to 8 GPUs (`NGPU=8` for eight). It builds
-  the corpora, trains, calibrates and evaluates.
-- `training/run_recipe.sh all` with [training/aws/](training/aws/README.md): a distributed
-  8-GPU host. It adds per-stage timing and logs, row-count checks, the S3 copy of the
-  outputs (`PY` and `S3_PREFIX` must be set), and `FAST=1`, which trades 24 GB
-  compatibility for speed on 80 GB GPUs.
-
-About 11 hours on one RTX 3090 (24 GiB), or 1 hour 10 minutes on eight H100s with `FAST=1`.
-[training/README.md](training/README.md) has the setup, the stages, the settings and the
-hardware notes; [data/sources.md](data/sources.md) lists every source and its licence, and
+One trainer, `python -m training.train`, trains both kinds of model on one machine with NVIDIA GPUs: the token
+readout of the decision interface (Gemma 4, `docs/spec.md`), and v1's pointer head. `training/recipe.sh all` builds
+v1's corpora and trains the pointer head on them, then calibrates and evaluates, on 1, 2, 4 or 8 GPUs (`NGPU=8` for
+eight). [training/README.md](training/README.md) walks through both heads, their settings and what each writes;
+[data/sources.md](data/sources.md) lists every source and its licence, and
 [data/README.md](data/README.md#reproduction-contract) states the reproduction contract.
 
 ## The research

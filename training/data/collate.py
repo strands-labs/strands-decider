@@ -72,16 +72,6 @@ class SystemOneCollator:
         pool = ex.all_instructions()
         return self.rng.choice(pool) if len(pool) > 1 else None
 
-    def skip(self, batch: list[Example]) -> None:
-        """Advance the random stream exactly as collating `batch` would, rendering nothing.
-
-        A multi-GPU rank calls this for the rows other ranks train on (distributed.py),
-        so every row is rendered as it would be on one GPU.
-        """
-        for ex in batch:  # the draws `__call__` makes, in its order
-            self._option_order(ex)
-            self._instruction(ex)
-
     @staticmethod
     def option_token_index(
         offsets: Sequence[Sequence[int]], spans: Sequence[Sequence[int]], base: int

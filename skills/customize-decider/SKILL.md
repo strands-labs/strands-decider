@@ -223,8 +223,8 @@ Read `references/data-format.md`.
 
 ## Phase 6. Train
 
-Read `references/training.md` and `training/AGENTS.md` (host rules: spend is the user's decision;
-one name tag per agent; tear down every host).
+Read `references/training.md`, and its note on which trainer this phase needs. Spend on a host is the user's
+decision, and every host you launch is torn down at the end.
 
 1. Choose the host for the size (`training.md`, "Hosts"). Ask the user, with the price.
 2. Copy the frozen data to the host (`training.md`, "Data to the host"). Ask the user first.

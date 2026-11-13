@@ -32,7 +32,7 @@ data/raw/
 .env.*
 build/
 dist/
-# Runner output written inside the checkout (training/run_recipe.sh RUN_DIR default)
+# Runner output written inside the checkout (the run directories of earlier recipe runners)
 /runs/
 
 # Local inference benchmark environments and generated runs

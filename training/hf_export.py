@@ -146,9 +146,8 @@ score_0 score = 1.10 (confidence 0.519)
 host ({gpu}): recipe wall clock {wall} s, training stage
 {train} s. Stage timings: `training/stages.jsonl`; data hashes:
 `training/data_sha256.txt`; configs: `train_config.json`, `training/configs/`.""",
-    retrain="""To retrain, run the same recipe on a Linux or WSL2 host with NVIDIA GPUs: about 11 hours
-on one RTX 3090, or about 1 h 10 min on eight H100s with `NGPU=8 FAST=1` through the AWS
-runner.""",
+    retrain="""To train this recipe again, follow `training/README.md` of the code repository (the pointer
+head). The v1 releases were trained by the trainer before it, which `train_config.json` configures.""",
 )
 
 
@@ -188,8 +187,8 @@ def _gemma4(size: str, revision: str) -> Base:
         trained_by="""Trained by `strands-decider train` of the code repository under `torchrun` on a `{host}`
 host ({gpu}): recipe wall clock {wall} s, training stage {train} s. Configs:
 `train_config.json`, `training/configs/`.""",
-        retrain="""To retrain, train with the recipe in `train_config.json` on one 8-GPU H100 host, after
-`training/recipe.sh build fetch multistep generated adequacy distill`.""",
+        retrain="""To train this recipe again, follow `training/README.md` of the code repository (the pointer
+head). The v1 releases were trained by the trainer before it, which `train_config.json` configures.""",
     )
 
 
@@ -283,7 +282,7 @@ def is_pickle(path: str) -> bool:
 # to a public repository. These rules remove what the code repository does not already
 # show: where the host kept its files, which cloud account, region, bucket or instance
 # it was, and what anything cost. An instance TYPE (p5.48xlarge), a GPU name and the
-# stage timings stay: training/aws/README.md states them.
+# stage timings stay.
 REDACTED = "<redacted>"
 HOST_PATH = re.compile(
     r"(?<![\w./:-])/(?:opt|home|Users|mnt|tmp|root|var|srv|scratch|workspace|"

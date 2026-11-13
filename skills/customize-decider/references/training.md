@@ -1,8 +1,14 @@
 # Training a customized decider
 
-Read `training/README.md` (setup, Gemma 4 settings, several GPUs) and `training/AGENTS.md`
-(host runbooks and ground rules) before the first run. This file says what to change for a
-user's own decisions.
+Read `training/README.md` (setup, Gemma 4 settings, several GPUs) before the first run. This file says what to
+change for a user's own decisions.
+
+**Before you start.** This route fine-tunes a released model with `init_from` and anchors it to that model with
+the frozen-KL term, and runs on an EC2 host through `training/aws/`. All three belonged to v1's trainer.
+`training/train.py`, which replaced it, does not have `init_from` or the anchor term yet, and the host scripts are
+gone (training/README.md, "Open questions"). Until that is decided, run this route with v1's trainer from the
+repository's history: the commit before `training/train.py` became the one trainer. Everything else in this file
+describes that trainer.
 
 ## What to train
 
@@ -47,7 +53,7 @@ On AWS, `training/aws/scripts/launch-host.sh` defaults to 8-GPU shapes (`SHAPES`
 `training/aws/README.md`). For one GPU, pass a one-GPU shape, for example
 `SHAPES="g6e.xlarge"` (one L40S, 48 GB) or a one-H100 shape where the region has one. Look up the
 hourly price for the shape and region, give the user the shape, region, hours and price, and wait
-for a yes (`training/AGENTS.md` section 0). Eight GPUs train one run about 8 times faster with
+for a yes: spend is the user's decision. Eight GPUs train one run about 8 times faster with
 `torchrun` (below), at about 8 times the hourly price.
 
 Time: training prints the number of optimizer steps; the smoke run gives the time per step.
@@ -171,7 +177,7 @@ done
 torchrun --standalone --nproc_per_node=8 -m training.train --config work/train-s0.yaml
 ```
 
-On a cloud host, run long jobs in the background as `training/AGENTS.md` describes, not in a
+On a cloud host, run long jobs in the background (v1's `training/AGENTS.md` described how), not in a
 held-open session.
 
 ## Monitoring

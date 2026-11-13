@@ -1,7 +1,9 @@
-# The recipe step by step
+# v1's data and the pointer head, step by step
 
-The six core steps of `training/recipe.sh`, with the command and what it writes. [README.md](README.md#usage) gives the one-line form. Paths are relative to the repository
-root unless they are links.
+The steps of `training/recipe.sh`: v1's corpora, built from public datasets and the committed synthetic files, and
+the pointer head trained on them by `training/train.py`, with the command and what each writes. [README.md](README.md)
+says how the trainer works and what differs from v1's trainer. Paths are relative to the repository root unless they
+are links.
 
 ## 1. Build the corpora
 
@@ -34,7 +36,7 @@ just held-out rows — are the honest test of whether the readout learned to bin
 prompt-described options, since in-distribution accuracy can be reached by memorising
 label sets. Of the seven held out, the four with unseen label sets and rubrics are the
 generalisation test; the three RuleTaker depths share a generator with the trained ones,
-so `recipe_v7.sh` drops them into `data/holdout_v5_norule.jsonl` for calibration and
+so `recipe.sh build` drops them into `data/holdout_v5_norule.jsonl` for calibration and
 evaluation.
 
 Datasets with large label sets (banking77's 77 intents) are subsampled per example to
@@ -75,23 +77,32 @@ without it). Rows are written as they are
 labelled and a rerun resumes. `--shift-by` also writes the labels indexed into the
 concatenated training files, which is what training reads. About an hour under WSL2.
 
-## 3. Train
+## 3. Convert and train
 
-Before this step, `recipe.sh parent` trains the parent checkpoint from
-`configs/train-parent.yaml`, and `recipe.sh replay` labels the multi-step rows with it,
-writing `data/replay_parent_multistep.jsonl`, which `configs/train.yaml` reads.
+The trainer reads its own rows (training/README.md, "The data"), so the examples are converted first. The converter
+measures each row's prompt under the numbered render with the base's tokenizer, folds the teacher's distributions
+into the targets, smooths the score targets as v1's collator did, and holds out the dev fold with v1's split:
 
 ```bash
-python -m training.train --config configs/train.yaml       # v19, under WSL2, ~6 h
-python -m training.train --config configs/train-v7.yaml    # v7, on Windows, ~3 h
+training/recipe.sh base      # Qwen/Qwen3.5-2B-Base at the config's revision, into checkpoints/base-qwen3.5-2b
+python -m training.convert --examples data/train_v5.jsonl data/multistep_v14.jsonl data/generated_v16p.jsonl \
+  data/generated_v18p.jsonl data/adequacy_hs2.jsonl data/adequacy_gen.jsonl data/catchall_v20.jsonl \
+  data/flips_v20.jsonl --teacher 1.0 data/teacher_v20.jsonl --base checkpoints/base-qwen3.5-2b \
+  --prompt numbered --max-length 4096 --out data/rows-v20
+python -m training.train --config training/configs/pointer-2b.yaml --base checkpoints/base-qwen3.5-2b \
+  --train data/rows-v20/train.jsonl --dev data/rows-v20/dev.jsonl --output checkpoints/pointer-2b-seed-0 --seed 0
 ```
 
-LoRA on the torso, the pointer readout and the KL terms (the teacher's only for `configs/train.yaml`);
-bf16, gradient checkpointing,
-one epoch, length-grouped batching. Each writes to the `output_dir` of its config,
-`checkpoints/hobson-*-recipe`.
-Head-only training (`freeze_torso: true`) is much cheaper and much weaker —
-useful to sanity-check a pipeline, not to produce a usable model.
+`training/recipe.sh convert train` runs the same. The examples go in the order of the teacher file's row indices, as
+v1's `train_files` did. Training writes a v1 checkpoint at every save, `checkpoints/pointer-2b-seed-0/step-NNNNN/
+checkpoint/`, and `last` points at the newest. On eight GPUs of one machine, `NGPU=8 training/recipe.sh train` runs
+the same command under `torchrun --standalone`; the config's 8 microbatches a step divide over 1, 2, 4 or 8 GPUs.
+
+`training/configs/pointer-e2b.yaml` is the same recipe on Gemma 4 E2B (with `force_bos`, and `--force-bos` at the
+conversion), and the E4B, 12B and 26B-A4B take it with their own `--base-model` and `--revision`. v1's frozen-KL anchor
+toward a reference checkpoint is no term of this trainer: an approximation is the reference's own distributions as
+one more teacher group, from `python -m training.data.replay <reference> --src <file> --out <file>` per training file
+(with `--shift-by` the files before it), given as `--teacher 0.3 <files>` (training/README.md, "Open questions").
 
 ### Seeds and soups
 
@@ -99,12 +110,12 @@ Two seeds of one recipe differ by about 3 tasks on JevBench (seed SD 3.1 over 18
 v26's c0001 recipe). That is the spread you get when each of the ~60 items near the decision
 boundary falls either way at its own rate, so the top seed by JevBench is a lucky draw, not a
 better model. A release is therefore made from 3 seeds, not by picking one. Train the recipe
-three times, with `seed: 0`, `1` and `2` and an `output_dir` each (here `checkpoints/r-s0` to
-`r-s2`), then soup and calibrate them:
+three times, with `SEED=0`, `1` and `2` (`training/recipe.sh train` writes
+`checkpoints/pointer-2b-seed-N`), then soup and calibrate them:
 
 ```bash
-python -m training.soup checkpoints/r-s0 checkpoints/r-s1 checkpoints/r-s2 --out checkpoints/r-soup
-python -m training.evaluate calibrate checkpoints/r-soup --data data/holdout_v5_norule.jsonl
+python -m training.soup checkpoints/pointer-2b-seed-{0,1,2}/last/checkpoint --out checkpoints/pointer-2b-soup
+python -m training.evaluate calibrate checkpoints/pointer-2b-soup --data data/holdout_v5_norule.jsonl
 ```
 
 `soup` writes one checkpoint whose weights average the seeds' by what they compute, not
@@ -134,24 +145,14 @@ must not overlap an input and must be absent or empty; `--replace` deletes what 
 first. It writes `soup.json` with the input paths; the Hugging Face export leaves that file
 out.
 
-Two training options help compare seeds. Both are off by default, and off, training is
-unchanged:
-
-- `val_split_seed: <int>` fixes the train/validation split across seeds, so every seed
-  trains on the same rows. Without it each seed holds out its own `val_fraction`.
-  Initialisation, data order and option order still follow `seed`.
-- `ema_decay: <d>` keeps an fp32 exponential moving average of the trained weights, updated
-  after every optimizer step with decay min(d, (1 + step) / (10 + step)). The average is
-  validated at the end and saved, also by mid-run saves, which then train on from the live
-  weights. Periodic validation (`eval_every`) scores the live weights, while periodic saves
-  hold the EMA weights, so read a mid-run history's validation loss accordingly. We measured it once, `ema_decay: 0.998` on Gemma 4 E4B against the same 3 seeds
-  without it: JevBench +1.7 tasks and Brier -0.010, but 5.7 more yes/no answers near 0.5,
-  which failed our release gate. No recipe turns it on.
+Every seed trains on the same rows: the conversion fixes the dev fold once, where v1's trainer held out each seed's
+own `val_fraction` unless `val_split_seed` was set. Initialisation, data order, option order and dropout still
+follow `--seed`.
 
 ## 4. Calibrate
 
 ```bash
-python -m training.evaluate calibrate checkpoints/hobson-2b-recipe --data data/holdout_v5_norule.jsonl
+python -m training.evaluate calibrate checkpoints/pointer-2b-seed-0/last/checkpoint --data data/holdout_v5_norule.jsonl
 ```
 
 Fits a temperature **per primitive**, minimising **ECE**, and writes them into the
@@ -180,7 +181,30 @@ that evaporates in production. Pass `--split all` to either command to override.
 `training/recipe.sh eval` runs the held-out classification and multi-step evaluations. The commands
 and what they measure are in [Internal evaluations](../evaluation/README.md#internal-evaluations).
 
-## 6. Serve
+JevBench, the public benchmark the recipe is ranked on, runs against the served checkpoint
+([Reproducing, and two caveats](../evaluation/jevbench.md#reproducing-and-two-caveats)). On a machine with one GPU, the
+third argument a run in `research/data/jevbench_results.csv` (for example `v19`) for the paired test:
+
+```bash
+GPU=0 evaluation/jevbench/jevbench.sh checkpoints/pointer-2b-soup <out dir> v19
+python evaluation/jevbench/paired.py --a research/data/jevbench_results.csv --a-run v19 --b <out dir>/results.jsonl --list
+```
+
+The script serves the checkpoint on 127.0.0.1 and stops by itself when the port already answers (the benchmark would
+score an old server) or `/health` names another checkpoint or window. Its `run_meta.json` should say `n_attempted`
+231, `n_failed` 0 and `schema_validity_strict` 1.0.
+
+## 6. Serve and export
 
 `strands-decider serve` answers requests over HTTP. See [Serve](../docs/inference.md#serve).
 
+`training.hf_export` writes a checkpoint as a Hugging Face model-repo folder: no pickles, a model card with
+provenance, and a `MANIFEST.sha256` written last. Exporting the same inputs twice gives the same bytes, the export
+never changes weights, and nothing in it talks to the Hub:
+
+```bash
+python -m training.hf_export export checkpoints/pointer-2b-soup <export dir> --jevbench <out dir> \
+  --repo-url https://github.com/strands-labs/strands-decider
+python -m training.hf_export verify <export dir>
+hf upload <org>/<repo> <export dir> . --commit-message "<what changed and why>"
+```

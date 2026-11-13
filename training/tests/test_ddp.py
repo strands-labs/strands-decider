@@ -52,6 +52,7 @@ def _env() -> dict:
         "PYTHONPATH": os.pathsep.join([os.path.join(ROOT, "src"), ROOT]),
         "OMP_NUM_THREADS": "1",
         "TOKENIZERS_PARALLELISM": "false",
+        "CUDA_VISIBLE_DEVICES": "",
     }
     for k in ("RANK", "LOCAL_RANK", "WORLD_SIZE", "LOCAL_WORLD_SIZE", "MASTER_ADDR", "MASTER_PORT"):
         env.pop(k, None)
@@ -199,26 +200,9 @@ def test_a_world_across_machines_is_refused(monkeypatch):
     monkeypatch.setenv("LOCAL_WORLD_SIZE", "8")
     with pytest.raises(SystemExit, match="one machine"):
         distributed.Process()
-
-
-def test_skipping_rows_matches_collating_them(corpus):
-    """SystemOneCollator.skip leaves the random stream where collating the rows would."""
-    from training.data.collate import CollatorConfig, SystemOneCollator
-
-    tok = _load_tokenizer(str(corpus / "tokenizer.json"))
-    rows = _examples(64, seed=5)
-    cfg = CollatorConfig(seed=7, max_length=2048)
-    full, part = SystemOneCollator(tok, cfg), SystemOneCollator(tok, cfg)
-    for b in range(0, 64, 8):
-        whole = full(rows[b : b + 8])
-        part.skip(rows[b : b + 3])
-        mid = part(rows[b + 3 : b + 6])
-        part.skip(rows[b + 6 : b + 8])
-        for j in range(3):
-            a, m = whole["input_ids"][3 + j], whole["attention_mask"][3 + j].bool()
-            c, mc = mid["input_ids"][j], mid["attention_mask"][j].bool()
-            assert a[m].tolist() == c[mc].tolist()
-            assert int(whole["labels"][3 + j]) == int(mid["labels"][j])
+    monkeypatch.delenv("LOCAL_WORLD_SIZE")  # a launcher that does not say: refused too
+    with pytest.raises(SystemExit, match="unknown number"):
+        distributed.Process()
 
 
 # ---------------------------------------------------------------- sharded labelling
