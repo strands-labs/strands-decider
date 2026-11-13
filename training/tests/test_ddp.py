@@ -731,3 +731,63 @@ def test_replay_shards_merge_to_the_single_process_file(corpus, tmp_path, monkey
 
 if __name__ == "__main__" and sys.argv[1:2] == ["worker"]:
     worker(sys.argv[2])
+
+
+def _e2b_step(seed=0):
+    """A step of the E2B run's shape: 91 micro-batches of 30 rows, lengths of the v2 mix."""
+    rng = random.Random(seed)
+    lengths = [
+        rng.choice([rng.randrange(150, 3000)] * 9 + [rng.randrange(3000, 48000)])
+        for _ in range(2730)
+    ]
+    order = sorted(range(2730), key=lambda i: -lengths[i])
+    step = [order[k : k + 30] for k in range(0, 2730, 30)]
+    rng.shuffle(step)
+    return lengths, step
+
+
+@pytest.mark.parametrize("world", [8, 16, 32])
+def test_a_slice_budget_caps_a_forward_and_keeps_the_steps_rows(world):
+    """Every slice is under the cap (or one row), and the step's rows are unchanged."""
+    budget = 56000
+    lengths, step = _e2b_step()
+    plan = plan_step(step, lengths, world, budget)
+    assert len(plan) == world and all(plan)
+    seen = sorted((j, i) for p in plan for j, a, b in p for i in range(a, b))
+    assert seen == [(j, i) for j in range(91) for i in range(30)]
+    for p in plan:
+        for j, a, b in p:
+            rows = step[j][a:b]
+            cost = len(rows) * max(lengths[i] for i in rows)
+            assert cost <= budget or len(rows) == 1, (j, a, b, cost)
+    uncapped = max(
+        len(step[j][a:b]) * max(lengths[i] for i in step[j][a:b])
+        for p in plan_step(step, lengths, world)
+        for j, a, b in p
+    )
+    assert uncapped > budget  # the cap is what bounds it, not the data
+
+
+def test_the_slice_budget_does_not_change_which_rows_a_step_trains():
+    """The cap only moves rows between ranks: the step's (micro-batch, row) set is the same."""
+    lengths, step = _e2b_step(1)
+    rows = sorted((j, i) for p in plan_step(step, lengths, 8) for j, a, b in p for i in range(a, b))
+    capped = sorted(
+        (j, i) for p in plan_step(step, lengths, 8, 56000) for j, a, b in p for i in range(a, b)
+    )
+    assert rows == capped
+
+
+def test_the_slice_budget_cuts_the_same_micro_batches_at_any_world_size():
+    """A micro-batch's cut points come from the cap, so they do not depend on the GPU count."""
+    lengths, step = _e2b_step(2)
+    cuts = {}
+    for world in (8, 16, 32):
+        plan = plan_step(step, lengths, world, 56000)
+        for p in plan:
+            for j, a, b in p:
+                cuts.setdefault(world, {}).setdefault(j, set()).add((a, b))
+    over = [j for j, c in cuts[8].items() if len(c) > 1]
+    assert over, "no micro-batch was cut: the test step does not exercise the cap"
+    for j in over:
+        assert cuts[8][j] == cuts[16][j] == cuts[32][j], j

@@ -152,6 +152,12 @@ class TrainConfig:
     # so that every saved train_config.json from before it existed still reproduces the
     # run it describes; the shipped configs turn it on.
     group_by_length: bool = False
+    # Cap on one forward's padded size (rows x longest row) under torchrun, in prompt
+    # characters (training.data.sampling.example_length); 0 = no cap. It bounds activations
+    # and the attention mask without changing the rows of a step or the gradient: only how
+    # the ranks share the step's rows out. 56000 is about the reference trainer's 32,768
+    # padded tokens on the v2 data (measured: at least 1.735 characters per token).
+    slice_char_budget: int = 0
     length_group_mega: int = 50
     ordinal_smoothing: float = 0.1
     reverse_score_prob: float = 0.5
@@ -697,7 +703,9 @@ def train(cfg: TrainConfig) -> str:
     if world > 1:  # each rank iterates its share of every step's rows instead
         # 0 for kl_slots: all rows are eligible under a pointer-head reference, so no
         # eligibility counter is needed in StepSlices.
-        train_loader = distributed.StepSlices(train_loader, 0, cfg.grad_accum, total_steps)
+        train_loader = distributed.StepSlices(
+            train_loader, 0, cfg.grad_accum, total_steps, cfg.slice_char_budget
+        )
 
     refs = None
     if cfg.precompute_frozen_kl and cfg.kl_frozen_weight > 0:
