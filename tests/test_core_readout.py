@@ -231,36 +231,10 @@ def test_bad_temperatures_raise(t):
 
 def test_code_probabilities_needs_a_named_stage():
     with pytest.raises(TypeError, match="stage"):
-        code_probabilities(np.zeros(3), 2, softcap_c=C, temperature=1.0)
-    with pytest.raises(TypeError, match="stage"):
-        code_probabilities(np.zeros(3), 2, stage=None, softcap_c=C, temperature=1.0)
-    for bad in (HIDDEN, "logits", "probs"):
+        code_probabilities(np.zeros(3), 2, softcap_c=C, temperature=1.0)  # type: ignore[call-arg]
+    for bad in (None, HIDDEN, "logits", "probs"):
         with pytest.raises(ValueError, match="stage must be"):
             code_probabilities(np.zeros(3), 2, stage=bad, softcap_c=C, temperature=1.0)
-
-
-def test_inputs_is_the_stages_deprecated_name():
-    """`inputs=` named the stage before `stage=` did; it still works, with a warning, so that
-    callers written against it keep running until they move."""
-    z = np.random.default_rng(4).normal(0, 5, 255)
-    want = code_probabilities(z, 3, stage=RAW_LOGITS, softcap_c=C, temperature=0.7)
-    with pytest.warns(DeprecationWarning, match="stage="):
-        got = code_probabilities(z, 3, inputs=RAW_LOGITS, softcap_c=C, temperature=0.7)
-    assert np.array_equal(got, want)
-    with pytest.raises(TypeError, match="not both"):
-        code_probabilities(z, 3, stage=RAW_LOGITS, inputs=RAW_LOGITS, softcap_c=C, temperature=1)
-    w = round_to_bf16(np.random.default_rng(5).normal(0, 1, (255, 8)))
-    h = round_to_bf16(np.random.default_rng(6).normal(0, 1, (1, 8)))
-    rendered = _request(_rq("choice", ["a", "b", "c"]))
-    by_stage = read(h, Readout(w, C), _config(), rendered, stage=HIDDEN)
-    with pytest.warns(DeprecationWarning):
-        assert read(h, Readout(w, C), _config(), rendered, inputs=HIDDEN) == by_stage
-    with pytest.warns(DeprecationWarning):
-        old = question_probabilities(h, Readout(w, C), _config(), rendered, inputs=HIDDEN)
-    new = question_probabilities(h, Readout(w, C), _config(), rendered, stage=HIDDEN)
-    assert np.array_equal(old["q"], new["q"])
-    with pytest.raises(TypeError, match="not both"):
-        read(h, Readout(w, C), _config(), rendered, stage=HIDDEN, inputs=HIDDEN)
 
 
 @pytest.mark.parametrize("stage", [RAW_LOGITS, CAPPED_LOGITS, FINAL_LOGITS])
@@ -871,9 +845,7 @@ def test_read_refuses_a_mismatch():
     rendered = _request(_rq("noul", ["false", "true"]))
     with pytest.raises(TypeError):
         read(np.zeros((1, 4)), Readout(w, C), _config(), rendered)  # type: ignore[call-arg]
-    with pytest.raises(TypeError, match="stage"):
-        read(np.zeros((1, 4)), Readout(w, C), _config(), rendered, stage=None)
-    for bad in ("logits", "probs"):
+    for bad in (None, "logits", "probs"):
         with pytest.raises(ValueError, match="stage must be"):
             read(np.zeros((1, 4)), Readout(w, C), _config(), rendered, stage=bad)
     with pytest.raises(ValueError, match="rendered for"):

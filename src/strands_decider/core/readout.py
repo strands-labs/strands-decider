@@ -25,7 +25,6 @@ import json
 import math
 import os
 import struct
-import warnings
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -178,33 +177,15 @@ def _softmax32(s: np.ndarray) -> np.ndarray:
     return out
 
 
-def _stage_argument(stage: str | None, inputs: str | None, where: str) -> str:
-    """The stage a caller named: `stage`, or `inputs`, its deprecated old name."""
-    if inputs is not None:
-        if stage is not None:
-            raise TypeError(f"{where}() takes `stage`, not both `stage` and `inputs`")
-        warnings.warn(
-            f"{where}(inputs=...) is deprecated: the argument names the rows' stage; pass stage=",
-            DeprecationWarning,
-            stacklevel=3,
-        )
-        return inputs
-    if stage is None:
-        raise TypeError(f"{where}() missing required keyword argument: 'stage'")
-    return stage
-
-
 def code_probabilities(
     values: Any,
     k: int,
     *,
-    stage: str | None = None,
+    stage: str,
     softcap_c: float | None,
     temperature: float,
-    inputs: str | None = None,
 ) -> np.ndarray:
-    """The probabilities of the first `k` codes, from one row of the stage `stage`
-    (required; `inputs` is its deprecated old name).
+    """The probabilities of the first `k` codes, from one row of the stage `stage`.
 
     A logit row (`raw_logits`, `capped_logits` or `final_logits`) holds the 255 codes in code
     order, or only the question's first k. `raw_logits` are rounded to bf16 (a bf16 GEMM's
@@ -215,7 +196,6 @@ def code_probabilities(
     refused: they cannot be what their stage says. Returns [k], float32 (float64 for
     `probabilities`).
     """
-    stage = _stage_argument(stage, inputs, "code_probabilities")
     if stage not in STAGES or stage == HIDDEN:
         raise ValueError(
             f"stage must be one of {STAGES[1:]} here, not {stage!r} (hidden states need "
@@ -430,19 +410,16 @@ def question_probabilities(
     config: DecisionConfig,
     rendered: RenderedRequest,
     *,
-    stage: str | None = None,
-    inputs: str | None = None,
+    stage: str,
 ) -> dict[str, np.ndarray]:
     """Each question's code probabilities, in code order ([k] per question), keyed by
     question name: section 7 of docs/spec.md from the stage `stage` on.
 
     `values` holds one row per question, in `rendered.questions` order or keyed by question
-    name. `stage` names what a row is (`STAGES`) and is required (`inputs` is its deprecated
-    old name), so that nothing is applied twice: `hidden` rows need `readout.weight`; the
+    name. `stage` names what a row is (`STAGES`), so that nothing is applied twice: `hidden` rows need `readout.weight`; the
     soft-cap is the checkpoint's (`config.final_logit_softcapping`) and the temperature
     `config.temperature`.
     """
-    stage = _stage_argument(stage, inputs, "question_probabilities")
     check_stage(stage, readout, config)
     check_rendered(config, rendered)
     c = config.final_logit_softcapping
@@ -477,15 +454,12 @@ def read(
     config: DecisionConfig,
     rendered: RenderedRequest,
     *,
-    stage: str | None = None,
+    stage: str,
     ordinal_smoothing: float = 0.0,
-    inputs: str | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Every question's answer, keyed by question name, in v1's response schema:
     `question_probabilities`, then `answer`. `stage` (required) names the stage of the
-    rows: `hidden`, `raw_logits`, `capped_logits`, `final_logits` or `probabilities`.
-    `inputs` is its deprecated old name, accepted with a DeprecationWarning."""
-    stage = _stage_argument(stage, inputs, "read")
+    rows: `hidden`, `raw_logits`, `capped_logits`, `final_logits` or `probabilities`."""
     probs = question_probabilities(values, readout, config, rendered, stage=stage)
     return {
         n: answer(rendered.questions[n], p.tolist(), ordinal_smoothing=ordinal_smoothing)
