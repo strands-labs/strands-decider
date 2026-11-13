@@ -187,14 +187,31 @@ def code_probabilities(
 ) -> np.ndarray:
     """The probabilities of the first `k` codes, from one row of the stage `stage`.
 
-    A logit row (`raw_logits`, `capped_logits` or `final_logits`) holds the 255 codes in code
-    order, or only the question's first k. `raw_logits` are rounded to bf16 (a bf16 GEMM's
-    output is unchanged by it), then capped; `capped_logits` are divided by the temperature;
-    all three end in a float32 softmax over the k codes, whose other codes' logits do not
-    enter it. A `probabilities` row (the k codes or all 255, as a softmax over them gives)
-    is renormalised over the k codes. Capped or final logits past the cap's range are
-    refused: they cannot be what their stage says. Returns [k], float32 (float64 for
-    `probabilities`).
+    `raw_logits` are rounded to bf16 (a bf16 GEMM's output is unchanged by it), then capped;
+    `capped_logits` are divided by the temperature; all three logit stages end in a float32
+    softmax over the k codes, whose other codes' logits do not enter it. A `probabilities`
+    row is renormalised over the k codes. Capped or final logits past the cap's range are
+    refused: they cannot be what their stage says.
+
+    Args:
+        values: One row of the stage `stage`: the 255 codes in code order, or only the
+            question's first `k`. A `probabilities` row is a softmax over the codes it holds.
+        k: How many codes the question has, at least 1 and at most the row's width.
+        stage: What the row is: `raw_logits`, `capped_logits`, `final_logits` or
+            `probabilities` (`STAGES` without `hidden`, which goes through
+            `readout_logits` first).
+        softcap_c: The soft-cap c, the checkpoint's `final_logit_softcapping`, or None for
+            none.
+        temperature: The temperature T, the checkpoint's `temperature`.
+
+    Returns:
+        The k probabilities in code order, [k]: float32, or float64 for `probabilities`.
+
+    Raises:
+        ValueError: For `hidden` or an unknown stage, a soft-cap or temperature that is not
+            a number above 0 in float32's normal range, a row that is not a vector of at
+            least k values finite in float32, capped or final logits past the cap's range, probabilities outside
+            [0, 1] or all 0, or logits that overflow float32 when divided by T.
     """
     if stage not in STAGES or stage == HIDDEN:
         raise ValueError(
@@ -318,6 +335,20 @@ def answer(
 
     Values are keyed by what the request named, in the request's order, whatever order the
     options were rendered in. Rounded to 4 places, as v1 rounds.
+
+    Args:
+        rq: The rendered question (`RenderedRequest.questions`).
+        probs: The probabilities of its codes, in code order: one per option.
+        ordinal_smoothing: For a score, the share of each training target's probability
+            mass that training put on the neighbouring levels, which its confidence corrects
+            for (`confidence.derive_score_confidence`); 0 for none. Nouls and choices
+            ignore it.
+
+    Returns:
+        The answer as JSON, its `type` the question's kind.
+
+    Raises:
+        ValueError: When `probs` does not hold one probability per code.
     """
     p = [float(x) for x in probs]
     if len(p) != len(rq.codes):
@@ -412,13 +443,33 @@ def question_probabilities(
     *,
     stage: str,
 ) -> dict[str, np.ndarray]:
-    """Each question's code probabilities, in code order ([k] per question), keyed by
-    question name: section 7 of docs/spec.md from the stage `stage` on.
+    """Each question's code probabilities: section 7 of docs/spec.md from the stage `stage`
+    on. The soft-cap is the checkpoint's (`config.final_logit_softcapping`) and the
+    temperature `config.temperature`; `stage` says which of them the rows already hold, so
+    that neither is applied twice.
 
-    `values` holds one row per question, in `rendered.questions` order or keyed by question
-    name. `stage` names what a row is (`STAGES`), so that nothing is applied twice: `hidden` rows need `readout.weight`; the
-    soft-cap is the checkpoint's (`config.final_logit_softcapping`) and the temperature
-    `config.temperature`.
+    Args:
+        values: One row per question, of the stage `stage`: an array [questions, width], a
+            sequence of rows, which may differ in width, or a mapping from question name to
+            row. An array or a sequence is in `rendered.questions` order. A row of logits or
+            probabilities holds the 255 codes or only the question's k, in code order.
+        readout: The checkpoint's readout. `hidden` rows need its `weight`; for the other
+            stages it may be None. When given, its soft-cap must be the checkpoint's.
+        config: The checkpoint's decision_config.json.
+        rendered: The request the rows answer, as `render` rendered it for the checkpoint's
+            prompt.
+        stage: What a row is: `hidden`, `raw_logits`, `capped_logits`, `final_logits` or
+            `probabilities` (`STAGES`).
+
+    Returns:
+        For each question, by name in `rendered.questions` order, the probabilities of its
+        k codes in code order, [k].
+
+    Raises:
+        ValueError: When the stage or the readout does not fit the checkpoint
+            (`check_stage`), `rendered` was rendered for another prompt or tokenizer
+            (`check_rendered`), or a row is missing or has the wrong shape or values for
+            its stage (`code_probabilities`).
     """
     check_stage(stage, readout, config)
     check_rendered(config, rendered)
@@ -457,9 +508,29 @@ def read(
     stage: str,
     ordinal_smoothing: float = 0.0,
 ) -> dict[str, dict[str, Any]]:
-    """Every question's answer, keyed by question name, in v1's response schema:
-    `question_probabilities`, then `answer`. `stage` (required) names the stage of the
-    rows: `hidden`, `raw_logits`, `capped_logits`, `final_logits` or `probabilities`."""
+    """Every question's answer in v1's response schema: `question_probabilities`, then
+    `answer`.
+
+    Args:
+        values: One row per question, of the stage `stage`, as `question_probabilities`
+            takes them: an array [questions, width], a sequence of rows, or a mapping from
+            question name to row.
+        readout: The checkpoint's readout. `hidden` rows need its `weight`; a runtime that
+            applies the readout itself and returns a later stage may pass None.
+        config: The checkpoint's decision_config.json.
+        rendered: The request the rows answer, as `render` rendered it for the checkpoint's
+            prompt.
+        stage: What a row is: `hidden`, `raw_logits`, `capped_logits`, `final_logits` or
+            `probabilities` (`STAGES`).
+        ordinal_smoothing: Passed to `answer`, for scores' confidence; 0 for none.
+
+    Returns:
+        For each question, by name in `rendered.questions` order, its answer as JSON: a
+        `NoulAnswer`, `ChoiceAnswer` or `ScoreAnswer` of `strands_decider.schema`.
+
+    Raises:
+        ValueError: As `question_probabilities` raises it.
+    """
     probs = question_probabilities(values, readout, config, rendered, stage=stage)
     return {
         n: answer(rendered.questions[n], p.tolist(), ordinal_smoothing=ordinal_smoothing)
