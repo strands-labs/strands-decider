@@ -54,7 +54,7 @@ class FakeBackend:
 
     def __init__(self, library, model, *, mmproj=None, processor_config=None, threads=None):
         self.args = (library, model, mmproj, processor_config, threads)
-        self.inputs = ("text", "image") if mmproj else ("text",)
+        self.has_vision = mmproj is not None
         self.last_timings: dict = {}
 
     def forward(self, state, questions, images=()):
