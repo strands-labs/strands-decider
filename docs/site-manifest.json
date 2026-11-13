@@ -8,7 +8,7 @@
     {
       "id": "landing",
       "source": "docs/landing.md",
-      "slug": "",
+      "slug": "introduction",
       "title": "Strands Decider",
       "description": "Strands Decider is a top-performing System One decision model from the Strands Agents team and AWS.",
       "nav": {

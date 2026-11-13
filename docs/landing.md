@@ -6,8 +6,6 @@ into your agentic applications today.
 
 ## Start here
 
-<!-- 2x2 grid -->
-
 | | |
 | --- | --- |
 | **[Overview of System One models](overview.md)** — understand what System One models are and the three question types they answer. | **[Using System One models in Strands SDK](getting-started.md)** — walk through using Strands Decider inside the Strands SDK. |
