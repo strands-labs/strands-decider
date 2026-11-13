@@ -32,8 +32,8 @@ the render goldens after the images.
 tests/fixtures/core/image_pixels.json holds the pixel goldens of docs/spec.md (Images, in The
 runtime interface): for each test image, the sha256 of its RGB bytes as v1 decodes it and
 after the bicubic resize to (W, H), made with PIXELS_PILLOW; STRANDS_DECIDER_REGEN_PIXELS=1
-rewrites it (Pillow only). `reference_pixels` is v1's decode; the spec's resize written out in
-numpy, without Pillow, is the core's `spec_resize`.
+rewrites it (Pillow only). `reference_pixels` is v1's decode, and `reference_resize` the
+spec's resize, the core's `resize_image`.
 """
 
 from __future__ import annotations
@@ -48,8 +48,6 @@ from functools import lru_cache
 from pathlib import Path
 
 import pytest
-
-from strands_decider.core.images import spec_resize  # noqa: F401  (the tests import it from here)
 
 FIXTURES = Path(__file__).parent / "fixtures" / "core"
 GEMMA4_REPO = "google/gemma-4-E2B-it"

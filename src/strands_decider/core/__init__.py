@@ -47,7 +47,6 @@ from .images import (
     resize_image,
     resized_size,
     soft_tokens,
-    spec_resize,
 )
 from .prompt import (
     CHAT,
@@ -145,5 +144,4 @@ __all__ = [
     "round_to_bf16",
     "soft_tokens",
     "softcap",
-    "spec_resize",
 ]
