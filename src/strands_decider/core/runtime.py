@@ -17,7 +17,7 @@ import numpy as np
 from .config import IMAGE, DecisionConfig
 from .prompt import RenderedImage, render
 from .readout import STAGES, Readout, check_rendered, check_stage, read
-from .request import has_images, parse_request
+from .request import RequestJSON, has_images, parse_request
 
 if TYPE_CHECKING:
     from tokenizers import Tokenizer
@@ -76,7 +76,7 @@ def attention_mask(state_len: int, total_len: int) -> np.ndarray:
 
 
 def evaluate(
-    request: Any,
+    request: RequestJSON,
     tokenizer: Tokenizer,
     readout: Readout | None,
     config: DecisionConfig,

@@ -39,7 +39,7 @@ from typing import TYPE_CHECKING, Any
 
 from .codes import codes_for
 from .images import IMAGE_CLOSE, IMAGE_OPEN, IMAGE_SOFT, EncodedImage
-from .request import Question, Request, parse_request
+from .request import Question, Request, RequestJSON, parse_request
 
 if TYPE_CHECKING:
     from tokenizers import Tokenizer
@@ -545,7 +545,7 @@ class _Prepared:
 
 
 def _prepare(
-    request: Any, variant: str, option_orders: Mapping[str, Sequence[int]] | None
+    request: RequestJSON, variant: str, option_orders: Mapping[str, Sequence[int]] | None
 ) -> _Prepared:
     if variant not in VARIANTS:
         raise ValueError(f"unknown prompt variant {variant!r}; this runtime implements {VARIANTS}")
@@ -565,7 +565,10 @@ def _prepare(
 
 
 def render_text(
-    request: Any, variant: str, *, option_orders: Mapping[str, Sequence[int]] | None = None
+    request: RequestJSON,
+    variant: str,
+    *,
+    option_orders: Mapping[str, Sequence[int]] | None = None,
 ) -> tuple[str, dict[str, str]]:
     """The prompt as text, without a tokenizer: the state part, and each question's part.
     Control tokens appear as their strings (`<bos>`, `<|turn>`, `<turn|>`, and an image's
@@ -575,20 +578,39 @@ def render_text(
 
 
 def render(
-    request: Any,
+    request: RequestJSON,
     tokenizer: Tokenizer,
     variant: str,
     *,
     option_orders: Mapping[str, Sequence[int]] | None = None,
     max_length: int | None = None,
 ) -> RenderedRequest:
-    """Render every question of `request` for `variant`.
+    """Render every question of `request` for `variant`: the state's token ids, each
+    question's, its codes and their token ids, and each image's span.
 
-    `request` is the JSON object of `POST /v1/systemone` (or a v1 `SystemOneRequest`).
-    `tokenizer` is a `tokenizers.Tokenizer`, Gemma 4's; render never changes it and may run
-    on several threads at once with the same one. `option_orders` maps a question
-    name to a permutation of its options (training augmentation). A prompt longer than
-    `max_length` tokens is refused, never truncated.
+    Args:
+        request: The request: the JSON object of `POST /v1/systemone`, as `json.loads` reads
+            it, or a v1 `SystemOneRequest`. It is checked as `parse_request` checks it.
+        tokenizer: A `tokenizers.Tokenizer`, Gemma 4's: the checkpoint's own. Render never
+            changes it, and may run on several threads at once with the same one.
+        variant: The prompt, `strands-plain` or `strands-chat` (`VARIANTS`): the
+            checkpoint's decision_config.json `prompt`.
+        option_orders: For training augmentation, a permutation of a question's option
+            indices, by question name, in the order the options are rendered; a score's
+            levels may only be reversed. A question it does not name keeps the request's
+            order.
+        max_length: The most tokens a prompt may have, or None for no limit. A longer
+            prompt is refused, never truncated.
+
+    Returns:
+        The rendered request: its questions in the request's order, each with the shared
+        state ids, its own ids, its codes and their token ids, and the state's images.
+
+    Raises:
+        ValueError: When the request or one of its images is malformed (`parse_request`),
+            the variant is unknown, `option_orders` names an unknown question or is not a
+            permutation, the tokenizer lacks a control token, splits a code or has an added
+            token that is not special, or a prompt is longer than `max_length`.
     """
     prep = _prepare(request, variant, option_orders)
     names = list(prep.blocks)
