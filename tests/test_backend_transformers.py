@@ -112,9 +112,9 @@ IMAGES = [image_b64(64, 48), image_b64(50, 90, "JPEG", 1)]
 
 def test_loads_the_multimodal_layout(backends, kind):
     full, reuse = backends
-    inputs = ["text", "image"] if IMAGING[kind] else ["text"]
     assert full.outputs == "hidden"
-    assert list(full.inputs) == inputs
+    assert (full.image_processor is not None) == bool(IMAGING[kind])
+    assert (full.image_problem is None) == bool(IMAGING[kind])
     assert full.checkpoint.layout == tb.MULTIMODAL and full.checkpoint.unified == (kind == UNIFIED)
     want = (
         "Gemma4UnifiedForConditionalGeneration"
@@ -127,7 +127,6 @@ def test_loads_the_multimodal_layout(backends, kind):
         "device": "cpu",
         "dtype": "float32",
         "layout": "multimodal",
-        "inputs": inputs,
         "reuse_state": False,
     }
     assert reuse.describe()["reuse_state"] is True
@@ -143,7 +142,7 @@ def test_the_intermediate_layout_loads_as_text_only_with_warnings(tmp_path):
     text = " ".join(str(w.message) for w in caught)
     assert 'no "interface"' in text and 'no "inputs"' in text
     assert backend.checkpoint.layout == tb.DECODER and backend.checkpoint.config is None
-    assert backend.inputs == ("text",) and type(backend.model).__name__ == "Gemma4TextModel"
+    assert backend.image_processor is None and type(backend.model).__name__ == "Gemma4TextModel"
     # Its soft-cap comes from config.json, its temperature from decision_config.json.
     assert backend.checkpoint.readout.softcap == SOFTCAP
     assert backend.checkpoint.temperature == TEMPERATURE
@@ -479,7 +478,7 @@ def test_spans_are_checked(backends, kind):
 def test_a_text_only_checkpoint_refuses_images_before_decoding_them(tmp_path):
     path = decision_checkpoint(tmp_path / "t", GEMMA4, decision={"inputs": ["text"]})
     backend = tb.TransformersBackend.load(str(path))
-    assert backend.inputs == ("text",) and backend.decoder.vision_tower is None
+    assert backend.image_processor is None and backend.decoder.vision_tower is None
     ck = backend.checkpoint
     with pytest.raises(ValueError, match=r'decision_config.json inputs are \["text"\]'):
         evaluate(request(["not even base64"]), ck.tokenizer(), ck.readout, ck.config, backend)
@@ -489,7 +488,7 @@ def test_a_text_only_checkpoint_refuses_images_before_decoding_them(tmp_path):
 def test_a_backend_without_its_vision_encoder_refuses_images(ckpt):
     backend = tb.TransformersBackend.load(str(ckpt), images=False)
     ck = backend.checkpoint
-    assert backend.inputs == ("text",)
+    assert backend.image_processor is None and backend.image_problem == NO_VISION
     with pytest.raises(ValueError, match=NO_VISION):
         evaluate(request(IMAGES[:1]), ck.tokenizer(), ck.readout, ck.config, backend)
 
@@ -508,7 +507,7 @@ def test_an_image_processor_off_the_spec_refuses_images(tmp_path, processor, mat
     path = decision_checkpoint(tmp_path / "p", GEMMA4, processor=processor)
     with pytest.warns(UserWarning, match=match):
         backend = tb.TransformersBackend.load(str(path))
-    assert backend.inputs == ("text",) and match in backend.image_problem
+    assert backend.image_processor is None and match in backend.image_problem
     ck = backend.checkpoint
     engine = DecisionEngine(
         backend, ck.tokenizer(), ck.config, ck.readout, model_name="t",
@@ -547,7 +546,7 @@ def test_config_json_must_name_the_interfaces_image_tokens(tmp_path, monkeypatch
     monkeypatch.setattr(tb.Checkpoint, "tokenizer", lambda self: pytest.fail("read the tokenizer"))
     with pytest.warns(UserWarning, match=r"image_token_id is 3, not the interface.s id"):
         backend = tb.TransformersBackend.load(str(path))
-    assert backend.inputs == ("text",)
+    assert backend.image_processor is None and "image_token_id is 3" in backend.image_problem
 
 
 def test_a_config_json_without_a_hidden_size_is_named(tmp_path):
@@ -797,7 +796,9 @@ def test_a_real_checkpoint():
     ck = full.checkpoint
     assert ck.config is not None, "a decision checkpoint, not an intermediate one"
     images = (
-        [base64.b64encode(_photo(640, 480, "JPEG", 0)).decode()] if "image" in full.inputs else []
+        [base64.b64encode(_photo(640, 480, "JPEG", 0)).decode()]
+        if full.image_processor is not None
+        else []
     )
     tok = ck.tokenizer()
     a = evaluate(request(images), tok, ck.readout, ck.config, full)
@@ -984,7 +985,7 @@ def test_an_image_processor_that_cannot_be_built_refuses_images_only(tmp_path, m
     with pytest.warns(UserWarning, match="processor_config.json is unreadable"):
         backend = tb.TransformersBackend.load(str(path))
     # Clients get a fixed reason; the error, with its local path, is only in the warning.
-    assert backend.inputs == ("text",) and backend.image_problem == tb.PROCESSOR_FAILED
+    assert backend.image_processor is None and backend.image_problem == tb.PROCESSOR_FAILED
     assert str(path) not in backend.image_problem
     ck = backend.checkpoint
     assert evaluate(request(), ck.tokenizer(), ck.readout, ck.config, backend)["answers"]
