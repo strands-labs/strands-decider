@@ -79,7 +79,7 @@ from .readout import (
     round_to_bf16,
     softcap,
 )
-from .request import parse_request
+from .request import NO_VISION, RequestJSON, parse_request
 from .runtime import Backend, attention_mask, evaluate
 from .tokenizer import CODE_TOKEN_IDS, CONTROL_TOKEN_IDS, check_tokenizer, load_tokenizer
 
@@ -99,6 +99,7 @@ __all__ = [
     "MAX_CODES",
     "MAX_IMAGES",
     "MAX_IMAGE_PIXELS",
+    "NO_VISION",
     "PLAIN",
     "PROBABILITIES",
     "RAW_LOGITS",
@@ -114,6 +115,7 @@ __all__ = [
     "RenderedImage",
     "RenderedQuestion",
     "RenderedRequest",
+    "RequestJSON",
     "agreement",
     "agreement_with_goldens",
     "answer",

@@ -1820,12 +1820,12 @@ def test_request_parsing_matches_v1():
         *({"state": "s", "questions": one, "images": i} for i in images),
     ]
     # v1's text-only engine refuses a request that validates with images, with this message,
-    # which the core gives for a backend without an image path (runtime.evaluate).
+    # which a core Backend without an image path raises from forward.
     # Only that check needs torch, so the parity checks below still run without it; hidden_engine
     # imports without torch today, but need not.
     import importlib.util
 
-    from strands_decider.core.request import NO_VISION
+    from strands_decider.core import NO_VISION
 
     if importlib.util.find_spec("torch") is not None:
         from strands_decider import hidden_engine
