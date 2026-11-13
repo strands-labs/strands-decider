@@ -220,7 +220,8 @@ encoding rather than guess whether it has a batch dimension.
 
 ```
 src/strands_decider/              -- published package (inference only)
-  schema.py       wire types; the confidence formula
+  schema.py       wire types
+  confidence.py   the confidence formulas, without dependencies
   prompting.py    state/question rendering; slot <-> option binding
   modeling.py     LLM torso (Qwen3 or hybrid Qwen3.5) + pointer (or slot) readout;
                   masked softmax; KL reference; is_hybrid
@@ -233,6 +234,8 @@ src/strands_decider/              -- published package (inference only)
   hf_export.py    a checkpoint as a Hugging Face model folder (safetensors, card, manifest)
   naming.py       release naming helpers (used by hf_export and release scripts)
   vision.py       Qwen3.5 vision-tower engine (`serve --vision`, `ask --image`)
+  core/           the decision interface without torch (docs/spec.md): prompt
+                  rendering, the code readout, decision_config.json, the runtime contract
 
 training/                         -- not published; run as `python -m training.<module>`
   train.py        LoRA + readout training loop (`python -m training.train`)
@@ -312,10 +315,12 @@ tests/            pytest only: test_core (no GPU), test_server (stubbed), test_g
                   test_catchall, test_distill, test_hf_export, test_checkpoint_load,
                   test_cli_build, test_data_identity, test_configs, test_run_recipe,
                   test_llm_client, test_cli_exit,
-                  test_ddp (`-m distributed` for the multi-GPU runs)
+                  test_ddp (`-m distributed` for the multi-GPU runs);
+                  test_core_prompt, test_core_readout, test_core_config (the torch-free core)
 docs/             architecture.md -- this document; inference.md -- serving a checkpoint:
-                  install, ask, serve, the HTTP API, a Mac
-.github/          workflows/tests.yml -- the CPU tests; workflows/generators-live-test.yml
+                  install, ask, serve, the HTTP API, a Mac; spec.md -- the decision interface
+.github/          workflows/tests.yml -- the CPU tests, and the torch-free core's tests against
+                  the pinned Gemma 4 tokenizer; workflows/generators-live-test.yml
                   and .github/scripts/check_generator_rows.py -- one live batch per generator backend
 ```
 

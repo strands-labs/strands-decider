@@ -1,0 +1,25 @@
+Subject: convert: do not take Strands Decider checkpoints for pplx-decider ones
+
+The pplx-decider hparams loader claims any directory with decision_config.json,
+readout.safetensors and config.json, unless decision_config.json has a format_id. It now also
+leaves a directory whose decision_config.json says "interface": "strands-decider", which
+llama.cpp's own Gemma 4 classes then convert from its config.json, the text decoder and
+--mmproj alike, and one whose decision_config.json is not a JSON object. pplx-decider and
+vllm-d3 are llama.cpp's own names for those formats.
+
+diff --git a/conversion/pplx_decider.py b/conversion/pplx_decider.py
+index b71bd8a..3f0ec6e 100644
+--- a/conversion/pplx_decider.py
++++ b/conversion/pplx_decider.py
+@@ -19,8 +19,9 @@ def _is_pplx_decider_checkpoint(dir_model: Path) -> bool:
+     if not all((dir_model / name).is_file() for name in ("decision_config.json", "readout.safetensors", "config.json")):
+         return False
+     with open(dir_model / "decision_config.json", encoding="utf-8") as f:
+-        # the same layout with a format_id is a vllm-d3 checkpoint
+-        return "format_id" not in json.load(f)
++        decision = json.load(f)
++    # a format_id means vllm-d3, interface "strands-decider" means Strands Decider
++    return isinstance(decision, dict) and "format_id" not in decision and decision.get("interface") != "strands-decider"
+ 
+ 
+ @ModelBase.register_hparams_loader(_is_pplx_decider_checkpoint)

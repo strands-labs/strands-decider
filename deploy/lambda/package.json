@@ -8,7 +8,8 @@
   },
   "scripts": {
     "build": "tsc --noEmit",
-    "cdk": "cdk"
+    "cdk": "cdk",
+    "test": "tsx --test test/*.test.ts"
   },
   "devDependencies": {
     "@types/node": "22.20.5",
