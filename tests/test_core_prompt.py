@@ -702,8 +702,9 @@ def test_json_renders_by_the_spec_rules():
 def test_whitespace_is_the_specs_29_code_points():
     """Section 3.1's whitespace is Python's str.isspace set, the same on every Python the core
     runs on. Request text loses exactly it at its ends, an option has each run of it as one
-    space, and U+200B and U+FEFF, which are not whitespace, are kept."""
-    from strands_decider.core.prompt import render_content
+    space in its name and its description, and U+200B and U+FEFF, which are not whitespace,
+    are kept."""
+    from strands_decider.core.prompt import DESCRIPTION_SEPARATOR, render_content
 
     assert len(SPEC_WHITESPACE) == 29 == len(set(SPEC_WHITESPACE))
     assert set(SPEC_WHITESPACE) == {chr(c) for c in range(sys.maxunicode + 1) if chr(c).isspace()}
@@ -718,6 +719,11 @@ def test_whitespace_is_the_specs_29_code_points():
         req = {"state": "s", "questions": {"q": {"instructions": "x", "criteria": criteria}}}
         _, parts = render_text(req, PLAIN)
         assert "A." + (f" {name}" if name else "") in parts["q"].split("\n"), ascii(t)
+        criteria = {"x": t, "other": None}
+        req = {"state": "s", "questions": {"q": {"instructions": "x", "criteria": criteria}}}
+        _, parts = render_text(req, PLAIN)
+        line = "A. x" + (f"{DESCRIPTION_SEPARATOR}{name}" if name else "")
+        assert line in parts["q"].split("\n"), ascii(t)
     assert render_content("\u200b a \ufeff") == "\u200b a \ufeff"
     # Request text is kept as sent: a carriage return inside it stays.
     s, _ = render_text({"state": "a\r\nb\r", "questions": {"q": {"instructions": "x"}}}, PLAIN)
