@@ -21,13 +21,13 @@ STRANDS_DECIDER_GEMMA4_TEMPLATES lists the Gemma 4 base models' chat_template.ji
 need jinja2 (and transformers, for the apply_chat_template comparison). A decision checkpoint
 ships no chat template, and its prompts are never rendered with one.
 
-The test images are small synthetic files in tests/fixtures/core/images, checked in, so that
-the core's header reader and the render goldens need no imaging library. `make_image`
-draws each one deterministically with Pillow; with STRANDS_DECIDER_REGEN_IMAGES=1 the files
-are rewritten, and so is tests/fixtures/core/image_soft_tokens.json, the soft-token count
-of every listed size by Gemma 4's real image processors (which needs transformers, Pillow
-and torchvision); STRANDS_DECIDER_REGEN_SOFT_TOKENS=1 rewrites the table alone. Regenerate
-the render goldens after the images.
+The test images are small synthetic files in tests/fixtures/core/images, checked in.
+`make_image` draws each one deterministically with Pillow; with
+STRANDS_DECIDER_REGEN_IMAGES=1 the files are rewritten, and so is
+tests/fixtures/core/image_soft_tokens.json, the soft-token count of every listed size by
+Gemma 4's real image processors (which needs transformers, Pillow and torchvision);
+STRANDS_DECIDER_REGEN_SOFT_TOKENS=1 rewrites the table alone. Regenerate the render goldens
+after the images.
 
 tests/fixtures/core/image_pixels.json holds the pixel goldens of docs/spec.md (Images, in The
 runtime interface): for each test image, the sha256 of its RGB bytes as v1 decodes it and
@@ -163,8 +163,8 @@ def toy_tokenizer():
 
 # ---- test images ------------------------------------------------------------------------
 
-# The checked-in test images: name -> (format, width, height), as their headers give them
-# and as Pillow opens them (tests/test_core_images.py checks both).
+# The checked-in test images: name -> (format, width, height), as Pillow reads them from
+# their headers (tests/test_core_images.py checks it).
 IMAGE_FILES = {
     "checker-64x48.png": ("PNG", 64, 48),
     "stripes-300x40.jpg": ("JPEG", 300, 40),

@@ -35,7 +35,8 @@ dependencies = [
 # live under training/, not src/, so they ship in the repo, not in the wheel; this extra
 # is here for `pip install -e ".[train]"` from a checkout rather than for Hub consumers.
 train = ["datasets>=2.20"]
-# Image input (`serve --vision`, `ask --image`, docs/vision.md); also needs transformers >= 5.18.
+# Image input: v1's (`serve --vision`, `ask --image`, docs/vision.md), which also needs
+# transformers >= 5.18, and the core's (strands_decider.core), which reads image headers with it.
 vision = ["pillow>=10"]
 # `--device mlx`: the torso on Apple silicon's GPU through mlx-lm (Python 3.11+;
 # src/strands_decider/mlx_engine.py).
