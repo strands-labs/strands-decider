@@ -65,6 +65,10 @@ class TrainConfig:
     # such as Qwen3.5 needs its recurrent layers' projections listed too, or LoRA reaches
     # only its few full-attention layers.
     lora_targets: list[str] | None = None
+    # LoRA on every routed expert of a MoE torso (Gemma 4 26B-A4B); see StrandsDeciderConfig.
+    expert_lora: bool = False
+    expert_lora_r: int = 8
+    expert_lora_alpha: int | None = None
     # Start every prompt with BOS even if the tokenizer adds none (modeling.ensure_bos);
     # gemma-4-E2B-it's tokenizer leaves it to the chat template.
     force_bos: bool = False
@@ -222,6 +226,9 @@ INIT_FROM_ARCH = (
     "lora_r",
     "lora_alpha",
     "lora_targets",
+    "expert_lora",
+    "expert_lora_r",
+    "expert_lora_alpha",
     "force_bos",
 )
 
@@ -563,6 +570,9 @@ def train(cfg: TrainConfig) -> str:
             use_lora=cfg.use_lora and not cfg.freeze_torso,
             lora_r=cfg.lora_r,
             lora_alpha=cfg.lora_alpha,
+            expert_lora=cfg.expert_lora,
+            expert_lora_r=cfg.expert_lora_r,
+            expert_lora_alpha=cfg.expert_lora_alpha,
             force_bos=cfg.force_bos,
             host_embeddings=cfg.host_embeddings,
             # Serving needs this to correct the variance floor smoothing imposes on

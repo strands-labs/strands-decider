@@ -108,6 +108,12 @@ class StrandsDeciderConfig:
             "down_proj",
         ]
     )
+    # LoRA on every routed expert of a mixture-of-experts torso (Gemma 4 26B-A4B): one adapter
+    # of rank expert_lora_r per expert on its fused gate_up and down projections, router frozen
+    # (expert_lora.py). expert_lora_alpha None is lora_alpha. Off by default.
+    expert_lora: bool = False
+    expert_lora_r: int = 8
+    expert_lora_alpha: int | None = None
     # Start every prompt with the tokenizer's BOS token even when its own post-processor
     # adds none (ensure_bos). gemma-4-E2B-it's tokenizer leaves BOS to its chat template,
     # and without it the frozen -it torso reads JevBench at chance (73/231, against 135
@@ -123,6 +129,8 @@ class StrandsDeciderConfig:
         readout = self.head_type == "token_readout"
         if self.attention_mode not in (("causal", "prefix_bidir") if readout else ("causal",)):
             raise ValueError(f"attention_mode {self.attention_mode!r} with head {self.head_type!r}")
+        if self.expert_lora and not (readout and self.use_lora):
+            raise ValueError("expert_lora goes with head_type token_readout and use_lora")
 
     def to_json(self) -> str:
         d = asdict(self)
@@ -130,6 +138,9 @@ class StrandsDeciderConfig:
         for key, default in (
             ("attention_mode", "causal"),
             ("readout_softcap", None),
+            ("expert_lora", False),
+            ("expert_lora_r", 8),
+            ("expert_lora_alpha", None),
         ):
             if d[key] == default:
                 del d[key]
@@ -515,6 +526,13 @@ class StrandsDeciderModel(nn.Module):
             model.attach_lora()
         return model
 
+    def attach_expert_lora(self) -> None:
+        from . import expert_lora
+
+        c = self.config
+        alpha = c.lora_alpha if c.expert_lora_alpha is None else c.expert_lora_alpha
+        expert_lora.attach(self.torso, c.expert_lora_r, alpha, c.lora_dropout)
+
     @staticmethod
     def _load_torso(
         config: StrandsDeciderConfig,
@@ -588,6 +606,8 @@ class StrandsDeciderModel(nn.Module):
             task_type="FEATURE_EXTRACTION",
         )
         self.torso = get_peft_model(self.torso, lora_cfg)
+        if self.config.expert_lora:  # after PEFT, which freezes every non-LoRA parameter
+            self.attach_expert_lora()
 
     def freeze_torso(self) -> None:
         for p in self.torso.parameters():
@@ -694,6 +714,14 @@ class StrandsDeciderModel(nn.Module):
         save_file(state, os.path.join(path, "head.safetensors"), metadata={"format": "pt"})
         if self.config.use_lora:
             self.torso.save_pretrained(os.path.join(path, "lora"))
+        if self.config.expert_lora:
+            from . import expert_lora
+
+            save_file(
+                expert_lora.state_dict(self.torso),
+                os.path.join(path, "lora", expert_lora.FILE),
+                metadata={"format": "pt"},
+            )
         self.tokenizer.save_pretrained(path)
 
     @classmethod
@@ -748,6 +776,16 @@ class StrandsDeciderModel(nn.Module):
         obj.head = build_head(config, cls.hidden_size(torso))
         obj.head.load_state_dict(head_state)
         obj.head.to(torch.float32)
+        if config.expert_lora:
+            from safetensors.torch import load_file
+
+            from . import expert_lora
+
+            obj.attach_expert_lora()
+            expert_lora.load_state(torso, load_file(os.path.join(lora_dir, expert_lora.FILE)))
+            for m in expert_lora.modules(torso).values():
+                for p in expert_lora.PARTS:
+                    getattr(m, p).requires_grad_(trainable)
         return obj
 
 

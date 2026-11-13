@@ -2,7 +2,8 @@
 
     python -m training.export_v2 <checkpoint> <out>
 
-The package is the spec's checkpoint layout (docs/spec.md): the torso with its LoRA adapter merged in,
+The package is the spec's checkpoint layout (docs/spec.md): the torso with its LoRA adapter
+merged in, and a MoE's expert adapters folded into its experts,
 saved in bfloat16 as a text-only Gemma 4 decoder (`config.json`, `model-*.safetensors`,
 no `model.` prefix), `readout.safetensors` (one bfloat16 tensor `weight`, [255, hidden]),
 `decision_config.json` (prompt, codes, token ids, temperature, attention, pooling and a
@@ -24,6 +25,7 @@ import typer
 from huggingface_hub import snapshot_download
 from safetensors.torch import save_file
 
+from strands_decider import expert_lora
 from strands_decider.core import CHAT, CODES
 from strands_decider.modeling import StrandsDeciderModel
 
@@ -67,6 +69,7 @@ def export_v2(checkpoint: str, out: str) -> str:
     torso: Any = model.torso
     if cfg.use_lora:
         torso = torso.merge_and_unload()
+    expert_lora.merge_and_unwrap(torso)  # a MoE's expert adapters, when it has them
     torso.config.final_logit_softcapping = cfg.readout_softcap or None
     torso.to(torch.bfloat16).save_pretrained(out, max_shard_size="5GB")  # run-2's shards
     weight = model.head.state_dict()["proj.weight"]
@@ -93,6 +96,15 @@ def export_v2(checkpoint: str, out: str) -> str:
             "targets": ",".join(cfg.lora_targets),
         }
         if cfg.use_lora
+        else None,
+        "expert_lora": {
+            "rank": cfg.expert_lora_r,
+            "alpha": cfg.lora_alpha if cfg.expert_lora_alpha is None else cfg.expert_lora_alpha,
+            "dropout": cfg.lora_dropout,
+            "targets": "experts.gate_up_proj,experts.down_proj",
+            "router": "frozen",
+        }
+        if cfg.expert_lora
         else None,
         "backbone": "LoRA merged, bfloat16" if cfg.use_lora else "as released, bfloat16",
         "readout": "trained, F32 master, saved bfloat16",

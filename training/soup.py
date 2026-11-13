@@ -31,6 +31,7 @@ import torch
 import typer
 from rich.console import Console
 
+from strands_decider import expert_lora
 from strands_decider.modeling import (
     CONFIG_NAME,
     StrandsDeciderConfig,
@@ -41,6 +42,7 @@ from strands_decider.modeling import (
 
 ADAPTER = "lora/adapter_model.safetensors"
 ADAPTER_CONFIG = "lora/adapter_config.json"
+EXPERTS = expert_lora.FILE
 FITTED = {"temperature", "temperature_by_kind"}  # calibration: may differ between the inputs
 
 
@@ -177,6 +179,20 @@ def soup(checkpoints: list[str], out: str, replace: bool = False) -> str:
         with open(os.path.join(out, ADAPTER_CONFIG), "w", encoding="utf-8") as fh:
             json.dump({**acfg, "r": n * r, "lora_alpha": alpha}, fh, indent=2)
         cfg = {**cfg, "lora_r": n * r, "lora_alpha": alpha}
+    if cfg.get("expert_lora"):  # the same rank-N*r construction, per expert ([E, r, in] A)
+        experts = [load_file(os.path.join(c, "lora", EXPERTS)) for c in checkpoints]
+        if any(set(e) != set(experts[0]) for e in experts):
+            raise ValueError("the expert adapters cover different modules")
+        souped = {
+            k: torch.cat([e[k] for e in experts], dim=1)
+            if k.endswith("_a")
+            else torch.cat([e[k] for e in experts], dim=2) / n
+            for k in experts[0]
+        }
+        save_file(souped, os.path.join(out, "lora", EXPERTS))
+        e_alpha = cfg["expert_lora_alpha"]
+        e_alpha = acfg["lora_alpha"] if e_alpha is None else e_alpha  # before the rescale
+        cfg = {**cfg, "expert_lora_r": n * cfg["expert_lora_r"], "expert_lora_alpha": n * e_alpha}
 
     head = soup_heads([load_head_state(c) for c in checkpoints], cfg["head_type"])
     save_file(
