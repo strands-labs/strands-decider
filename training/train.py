@@ -148,8 +148,11 @@ class TrainConfig:
     # With init_from both start trained, and no value is measured for that yet.
     head_lr: float = 1e-3
     weight_decay: float = 0.01
-    # AdamW (beta1, beta2); the v2 recipe trains with (0.9, 0.999).
+    # AdamW (beta1, beta2).
     adam_betas: tuple[float, float] = (0.9, 0.95)
+    # head_dropout, head_lr, weight_decay and adam_betas above are the pointer head's defaults.
+    # A token readout starts from the LM head's rows, not at random: when the config does not
+    # set them it trains with READOUT_DEFAULTS instead (_readout_defaults).
     warmup_ratio: float = 0.03
     # The cosine schedule ends at lr_floor x the peak (0: at zero; the v2 recipe: 0.1).
     lr_floor: float = 0.0
@@ -213,6 +216,25 @@ class TrainConfig:
         return cfg
 
 
+# A token readout trains in one AdamW group with the adapter: its lr, no weight decay, AdamW's
+# default betas and no dropout before the readout. None: cfg.lr.
+READOUT_DEFAULTS: dict[str, Any] = {
+    "head_dropout": 0.0,
+    "head_lr": None,
+    "weight_decay": 0.0,
+    "adam_betas": (0.9, 0.999),
+}
+
+
+def _readout_defaults(cfg: TrainConfig) -> None:
+    """Give a token_readout run READOUT_DEFAULTS for each of those keys the config does not set."""
+    if cfg.head_type != "token_readout":
+        return
+    for name, value in READOUT_DEFAULTS.items():
+        if not _given(cfg, name):
+            setattr(cfg, name, cfg.lr if value is None else value)
+
+
 # Slot-era TrainConfig keys, and the token readout's render (checked above), that the current
 # dataclass no longer carries. Dropped silently by
 # from_yaml so a published recipe still parses; a typo in any other key raises.
@@ -262,6 +284,7 @@ def _init_from(cfg: TrainConfig) -> StrandsDeciderModel:
         if _given(cfg, name) and mine != theirs:
             conflicts.append((name, mine, theirs))
         setattr(cfg, name, getattr(ck, name))
+    _readout_defaults(cfg)  # head_type is the checkpoint's now
     if conflicts:
         sets = "; ".join(
             f"the config sets {n}={m!r}, the checkpoint has {t!r}" for n, m, t in conflicts
@@ -565,6 +588,7 @@ def train(cfg: TrainConfig) -> str:
     if cfg.init_from:
         model = _init_from(cfg)
     else:
+        _readout_defaults(cfg)
         print(f"[strands-decider] loading base model {cfg.base_model}")
         model_cfg = StrandsDeciderConfig(
             base_model=cfg.base_model,
