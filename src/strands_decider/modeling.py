@@ -19,7 +19,7 @@ import json
 import os
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
-from typing import Any
+from typing import Any, cast
 
 import torch
 import torch.nn as nn
@@ -354,6 +354,7 @@ class StrandsDeciderModel(nn.Module):
         kwargs: dict[str, Any] = {
             "dtype": getattr(torch, config.torch_dtype),
             "revision": config.base_revision,
+            "output_loading_info": True,
         }
         if device_map:
             kwargs["device_map"] = device_map
@@ -367,10 +368,14 @@ class StrandsDeciderModel(nn.Module):
             # the input embeddings, which the KL reference reads instead).
             import transformers
 
-            lm = transformers.Qwen3_5ForCausalLM.from_pretrained(
-                config.base_model, config=base_cfg.get_text_config(), **kwargs
+            lm, loading_info = cast(
+                tuple[transformers.Qwen3_5ForCausalLM, dict[str, Any]],
+                transformers.Qwen3_5ForCausalLM.from_pretrained(
+                    config.base_model, config=base_cfg.get_text_config(), **kwargs
+                ),
             )
             torso = lm.model
+            decoder_prefix = "model."
         elif base_cfg.model_type in GEMMA4_CLASSES:
             # Gemma 4 checkpoints are multimodal too, but the Qwen trick does not carry
             # over: Gemma4ForCausalLM does not map the checkpoint's `model.language_model.*`
@@ -381,13 +386,24 @@ class StrandsDeciderModel(nn.Module):
             # `gemma4` with a mixture-of-experts block in every layer.
             import transformers
 
-            full = getattr(transformers, GEMMA4_CLASSES[base_cfg.model_type]).from_pretrained(
-                config.base_model, **kwargs
-            )
+            full, loading_info = getattr(
+                transformers, GEMMA4_CLASSES[base_cfg.model_type]
+            ).from_pretrained(config.base_model, **kwargs)
             torso = full.model.language_model
+            decoder_prefix = "model.language_model."
             del full
         else:
-            torso = AutoModel.from_pretrained(config.base_model, **kwargs)
+            torso, loading_info = AutoModel.from_pretrained(config.base_model, **kwargs)
+            decoder_prefix = ""
+        # The discarded LM head and multimodal encoders are not part of the torso.
+        missing = sorted(
+            key for key in loading_info["missing_keys"] if key.startswith(decoder_prefix)
+        )
+        if missing:
+            raise ValueError(
+                f"{config.base_model}: missing decoder weights ({len(missing)}): "
+                f"{', '.join(missing[:5])}; refusing to use an incompletely loaded torso"
+            )
         if config.host_embeddings:
             table = getattr(torso, "embed_tokens_per_layer", None)
             if table is not None:
