@@ -25,8 +25,7 @@ def derive_score_confidence(probabilities: list[float], *, ordinal_smoothing: fl
     target's mass on neighbouring levels, so a perfectly fitted model still reports
     sigma ~ sqrt(eps) and could never reach 1.0. Without this correction a 3-level
     score would cap at 0.68 confidence, making the documented ">= 0.9 means act
-    automatically" threshold unreachable by construction -- which is exactly the bug
-    this replaced.
+    automatically" threshold unreachable by construction.
     """
     n = len(probabilities)
     if n <= 1:
