@@ -1825,18 +1825,6 @@ def test_request_parsing_matches_v1():
         {"state": "s", "questions": one, "model": 5},
         *({"state": "s", "questions": one, "images": i} for i in images),
     ]
-    # v1's text-only engine refuses a request that validates with images, with this message,
-    # which a core Backend without an image path raises from forward.
-    # Only that check needs torch, so the parity checks below still run without it; hidden_engine
-    # imports without torch today, but need not.
-    import importlib.util
-
-    from strands_decider.core import NO_VISION
-
-    if importlib.util.find_spec("torch") is not None:
-        from strands_decider import hidden_engine
-
-        assert NO_VISION in inspect.getsource(hidden_engine.HiddenStateEngine.evaluate)
     for req in requests:
         try:
             validated = SystemOneRequest.model_validate(req)
@@ -1860,6 +1848,16 @@ def test_request_parsing_matches_v1():
         if parsed is not None and validated is not None:
             assert len(parsed.images) == len(validated.images), req
     assert parse_request(SystemOneRequest.model_validate(CASES["support_ticket"])).questions
+
+
+def test_v1_text_only_engine_refuses_images_with_no_vision():
+    """v1's text-only engine refuses a request that validates with images with NO_VISION, the
+    message a core Backend without an image path raises from forward."""
+    pytest.importorskip("torch")
+    from strands_decider import hidden_engine
+    from strands_decider.core import NO_VISION
+
+    assert NO_VISION in inspect.getsource(hidden_engine.HiddenStateEngine.evaluate)
 
 
 def test_render_content_matches_v1():
