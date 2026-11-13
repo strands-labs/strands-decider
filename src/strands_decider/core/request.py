@@ -14,7 +14,7 @@ import math
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Protocol
 
 from .images import MAX_IMAGES, EncodedImage, decode_image
 
@@ -44,6 +44,18 @@ _SURROGATE = re.compile("[\ud800-\udfff]")
 # a `runtime.Backend` without an image path raises it when `forward` is given images.
 NO_VISION = "this engine has no vision tower; images are not supported"
 NO_AUDIO = "audio input is not supported"
+
+
+class HasModelDump(Protocol):
+    """A request given as a v1 `SystemOneRequest` (`strands_decider.schema`), or as anything
+    else whose `model_dump()` returns the request's JSON object."""
+
+    def model_dump(self) -> Mapping[str, Any]: ...
+
+
+# What `parse_request` and `render` take: the request's JSON object, as `json.loads` reads it,
+# or a v1 `SystemOneRequest`.
+RequestJSON = Mapping[str, Any] | HasModelDump
 
 
 @dataclass(frozen=True)
@@ -201,7 +213,7 @@ def has_images(request: Any) -> bool:
     )
 
 
-def parse_request(request: Any, *, images: bool = True) -> Request:
+def parse_request(request: RequestJSON, *, images: bool = True) -> Request:
     """A request from its JSON object, or from a v1 `SystemOneRequest` (anything with
     `model_dump`). Unknown fields are ignored, as v1 ignores them.
 
