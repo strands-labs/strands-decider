@@ -20,7 +20,7 @@ python examples/strands/tool_call_intervention.py
 
 On an Apple-silicon Mac, `pip install -e ".[mlx]" strands-agents` and `--device mlx` on the
 `serve` line run the decider through MLX
-([Serving on a Mac with MLX](../../docs/inference.md#serving-on-a-mac-with-mlx)).
+([Serving on a Mac with MLX](../../docs/designs/inference.md#serving-on-a-mac-with-mlx)).
 
 The scenario is deliberately small. The agent has one `get_weather` tool and a system prompt
 that makes it eager, and the user asks "*What's the weather?*" without saying where. The agent

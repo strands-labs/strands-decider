@@ -1,67 +1,89 @@
 # Overview
 
-Strands Decider is a small, fast decision model for agentic AI. It answers typed
-questions about a state instead of generating text. Use it when your application
-already knows the valid outputs and needs a choice, a yes-or-no probability, or a
-score with a calibrated measure of confidence.
+System One models understand natural language and make a decision based on that
+information. They do not generate text — they return a typed answer from a known
+output space along with calibrated confidence.
 
-Decider runs on a local CPU, an Apple-silicon Mac, or an NVIDIA GPU. You can call
-it from the command line, serve it over HTTP, or place it inside a Strands agent.
+Strands Decider is a System One model. It supports three question types:
+**Choice**, **Noul** (yes/no), and **Score**.
 
-## What Decider returns
+## Question types
 
-Decider supports three question types:
+### Choice
 
-| Type | Use it to | Result |
-| --- | --- | --- |
-| `noul` | Ask a yes-or-no question | The probability that the answer is true |
-| `choice` | Pick one option from a set | The selected option, every option's probability, and confidence |
-| `score` | Rate something on an ordered scale | The expected score, the distribution across levels, and confidence |
+Given a list of options, pick one.
 
-One request can ask several questions about the same state. Decider encodes the
-shared state once, then evaluates each question independently. This keeps
-multi-question decisions fast without letting one question influence another.
+> **Example**
+>
+> _State:_ "What color is this fruit: Banana"
+>
+> _Choices:_ Red, Yellow, or Blue?
+>
+> _Strands Decider:_ **Yellow**
 
-## When to use Decider
-
-Use Decider when the output space is known before the request and the same kind
-of decision happens repeatedly. Common uses inside agentic workflows include:
-
-- routing a request to a model, tool, team, or queue;
-- checking tool arguments, grounding, safety, or policy compliance;
-- scoring model responses for evaluation;
-- handling routine decisions in a hybrid agent while an LLM handles harder,
-  open-ended work.
-
-Use an LLM when the task needs generated text, conversation, coding,
-summarization, or complex reasoning. Decider classifies and scores; it does not
-generate a response.
-
-## Try one decision
-
-Install the package and ask the published 2B model to route a support request:
+Try it yourself:
 
 ```bash
 pip install strands-decider
 
 strands-decider ask StrandsAgents/strands-decider-2B-qwen3.5-v1-2610 \
-  --state "Help! My payouts have been failing for 3 days." \
-  --choice "Which team should handle this?=billing,technical,sales"
+  --state "What color is this fruit: Banana" \
+  --choice "color=red,yellow,blue"
 ```
 
-The result names the selected option, reports a probability for every option,
-and includes a confidence for the choice. See [Inference](inference.md) for the
-complete installation, device, command-line, and HTTP server guide.
+### Noul (yes / no)
 
-## Explore Decider
+Ask a yes-or-no question. Decider returns the probability that the answer is
+true.
 
-- [Inference](inference.md): install Decider, ask questions, and serve the HTTP
-  API.
-- [Images](vision.md): ask questions about image inputs with supported models.
-- [Architecture](architecture.md): understand the pointer head, question types,
-  calibration, and shared-prefix cache.
-- [Model names](naming.md): choose and interpret a published model identifier.
-- [Strands Agents example](../examples/strands/README.md): gate a tool call with
-  Decider inside a Strands agent.
+```bash
+strands-decider ask StrandsAgents/strands-decider-2B-qwen3.5-v1-2610 \
+  --state "Help! My payouts have been failing for 3 days." \
+  --noul "urgent=is this request urgent?"
+```
 
-New to Decider? Continue with [Inference](inference.md) to run the model locally.
+### Score
+
+Rate something on an ordered scale. Decider returns the expected score, the
+distribution across levels, and confidence.
+
+```bash
+strands-decider ask StrandsAgents/strands-decider-2B-qwen3.5-v1-2610 \
+  --state "The checkout button is missing on mobile." \
+  --score "severity=low,medium,high,critical"
+```
+
+## Image support
+
+Strands Decider can also answer questions about images when loaded with
+`--vision`. See [Images](images.md) for supported models, request format, and
+measurements.
+
+```bash
+pip install "strands-decider[vision]"
+strands-decider serve StrandsAgents/strands-decider-2B-qwen3.5-v1-2610 --vision --port 8000
+```
+
+## Good use cases for System One models
+
+- **Replacing decision making from LLMs with Decider models.** LLMs are great at
+  making decisions based on some information, but they can be costly and slow.
+  Switching to a System One model reduces token cost and response latency. You
+  no longer pay for idle compute while waiting for an LLM — Decider often
+  responds in under one second, and because it produces a single output token,
+  you do not pay for output tokens.
+- **Model routing.** Use a System One model to route an incoming question to
+  the correctly scoped model — Haiku for easy problems, Opus for hard ones. See
+  [Decision models in the Strands SDK](https://strandsagents.com/docs/user-guide/sdk/decision-models/).
+- **Interventions.** Use a System One model to decide whether a human should
+  intervene in an agent's action. If an agent might perform an action that
+  cannot be deterministically identified as harmful, Decider can flag it for
+  human review. <!-- TODO: link to interventions docs -->
+- **Filtering.** Use a System One model inside a graph to decide whether a
+  request should be processed by an LLM (expensive) or skipped to save cost.
+  <!-- TODO: link to McKinsey blog post -->
+
+## Interested in learning or trying more?
+
+- [Strands Decider on GitHub](https://github.com/strands-agents/strands-decider) — design and inference docs
+- [Train a model yourself](https://github.com/strands-labs/strands-decider/tree/main/training)

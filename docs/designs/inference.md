@@ -22,16 +22,16 @@ CPU), so they report the numbers serving returns. `--device mlx` is refused.
 - [Asking many questions is nearly free](#asking-many-questions-is-nearly-free): the shared-prefix cache.
 - [Serving on a Mac](#serving-on-a-mac): MPS, and the one kernel that had to be replaced.
 - [Serving on a Mac with MLX](#serving-on-a-mac-with-mlx): `--device mlx`, measured against MPS.
-- [Deployment guide](../deploy/README.md): hosting the server, for example on an Amazon SageMaker
+- [Deployment guide](../../deploy/README.md): hosting the server, for example on an Amazon SageMaker
   real-time endpoint.
-- [Strands Agents example](../examples/strands/README.md): an agent built with the Strands
+- [Strands Agents example](../../examples/strands/README.md): an agent built with the Strands
   Agents SDK that uses the server, with its client in `_client.py`.
-- [Evaluation results](../evaluation/results.md): measured latency and accuracy on an
-  RTX 3090 and on a Mac; [JevBench results](../evaluation/jevbench.md): JevBench,
+- [Evaluation results](../../evaluation/results.md): measured latency and accuracy on an
+  RTX 3090 and on a Mac; [JevBench results](../../evaluation/jevbench.md): JevBench,
   the external benchmark.
 - [Architecture](architecture.md#the-routing-convention): the confidence
   formulas and the routing convention.
-- [Training guide](../training/README.md): how to train a checkpoint.
+- [Training guide](../../training/README.md): how to train a checkpoint.
 
 Paths are relative to the repository root unless they are links. A module path such as
 `mps_kernels.py` is relative to `src/strands_decider/`.
@@ -39,7 +39,7 @@ Paths are relative to the repository root unless they are links. A module path s
 ## Environments for serving
 
 On Linux, or under WSL2 on Windows, with an NVIDIA GPU, serving uses the training
-environment in [Setup](../training/README.md#setup).
+environment in [Setup](../../training/README.md#setup).
 
 A server started inside WSL (`strands-decider serve ... --port 8099`) is reachable from Windows
 at `127.0.0.1:8099` for as long as its WSL session is alive.
@@ -114,7 +114,7 @@ its date (`YYMMDD`), and a second release in the same month updates `main` of th
 repository. To pin one, download it by its tag and pass the folder:
 `hf download StrandsAgents/strands-decider-2B-qwen3.5-v1-2610 --revision YYMMDD --local-dir v1`,
 then `strands-decider serve v1`. You can equally train your own with the recipe
-([training/README.md](../training/README.md#usage)); `recipe.sh` writes it to
+([training/README.md](../../training/README.md#usage)); `recipe.sh` writes it to
 `checkpoints/hobson-2b-recipe`.
 
 A checkpoint directory holds these files. `StrandsDeciderModel.save_pretrained` in `modeling.py`
@@ -196,7 +196,7 @@ score_0 score = 1.24 (confidence 0.578)
 That is real output from v19, not an illustration — and it is
 worth reading the confidence, not just the answer. Whether failing payouts are
 `billing` or `technical` is arguable, and the model leans but says so: 0.622 is in the
-"confirm" band of the [routing convention](../docs/architecture.md#the-routing-convention), well short
+"confirm" band of the [routing convention](./architecture.md#the-routing-convention), well short
 of the 0.9 at which that convention acts without a check.
 
 ## Serve
@@ -207,18 +207,18 @@ strands-decider serve checkpoints/hobson-2b-recipe --port 8000
 
 `POST /v1/systemone` takes a state and typed questions. JevBench's `typesafe` adapter
 targets this endpoint and runs against it unmodified: 231 of 231 tasks attempted and
-schema validity 1.000 ([External benchmark](../evaluation/jevbench.md#external-benchmark-jevbench-v1-public-set)).
+schema validity 1.000 ([External benchmark](../../evaluation/jevbench.md#external-benchmark-jevbench-v1-public-set)).
 Compatibility with the Jev API itself is not verified. `GET /health` returns the model
 name, the checkpoint path, the base model, the device and the calibration temperature.
 `GET /ping` and `POST /invocations` are the same as `/health` and `/v1/systemone`: they are
 the paths that SageMaker and Bedrock AgentCore Runtime call
-([SageMaker deployment guide](../deploy/sagemaker/README.md)). `/health` and `/ping` answer at once
+([SageMaker deployment guide](../../deploy/sagemaker/README.md)). `/health` and `/ping` answer at once
 even while every worker thread is busy with requests, as a load balancer's health check
 expects (SageMaker allows `/ping` 2 s).
 
 The server binds to `127.0.0.1` by default and has no authentication. Its behaviour under
 concurrent requests is not verified. Use it for local experiments only
-([Security](../README.md#security)).
+([Security](../../README.md#security)).
 
 ```bash
 curl -s localhost:8000/v1/systemone -H 'content-type: application/json' -d '{
@@ -303,7 +303,7 @@ there, because it computes with 4B of its parameters per token. On one H100, the
 
 *The latency table below was measured on v7, a Qwen3 torso. The cache now also forks the
 recurrent state of the hybrid Qwen3.5 torso
-([Hybrid torsos share the prefix too](../docs/architecture.md#design-decisions-worth-knowing)).
+([Hybrid torsos share the prefix too](./architecture.md#design-decisions-worth-knowing)).
 The v14 figures at the end of this section use it.*
 
 The state is encoded **once** and its KV cache is broadcast across the question batch;
@@ -344,7 +344,7 @@ for v19 on this Mac only. They are not a latency claim for other hardware or oth
 checkpoints.
 
 The accuracy and latency measurements are in
-[Serving on a Mac: accuracy and latency](../evaluation/results.md#serving-on-a-mac-accuracy-and-latency).
+[Serving on a Mac: accuracy and latency](../../evaluation/results.md#serving-on-a-mac-accuracy-and-latency).
 
 **One kernel had to be replaced.** Without `fla`, the reference chunk rule for the 18
 Gated DeltaNet layers was 806 of 1,739 ms of a 1,024-token forward. Nearly all of it
@@ -361,7 +361,7 @@ version.
 ## Serving on a Mac with MLX
 
 `--device mlx` runs the torso on Apple silicon's GPU through mlx-lm
-([`mlx_engine.py`](../src/strands_decider/mlx_engine.py)). mlx-lm implements Qwen3.5 with fused
+([`mlx_engine.py`](../../src/strands_decider/mlx_engine.py)). mlx-lm implements Qwen3.5 with fused
 Metal kernels, Gated DeltaNet included, where MPS dispatches every op separately and has none
 of the CUDA kernels. Nothing else moves: `MLXEngine` subclasses `SystemOneEngine`, so prompt
 rendering, tokenisation, truncation, option positions, both evaluation paths, the
@@ -376,7 +376,7 @@ in fp32 on the CPU, none changes on either device, and the largest probability d
 into the bf16 weights at load, where torch keeps it unmerged; with the torso in fp32 it is
 0.0036. On a tiny random Qwen3.5, `tests/test_mlx_engine.py` finds the torch engine's answers to
 four decimal places, on Metal and on MLX's CPU backend. The measurements, and the commands that reproduce them, are in
-[Serving on a Mac through MLX: accuracy and latency](../evaluation/results.md#serving-on-a-mac-through-mlx-accuracy-and-latency).
+[Serving on a Mac through MLX: accuracy and latency](../../evaluation/results.md#serving-on-a-mac-through-mlx-accuracy-and-latency).
 
 Limits. mlx-lm is pinned to the minor version tested, because the engine uses its Qwen3.5
 module layout and prompt-cache classes. The adapter merge refuses DoRA, `modules_to_save`,

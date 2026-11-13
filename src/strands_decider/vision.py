@@ -110,7 +110,7 @@ def _pil() -> Any:
     return PILImage
 
 
-# What docs/vision.md promises. Anything else Pillow can open (EPS through Ghostscript, for
+# What docs/images.md promises. Anything else Pillow can open (EPS through Ghostscript, for
 # one) is refused before it is parsed further.
 IMAGE_FORMATS = ("PNG", "JPEG", "WEBP", "GIF")
 

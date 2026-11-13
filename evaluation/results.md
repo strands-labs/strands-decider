@@ -8,7 +8,7 @@ root unless they are links. A module path such as `infer.py` is relative to `src
 
 ## v1, the released model
 
-`StrandsAgents/strands-decider-2B-qwen3.5-v1-2610` ([docs/naming.md](../docs/naming.md) explains
+`StrandsAgents/strands-decider-2B-qwen3.5-v1-2610` ([docs/designs/naming.md](../docs/designs/naming.md) explains
 the name). What is new against v21:
 
 - **A balanced data mix** of 246,678 rows, about twice v21's: v21's rows without the 20,000 from
@@ -69,7 +69,7 @@ On the Decision Index (balanced skill) the soup scores 30.82, measured with the 
 | internal sets (`training/recipe.sh eval`) and the code tasks, on the L4 | the soup column above, each within 2 items of the harness |
 | README examples, `--device cpu` and `--device cuda` | the same answers; probabilities within 0.006 |
 | code: test suite (CPU), ruff and mypy, as CI runs them | pass |
-| images, `--vision` ([docs/vision.md](../docs/vision.md#v1)) | NaturalBench 0.776, POPE 0.872; hobson-v21 on the same GPU 0.785, 0.877 |
+| images, `--vision` ([docs/images.md](../docs/images.md#v1)) | NaturalBench 0.776, POPE 0.872; hobson-v21 on the same GPU 0.785, 0.877 |
 
 ## Gemma 4 v1
 
@@ -189,7 +189,7 @@ exported files, and `python -m training.hf_export verify` passes. Through the co
 | 50 JevBench tasks: largest probability difference from the GPU | 0.050 | 0.014 | 0.038 | 0.126 |
 
 On one NVIDIA A100, with the E2B attention fix, the E2B card example's yes/no answer is 0.861 (0.708
-with PyTorch's default attention kernel; 0.863 on CPU) ([docs/inference.md](../docs/inference.md#gemma-4-models)).
+with PyTorch's default attention kernel; 0.863 on CPU) ([docs/designs/inference.md](../docs/designs/inference.md#gemma-4-models)).
 
 ## v21, the previous release
 
@@ -241,7 +241,7 @@ training harness, on other GPUs (NVIDIA L40S for text, L4 for images):
 | HotpotQA (never trained on) | 0.746 | 0.745 |
 | held-out short tasks (6,000) | 0.650 | 0.650 |
 | generated adequacy (302) | 0.788 | 0.788 |
-| images, `--vision` ([docs/vision.md](../docs/vision.md#v21)) | not run | NaturalBench 0.785, POPE 0.878 |
+| images, `--vision` ([docs/images.md](../docs/images.md#v21)) | not run | NaturalBench 0.785, POPE 0.878 |
 | code: test suite (CPU), ruff and mypy, as CI runs them | | pass |
 
 Every accuracy is within one item of its training-time figure. JevBench ECE, binned over
@@ -338,7 +338,7 @@ above 2B). See* [External benchmark](jevbench.md#external-benchmark-jevbench-v1-
 
 \* v13 onwards served under WSL2, the others on Windows; the latencies are not a
 like-for-like comparison. JevBench asks one question per task, so none of these
-figures involves the shared-prefix cache ([Asking many questions is nearly free](../docs/inference.md#asking-many-questions-is-nearly-free)).
+figures involves the shared-prefix cache ([Asking many questions is nearly free](../docs/designs/inference.md#asking-many-questions-is-nearly-free)).
 
 Every metric improved from v5 to v7. v7 ties `kev 0.6B` (0.6667), the system whose
 readout it adopts, and sits above `kev 4B` (0.662) and `Open-Jev 2B` (0.645). The
@@ -403,7 +403,7 @@ four tasks neither model trained on:
 | 0.5 - 0.9 | 29% | 0.694 | 29% | 0.691 | 27% | 0.680 | 32% | 0.688 | 30% | 0.710 | 34% | 0.655 |
 | < 0.5 | 48% | 0.477 | 48% | 0.449 | 49% | 0.446 | 46% | 0.456 | 48% | 0.457 | 43% | 0.474 |
 
-So on these tasks the [routing convention](../docs/architecture.md#the-routing-convention) holds: act on the top
+So on these tasks the [routing convention](../docs/designs/architecture.md#the-routing-convention) holds: act on the top
 band, send the rest to review. It holds on unseen short classification tasks too — the model flags what
 it does not know instead of guessing confidently. It held less well far from the training distribution for v14, whose answers
 at 0.9 confidence or above on JevBench were right about 0.16 less often than claimed;
@@ -453,7 +453,7 @@ Three limits, all still current:
 
 Measured with v19 on an M3 Pro (36 GB) running macOS 26.6: torch 2.7.1, transformers
 5.17.0, bf16 on MPS. The setup and the MPS kernel are in
-[Serving on a Mac](../docs/inference.md#serving-on-a-mac).
+[Serving on a Mac](../docs/designs/inference.md#serving-on-a-mac).
 
 **Accuracy is unchanged.** JevBench's official harness against `strands-decider serve --device
 mps` scores 168/231, Brier 0.3419, ECE 0.0491, paraphrase consistency 0.861, schema
@@ -462,7 +462,7 @@ and ECE (3090: 0.3416, 0.0507)
 ([The context window is not the ceiling](jevbench.md#the-context-window-is-not-the-ceiling)), with the same single flip on `long_policy-01` against the
 pre-registered 3072 run. The README example gives noul 0.801, `technical` 0.750 and score
 1.24 (confidence 0.578), within bf16 noise of the output recorded in
-[Ask](../docs/inference.md#ask).
+[Ask](../docs/designs/inference.md#ask).
 
 **Latency: each input length pays a one-off compile.** MPS compiles per tensor shape,
 and nearly every JevBench task has a unique token count. Asking every task twice, back
@@ -526,7 +526,7 @@ public task file, and `split` refuses a pair whose two requests differ in length
 
 Measured with v19 on an M4 Pro (20-core GPU, 48 GB), bf16 on both devices: torch 2.7.1 and
 transformers 5.18.0 for MPS, mlx 0.32.3 for MLX. All MLX figures are from mlx-lm 0.32.0, the version the extra requires. The
-setup is in [Serving on a Mac with MLX](../docs/inference.md#serving-on-a-mac-with-mlx).
+setup is in [Serving on a Mac with MLX](../docs/designs/inference.md#serving-on-a-mac-with-mlx).
 JevBench was not run on MLX.
 
 **The answers are the same.** `evaluation/device_parity.py` asks 54 questions: three tickets,

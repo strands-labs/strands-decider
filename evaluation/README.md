@@ -89,9 +89,9 @@ Rank on JevBench ([External benchmark](jevbench.md#external-benchmark-jevbench-v
   own traffic before trusting a threshold.
 - **Training the Qwen3.5 torso needs Linux or WSL2** for its fused kernels. Serving runs
   on an Apple-silicon Mac with the same answers (measured with v19 on an M3 Pro), at about a ninth of the 3090's
-  throughput on long prompts ([Serving on a Mac](../docs/inference.md#serving-on-a-mac)). Through MLX it is
+  throughput on long prompts ([Serving on a Mac](../docs/designs/inference.md#serving-on-a-mac)). Through MLX it is
   1.4 to 1.6x faster than MPS, measured on an M4 Pro
-  ([Serving on a Mac with MLX](../docs/inference.md#serving-on-a-mac-with-mlx)).
+  ([Serving on a Mac with MLX](../docs/designs/inference.md#serving-on-a-mac-with-mlx)).
 - **A `slot` checkpoint caps a choice question at `num_slots` options** (24 by
   default), where the reference API allows 255. The `pointer` readout used from v7 on
   has no such cap.

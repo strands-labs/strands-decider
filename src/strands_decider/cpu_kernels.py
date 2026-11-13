@@ -11,7 +11,7 @@ With width 4, the convolution is four shifted multiply-adds over the whole tenso
 takes 8 ms for all 18 layers instead of 2,026 ms, and agrees with the reference to within
 float rounding (`tests/test_cpu_kernels.py`). Linux x86 torch wheels have oneDNN, whose
 grouped conv is not per channel; the multiply-adds still beat it there, by 1.1-4x per
-layer (docs/inference.md).
+layer (docs/designs/inference.md).
 
 `install()` swaps it in for CPU tensors only, the same way `mps_kernels.install()` does
 for the chunk rule. Other devices still reach whatever transformers bound.

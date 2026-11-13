@@ -17,7 +17,7 @@ from the layout they were written in, and those paths have since moved:
 | `scripts/bench_local.py` | `evaluation/bench_local.py` |
 | `scripts/jevbench_cold_warm.py` | `evaluation/jevbench/jevbench_cold_warm.py` |
 | `scripts/` (the generators and their `gen_*/` exports) | `data/generators/` |
-| `docs/inference.md`, `docs/training.md`, `docs/evaluation.md`, `docs/data.md` | `inference/README.md`, `training/README.md`, `evaluation/README.md`, `data/README.md` |
+| `docs/designs/inference.md`, `docs/training.md`, `docs/evaluation.md`, `docs/data.md` | `inference/README.md`, `training/README.md`, `evaluation/README.md`, `data/README.md` |
 | `docs/experiments/README.md`, `docs/experiments/history.md` | `research/README.md`, `research/history.md` |
 | `docs/experiments/PREREGISTRATION-*.md` | this folder |
 | `report/HISTORY.md`, `report/data/`, `report/figures/`, `report/scripts/` | `research/generations.md`, `research/data/`, `research/figures/`, `research/scripts/` |

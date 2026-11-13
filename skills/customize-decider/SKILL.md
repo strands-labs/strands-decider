@@ -75,7 +75,7 @@ LLM or a person.
 
 Poor fits: the answer is free text; the options are not known before the call; the decision needs
 many steps of reasoning that are not in the state; the state is much longer than the serving
-window (4,096 tokens by default; see `docs/inference.md`).
+window (4,096 tokens by default; see `docs/designs/inference.md`).
 
 If it is a poor fit, say so and stop.
 
@@ -251,7 +251,7 @@ gain is inside the noise, say so: the training did not help, and the released mo
 
 ## Phase 8. Ship and watch
 
-- Serve: `strands-decider serve <checkpoint> --port 8000` (`docs/inference.md` for devices,
+- Serve: `strands-decider serve <checkpoint> --port 8000` (`docs/designs/inference.md` for devices,
   batching and the window). Always serve a calibrated checkpoint.
 - Thresholds for `choice` and `score`: from the test-half `by_confidence_band` table and the error
   costs in the task card, choose the confidence at which the application acts without a check. The
