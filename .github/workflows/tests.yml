@@ -218,6 +218,70 @@ jobs:
               python -m pytest -q -rs tests/test_core_prompt.py tests/test_core_images.py
           done
 
+  training-recipe:
+    # The trainer's tests under the versions the token-readout recipe was trained and checked with
+    # (training/requirements.txt), with Gemma 4's pinned tokenizer, which the core renders with: the bit-for-bit
+    # comparisons with the previous trainer's outputs (training/tests/fixtures/, STRANDS_DECIDER_EXACT_FIXTURES), the
+    # token-readout path end to end on a tiny model, and the multi-process tests (two ranks against one, gloo on the
+    # CPU). The cpu jobs run the same tests at other versions, where those comparisons allow the last bit's
+    # rounding, and skip the ones that need the tokenizer.
+    name: training (recipe pins, gemma 4 tokenizer)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      GEMMA4_REPO: google/gemma-4-E2B-it
+      GEMMA4_REVISION: 3e22461f65e89153144f8adb70e3b8c2cc9845a7
+      GEMMA4_TOKENIZER_SHA256: cc8d3a0ce36466ccc1278bf987df5f71db1719b9ca6b4118264f45cb627bfe0f
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Fetch the pinned tokenizer and check its sha256
+        id: fetch
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          set -euo pipefail
+          dir="$RUNNER_TEMP/gemma4"
+          mkdir -p "$dir"
+          auth=()
+          if [ -n "${HF_TOKEN:-}" ]; then auth=(-H "Authorization: Bearer $HF_TOKEN"); fi
+          code=$(curl -sSL --retry 3 ${auth[@]+"${auth[@]}"} -o "$dir/tokenizer.json" -w '%{http_code}' \
+            "https://huggingface.co/$GEMMA4_REPO/resolve/$GEMMA4_REVISION/tokenizer.json")
+          if [ "$code" = 401 ] || [ "$code" = 403 ]; then
+            if [ -z "${HF_TOKEN:-}" ]; then
+              if [ "$GITHUB_EVENT_NAME" = push ]; then
+                echo "::error::$GEMMA4_REPO is gated and the repository has no HF_TOKEN"
+                exit 1
+              fi
+              echo "::warning::$GEMMA4_REPO is gated and HF_TOKEN is not set; the tokenizer tests skip"
+              echo "dir=" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "::error::HF_TOKEN cannot read $GEMMA4_REPO (HTTP $code)"
+            exit 1
+          fi
+          if [ "$code" != 200 ]; then
+            echo "::error::tokenizer.json: HTTP $code"
+            exit 1
+          fi
+          echo "$GEMMA4_TOKENIZER_SHA256  $dir/tokenizer.json" | sha256sum -c -
+          echo "dir=$dir" >> "$GITHUB_OUTPUT"
+      - run: python -m pip install torch==2.14.0 --index-url https://download.pytorch.org/whl/cpu
+      - run: python -m pip install -e ".[dev]" -r training/requirements.txt
+      - env:
+          HF_HUB_OFFLINE: "1"
+          STRANDS_DECIDER_EXACT_FIXTURES: "1"
+          TOKENIZER_DIR: ${{ steps.fetch.outputs.dir }}
+        run: |
+          if [ -n "$TOKENIZER_DIR" ]; then
+            export STRANDS_DECIDER_GEMMA4_TOKENIZER="$TOKENIZER_DIR/tokenizer.json"
+          fi
+          python -m pytest -q -rs -m "" training/tests
+
   lint:
     name: lint
     runs-on: ubuntu-latest
