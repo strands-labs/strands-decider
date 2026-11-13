@@ -39,7 +39,6 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
-from ..core.config import IMAGE, TEXT
 from ..core.images import (
     IMAGE_CLOSE,
     IMAGE_FORMATS,
@@ -53,6 +52,7 @@ from ..core.images import (
     resize_image,
 )
 from ..core.readout import HIDDEN
+from ..core.request import NO_VISION
 
 if TYPE_CHECKING:
     from PIL import Image
@@ -147,7 +147,8 @@ class LlamaCppBackend:
 
     library: the shim (`deploy/lambda/decision/shim.c`) built against the pinned, patched llama.cpp.
     model: the decoder's GGUF, a stock conversion of the checkpoint (quantized or not).
-    mmproj: the vision tower's mmproj GGUF, for images; without it the backend takes text only.
+    mmproj: the vision tower's mmproj GGUF, for images; without it `has_vision` is False and
+        `forward` refuses images with v1's text-only message.
     processor_config: the checkpoint's processor_config.json, checked when `mmproj` is given.
     threads: CPU threads per decode; the machine's CPUs by default.
 
@@ -203,7 +204,7 @@ class LlamaCppBackend:
         if not self._handle:
             raise RuntimeError(f"llama.cpp could not load {os.fspath(model)}")
         self.n_embd = n_embd.value
-        self.inputs: tuple[str, ...] = (TEXT,)
+        self.has_vision = False
         if mmproj is not None:
             rc = lib.sd_load_vision(self._handle, os.fsencode(mmproj), MAX_SOFT_TOKENS)
             if rc != 0:
@@ -211,7 +212,7 @@ class LlamaCppBackend:
                 raise RuntimeError(
                     f"llama.cpp could not load the vision tower {os.fspath(mmproj)} ({rc})"
                 )
-            self.inputs = (TEXT, IMAGE)
+            self.has_vision = True
             self.n_embd_inp = lib.sd_n_embd_inp(self._handle)
             try:
                 self._check_vision(processor)
@@ -260,7 +261,7 @@ class LlamaCppBackend:
 
     def _encode_image(self, image: Image.Image) -> tuple[np.ndarray, dict[str, float]]:
         """encode_image, under the lock: mtmd's output buffer is shared."""
-        if IMAGE not in self.inputs:
+        if not self.has_vision:
             raise RuntimeError("no vision tower is loaded")
         rgb = image.tobytes()
         if image.mode != "RGB" or len(rgb) != image.width * image.height * 3:
@@ -347,8 +348,8 @@ class LlamaCppBackend:
         each with its file and the span of its placeholders in `state`."""
         if not state or not questions or any(not q for q in questions):
             raise RuntimeError("forward needs a state and questions, none of them empty")
-        if images and IMAGE not in self.inputs:
-            raise RuntimeError("this backend has no vision tower; images are not supported")
+        if images and not self.has_vision:
+            raise ValueError(NO_VISION)
         with self._lock:
             if not self._handle:
                 raise RuntimeError("the backend is closed")

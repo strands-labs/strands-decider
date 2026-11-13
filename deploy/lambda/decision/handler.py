@@ -40,7 +40,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Any
 
 from strands_decider.backends.llama_cpp import ImageError, LlamaCppBackend
-from strands_decider.core import DecisionConfig, Readout, evaluate, load_tokenizer
+from strands_decider.core import NO_VISION, DecisionConfig, Readout, evaluate, load_tokenizer
 from strands_decider.core.config import IMAGE
 
 log = logging.getLogger("decider")
@@ -71,19 +71,21 @@ class RequestTooLarge(RequestError):
 
 
 class LimitedBackend:
-    """The backend, refusing a request that forwards more than `max_request_tokens` tokens (the
-    state once, then every question) before it decodes an image or runs a token. None: no limit."""
+    """The backend, refusing images when it has no vision tower, and a request that forwards
+    more than `max_request_tokens` tokens (the state once, then every question), before it
+    decodes an image or runs a token. None: no limit."""
 
     def __init__(self, backend: LlamaCppBackend, max_request_tokens: int | None):
         self.backend = backend
         self.max_request_tokens = max_request_tokens
         self.outputs = backend.outputs
-        self.inputs = backend.inputs
         self.forwarded = False  # whether the request has been through the decoder
 
     def forward(
         self, state: list[int], questions: list[list[int]], images: Sequence[Any] = ()
     ) -> Any:
+        if images and not self.backend.has_vision:
+            raise RequestError(NO_VISION)
         n = len(state) + sum(len(q) for q in questions)
         if self.max_request_tokens and n > self.max_request_tokens:
             raise RequestTooLarge(
@@ -91,11 +93,7 @@ class LimitedBackend:
                 f"exceeds the limit of {self.max_request_tokens} tokens per request"
             )
         try:
-            out = (
-                self.backend.forward(state, questions, images)
-                if images
-                else self.backend.forward(state, questions)
-            )
+            out = self.backend.forward(state, questions, images)
         except ImageError as e:
             raise RequestError(str(e)) from e
         except ValueError as e:  # the backend's own, not the request's
@@ -182,7 +180,7 @@ class Model:
         return {
             "status": "ok",
             "model": self.name,
-            "inputs": list(self.backend.inputs),
+            "inputs": ["text", "image"] if self.backend.backend.has_vision else ["text"],
             "max_length": self.config.max_length_validated,
             "max_request_tokens": self.backend.max_request_tokens,
         }
