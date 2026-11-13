@@ -1,0 +1,55 @@
+# strands-decider-26B-A4B-gemma4-v2-2611: Strands Decider v2 26B-A4B, the run-1 one-stage recipe, for training/train.py.
+# Source: the finetune section of the v2 run-1 decision_config.json (261111/26B-A4B/run-1).
+#   base google/gemma-4-26B-A4B-it, revision 4d7ae4984b7db7de8f8457170b3f1a419ee76d52.
+# Data: train.jsonl / dev.jsonl (SD-1.31r-legal-strict-v7A-MO, 17,480,385 rows) converted with
+#   `python -m training.data.strands_v2`.
+# Step math: 8 x 335 = 2,680 rows per optimizer step, independent of the GPU count
+#   -> 6,522 steps (ref 6,523; ref per rank batch_size 8, accum 4, token_budget 8,192 on 96 GPUs).
+# Sort window 8 x 384 = 3,072; assumed ref 3,072 = world x batch_size x accum (E2B's
+#   training_config records sort_window 3,072; the other sizes' were not read).
+# slice_char_budget 14000 is the ref token_budget 8,192 at 56,000 characters per 32,768 tokens.
+# Not mapped: revision (no key: the host kit pins it); lora.dropout 0.05 (no key; the model's
+#   lora_dropout default is 0.05); brier_weight 0.0 (no key); pooling "last" / readout_mode "trained"
+#   (what token_readout does); augment true -> shuffle_options.
+#   expert_lora alpha/dropout/scale/targets/router (no keys; see the commented block at the end).
+train_files: ["data/train_examples.jsonl"]
+val_files: ["data/dev_examples.jsonl"]   # S3 dev.jsonl
+base_model: "google/gemma-4-26B-A4B-it"
+head_type: "token_readout"
+render: "strands-chat"
+attention_mode: "prefix_bidir"
+attn_split: 1024        # E2B ref training_config; speed only
+max_length: 16384
+use_lora: true
+lora_r: 64
+lora_alpha: 128
+lora_targets: ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+head_dropout: 0.0
+epochs: 1
+micro_batch_size: 8
+grad_accum: 335
+slice_char_budget: 14000
+group_by_length: true
+length_group_mega: 384
+lr: 1.0e-4
+head_lr: 1.0e-4
+weight_decay: 0.0
+adam_betas: [0.9, 0.999]
+warmup_ratio: 0.05
+lr_floor: 0.1           # ref: linear warmup, cosine to 0.1x
+max_grad_norm: 1.0
+gradient_checkpointing: true
+shuffle_options: true
+ordinal_smoothing: 0.0
+reverse_score_prob: 0.0
+seed: 20260920
+log_every: 1
+eval_every: 100
+save_every: 100
+output_dir: "checkpoints/strands-decider-26B-A4B-gemma4-v2-2611-run1"
+
+# Expert LoRA (ref expert_lora: rank 8, alpha 128, dropout 0.05, scale 16.0, targets
+# experts.gate_up_proj,experts.down_proj, router frozen). TrainConfig.from_yaml rejects unknown
+# keys, so these stay commented out until the trainer has them:
+# expert_lora: true   # needs feat/v2-expert-lora
+# expert_lora_r: 8    # needs feat/v2-expert-lora
