@@ -76,7 +76,7 @@ from ..core import (
     check_image_processor,
     resize_image,
 )
-from ..core.config import IMAGE, TEXT
+from ..core.config import IMAGE
 from ..core.images import IMAGE_FORMATS
 from ..core.request import NO_VISION
 from ..refusals import RequestRefused
@@ -283,10 +283,9 @@ class MLXBackend:
     ) -> None:
         self.model = model
         self.processor = processor
-        self.inputs: tuple[str, ...] = (TEXT, IMAGE) if processor is not None else (TEXT,)
-        # Why a checkpoint that lists images cannot take them here; the decision engine
-        # refuses image requests with it.
-        self.image_problem = image_problem if processor is None else None
+        # Why image requests are refused, None when the backend has an image path; the
+        # decision engine refuses them with it before their files are read.
+        self.image_problem = (image_problem or NO_VISION) if processor is None else None
         self.share_state = share_state
         self.unified = unified
         self.image_token_id = image_token_id
@@ -308,7 +307,7 @@ class MLXBackend:
         questions: list[list[int]],
         images: Sequence[RenderedImage] = (),
     ) -> np.ndarray:
-        if images and IMAGE not in self.inputs:
+        if images and self.processor is None:
             raise ValueError(self.image_problem or NO_VISION)
         if not questions:
             raise ValueError("forward needs at least one question")

@@ -633,7 +633,7 @@ def test_a_text_only_checkpoint_refuses_images_before_decoding_them(ckpts, tmp_p
     edit_json(path, "decision_config.json", inputs=["text"])
     engine = mlx_engine(path)
     try:
-        assert engine.backend.inputs == ("text",) and not engine.takes_images
+        assert engine.backend.processor is None and not engine.takes_images
         assert engine.backend.model.vision_tower is None  # not loaded
         with pytest.raises(RequestRefused, match=r'does not take images: .* \["text"\]'):
             engine.evaluate({**REQUEST, "images": ["not base64 at all!"]})
@@ -647,7 +647,7 @@ def test_other_processor_settings_leave_no_image_path(ckpts, tmp_path):
     edit_json(path, "processor_config.json", **{"image_processor.max_soft_tokens": 70})
     engine = mlx_engine(path)
     try:
-        assert engine.backend.inputs == ("text",) and not engine.takes_images
+        assert engine.backend.processor is None and not engine.takes_images
         assert engine.backend.image_problem.startswith(
             "images are not supported: the checkpoint's image processor has {'max_soft_tokens': 70}"
         )
