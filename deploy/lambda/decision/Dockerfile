@@ -30,7 +30,7 @@ ENV PIP_NO_CACHE_DIR=1 HF_HOME=/tmp/hf
 RUN pip install torch==2.11.0 --index-url https://download.pytorch.org/whl/cpu \
     && pip install numpy==2.5.4 safetensors==0.8.0 sentencepiece==0.2.1 transformers==5.20.2 \
       "protobuf>=4.21,<5" pyyaml==6.0.3 tqdm==4.70.1 tokenizers==0.23.2 pillow==13.0.0 \
-      boto3==1.43.127
+      pydantic==2.14.3 boto3==1.43.127
 COPY --from=llama /llama /llama
 COPY --from=llama /build/bin/llama-quantize /usr/local/bin/
 COPY --from=llama /build/libdecision.so /opt/libdecision.so
@@ -61,10 +61,11 @@ RUN dnf -y install libgomp && dnf clean all
 COPY --from=model /model /opt/model
 COPY pyproject.toml README.md LICENSE /tmp/strands-decider/
 COPY src /tmp/strands-decider/src
-# What the core and the backend import (Pillow decodes images), then the package without its
-# dependencies, which include torch.
+# What the core and the backend import (pydantic checks requests, Pillow reads and decodes
+# images), then the package without its dependencies, which include torch.
 ENV PIP_NO_CACHE_DIR=1
 RUN pip install --target "${LAMBDA_TASK_ROOT}" numpy==2.5.4 tokenizers==0.23.2 pillow==13.0.0 \
+      pydantic==2.14.3 \
     && SETUPTOOLS_SCM_PRETEND_VERSION=0.0.0+lambda pip install --target "${LAMBDA_TASK_ROOT}" \
       --no-deps /tmp/strands-decider \
     && rm -rf /tmp/strands-decider

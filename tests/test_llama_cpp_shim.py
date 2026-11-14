@@ -7,7 +7,8 @@ sliding window, or causal full-attention layers, which a build without patches/0
 the answers through `strands_decider.core.evaluate`.
 
 It needs a llama.cpp tree built by deploy/lambda/decision/scripts/build_native.sh, and torch,
-transformers, safetensors, sentencepiece and Pillow; no GPU, no download. Without them it skips:
+transformers, safetensors, sentencepiece, pydantic and Pillow; no GPU, no download. Without them
+it skips:
 
     sh deploy/lambda/decision/scripts/build_native.sh /tmp/llama.cpp /tmp/llama-build
     STRANDS_DECIDER_LLAMA_CPP=/tmp/llama.cpp STRANDS_DECIDER_LLAMA_LIB=/tmp/llama-build/libdecision.so \\
@@ -49,7 +50,7 @@ pytestmark = pytest.mark.skipif(
 def result(tmp_path_factory):
     if REQUIRED and not (SRC and LIB):
         pytest.fail("STRANDS_DECIDER_REQUIRE_SHIM=1 but no llama.cpp build was given")
-    for module in ("torch", "transformers", "safetensors", "sentencepiece", "PIL"):
+    for module in ("torch", "transformers", "safetensors", "sentencepiece", "pydantic", "PIL"):
         if REQUIRED:
             importlib.import_module(module)
         else:
