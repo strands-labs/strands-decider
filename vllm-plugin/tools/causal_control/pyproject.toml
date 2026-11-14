@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "strands-decider-causal-control"
+version = "0.3.0"
+description = "Diagnostic only: the Strands Decider readout on Gemma 4's own causal, sliding-window attention"
+requires-python = ">=3.10"
+dependencies = ["strands-decider-vllm==0.3.0"]
+
+[project.entry-points."vllm.general_plugins"]
+strands_decider_causal_control = "strands_decider_causal_control:register"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["strands_decider_causal_control*"]

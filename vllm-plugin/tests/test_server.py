@@ -1,0 +1,1026 @@
+"""The plugin's server without a GPU: rendering, the collapsed prompt vLLM expands, the image decode, the probabilities
+and v1's response format, and the HTTP refusals, against a stand-in for vLLM's engine. Needs the core library
+(strands_decider.core, PR #129), tokenizers, Pillow, FastAPI and vLLM (for SamplingParams); skipped without them."""
+
+from __future__ import annotations
+
+import asyncio
+import base64
+import io
+import json
+import math
+from types import SimpleNamespace
+
+import pytest
+
+core = pytest.importorskip("strands_decider.core")
+pytest.importorskip("tokenizers")
+PIL = pytest.importorskip("PIL.Image")
+pytest.importorskip("fastapi")
+pytest.importorskip("vllm")
+from fastapi.testclient import TestClient  # noqa: E402
+
+from strands_decider_vllm import (  # noqa: E402
+    ARCH,
+    ARCH_MULTIMODAL,
+    ARCH_UNIFIED,
+    PREFIX_END_KEY,
+    SERVER_CONFIG_KEY,
+    server,
+)
+
+IMAGE_OPEN, IMAGE_SOFT, IMAGE_CLOSE = "<|image>", "<|image|>", "<image|>"
+
+
+def toy_tokenizer():
+    """A word-level tokenizer with Gemma 4's control tokens, its image tokens and every code as one token."""
+    from tokenizers import AddedToken, Regex, Tokenizer, models, pre_tokenizers
+
+    words = ["<unk>", "\n", " ", ".", "<", ">", "/", '"', "=", "—", "answer", "model", "user"]
+    vocab = {w: i for i, w in enumerate(dict.fromkeys(words + list(core.CODES)))}
+    tok = Tokenizer(models.WordLevel(vocab, unk_token="<unk>"))
+    tok.pre_tokenizer = pre_tokenizers.Split(Regex(r"\w+|\s|[^\w\s]"), behavior="isolated")
+    specials = ("<bos>", "<|turn>", "<turn|>", "<eos>", IMAGE_OPEN, IMAGE_SOFT, IMAGE_CLOSE)
+    tok.add_special_tokens([AddedToken(s, special=True) for s in specials])
+    return tok
+
+
+def png(w, h, color=(200, 30, 30, 255), mode="RGBA"):
+    buf = io.BytesIO()
+    PIL.new(mode, (w, h), color).save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def b64(data):
+    return base64.b64encode(data).decode()
+
+
+@pytest.fixture
+def checkpoint(tmp_path):
+    def make(inputs=("text", "image"), processor=None, prompt="strands-plain"):
+        tok = toy_tokenizer()
+        tok.save(str(tmp_path / "tokenizer.json"))
+        dc = {
+            "interface": "strands-decider",
+            "format_version": 1,
+            "prompt": prompt,
+            "inputs": list(inputs),
+            "codes": list(core.CODES),
+            "token_ids": [tok.token_to_id(c) for c in core.CODES],
+            "temperature": 1.0,
+            "final_logit_softcapping": 30.0,
+            "attention_mode": "prefix_bidir",
+            "pooling": "last",
+            "max_length_validated": 8192,
+            "provenance": {
+                "base_model": "google/gemma-4-E2B-it",
+                "base_revision": "3e22461f65e89153144f8adb70e3b8c2cc9845a7",
+            },
+        }
+        (tmp_path / "decision_config.json").write_text(json.dumps(dc))
+        (tmp_path / "config.json").write_text(
+            json.dumps({"architectures": ["Gemma4ForConditionalGeneration"], "text_config": {}})
+        )
+        pc = (
+            processor
+            if processor is not None
+            else {
+                "image_processor": {
+                    "patch_size": 16,
+                    "pooling_kernel_size": 3,
+                    "max_soft_tokens": 280,
+                }
+            }
+        )
+        (tmp_path / "processor_config.json").write_text(json.dumps(pc))
+        return server.Checkpoint.open(str(tmp_path)), tok
+
+    return make
+
+
+class FakeEngine:
+    """vLLM's AsyncLLM as the server uses it: it expands each <|image|> as Gemma 4's processor does (N from the
+    image's size, by the specification's rule, or ``wrong_n``), and returns logprobs for the allowed ids."""
+
+    def __init__(self, tok, logits=None, wrong_n=None, refuse=None):
+        self.tok, self.logits, self.wrong_n, self.refuse = tok, logits or {}, wrong_n, refuse
+        self.calls = []
+        self.healthy = True
+        self.cached = 7
+
+    async def generate(self, prompt, sp, request_id):
+        self.calls.append((prompt, sp))
+        if self.refuse:
+            raise self.refuse
+        images = (prompt.get("multi_modal_data") or {}).get("image", [])
+        soft, op, cl = (self.tok.token_to_id(t) for t in (IMAGE_SOFT, IMAGE_OPEN, IMAGE_CLOSE))
+        out, i = [], 0
+        if images:
+            assert prompt["mm_processor_kwargs"] == {"do_resize": False}
+        for t in prompt["prompt_token_ids"]:
+            if t == soft:
+                w, h = images[
+                    i
+                ].size  # the processor, its resize off, gives one token per 48 x 48 pixels
+                n = self.wrong_n or (w // 48) * (h // 48)
+                out += [op] + [soft] * n + [cl]
+                i += 1
+            else:
+                out.append(t)
+        lp = {
+            t: SimpleNamespace(logprob=self.logits.get(j, -float(j)))
+            for j, t in enumerate(sp.allowed_token_ids)
+        }
+        yield SimpleNamespace(
+            prompt_token_ids=out,
+            outputs=[SimpleNamespace(logprobs=[lp])],
+            num_cached_tokens=self.cached,
+        )
+
+    async def check_health(self):
+        if not self.healthy:
+            raise RuntimeError("EngineDeadError")
+
+    def shutdown(self):
+        self.shut = True
+
+
+def decider(make, engine_kwargs=None, max_body=None, **kw):
+    ckpt, tok = make(**kw)
+    engine = FakeEngine(tok, **(engine_kwargs or {}))
+    problem = None
+    if "image" in json.loads(ckpt.files["decision_config.json"].read_text())["inputs"]:
+        problem = server.processor_problem(
+            ckpt.json("processor_config.json"), core.check_image_processor
+        )
+    d = server.Decider(
+        engine,
+        ckpt,
+        served_name="m",
+        max_length=8192,
+        prefix_caching=True,
+        image_problem=problem,
+        max_body=max_body,
+        preprocess_workers=2,
+    )
+    return d, engine, tok
+
+
+QUESTIONS = {
+    "color": {
+        "type": "choice",
+        "instructions": "Which color?",
+        "criteria": {"red": None, "blue": None, "green": None},
+    },
+    "square": {"type": "noul", "instructions": "Is it a square?"},
+    "size": {
+        "type": "score",
+        "instructions": "How large?",
+        "criteria": ["small", "medium", "large"],
+    },
+}
+
+
+# --- pieces ---------------------------------------------------------------------------------------------------------
+
+
+def test_collapse_leaves_one_placeholder_per_image():
+    ids = (2, 9, 100, 7, 7, 7, 101, 8, 100, 7, 7, 101, 5)
+    images = [SimpleNamespace(start=3, end=6), SimpleNamespace(start=9, end=11)]
+    assert server.collapse(ids, images, 7) == [2, 9, 7, 8, 7, 5]
+    assert server.collapse(ids, [], 7) == list(ids)
+
+
+def test_probabilities_renormalize_over_the_questions_codes():
+    lp = {10: SimpleNamespace(logprob=math.log(0.2)), 11: SimpleNamespace(logprob=math.log(0.6))}
+    p = server.probabilities(lp, (10, 11))
+    assert p == pytest.approx([0.25, 0.75])
+    assert server.probabilities(lp, (10, 11, 12))[2] == 0.0
+    with pytest.raises(server.Mismatch):
+        server.probabilities({}, (10,))
+
+
+@pytest.mark.parametrize(
+    "settings, ok",
+    [
+        ({"patch_size": 16, "pooling_kernel_size": 3, "max_soft_tokens": 280}, True),
+        ({"patch_size": 14, "pooling_kernel_size": 3, "max_soft_tokens": 280}, False),
+        ({"patch_size": 16, "pooling_kernel_size": 3, "max_soft_tokens": 560}, False),
+    ],
+)
+def test_the_image_processor_must_have_the_specifications_settings(settings, ok):
+    check = core.check_image_processor  # the core's check: the server keeps no copy of it
+    assert (server.processor_problem({"image_processor": settings}, check) is None) is ok
+    assert server.processor_problem(None, check) is not None
+
+
+@pytest.mark.parametrize(
+    "base, arch",
+    [
+        ("Gemma4ForConditionalGeneration", ARCH_MULTIMODAL),
+        ("Gemma4UnifiedForConditionalGeneration", ARCH_UNIFIED),
+        ("Gemma4TextModel", ARCH),
+    ],
+)
+def test_the_plugin_architecture_follows_the_base(base, arch):
+    assert server.plugin_architecture({"architectures": [base]}) == arch
+    with pytest.raises(SystemExit):
+        server.plugin_architecture({"architectures": ["Qwen3ForCausalLM"]})
+
+
+def target(data):
+    """The core's check_decoded_size for a request's image, as the server binds it."""
+    r = core.render(
+        {"state": "x", "images": [b64(data)], "questions": QUESTIONS},
+        toy_tokenizer(),
+        "strands-plain",
+    )
+    im = r.images[0]
+    return im, (lambda w, h: core.check_decoded_size(im, w, h))
+
+
+def test_prepare_image_resizes_with_the_cores_resize_image():
+    data = png(64, 48, (10, 200, 30, 255), mode="RGBA")
+    im, size = target(data)
+    img = server.prepare_image(data, im.tokens, size, core.resize_image)
+    expected = core.resize_image(server.decode_image(data), 912, 672)
+    assert img.size == (912, 672) and img.tobytes() == expected.tobytes()
+    with pytest.raises(server.Mismatch, match="not to the core's 265 tokens"):
+        server.prepare_image(data, 265, size, core.resize_image)
+
+
+def test_the_server_uses_the_cores_helpers_and_needs_every_one(monkeypatch):
+    c = server.require_core()
+    for name in server.CORE_NAMES:
+        assert getattr(c, name) is getattr(core, name)
+    # Request: a core whose parse_request predates the pydantic request (and decodes its images).
+    for name in ("parse_request", "Request", "check_decoded_size", "resize_image"):
+        with monkeypatch.context() as m:
+            m.delattr(core, name)
+            with pytest.raises(SystemExit, match=f"has no {name}"):
+                server.require_core()
+
+
+def test_a_decoded_size_the_core_refuses_is_a_refusal():
+    def refuse(w, h):
+        raise ValueError(f"image could not be decoded: its pixels are {w}x{h}")
+
+    with pytest.raises(server.Refused, match="could not be decoded: its pixels are 64x48"):
+        server.prepare_image(png(64, 48), 266, refuse, core.resize_image)
+
+
+def test_an_image_request_drops_its_files_once_decoded(checkpoint):
+    d, _, _ = decider(checkpoint)
+    rendered, images = asyncio.run(
+        d.prepare({"state": "x", "images": [b64(png(64, 48))], "questions": QUESTIONS})
+    )
+    assert [im.size for im in images] == [(912, 672)]
+    assert all(im.data == b"" for q in rendered.questions.values() for im in q.images)
+    assert rendered.images[0].sha256 and rendered.images[0].tokens == 266, "spans and keys kept"
+    d.close()
+
+
+def test_decode_image_composites_transparency_onto_white():
+    img = server.decode_image(png(4, 3, (0, 0, 0, 0)))
+    assert img.mode == "RGB" and img.size == (4, 3) and img.getpixel((0, 0)) == (255, 255, 255)
+
+
+def test_decode_image_applies_the_exif_orientation():
+    buf = io.BytesIO()
+    exif = PIL.Exif()
+    exif[0x0112] = 6  # rotate 90 degrees clockwise to show it
+    PIL.new("RGB", (8, 4), (10, 20, 30)).save(buf, format="JPEG", exif=exif)
+    assert server.decode_image(buf.getvalue()).size == (4, 8)
+
+
+def test_a_file_pillow_cannot_decode_is_refused():
+    # A sound header whose compressed pixel data is garbage: the core's header checks pass, Pillow's decode fails.
+    data = bytearray(png(64, 64, (1, 2, 3, 255)))
+    start = data.index(b"IDAT") + 4
+    data[start : start + 16] = b"\xff" * 16
+    with pytest.raises(server.Refused, match="image could not be"):
+        server.decode_image(bytes(data))
+
+
+# --- the request path -----------------------------------------------------------------------------------------------
+
+
+def test_a_text_request_is_answered_in_v1s_format(checkpoint):
+    d, engine, _ = decider(checkpoint)
+    out = asyncio.run(d.decide({"state": "A ticket.", "questions": QUESTIONS}))
+    assert set(out) == {"model", "answers", "usage"} and out["model"] == "m"
+    assert out["answers"]["color"]["choice"] == "red"  # logprobs 0, -1, -2
+    assert set(out["answers"]["size"]) >= {"score", "probabilities", "confidence"}
+    rendered = core.render(
+        {"state": "A ticket.", "questions": QUESTIONS}, d.tokenizer, "strands-plain"
+    )
+    assert out["usage"] == {
+        "input_tokens": rendered.input_tokens,
+        "output_tokens": 3,
+        "cached_tokens": 21,
+    }
+    for prompt, sp in engine.calls:
+        assert "multi_modal_data" not in prompt
+        assert (
+            sp.max_tokens == 1
+            and sp.temperature == 1.0
+            and sp.logprobs == len(sp.allowed_token_ids)
+        )
+        assert sp.extra_args == {PREFIX_END_KEY: rendered.questions["color"].state_len}
+
+
+def test_an_image_request_sends_the_collapsed_prompt_the_images_and_their_sha256(checkpoint):
+    d, engine, tok = decider(checkpoint)
+    files = [png(64, 48), png(300, 40, (0, 0, 255, 255))]
+    body = {"state": "Two photos.", "images": [b64(f) for f in files], "questions": QUESTIONS}
+    asyncio.run(d.decide(body))
+    rendered = core.render(body, d.tokenizer, "strands-plain")
+    s = rendered.questions["color"].state_len
+    assert [im.tokens for im in rendered.images] == [266, 270]
+    for prompt, sp in engine.calls:
+        assert prompt["prompt_token_ids"].count(tok.token_to_id(IMAGE_SOFT)) == 2, (
+            "one <|image|> per image"
+        )
+        assert tok.token_to_id(IMAGE_OPEN) not in prompt["prompt_token_ids"]
+        # Resized with Pillow to the specification's W x H: 266 = 19 x 14 and 270 = 45 x 6 tokens of 48 pixels.
+        assert [im.size for im in prompt["multi_modal_data"]["image"]] == [(912, 672), (2160, 288)]
+        assert prompt["multi_modal_uuids"] == {"image": [im.sha256 for im in rendered.images]}
+        assert sp.extra_args == {PREFIX_END_KEY: s}, "S counts the expanded image tokens"
+    assert rendered.images[0].sha256 == __import__("hashlib").sha256(files[0]).hexdigest()
+
+
+def test_the_first_question_runs_before_the_others(checkpoint):
+    d, engine, _ = decider(checkpoint)
+    order = []
+    original = engine.generate
+
+    async def generate(prompt, sp, rid):
+        order.append(("start", sp.allowed_token_ids[0]))
+        async for out in original(prompt, sp, rid):
+            await asyncio.sleep(0)
+            yield out
+        order.append(("end", sp.allowed_token_ids[0]))
+
+    engine.generate = generate
+    asyncio.run(d.decide({"state": "x", "questions": QUESTIONS}))
+    assert order[:2] == [("start", order[0][1]), ("end", order[0][1])], (
+        "the state is cached before the rest"
+    )
+    assert len(order) == 6
+
+
+@pytest.fixture
+def client(checkpoint):
+    def make(engine_kwargs=None, max_body=None, **kw):
+        d, engine, _ = decider(checkpoint, engine_kwargs, max_body, **kw)
+
+        async def factory():
+            return d
+
+        return TestClient(server.build_app(factory)), engine
+
+    return make
+
+
+def post(c, body):
+    r = c.post("/v1/systemone", json=body)
+    return r.status_code, r.json()
+
+
+def test_http_text_and_image_requests_and_health(client):
+    c, engine = client()
+    with c:
+        for path in ("/health", "/ping"):
+            r = c.get(path)
+            assert r.status_code == 200 and r.json()["inputs"] == ["text", "image"]
+        st, out = post(c, {"state": "x", "questions": QUESTIONS})
+        assert st == 200 and "latency_ms" in out
+        st, out = post(c, {"state": "x", "images": [b64(png(50, 50))], "questions": QUESTIONS})
+        assert st == 200 and out["answers"]["square"]["noul"] == pytest.approx(
+            math.exp(-1) / (1 + math.exp(-1)), abs=1e-4
+        )
+        assert (
+            c.post("/invocations", json={"state": "x", "questions": QUESTIONS}).status_code == 200
+        )
+        engine.healthy = False
+        assert c.get("/health").status_code == 503
+    assert engine.shut
+
+
+@pytest.mark.parametrize(
+    "body, match",
+    [
+        (
+            {"state": "x", "images": [b64(png(8, 8))] * 5, "questions": QUESTIONS},
+            "5 images; this server takes at most 4",
+        ),
+        ({"state": "x", "images": ["@@@"], "questions": QUESTIONS}, "image is not valid base64"),
+        (
+            {"state": "x", "images": [b64(b"GIF89a" + b"\x00" * 4)], "questions": QUESTIONS},
+            "could not be read",
+        ),
+        (
+            {"state": "x", "images": None, "questions": QUESTIONS},
+            "images: Input should be a valid list",
+        ),
+        ({"state": "x", "questions": QUESTIONS, "audio": []}, "audio input is not supported"),
+        ({"state": "x", "questions": {}}, "questions: Dictionary should have at least 1 item"),
+    ],
+)
+def test_bad_requests_get_422_and_the_server_keeps_serving(client, body, match):
+    c, _ = client()
+    with c:
+        st, out = post(c, body)
+        assert st == 422 and match in out["detail"], out
+        assert post(c, {"state": "x", "questions": QUESTIONS})[0] == 200
+
+
+def test_a_request_without_a_state_is_answered_as_one_with_an_empty_state(client):
+    c, _ = client()
+    with c:
+        st, out = post(c, {"questions": QUESTIONS})
+        assert st == 200, out
+        assert out["answers"] == post(c, {"state": "", "questions": QUESTIONS})[1]["answers"]
+
+
+def test_images_for_a_text_only_checkpoint_are_refused_before_decoding(client):
+    c, engine = client(inputs=("text",))
+    with c:
+        st, out = post(c, {"state": "x", "images": ["not even base64"], "questions": QUESTIONS})
+        assert st == 422 and out["detail"] == (
+            'this checkpoint does not take images: its decision_config.json inputs are ["text"]'
+        )
+        assert engine.calls == []
+
+
+def test_images_for_another_image_processor_are_refused(client):
+    c, _ = client(
+        processor={
+            "image_processor": {"patch_size": 14, "pooling_kernel_size": 3, "max_soft_tokens": 280}
+        }
+    )
+    with c:
+        st, out = post(c, {"state": "x", "images": [b64(png(8, 8))], "questions": QUESTIONS})
+        assert st == 422 and "patch_size" in out["detail"]
+        assert post(c, {"state": "x", "questions": QUESTIONS})[0] == 200, "text is still served"
+
+
+def test_an_engine_refusal_is_422(client):
+    # AsyncLLM.generate raises VLLMValidationError for a request its engine core refuses (the end-to-end tiers'
+    # tests/gpu/engine_checks.py checks this on a real engine).
+    from vllm.exceptions import VLLMValidationError
+
+    c, _ = client(
+        engine_kwargs={"refuse": VLLMValidationError("strands-decider: no", parameter="images")}
+    )
+    with c:
+        st, out = post(c, {"state": "x", "questions": QUESTIONS})
+        assert st == 422 and "strands-decider: no" in out["detail"]
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        RuntimeError("/srv/private/path: boom"),
+        # A ValueError from inside vLLM or the plugin's processor is a server fault, not the client's.
+        ValueError("strands-decider: sides are multiples of 48, /srv/private/path"),
+        KeyError("internal"),
+    ],
+)
+def test_any_other_failure_is_a_generic_500_and_the_server_keeps_serving(client, error):
+    c, engine = client(engine_kwargs={"refuse": error})
+    with c:
+        r = c.post("/v1/systemone", json={"state": "x", "questions": QUESTIONS})
+        assert r.status_code == 500 and r.json()["detail"] == "internal server error"
+        assert set(r.json()) == {"detail", "error_id"} and "private" not in r.text
+        engine.refuse = None
+        assert post(c, {"state": "x", "questions": QUESTIONS})[0] == 200
+
+
+def test_an_expansion_that_differs_from_the_render_is_500_never_an_answer(client):
+    c, _ = client(engine_kwargs={"wrong_n": 5})
+    with c:
+        st, out = post(c, {"state": "x", "images": [b64(png(48, 48))], "questions": QUESTIONS})
+        assert st == 500 and out["detail"] == "internal server error" and out["error_id"]
+
+
+@pytest.mark.parametrize(
+    "raw, match",
+    [
+        ("[]", "must be a JSON object, not list"),
+        ('"x"', "must be a JSON object, not str"),
+        ("null", "must be a JSON object, not NoneType"),
+        ("{", "the body is not JSON"),
+        ("[" * 100000 + "]" * 100000, "the body is not JSON"),
+    ],
+)
+def test_a_body_that_is_not_a_json_object_is_422(client, raw, match):
+    c, engine = client()
+    with c:
+        r = c.post("/v1/systemone", content=raw, headers={"content-type": "application/json"})
+        assert r.status_code == 422 and match in r.json()["detail"], r.text
+        assert engine.calls == []
+
+
+def test_a_body_over_the_limit_is_413_whether_or_not_it_declares_its_length(client):
+    c, engine = client(max_body=2000)
+    with c:
+        big = json.dumps({"state": "x" * 3000, "questions": QUESTIONS})
+        r = c.post("/v1/systemone", content=big, headers={"content-type": "application/json"})
+        assert r.status_code == 413 and "at most 2000" in r.json()["detail"]
+        chunks = (big[i : i + 500].encode() for i in range(0, len(big), 500))  # no Content-Length
+        r = c.post("/v1/systemone", content=chunks, headers={"content-type": "application/json"})
+        assert r.status_code == 413 and "over 2000" in r.json()["detail"]
+        assert engine.calls == []
+        assert post(c, {"state": "x", "questions": QUESTIONS})[0] == 200
+        assert c.get("/health").json()["max_body_bytes"] == 2000
+
+
+def test_the_default_body_limit_holds_four_images_and_the_text():
+    four = server.MAX_IMAGES * server.base64_size(server.IMAGE_FILE_BYTES)
+    assert server.default_max_body(True) == server.TEXT_BYTES + four
+    assert round(server.default_max_body(True) / 2**20) == 93
+    assert server.default_max_body(False) == server.TEXT_BYTES
+
+
+def test_the_byte_budget_bounds_buffered_bodies_and_grants_in_arrival_order():
+    async def run():
+        b = server.ByteBudget(100)
+        order = []
+        assert await b.take(60) == 60
+        big = asyncio.ensure_future(b.take(80))
+        await asyncio.sleep(0)
+        small = asyncio.ensure_future(
+            b.take(10)
+        )  # fits now, but waits behind the earlier, larger one
+        await asyncio.sleep(0)
+        for t, name in ((big, "big"), (small, "small")):
+            t.add_done_callback(lambda _, name=name: order.append(name))
+        assert not big.done() and not small.done() and b.used == 60
+        b.give(60)
+        await asyncio.wait_for(asyncio.gather(big, small), 5)
+        assert order == ["big", "small"] and b.used == 90
+        cancelled = asyncio.ensure_future(b.take(50))
+        await asyncio.sleep(0)
+        cancelled.cancel()
+        await asyncio.gather(cancelled, return_exceptions=True)
+        assert b.used == 90 and not b._waiters, "a cancelled wait takes nothing"
+        b.give(90)
+        assert await b.take(10**9) == 100, "a reservation is at most the whole budget"
+
+    asyncio.run(run())
+
+
+def test_large_bodies_wait_for_the_budget_and_give_it_back(checkpoint):
+    import httpx
+
+    d, _, _ = decider(checkpoint, max_body=10 * 2**20)
+    d.max_buffered = 3 * 2**20
+    app = server.build_app(None)
+    app.state.decider = d
+    pad = "x" * (2 * 2**20)  # a 2 MiB body: over SMALL_BODY, so it reserves its size
+    body = {"state": pad, "questions": QUESTIONS}
+    seen = []
+    real_render = d.render_request
+
+    def render(raw):
+        seen.append(d._budget.used)  # on a pool thread: read the loop's budget directly
+        return real_render(raw)
+
+    d.render_request = render
+
+    async def run():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            rs = await asyncio.gather(*(c.post("/v1/systemone", json=body) for _ in range(3)))
+        return rs
+
+    d.max_length = 10**7
+    rs = asyncio.run(run())
+    assert [r.status_code for r in rs] == [200] * 3
+    assert max(seen) <= d.max_buffered and max(seen) > 0, seen
+    assert d._budget.used == 0, "every reservation is given back"
+    d.close()
+
+
+def test_ping_answers_while_an_image_is_decoded(checkpoint, monkeypatch):
+    import threading
+    import time
+
+    import httpx
+
+    d, _, _ = decider(checkpoint)
+    entered, release = threading.Event(), threading.Event()
+    real = server.prepare_image
+
+    def slow(*args):
+        entered.set()
+        assert release.wait(20), "the test released the decode"
+        return real(*args)
+
+    monkeypatch.setattr(server, "prepare_image", slow)
+    app = server.build_app(None)
+    app.state.decider = d
+    body = {"state": "x", "images": [b64(png(640, 480))], "questions": QUESTIONS}
+
+    async def run():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            answer = asyncio.ensure_future(c.post("/v1/systemone", json=body))
+            assert await asyncio.get_running_loop().run_in_executor(None, entered.wait, 20)
+            t = time.perf_counter()
+            ping = await asyncio.wait_for(c.get("/ping"), 10)
+            waited = time.perf_counter() - t
+            decoding = not release.is_set()
+            release.set()
+            return ping, waited, decoding, await answer
+
+    ping, waited, decoding, answer = asyncio.run(run())
+    assert ping.status_code == 200 and decoding and waited < 5, waited
+    assert answer.status_code == 200
+    d.close()
+
+
+async def asgi_post(app, chunks, *, content_length=None, then="end"):
+    """POST /v1/systemone straight to the ASGI app, with no socket: the body as ``chunks``, then the end of the body
+    (``then="end"``), nothing ever again (``"stall"``) or a disconnect (``"disconnect"``). (status, response body,
+    and ``app.state.decider``'s budget in use at each receive)."""
+    headers = [(b"content-type", b"application/json")]
+    if content_length is not None:
+        headers.append((b"content-length", str(content_length).encode()))
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": "/v1/systemone",
+        "raw_path": b"/v1/systemone",
+        "query_string": b"",
+        "root_path": "",
+        "headers": headers,
+        "client": ("127.0.0.1", 50000),
+        "server": ("127.0.0.1", 8000),
+    }
+    queue, sent, used = list(chunks), [], []
+
+    async def receive():
+        used.append(app.state.decider._budget.used if app.state.decider._budget else 0)
+        if queue:
+            body = queue.pop(0)
+            return {"type": "http.request", "body": body, "more_body": bool(queue) or then != "end"}
+        if then == "disconnect":
+            return {"type": "http.disconnect"}
+        if then == "stall":
+            await asyncio.Event().wait()
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message):
+        sent.append(message)
+
+    await app(scope, receive, send)
+    status = next(m["status"] for m in sent if m["type"] == "http.response.start")
+    return (
+        status,
+        b"".join(m.get("body", b"") for m in sent if m["type"] == "http.response.body"),
+        used,
+    )
+
+
+def budget_app(checkpoint, *, max_body, max_buffered, timeout=30.0):
+    d, _, _ = decider(checkpoint, max_body=max_body)
+    d.max_buffered, d.body_read_timeout, d.max_length = max_buffered, timeout, 10**7
+    app = server.build_app(None)
+    app.state.decider = d
+    return d, app
+
+
+def large_body(n=2 * 2**20):
+    return json.dumps({"state": "x" * n, "questions": QUESTIONS}).encode()
+
+
+def test_stalled_clients_give_their_reservations_back_and_a_later_large_body_proceeds(checkpoint):
+    # Two connections declare large bodies and send nothing more: one holds a reservation and stalls in its read,
+    # the other waits for the budget behind it. Without timeouts they would block every later large body.
+    d, app = budget_app(checkpoint, max_body=10 * 2**20, max_buffered=3 * 2**20, timeout=0.3)
+
+    async def run():
+        declared = int(2.5 * 2**20)
+        stalled = await asyncio.gather(
+            asgi_post(app, [], content_length=declared, then="stall"),
+            asgi_post(app, [], content_length=declared, then="stall"),
+        )
+        held_after = d._budget.used
+        body = large_body()
+        later = await asgi_post(app, [body], content_length=len(body))
+        return stalled, held_after, later
+
+    stalled, held_after, later = asyncio.run(run())
+    statuses = sorted(st for st, _, _ in stalled)
+    assert statuses[0] == 408 and statuses[1] in (408, 503), statuses
+    assert b"--body-read-timeout" in min(stalled)[1]
+    assert held_after == 0, "every stalled reservation is given back"
+    assert later[0] == 200, later[1][:200]
+    assert d._budget.used == 0
+    d.close()
+
+
+def test_a_client_that_disconnects_mid_body_gives_its_reservation_back(checkpoint):
+    d, app = budget_app(checkpoint, max_body=10 * 2**20, max_buffered=3 * 2**20)
+
+    async def run():
+        gone = await asgi_post(
+            app, [b'{"state": "' + b"x" * 2**20], content_length=int(2.5 * 2**20), then="disconnect"
+        )
+        body = large_body()
+        return gone, await asgi_post(app, [body], content_length=len(body))
+
+    (st, out, used), later = asyncio.run(run())
+    assert st == 400 and b"disconnected" in out
+    assert max(used) == int(2.5 * 2**20), "it held its declared size while reading"
+    assert later[0] == 200 and d._budget.used == 0
+    d.close()
+
+
+def test_a_body_without_a_length_reserves_the_limit_past_1_mib_and_gives_back_the_rest(checkpoint):
+    d, app = budget_app(checkpoint, max_body=4 * 2**20, max_buffered=8 * 2**20)
+    body = large_body()
+    chunks = [
+        body[i : i + 2**19] for i in range(0, len(body), 2**19)
+    ]  # 512 KiB each, no Content-Length
+    at_render = []
+    real = d.render_request
+
+    def render(raw):
+        at_render.append(d._budget.used)
+        return real(raw)
+
+    d.render_request = render
+    st, _, used = asyncio.run(asgi_post(app, chunks))
+    assert st == 200
+    assert used[:3] == [0, 0, 0], "the first 1 MiB is read without a reservation"
+    assert d.max_body in used, "past 1 MiB it reserves the limit, before reading on"
+    assert at_render == [len(body)], "once read, it gives back what it did not use"
+    assert d._budget.used == 0
+    d.close()
+
+
+def test_a_cancelled_wait_raced_by_a_give_ends_cancelled():
+    async def run():
+        b = server.ByteBudget(100)
+        await b.take(100)
+        waiting = asyncio.ensure_future(b.take(50))
+        await asyncio.sleep(0)
+        waiting.cancel()  # its future is cancelled at once
+        b.give(100)  # and this give drops the cancelled waiter before the task wakes
+        with pytest.raises(asyncio.CancelledError):
+            await waiting
+        assert b.used == 0 and not b._waiters
+        await b.take(100)
+        with pytest.raises(asyncio.TimeoutError):
+            await b.take(1, timeout=0.05)
+        assert b.used == 100 and not b._waiters, "a timed-out wait takes nothing"
+
+    asyncio.run(run())
+
+
+def test_a_request_without_images_never_waits_behind_a_decode(checkpoint, monkeypatch):
+    import threading
+
+    d, _, _ = decider(checkpoint)  # preprocess_workers=2
+    entered, release, inside, most = threading.Semaphore(0), threading.Event(), [0], [0]
+    lock = threading.Lock()
+    real = server.prepare_image
+
+    def slow(*args):
+        with lock:
+            inside[0] += 1
+            most[0] = max(most[0], inside[0])
+        entered.release()
+        assert release.wait(20)
+        with lock:
+            inside[0] -= 1
+        return real(*args)
+
+    monkeypatch.setattr(server, "prepare_image", slow)
+    image = {"state": "x", "images": [b64(png(640, 480))], "questions": QUESTIONS}
+
+    async def run():
+        decodes = [asyncio.ensure_future(d.decide(dict(image))) for _ in range(5)]
+        for _ in range(2):
+            assert await asyncio.get_running_loop().run_in_executor(None, entered.acquire, True, 20)
+        await asyncio.sleep(0.2)
+        text = await asyncio.wait_for(d.decide({"state": "x", "questions": QUESTIONS}), 10)
+        blocked = not release.is_set()
+        release.set()
+        return text, blocked, await asyncio.gather(*decodes)
+
+    text, blocked, done = asyncio.run(run())
+    assert blocked and set(text["answers"]) == set(QUESTIONS), (
+        "answered while both decode threads were busy"
+    )
+    assert most[0] == 2, f"at most preprocess_workers decodes at once, saw {most[0]}"
+    assert len(done) == 5
+    d.close()
+
+
+def test_concurrent_renders_on_the_shared_tokenizer_give_the_sequential_ids(checkpoint):
+    d, _, _ = decider(checkpoint)
+    bodies = [{"state": f"ticket {i} " * (i + 1), "questions": QUESTIONS} for i in range(12)]
+    alone = [d.render_request(b) for b in bodies]
+
+    async def run():
+        return await asyncio.gather(*(d._run("render", d.render_request, b) for b in bodies))
+
+    together = asyncio.run(run())
+    for a, t in zip(alone, together, strict=True):
+        assert {n: q.ids for n, q in a.questions.items()} == {
+            n: q.ids for n, q in t.questions.items()
+        }
+    d.close()
+
+
+def test_cancelling_a_request_cancels_its_engine_requests(checkpoint):
+    d, engine, _ = decider(checkpoint)
+    original, started, cancelled = engine.generate, [], []
+
+    async def generate(prompt, sp, rid):
+        started.append(rid)
+        if (
+            len(started) > 1
+        ):  # the first question answers; the others are in flight when the client leaves
+            try:
+                await asyncio.sleep(60)
+            except asyncio.CancelledError:
+                cancelled.append(rid)
+                raise
+        async for out in original(prompt, sp, rid):
+            yield out
+
+    engine.generate = generate
+
+    async def run():
+        t = asyncio.ensure_future(d.decide({"state": "x", "questions": QUESTIONS}))
+        while len(started) < 3:
+            await asyncio.sleep(0.01)
+        t.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await t
+
+    asyncio.run(run())
+    assert sorted(cancelled) == sorted(started[1:]), "every question still running was cancelled"
+    d.close()
+
+
+def test_a_failing_question_cancels_the_others(checkpoint):
+    d, engine, _ = decider(checkpoint)
+    original, calls, cancelled = engine.generate, [], []
+
+    async def generate(prompt, sp, rid):
+        calls.append(rid)
+        if len(calls) == 2:
+            raise RuntimeError("boom")
+        if len(calls) == 3:
+            try:
+                await asyncio.sleep(60)
+            except asyncio.CancelledError:
+                cancelled.append(rid)
+                raise
+        async for out in original(prompt, sp, rid):
+            yield out
+
+    engine.generate = generate
+    with pytest.raises(RuntimeError, match="boom"):
+        asyncio.run(d.decide({"state": "x", "questions": QUESTIONS}))
+    assert cancelled == [calls[2]], "the third question's engine request was cancelled"
+    d.close()
+
+
+def test_a_prompt_over_the_validated_length_is_refused(client):
+    c, _ = client()
+    with c:
+        st, out = post(c, {"state": "word " * 9000, "questions": QUESTIONS})
+        assert st == 422 and "exceeds the limit of 8192 tokens" in out["detail"]
+
+
+# --- the engine's settings ------------------------------------------------------------------------------------------
+
+
+def args(**over):
+    a = dict(
+        served_model_name="m",
+        max_model_len=None,
+        max_length=None,
+        max_num_batched_tokens=None,
+        max_num_seqs=None,
+        enable_prefix_caching=True,
+        gpu_memory_utilization=0.9,
+        tensor_parallel_size=1,
+        enforce_eager=False,
+        mm_processor_cache_gb=4.0,
+        dtype="bfloat16",
+        block_size=None,
+    )
+    a.update(over)
+    return SimpleNamespace(**a)
+
+
+@pytest.mark.parametrize("inputs, image_limit", [(("text", "image"), 4), (("text",), 0)])
+def test_engine_args_carry_the_plugins_flags(checkpoint, inputs, image_limit):
+    ckpt, _ = checkpoint(inputs=inputs)
+    e = server.engine_args(ckpt, args(), 8193)
+    assert e.hf_overrides == {
+        "architectures": [ARCH_MULTIMODAL],
+        "text_config": {"use_bidirectional_attention": None},
+    }
+    assert e.limit_mm_per_prompt == {"image": image_limit, "video": 0, "audio": 0}
+    assert (e.max_model_len, e.max_num_batched_tokens, e.enable_chunked_prefill) == (
+        8193,
+        8193,
+        False,
+    )
+    assert (e.dtype, e.logprobs_mode, e.max_logprobs, e.generation_config) == (
+        "bfloat16",
+        "processed_logprobs",
+        255,
+        "vllm",
+    )
+    assert e.prefix_caching_hash_algo == "sha256" and e.prefix_cache_retention_interval is None
+    assert e.additional_config == {SERVER_CONFIG_KEY: server.__version__}
+    assert (
+        server.engine_args(ckpt, args(max_num_batched_tokens=16384), 4097).max_num_batched_tokens
+        == 16384
+    )
+
+
+@pytest.mark.parametrize(
+    "over, expected",
+    [
+        ({}, (8192, 8193)),
+        ({"max_length": 4096}, (4096, 4097)),
+        ({"max_model_len": 16384}, (8192, 16384)),
+        ({"max_length": 1000, "max_model_len": 1001}, (1000, 1001)),
+    ],
+)
+def test_the_context_leaves_room_for_the_answer_token(over, expected):
+    # vLLM 0.33 refuses a prompt of exactly max_model_len tokens (tests/gpu/engine_checks.py checks it on a real
+    # engine), so the default context is one token more than the longest prompt served.
+    assert server.lengths(args(**over), 8192) == expected
+
+
+@pytest.mark.parametrize(
+    "over", [{"max_model_len": 8192}, {"max_length": 4096, "max_model_len": 4096}]
+)
+def test_a_context_no_longer_than_the_longest_prompt_is_refused_at_startup(over):
+    with pytest.raises(SystemExit, match="must be below --max-model-len"):
+        server.lengths(args(**over), 8192)
+
+
+def test_prepare_environment_puts_vllms_sockets_on_loopback_and_keeps_the_callers_values(
+    monkeypatch,
+):
+    import os
+
+    monkeypatch.setenv("VLLM_HOST_IP", "10.0.0.1")
+    for k in ("GLOO_SOCKET_IFNAME", "VLLM_USE_V2_MODEL_RUNNER", "NCCL_SOCKET_IFNAME"):
+        monkeypatch.delenv(k, raising=False)
+    server.prepare_environment()  # whatever address the HTTP server binds
+    assert os.environ["VLLM_HOST_IP"] == "10.0.0.1"
+    assert os.environ["GLOO_SOCKET_IFNAME"] == os.environ["NCCL_SOCKET_IFNAME"] == "lo"
+    assert os.environ["VLLM_USE_V2_MODEL_RUNNER"] == "1"
+
+
+def test_the_cli_binds_loopback_by_default():
+    from strands_decider_vllm.cli import parser
+
+    a = parser().parse_args(["serve", "/ckpt"])
+    assert a.host == "127.0.0.1" and a.enable_prefix_caching
+    assert (a.max_model_len, a.max_length, a.max_body_mb) == (None, None, None)
+    assert a.limit_concurrency == 128 and 1 <= a.preprocess_workers <= 4
+
+
+def test_an_older_core_without_reads_stage_argument_is_refused_at_startup(monkeypatch):
+    monkeypatch.setattr(core, "read", lambda values, r, c, d, *, inputs=None: 0)
+    with pytest.raises(SystemExit, match=r"read\(stage=\)"):
+        server.require_core()
+
+
+def test_a_hub_checkpoint_is_read_at_one_commit(tmp_path, monkeypatch):
+    commit = "0123456789abcdef0123456789abcdef01234567"
+    snap = tmp_path / "snapshots" / commit
+    snap.mkdir(parents=True)
+    for n in server.Checkpoint.NAMES:
+        (snap / n).write_text("{}")
+    calls = []
+
+    def download(repo, name, revision=None):
+        calls.append((name, revision))
+        return str(snap / name)
+
+    import huggingface_hub
+
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", download)
+    ck = server.Checkpoint.open("org/model", "main")
+    assert ck.revision == commit, "the engine is given the commit, not the branch"
+    assert calls[0] == ("config.json", "main")
+    assert {r for _, r in calls[1:]} == {commit} and len(calls) == len(server.Checkpoint.NAMES)
