@@ -417,7 +417,11 @@ def test_the_state_never_sees_a_question(backends):
 
 @pytest.mark.parametrize("images", [[], IMAGES], ids=["text", "two-images"])
 def test_state_reuse_is_the_full_pass(backends, kind, images):
-    """float32 on CPU: the hidden states agree to float rounding, and the answers exactly."""
+    """float32 on CPU: the hidden states agree to float rounding, and so do the answers: every
+    field the same, numbers within 5e-4. Each number is rounded to four decimals, so one next
+    to a rounding boundary can move by a step either way (on an AMD EPYC CPU with torch 2.14 a
+    score of 0.25225 or so does), and a score or a confidence, computed from several
+    probabilities, by a few."""
     if images:
         _needs_images(kind)
     full, reuse = backends
@@ -426,9 +430,26 @@ def test_state_reuse_is_the_full_pass(backends, kind, images):
     assert a.dtype == np.float32 and a.shape == (3, 64)
     assert np.abs(a - b).max() < 2e-5 * max(1.0, float(np.abs(a).max()))
     ck = full.checkpoint
-    assert read(a, ck.readout, ck.config, r, stage="hidden") == read(
-        b, ck.readout, ck.config, r, stage="hidden"
+    _same_answers(
+        read(a, ck.readout, ck.config, r, stage="hidden"),
+        read(b, ck.readout, ck.config, r, stage="hidden"),
     )
+
+
+def _same_answers(a, b, tol: float = 5e-4) -> None:
+    """Equal in every field, numbers within `tol`."""
+    if isinstance(a, dict) or isinstance(b, dict):
+        assert isinstance(a, dict) and isinstance(b, dict) and a.keys() == b.keys()
+        for k in a:
+            _same_answers(a[k], b[k], tol)
+    elif isinstance(a, (list, tuple)) or isinstance(b, (list, tuple)):
+        assert type(a) is type(b) and len(a) == len(b), (a, b)
+        for x, y in zip(a, b, strict=True):
+            _same_answers(x, y, tol)
+    elif isinstance(a, float) or isinstance(b, float):
+        assert abs(a - b) < tol, (a, b)
+    else:
+        assert a == b, (a, b)
 
 
 def test_no_pass_over_the_state_is_64k_plus_1_wide(backends, recorder):
@@ -1030,18 +1051,6 @@ def test_prefix_bidir_attention_refuses_what_it_does_not_apply():
 REAL = os.environ.get("STRANDS_DECIDER_TEST_CHECKPOINT")
 
 
-def _code_probabilities(ck, rows, k: int = 4) -> np.ndarray:
-    """The first k codes' probabilities of each row, in the core's readout regime."""
-    from strands_decider.core import code_probabilities
-
-    z = readout_logits(ck.readout.weight, rows)
-    return np.stack([
-        code_probabilities(r, k, stage="raw_logits", softcap_c=ck.readout.softcap,
-                           temperature=ck.temperature)
-        for r in z
-    ])  # fmt: skip
-
-
 def _fits_in_float32(backend) -> bool:
     """Whether the bf16 model, cast to float32 in place, fits the GPU's free memory."""
     extra = sum(p.numel() for p in backend.model.parameters()) * 2  # bf16 -> float32
@@ -1051,7 +1060,8 @@ def _fits_in_float32(backend) -> bool:
 @pytest.mark.skipif(not REAL, reason="set STRANDS_DECIDER_TEST_CHECKPOINT to a decision checkpoint")
 def test_a_real_checkpoint():
     """A real decision checkpoint, on CUDA when there is one: it loads in the spec's layout,
-    state reuse agrees with the full passes, and an image request runs where it takes images."""
+    an image request runs where it takes images, and on the test request state reuse gives
+    the full passes' choice, and every noul, score and probability within REAL_REQUEST_BOUND."""
     device = "cuda" if CUDA else "cpu"
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
@@ -1068,27 +1078,50 @@ def test_a_real_checkpoint():
         else []
     )
     tok = ck.tokenizer()
-    a = evaluate(request(images), tok, ck.readout, ck.config, full)
-    b = evaluate(request(images), tok, ck.readout, ck.config, reuse)
-    assert a["answers"]["team"]["choice"] == b["answers"]["team"]["choice"]
-    # Question batches over the reused state at 64k+1 widths, on the real weights. In bf16 the
-    # two paths differ by rounding (on an H100, up to 0.06 relative in the hidden state and
-    # 0.04 in probability at widths 64 to 257, with no peak at 64k+1), so they are compared
-    # through the readout; float32 is the kernel's check, where the model fits the device.
-    state, cases = _question_batches(reuse, WIDTHS_64K_PLUS_1)
-    for width, qs in cases:
-        pa, pb = (_code_probabilities(ck, b.forward(state, qs)) for b in (full, reuse))
-        assert np.abs(pa - pb).max() < (0.1 if full.dtype == torch.bfloat16 else 1e-3), width
-    if CUDA and _fits_in_float32(full):
-        del reuse
-        f32 = tb.TransformersBackend(
+    a = evaluate(request(images), tok, ck.readout, ck.config, full)["answers"]
+    b = evaluate(request(images), tok, ck.readout, ck.config, reuse)["answers"]
+    assert a["team"]["choice"] == b["team"]["choice"]
+    for name, x in a.items():
+        for key in ("noul", "score", "probabilities"):
+            if key not in x:
+                continue
+            got = list(x[key].values()) if key == "probabilities" else x[key]
+            want = list(b[name][key].values()) if key == "probabilities" else b[name][key]
+            assert np.abs(np.subtract(got, want)).max() < REAL_REQUEST_BOUND, (name, key)
+
+
+# The most one full pass per question and state reuse may differ on the test request's answers,
+# on a real checkpoint in bf16 on CUDA. Measured on an H100: on Gemma 4 decision checkpoints,
+# 0.032 at 12B with torch 2.14 and 0.020 with 2.7.1; 0 at E2B with 2.14 and 0.0067 with 2.7.1;
+# 0 at E4B with 2.14.
+REAL_REQUEST_BOUND = 0.1
+
+
+@pytest.mark.skipif(not REAL, reason="set STRANDS_DECIDER_TEST_CHECKPOINT to a decision checkpoint")
+def test_a_real_checkpoint_reuses_states_as_full_passes_in_float32():
+    """Question batches over a reused state at 64k+1 widths, on the real weights, against full
+    passes, in float32, the kernels' check. In bf16 these random-token prompts are too fragile
+    to bound: on a Gemma 4 12B decision checkpoint on an H100 with torch 2.14, the two paths
+    differ by up to 0.4 in probability, with dense masks as with none. Skips where the model
+    does not fit the GPU in float32 (one 80 GB GPU takes a 12B, not a 26B-A4B or 31B)."""
+    device = "cuda" if CUDA else "cpu"
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        full = tb.TransformersBackend.load(REAL, device=device, reuse_state=False, images=False)
+    ck = full.checkpoint
+    if full.dtype == torch.bfloat16:
+        if not _fits_in_float32(full):
+            pytest.skip("the model does not fit the GPU in float32")
+        full = tb.TransformersBackend(
             full.model.float(), ck, device=device, dtype=torch.float32, reuse_state=False
         )
-        f32_reuse = tb.TransformersBackend(f32.model, ck, device=device, dtype=torch.float32)
-        for width, qs in cases:
-            ra, rb = f32.forward(state, qs), f32_reuse.forward(state, qs)
+    f32_reuse = tb.TransformersBackend(full.model, ck, device=device, dtype=torch.float32)
+    cases = [_question_batches(f32_reuse, WIDTHS_64K_PLUS_1, state_len=n) for n in (300, 321)]
+    for state, by_width in cases:
+        for width, qs in by_width:
+            ra, rb = full.forward(state, qs), f32_reuse.forward(state, qs)
             rel = float(np.abs(ra - rb).max()) / max(1.0, float(np.abs(ra).max()))
-            assert rel < 1e-3, (width, rel)
+            assert rel < 1e-3, (len(state), width, rel)
 
 
 # ---- model goldens (docs/spec.md, section 10) ---------------------------------------------
