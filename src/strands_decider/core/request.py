@@ -58,9 +58,9 @@ def _check_json(value: Any) -> Any:
     """`value`, if it is JSON that renders alike everywhere: it nests at most MAX_DEPTH levels,
     and the text `prompt.render_content` writes for it reads back as `value`, encodes as
     UTF-8 and holds no NaN or Infinity. So numbers that are not finite, integers of more than
-    4,300 digits (Python's limit, from 3.10.7), lone surrogates, object keys that are not
-    strings and values that are not JSON are refused too. Every failure is a ValueError. A
-    process that lifts Python's digit limit (PYTHONINTMAXSTRDIGITS=0) lifts that refusal."""
+    4,300 digits (Python's limit), lone surrogates, object keys that are not strings and values
+    that are not JSON are refused too. Every failure is a ValueError. A process that lifts
+    Python's digit limit (PYTHONINTMAXSTRDIGITS=0) lifts that refusal."""
     if not _nests_within(value, MAX_DEPTH):
         raise ValueError(f"nested more than {MAX_DEPTH} levels deep")
     try:

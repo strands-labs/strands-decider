@@ -34,13 +34,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # The tested floor versions and the lowest supported Python. setup-python resolves
-          # "3.10" to the newest 3.10 release, past the 3.10.7 floor. The core's request checks
-          # are pydantic's and its image headers Pillow's, so both are at their floors. Pillow
-          # 13 does not support Python 3.10, so this leg's floor is 12.3.
-          - python: "3.10"
+          # The tested floor versions and the lowest supported Python. The core's request checks
+          # are pydantic's and its image headers Pillow's, so both are at their floors.
+          - python: "3.11"
             torch: torch==2.7.1
-            pins: transformers==5.15.0 peft==0.21.0 huggingface_hub==1.5.0 pydantic==2.7.0 pillow==12.3.0
+            pins: transformers==5.15.0 peft==0.21.0 huggingface_hub==1.5.0 pydantic==2.7.0 pillow==13.0.0
           # The newest versions that pyproject.toml admits.
           # torchvision runs the 12B's image processor checks (tests/test_core_images.py).
           - python: "3.12"
@@ -154,10 +152,9 @@ jobs:
           echo "$GEMMA4_TEMPLATE_SHA256  $dir/chat_template.jinja" | sha256sum -c -
           echo "available=true" >> "$GITHUB_OUTPUT"
           echo "dir=$dir" >> "$GITHUB_OUTPUT"
-      # No torch. The core needs pydantic, and Pillow for the image tests, pinned here to
-      # 13.0.0, its floor on Python 3.11 and later. jinja2 and transformers (which runs
-      # without torch) un-skip the chat-template and apply_chat_template tests, and N against
-      # Gemma4ImageProcessor.
+      # No torch. The core needs pydantic, and Pillow for the image tests, pinned here to its
+      # floor, 13.0.0. jinja2 and transformers (which runs without torch) un-skip the
+      # chat-template and apply_chat_template tests, and N against Gemma4ImageProcessor.
       # The checks that need torchvision or torch (the 12B's processor, Gemma4Processor,
       # v1's decode_image) skip here.
       - if: steps.fetch.outputs.available == 'true'

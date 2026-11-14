@@ -36,9 +36,8 @@ MAX_IMAGE_PIXELS = 4096 * 4096
 # Bytes per image file, checked before Pillow reads it. 16 MiB holds a photo of MAX_IMAGE_PIXELS
 # as JPEG or WebP. Gemma 4's processor shrinks every image to at most 645,120 pixels, so a larger
 # file adds nothing the model sees, and the cap bounds the work of reading a header: on Pillow
-# 13, under 2 s for the worst files measured. Pillow 12.3, the floor on Python 3.10, which
-# Pillow 13 does not support, reads a GIF comment of many sub-blocks in quadratic time, so there
-# a 16 MiB GIF can take minutes.
+# 13, under 2 s for the worst files measured. Pillow 12 reads a GIF comment of many sub-blocks
+# in quadratic time, so there a 16 MiB GIF can take minutes.
 MAX_IMAGE_BYTES = 16 * 2**20
 # v1's prefix rule (vision.decode_image), applied after stripping surrounding whitespace, with
 # `\w` written out in ASCII so that it does not follow the interpreter's Unicode tables.
@@ -226,9 +225,9 @@ _B64_OTHER = re.compile(r"[^A-Za-z0-9+/=]")
 def _strict_b64decode(payload: str) -> bytes:
     """Standard base64 and nothing else, by the spec's rule rather than Python's: what
     `base64.b64decode(validate=True)` accepts, and the messages it gives, change between Python
-    3.10, 3.11, 3.12 and 3.13. Non-zero bits before the padding are accepted. RFC 4648
-    section 4: groups of four, the last padded with one or two "=" when short. In linear
-    time and constant memory, without a regular expression's repetition."""
+    3.11, 3.12 and 3.13. Non-zero bits before the padding are accepted. RFC 4648 section 4:
+    groups of four, the last padded with one or two "=" when short. In linear time and constant
+    memory, without a regular expression's repetition."""
     if not payload.isascii():
         raise ValueError("a character that is not ASCII")
     if _B64_OTHER.search(payload):
