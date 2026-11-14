@@ -360,7 +360,9 @@ def prefix_bidir_masks(
     type is refused.
     """
     impl = getattr(torso_config, "_attn_implementation", None) or "sdpa"
-    if impl not in ("sdpa", "eager"):
+    # "prefix_split" (prefix_split_attention, attn_split) takes the boolean mask SDPA takes:
+    # it hands batches under its minimum length to SDPA unchanged.
+    if impl not in ("sdpa", "eager", "prefix_split"):
         raise ValueError(f"attention_mode prefix_bidir needs sdpa or eager attention, not {impl}")
     pos = torch.arange(attention_mask.size(1), device=attention_mask.device)
     in_state = pos[None, :] < prefix_end.to(pos.device)[:, None]  # [B, L]
@@ -631,20 +633,17 @@ class StrandsDeciderModel(nn.Module):
                 raise ValueError("attention_mode prefix_bidir needs prefix_end")
             dtype = self.torso.get_input_embeddings().weight.dtype
             mask = prefix_bidir_masks(self.torso.config, attention_mask, prefix_end, dtype)
-        split = None
         if readout and self.config.attention_mode == "prefix_bidir" and self.config.attn_split:
             # Long batches: the same attention as the mask above, as two unmasked SDPA calls
             # per row, which runs on a faster kernel. The mask is still built and passed, and
-            # it is what short batches use.
-            from .prefix_split_attention import install
+            # it is what short batches use. Installed once and left in place: a gradient
+            # checkpoint's recompute must take the same path as the forward it repeats.
+            from .prefix_split_attention import install, set_rows
 
             assert prefix_end is not None  # checked above
-            split = install(self.torso, prefix_end, attention_mask, self.config.attn_split)
-        try:
-            hidden = self.encode(input_ids, mask, past_key_values=past_key_values)
-        finally:
-            if split is not None:
-                split.remove()
+            install(self.torso, self.config.attn_split)
+            set_rows(prefix_end, attention_mask)
+        hidden = self.encode(input_ids, mask, past_key_values=past_key_values)
         pooled = pool_last_token(hidden, attention_mask).to(torch.float32)
         if opt_idx is None or readout:
             logits = self.head(pooled, int(n_slots.max()))

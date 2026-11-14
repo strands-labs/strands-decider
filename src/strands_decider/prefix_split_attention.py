@@ -15,10 +15,10 @@ token), come out zero here instead of an average over the state's values.
 Rows are right-padded, as `training.data.collate` pads them: row i is state `[0, prefix_end)`,
 question `[prefix_end, valid)`, padding `[valid, L)`.
 
-    install(torso, prefix_end, attention_mask, min_length=1024)
+    install(torso, min_length=1024)          # once, at model build
+    set_rows(prefix_end, attention_mask)     # before every forward
 
-installs the attention function for one forward and returns a handle whose `remove()` puts the
-decoder back. Micro-batches under `min_length` padded tokens keep the masked call: for short
+Micro-batches under `min_length` padded tokens keep the masked call: for short
 rows one batched call beats 2B small ones. This is the same scheme, and the same default, as the
 reference v2 trainer's `--attn-split 1024`.
 """
@@ -78,24 +78,33 @@ def prefix_split_forward(
     return torch.cat(out, dim=0).transpose(1, 2).contiguous(), None
 
 
-class _Handle:
-    def __init__(self, configs: list[tuple[Any, str | None]]):
-        self._configs = configs
+def install(torso: Any, min_length: int = 1024) -> None:
+    """Point `torso`'s attention layers at `prefix_split_forward`, for good.
 
-    def remove(self) -> None:
-        for config, previous in self._configs:
-            config._attn_implementation = previous  # noqa: SLF001 -- transformers' own switch
-        _STATE["rows"] = None
-
-
-def install(
-    torso: Any, prefix_end: torch.Tensor, attention_mask: torch.Tensor, min_length: int = 1024
-) -> _Handle:
-    """Point `torso`'s attention layers at `prefix_split_forward` for one forward."""
+    It must stay in place through backward: with gradient checkpointing, backward runs each
+    layer's forward again, and a recompute that took another attention path would save other
+    tensors (torch.utils.checkpoint refuses). Idempotent. `set_rows` gives it each forward's rows.
+    """
     from transformers import AttentionInterface
 
     AttentionInterface.register(NAME, prefix_split_forward)
     _STATE["min_length"] = int(min_length)
+    inner = getattr(torso, "model", torso)
+    configs = [inner.config] + [
+        layer.self_attn.config
+        for layer in getattr(inner, "layers", [])
+        if hasattr(getattr(layer, "self_attn", None), "config")
+    ]
+    for config in configs:
+        config._attn_implementation = NAME  # noqa: SLF001 -- transformers' own switch
+
+
+def set_rows(prefix_end: torch.Tensor, attention_mask: torch.Tensor) -> None:
+    """Each row's (state end, real length) for the forward about to run and its backward.
+
+    A micro-batch's backward (and its checkpoint recompute) runs before the next forward
+    calls this again, so the recompute reads the same rows as the forward it repeats.
+    """
     valid = attention_mask.long().sum(dim=1)
     _STATE["rows"] = list(
         zip(
@@ -104,12 +113,3 @@ def install(
             strict=True,
         )
     )
-    inner = getattr(torso, "model", torso)
-    configs = [(inner.config, getattr(inner.config, "_attn_implementation", None))]
-    for layer in getattr(inner, "layers", []):
-        attention = getattr(layer, "self_attn", None)
-        if attention is not None and hasattr(attention, "config"):
-            configs.append((attention.config, getattr(attention.config, "_attn_implementation", None)))  # fmt: skip
-    for config, _ in configs:
-        config._attn_implementation = NAME  # noqa: SLF001 -- transformers' own switch
-    return _Handle(configs)
