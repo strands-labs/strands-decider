@@ -115,15 +115,10 @@ def _check_paths(checkpoints: list[str], out: str, replace: bool) -> None:
         raise ValueError(f"--out {out} is not empty; pass --replace to replace its contents")
 
 
-def soup(checkpoints: list[str], out: str, replace: bool = False) -> str:
-    """Write the soup of `checkpoints` (local directories of one recipe) to `out`, which must
-    be empty or absent; `replace` deletes what it holds first."""
-    from safetensors.torch import load_file, save_file
-
-    if not checkpoints:
-        raise ValueError("no checkpoints")
-    _check_paths(checkpoints, out, replace)
-    n = len(checkpoints)
+def check_one_recipe(checkpoints: list[str]) -> tuple[dict, dict | None]:
+    """Refuse checkpoints that are not seeds of one recipe (same config beyond the fitted
+    temperatures, base revision, base files and plain-LoRA adapter config); return the first
+    one's config (its base revision pinned) and adapter config (None without LoRA)."""
     # from_json drops stale slot-era keys (num_slots, head_type="pointer", head_hidden,
     # head_init, kl_frozen_weight) that pre-PR and v1-2610 pointer checkpoints still carry,
     # and rejects head_type="slot" cleanly so a slot-era input stops here rather than
@@ -151,6 +146,7 @@ def soup(checkpoints: list[str], out: str, replace: bool = False) -> str:
     if cfg.get("full_weight_targets"):  # a research build's torso-matrix checkpoint
         raise ValueError("soup reads LoRA checkpoints; full-weight checkpoints are not supported")
 
+    acfg = None
     if cfg.get("use_lora"):
         acfgs = [_json(os.path.join(c, ADAPTER_CONFIG)) for c in checkpoints]
         for a in acfgs:  # PEFT writes a list in no fixed order; a string is a regex, kept as is
@@ -170,6 +166,19 @@ def soup(checkpoints: list[str], out: str, replace: bool = False) -> str:
                 "soup supports plain LoRA (no DoRA, rank/alpha patterns, modules_to_save "
                 "or target_parameters)"
             )
+    return cfg, acfg
+
+
+def soup(checkpoints: list[str], out: str, replace: bool = False) -> str:
+    """Write the soup of `checkpoints` (local directories of one recipe) to `out`, which must
+    be empty or absent; `replace` deletes what it holds first."""
+    from safetensors.torch import load_file, save_file
+
+    if not checkpoints:
+        raise ValueError("no checkpoints")
+    _check_paths(checkpoints, out, replace)
+    n = len(checkpoints)
+    cfg, acfg = check_one_recipe(checkpoints)
     if replace and os.path.isdir(out):
         shutil.rmtree(out)
     os.makedirs(os.path.join(out, "lora"), exist_ok=True)

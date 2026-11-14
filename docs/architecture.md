@@ -211,7 +211,9 @@ and saved in bf16, the encoders unchanged, `readout.safetensors`, `decision_conf
 `training.json` record without local paths (strands-chat with `prefix_bidir` only). The export
 checks the base on disk against the `base.json` digest the run wrote (`--unrecorded-base` for a
 run without one), reads its output back with `strands_decider.core`, and deletes it if a check
-fails. Serve it with the vLLM runtime, `strands-decider-vllm`. Set `base_revision` in the
+fails. Several checkpoints of one recipe (other seeds) before `<out>` export their soup:
+each merged, every tensor and the readout averaged with equal weights, temperature 1.
+Serve it with the vLLM runtime, `strands-decider-vllm`. Set `base_revision` in the
 training config when the base is a local directory.
 
 ## Design decisions worth knowing

@@ -10,6 +10,7 @@ import random
 
 import pytest
 import torch
+import typer
 
 transformers = pytest.importorskip("transformers")
 if not hasattr(transformers, "Gemma4Config"):
@@ -226,3 +227,105 @@ def test_no_base_record_for_a_base_that_is_not_on_disk(tmp_path):
 
     assert not write_base_record(str(tmp_path), "not/cached-model", None)
     assert not (tmp_path / "base.json").exists()
+
+
+# ---- a soup of seeds: each merged, every tensor and the readout averaged -------------------
+
+
+def _seed_run(tmp_path, base, name, seed, **over):
+    """A token-readout checkpoint with base.json; seed > 0 gives its adapters and readout
+    random values (no training: the export reads only the saved tensors)."""
+    from strands_decider.modeling import StrandsDeciderConfig
+    from training.export_v2 import write_base_record
+
+    kw = dict(
+        base_model=str(base),
+        base_revision=REVISION,
+        torch_dtype="float32",
+        head_type="token_readout",
+        attention_mode="prefix_bidir",
+        lora_r=4,
+        lora_alpha=8,
+        lora_dropout=0.0,
+        lora_targets=GEMMA_TARGETS,
+    )
+    cfg = StrandsDeciderConfig(**{**kw, **over})
+    model = StrandsDeciderModel.from_pretrained_base(cfg)
+    if seed:
+        torch.manual_seed(seed)
+        with torch.no_grad():
+            for n, p in model.named_parameters():
+                if "lora_B" in n or n.endswith("_b") or n.startswith("head."):
+                    p.normal_(0, 0.1)
+    path = tmp_path / name
+    model.save_pretrained(str(path))
+    assert write_base_record(str(path), str(base), REVISION)
+    return path
+
+
+def _readout(d):
+    with safe_open(str(d / "readout.safetensors"), "pt") as f:
+        return f.get_tensor("weight")
+
+
+def _loads(out):
+    cfg = core.DecisionConfig.load(out)
+    core.Readout.load(out, cfg)
+    return cfg
+
+
+def test_a_soup_averages_every_merged_tensor_and_the_readout(tmp_path):
+    from strands_decider.modeling import StrandsDeciderConfig, config_path, load_head_state
+
+    base = tmp_path / "base"
+    _base(base, gemma4_tokenizer_path())
+    runs = [_seed_run(tmp_path, base, f"run{s}", s) for s in (1, 2)]
+    out = tmp_path / "soup"
+    export_v2([str(r) for r in runs], str(out), base_model=HUB_ID)
+    assert _loads(out).temperature == 1.0
+
+    mine, theirs = _tensors(out), _tensors(base)
+    assert sorted(mine) == sorted(theirs)
+    cfg = StrandsDeciderConfig.from_json(config_path(str(runs[0])))
+    deltas = [{k: d() for k, d in adapter_deltas(str(r), cfg).items()} for r in runs]
+    assert deltas[0].keys() == deltas[1].keys() and deltas[0]
+    for k, t in theirs.items():
+        if k not in deltas[0]:
+            assert torch.equal(mine[k], t.bfloat16() if k.startswith(DECODER) else t), k
+            continue
+        merged = [t.float() + d[k] for d in deltas]  # each seed's merged tensor, float32
+        assert torch.equal(mine[k], ((merged[0] + merged[1]) / 2).bfloat16()), k
+    heads = [load_head_state(str(r))["proj.weight"].float() for r in runs]
+    assert torch.equal(_readout(out), ((heads[0] + heads[1]) / 2).bfloat16())
+    assert not torch.equal(_readout(out), heads[0].bfloat16())  # the seeds differ
+    assert json.loads((out / "training.json").read_text())["soup_of"] == 2
+
+
+def test_a_soup_of_one_run_twice_is_that_run(tmp_path):
+    from typer.testing import CliRunner
+
+    from training.export_v2 import _cli
+
+    base = tmp_path / "base"
+    _base(base, gemma4_tokenizer_path())
+    run = _seed_run(tmp_path, base, "run", 1)
+    one, two = tmp_path / "one", tmp_path / "two"
+    export_v2(str(run), str(one), base_model=HUB_ID)
+    app = typer.Typer()
+    app.command()(_cli)
+    res = CliRunner().invoke(app, [str(run), str(run), str(two), "--base-model", HUB_ID])
+    assert res.exit_code == 0, res.output
+    _loads(one), _loads(two)
+    for name in os.listdir(one):
+        if name.endswith(".safetensors"):
+            assert (one / name).read_bytes() == (two / name).read_bytes(), name
+
+
+def test_a_soup_refuses_two_recipes(tmp_path):
+    base = tmp_path / "base"
+    _base(base, gemma4_tokenizer_path())
+    a = _seed_run(tmp_path, base, "a", 1)
+    b = _seed_run(tmp_path, base, "b", 2, lora_r=2, lora_alpha=4)
+    with pytest.raises(ValueError, match="not one recipe"):
+        export_v2([str(a), str(b)], str(tmp_path / "soup"), base_model=HUB_ID)
+    assert not (tmp_path / "soup").exists()

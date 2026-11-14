@@ -34,7 +34,6 @@ def _model(base, **kw):
         base_model=str(base),
         torch_dtype="float32",
         head_type="token_readout",
-        render="strands-chat",
         attention_mode="prefix_bidir",
         lora_r=4,
         lora_alpha=8,
@@ -123,7 +122,6 @@ def test_train_with_expert_lora_saves_and_reloads(base, tmp_path):
             val_files=[str(tmp_path / "train.jsonl")],
             base_model=str(base),
             head_type="token_readout",
-            render="strands-chat",
             attention_mode="prefix_bidir",
             lora_targets=GEMMA_TARGETS,
             expert_lora=True,
@@ -186,3 +184,30 @@ def test_the_export_folds_the_expert_adapters_as_the_module_merge_does(tmp_path)
         exported = theirs[f"model.language_model.{name}"]
         assert torch.equal(exported, mine[name].bfloat16()), name
         assert not torch.equal(exported, _tensors(base)[f"model.language_model.{name}"])
+
+
+def test_a_two_seed_soup_export_averages_the_merged_experts(tmp_path):
+    from core_support import gemma4_tokenizer_path
+    from test_export_v2 import HUB_ID, _base, _loads, _seed_run, _tensors
+
+    from training.export_v2 import export_v2
+
+    base = tmp_path / "base"
+    _base(base, gemma4_tokenizer_path(), moe=True)
+    runs = [_seed_run(tmp_path, base, f"run{s}", s, expert_lora=True) for s in (1, 2)]
+    out = tmp_path / "out"
+    export_v2([str(r) for r in runs], str(out), base_model=HUB_ID)
+    _loads(out)
+
+    merged = []
+    for r in runs:
+        torso = StrandsDeciderModel.load(str(r)).float().torso.merge_and_unload()
+        assert expert_lora.merge_and_unwrap(torso) == len(LAYERS)
+        merged.append(torso.state_dict())
+    theirs = _tensors(out)
+    names = [k for k in merged[0] if k.endswith(("experts.gate_up_proj", "experts.down_proj"))]
+    assert names
+    for name in names:
+        want = ((merged[0][name].float() + merged[1][name].float()) / 2).bfloat16()
+        assert torch.equal(theirs[f"model.language_model.{name}"], want), name
+        assert not torch.equal(merged[0][name], merged[1][name])  # the seeds differ

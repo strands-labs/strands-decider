@@ -1,6 +1,11 @@
 """Export a token-readout checkpoint (or a soup of them) as a decision checkpoint.
 
-    python -m training.export_v2 <checkpoint> <out> [--base-model google/gemma-4-E2B-it]
+    python -m training.export_v2 <checkpoint> [<checkpoint> ...] <out> [--base-model ...]
+
+Several checkpoints of one recipe (other seeds) give their soup: each one merged into the
+base, then every merged tensor, the readout included, averaged with equal weights in float32
+and written in bf16. A soup of one is the single export. (A soup checkpoint written by
+training.soup, whose stacked adapters average the seeds' updates, exports as one checkpoint.)
 
 The output is docs/spec.md's checkpoint layout (section 9): the base model's own multimodal
 checkpoint with the fine-tuning merged in, and this interface's files beside it.
@@ -44,6 +49,7 @@ from safetensors.torch import load_file, save_file
 
 from strands_decider import core, expert_lora
 from strands_decider.modeling import StrandsDeciderConfig, config_path, load_head_state
+from training.soup import check_one_recipe
 
 DECODER = "model.language_model."
 PEFT_PREFIX = "base_model.model."
@@ -159,9 +165,14 @@ def adapter_deltas(
     return out
 
 
-def merge_shards(base: str, out: str, deltas: dict[str, Callable[[], torch.Tensor]]) -> None:
-    """Write the base's shards to `out` with `deltas` added to their decoder tensors."""
-    left = dict(deltas)
+def merge_shards(base: str, out: str, deltas: list[dict[str, Callable[[], torch.Tensor]]]) -> None:
+    """Write the base's shards to `out`, each decoder tensor that `deltas` (one dict per seed)
+    change being the float32 mean of the seeds' merged tensors W + delta_i.
+
+    That mean is W + mean(delta_i); it is summed here as merged tensors, one tensor and one
+    seed's update at a time, so that it is exactly the float32 average of the merged models
+    (and one seed's export is W + delta, as before)."""
+    left = {name for d in deltas for name in d}
     for shard in _shards(base):
         tensors = {}
         with safe_open(os.path.join(base, shard), "pt") as f:
@@ -169,10 +180,14 @@ def merge_shards(base: str, out: str, deltas: dict[str, Callable[[], torch.Tenso
             for name in f.keys():
                 t = f.get_tensor(name)
                 if name in left:
-                    d = left.pop(name)()
-                    if d.shape != t.shape:
-                        raise ValueError(f"{name}: adapter update {d.shape}, base {t.shape}")
-                    t = t.float() + d
+                    left.discard(name)
+                    w, acc = t.float(), None
+                    for seed in deltas:
+                        d = seed[name]() if name in seed else torch.zeros_like(w)
+                        if d.shape != t.shape:
+                            raise ValueError(f"{name}: adapter update {d.shape}, base {t.shape}")
+                        acc = w + d if acc is None else acc + (w + d)
+                    t = acc / len(deltas)
                 if name.startswith(DECODER):
                     t = t.to(torch.bfloat16)
                 tensors[name] = t.contiguous()
@@ -214,11 +229,14 @@ def _no_paths(v: Any) -> Any:
     return v
 
 
-def training_record(checkpoint: str, cfg: StrandsDeciderConfig) -> dict[str, Any]:
-    """The run's recipe; a soup's (whose adapters are the runs' stacked) gives one run's."""
+def training_record(checkpoint: str, cfg: StrandsDeciderConfig, soup_of: int = 1) -> dict[str, Any]:
+    """The run's recipe; a soup's (whose adapters are the runs' stacked, or `soup_of` seeds
+    averaged by the export) gives one run's."""
     history = _optional_json(os.path.join(checkpoint, "history.json")) or []
     soup = _optional_json(os.path.join(checkpoint, "soup.json"))
     run = _optional_json(os.path.join(checkpoint, "train_config.json")) or {}
+
+    n = soup_of * (len(soup["checkpoints"]) if soup else 1)
 
     def per_run(key: str) -> Any:
         return run.get(key, getattr(cfg, key))
@@ -243,7 +261,7 @@ def training_record(checkpoint: str, cfg: StrandsDeciderConfig) -> dict[str, Any
             if cfg.expert_lora
             else None,
             "merge": "float32 sum, saved bfloat16",
-            "soup_of": len(soup["checkpoints"]) if soup else None,
+            "soup_of": n if soup or n > 1 else None,
             "optimizer_steps": max((h["step"] for h in history if "step" in h), default=None),
             "train_config": run or None,
         }
@@ -273,7 +291,7 @@ def check_no_local_paths(out: str, paths: list[str]) -> None:
 
 
 def export_v2(
-    checkpoint: str,
+    checkpoint: str | list[str],
     out: str,
     *,
     base_model: str | None = None,
@@ -282,18 +300,27 @@ def export_v2(
 ) -> str:
     """Write `checkpoint`'s decision checkpoint to `out` (absent or empty); returns `out`.
 
+    A list of checkpoints of one recipe (other seeds) writes their soup: each merged, every
+    tensor and the readout averaged with equal weights. Its temperature is 1: calibrate it.
+
     `base_model` is the base's Hub id for `provenance` (default: the checkpoint's base_model,
     which must then be a Hub id). `max_length_validated` defaults to the run's max_length.
     `unrecorded_base` skips the base digest check for a run that wrote no base.json."""
+    paths = [checkpoint] if isinstance(checkpoint, str) else list(checkpoint)
+    if not paths:
+        raise ValueError("no checkpoints")
     if os.path.isdir(out) and os.listdir(out):
         raise FileExistsError(f"{out}: not empty")
+    if len(paths) > 1:  # same config beyond temperatures, base revision and files, adapters
+        check_one_recipe(paths)
+    checkpoint = paths[0]
     cfg = StrandsDeciderConfig.from_json(config_path(checkpoint))
     if (cfg.head_type, cfg.attention_mode) != ("token_readout", "prefix_bidir"):
         raise ValueError(
             "a decision checkpoint is a token_readout checkpoint under prefix_bidir, "
             f"not {cfg.head_type} / {cfg.attention_mode}"
         )
-    if cfg.temperature_by_kind:
+    if len(paths) == 1 and cfg.temperature_by_kind:
         raise ValueError(
             "decision_config.json holds one temperature; this checkpoint has per-kind ones"
         )
@@ -321,7 +348,7 @@ def export_v2(
         "inputs": ["text"],
         "codes": list(core.CODES),
         "token_ids": list(core.CODE_TOKEN_IDS),
-        "temperature": cfg.temperature,
+        "temperature": cfg.temperature if len(paths) == 1 else 1.0,
         "final_logit_softcapping": cfg.readout_softcap,
         "attention_mode": cfg.attention_mode,
         "pooling": "last",
@@ -329,8 +356,8 @@ def export_v2(
         "provenance": {"base_model": hub_id, "base_revision": revision},
     }
     softcap = core.DecisionConfig.from_dict(decision).final_logit_softcapping  # before any write
-    weight = load_head_state(checkpoint)["proj.weight"]
-    deltas = adapter_deltas(checkpoint, cfg)
+    weight = sum(load_head_state(p)["proj.weight"].float() for p in paths) / len(paths)
+    deltas = [adapter_deltas(p, cfg) for p in paths]  # one recipe: the first's settings
 
     os.makedirs(out, exist_ok=True)
     try:
@@ -347,12 +374,12 @@ def export_v2(
         with open(os.path.join(out, core.config.FILENAME), "w", encoding="utf-8") as fh:
             fh.write(json.dumps(decision, indent=2) + "\n")
         with open(os.path.join(out, "training.json"), "w", encoding="utf-8") as fh:
-            fh.write(json.dumps(training_record(checkpoint, cfg), indent=2) + "\n")
+            fh.write(json.dumps(training_record(checkpoint, cfg, len(paths)), indent=2) + "\n")
 
         loaded = core.DecisionConfig.load(out)
         core.Readout.load(out, loaded)  # also: config.json's soft-cap equals decision_config's
         core.load_tokenizer(out, loaded)
-        check_no_local_paths(out, [checkpoint, base, out, os.path.expanduser("~")])
+        check_no_local_paths(out, [*paths, base, out, os.path.expanduser("~")])
     except BaseException:
         shutil.rmtree(out, ignore_errors=True)
         raise
@@ -360,15 +387,18 @@ def export_v2(
 
 
 def _cli(
-    checkpoint: str = typer.Argument(..., help="A token_readout strands-chat checkpoint or soup."),
+    checkpoints: list[str] = typer.Argument(
+        ..., help="A token_readout checkpoint or soup; several of one recipe: their soup."
+    ),
     out: str = typer.Argument(..., help="Directory for the decision checkpoint: absent or empty."),
     base_model: str = typer.Option(None, help="The base's Hub id, for provenance."),
     max_length_validated: int = typer.Option(None, help="Default: the run's max_length."),
     unrecorded_base: bool = typer.Option(False, help="Skip the base digest check (no base.json)."),
 ) -> None:
-    """Merge the adapters into the base and write the decision checkpoint layout."""
+    """Merge the adapters into the base (or average several merged seeds) and write the
+    decision checkpoint layout."""
     path = export_v2(
-        checkpoint,
+        checkpoints,
         out,
         base_model=base_model,
         max_length_validated=max_length_validated,
