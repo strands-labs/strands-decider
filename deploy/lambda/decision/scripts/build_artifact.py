@@ -1,4 +1,4 @@
-"""Build what the Lambda image serves from a decision checkpoint (docs/spec.md, The checkpoint layout).
+"""Build what the Lambda image serves from a decision checkpoint (docs/spec.md, section 9).
 
     python build_artifact.py CHECKPOINT OUT_DIR --llama-cpp DIR --quantize PATH [--revision REV]
         [--expect-digest SHA256] [--name NAME] [--mmproj-type q8_0|f16] [--max-bytes N]
