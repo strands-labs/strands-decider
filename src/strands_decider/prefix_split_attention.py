@@ -20,7 +20,7 @@ question `[prefix_end, valid)`, padding `[valid, L)`.
 
 Micro-batches under `min_length` padded tokens keep the masked call: for short
 rows one batched call beats 2B small ones. This is the same scheme, and the same default, as the
-reference v2 trainer's `--attn-split 1024`.
+v2 trainer's `--attn-split 1024`.
 """
 
 from __future__ import annotations

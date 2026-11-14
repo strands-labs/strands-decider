@@ -78,7 +78,7 @@ class StrandsDeciderConfig:
     attention_mode: str = "causal"
     # Micro-batches of at least this many padded tokens run prefix_bidir as two unmasked SDPA
     # calls per row instead of one masked call (prefix_split_attention); 0 = always masked.
-    # The reference v2 recipe uses 1024.
+    # The v2 recipe uses 1024.
     attn_split: int = 0
     # Token readout only: the cap on its logits, cap * tanh(x / cap) (0.0: none). Recorded from
     # the base model's final_logit_softcapping when training starts, then read from here, so a

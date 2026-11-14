@@ -84,11 +84,11 @@ class TrainConfig:
     head_type: str = "pointer"
     attention_mode: str = "causal"
     # Micro-batches of at least this many padded tokens run prefix_bidir without its dense
-    # mask (strands_decider.prefix_split_attention); 0 = always masked. The reference v2
-    # recipe uses 1024. Speed only: the attention is the same up to rounding.
+    # mask (strands_decider.prefix_split_attention); 0 = always masked. The v2 recipe
+    # uses 1024. Speed only: the attention is the same up to rounding.
     attn_split: int = 0
     # Run the forward under bf16 autocast: the LoRA and readout matmuls then run in bf16 on
-    # their fp32 master weights, as the reference v2 trainer runs them, instead of in fp32
+    # their fp32 master weights, as the v2 trainer runs them, instead of in fp32
     # on an fp32 copy of every adapted layer's input (peft's default). The backbone is bf16
     # either way. Changes numerics slightly; the optimizer state stays fp32.
     bf16_autocast: bool = False
