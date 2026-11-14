@@ -15,7 +15,6 @@ train_files: ["data/train_examples.jsonl"]
 val_files: ["data/dev_examples.jsonl"]   # S3 dev.jsonl
 base_model: "google/gemma-4-12B-it"
 head_type: "token_readout"
-render: "strands-chat"
 attention_mode: "prefix_bidir"
 attn_split: 1024        # E2B ref training_config; speed only
 max_length: 16384

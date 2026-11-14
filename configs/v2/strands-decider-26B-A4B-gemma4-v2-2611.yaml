@@ -11,12 +11,11 @@
 # Not mapped: revision (no key: the host kit pins it); lora.dropout 0.05 (no key; the model's
 #   lora_dropout default is 0.05); brier_weight 0.0 (no key); pooling "last" / readout_mode "trained"
 #   (what token_readout does); augment true -> shuffle_options.
-#   expert_lora alpha/dropout/scale/targets/router (no keys; see the commented block at the end).
+#   expert_lora targets/router (no keys; see the block at the end).
 train_files: ["data/train_examples.jsonl"]
 val_files: ["data/dev_examples.jsonl"]   # S3 dev.jsonl
 base_model: "google/gemma-4-26B-A4B-it"
 head_type: "token_readout"
-render: "strands-chat"
 attention_mode: "prefix_bidir"
 attn_split: 1024        # E2B ref training_config; speed only
 max_length: 16384
@@ -49,7 +48,9 @@ save_every: 100
 output_dir: "checkpoints/strands-decider-26B-A4B-gemma4-v2-2611-run1"
 
 # Expert LoRA (ref expert_lora: rank 8, alpha 128, dropout 0.05, scale 16.0, targets
-# experts.gate_up_proj,experts.down_proj, router frozen). TrainConfig.from_yaml rejects unknown
-# keys, so these stay commented out until the trainer has them:
-# expert_lora: true   # needs feat/v2-expert-lora
-# expert_lora_r: 8    # needs feat/v2-expert-lora
+# experts.gate_up_proj,experts.down_proj, router frozen). Scale 16 = alpha 128 / rank 8; alpha
+# would default to lora_alpha (128). Dropout is lora_dropout (0.05). Targets and the frozen
+# router are expert_lora.py's own.
+expert_lora: true
+expert_lora_r: 8
+expert_lora_alpha: 128
