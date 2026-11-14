@@ -141,6 +141,12 @@ def soup(checkpoints: list[str], out: str, replace: bool = False) -> str:
         raise ValueError(
             f"the checkpoints were trained on different base revisions: {sorted(map(str, revisions))}"
         )
+    records = {
+        open(p, "rb").read() if os.path.exists(p) else None
+        for p in (os.path.join(c, "base.json") for c in checkpoints)
+    }
+    if len(records) > 1:  # the base digests training wrote (export_v2 checks the soup's)
+        raise ValueError("the checkpoints were trained on different base files (base.json)")
     cfg = {**cfgs[0], "base_revision": revisions.pop()}  # pinned: no provenance fallback needed
     if cfg.get("full_weight_targets"):  # a research build's torso-matrix checkpoint
         raise ValueError("soup reads LoRA checkpoints; full-weight checkpoints are not supported")

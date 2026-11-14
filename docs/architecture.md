@@ -205,9 +205,14 @@ With `save_every`, each save also writes `resume-<step>.pt` (the last two are ke
 unbroken run would have.
 `python -m training.train`, `training.soup` and `training.evaluate calibrate` work with a token
 readout checkpoint. The engines in this repository refuse one. To serve it, export it to the
-v2 package layout, `python -m training.export_v2 <checkpoint> <package>` (merged bf16 weights,
-`readout.safetensors`, `decision_config.json`; strands-chat with `prefix_bidir` only), and
-serve the package with the vLLM runtime, `strands-decider-vllm`.
+checkpoint layout of docs/spec.md section 9, `python -m training.export_v2 <checkpoint> <out>
+--base-model <hub id>`: the base's own multimodal shards with the adapters merged in float32
+and saved in bf16, the encoders unchanged, `readout.safetensors`, `decision_config.json` and a
+`training.json` record without local paths (strands-chat with `prefix_bidir` only). The export
+checks the base on disk against the `base.json` digest the run wrote (`--unrecorded-base` for a
+run without one), reads its output back with `strands_decider.core`, and deletes it if a check
+fails. Serve it with the vLLM runtime, `strands-decider-vllm`. Set `base_revision` in the
+training config when the base is a local directory.
 
 ## Design decisions worth knowing
 

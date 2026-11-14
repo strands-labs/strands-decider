@@ -56,6 +56,9 @@ class TrainConfig:
 
     # model
     base_model: str = "Qwen/Qwen3-1.7B-Base"
+    # The base's 40-character Hub commit. None trains on the Hub's default branch (the export
+    # records the cached snapshot's); a local base directory needs it for an export.
+    base_revision: str | None = None
     head_dropout: float = 0.05
     max_length: int = 3072
     use_lora: bool = True
@@ -565,6 +568,7 @@ def train(cfg: TrainConfig) -> str:
         print(f"[strands-decider] loading base model {cfg.base_model}")
         model_cfg = StrandsDeciderConfig(
             base_model=cfg.base_model,
+            base_revision=cfg.base_revision,
             head_dropout=cfg.head_dropout,
             max_length=cfg.max_length,
             use_lora=cfg.use_lora and not cfg.freeze_torso,
@@ -733,6 +737,14 @@ def train(cfg: TrainConfig) -> str:
         os.makedirs(cfg.output_dir, exist_ok=True)
         with open(os.path.join(cfg.output_dir, "train_config.json"), "w", encoding="utf-8") as fh:
             json.dump(asdict(cfg), fh, indent=2)
+        # The base's digest, which export_v2 checks before it merges into a base
+        from training.export_v2 import write_base_record
+
+        base = model.config
+        if not write_base_record(cfg.output_dir, base.base_model, base.base_revision):
+            print(
+                f"[strands-decider] {base.base_model}: not on disk, no {cfg.output_dir}/base.json"
+            )
     if world > 1:  # each rank iterates its share of every step's rows instead
         # 0 for kl_slots: all rows are eligible under a pointer-head reference, so no
         # eligibility counter is needed in StepSlices.

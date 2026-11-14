@@ -104,9 +104,13 @@ class ExpertLoRA(nn.Module):
             (self.base.gate_up_proj, self.gate_up_a, self.gate_up_b),
             (self.base.down_proj, self.down_a, self.down_b),
         ):
-            delta = torch.bmm(b.to(w.device, torch.float32), a.to(w.device, torch.float32))
-            w.copy_((w.float() + self.scale * delta).to(w.dtype))
+            w.copy_((w.float() + delta(a.to(w.device), b.to(w.device), self.scale)).to(w.dtype))
         return self.base
+
+
+def delta(a: torch.Tensor, b: torch.Tensor, scale: float) -> torch.Tensor:
+    """The per-expert update scale * B[e] @ A[e], [E, out, in], in float32."""
+    return scale * torch.bmm(b.float(), a.float())
 
 
 def attach(torso: nn.Module, rank: int, alpha: float, dropout: float) -> int:

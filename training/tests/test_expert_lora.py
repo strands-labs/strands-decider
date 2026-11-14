@@ -14,7 +14,6 @@ from test_gemma4_train import GEMMA_TARGETS, LAYERS, _checkpoint  # noqa: E402
 
 from strands_decider import expert_lora  # noqa: E402
 from strands_decider.modeling import StrandsDeciderConfig, StrandsDeciderModel  # noqa: E402
-from training.export_v2 import export_v2  # noqa: E402
 from training.soup import soup  # noqa: E402
 
 E, H, INTER, R = 4, 32, 16, 8  # _checkpoint's "moe" layout: experts, hidden, moe_intermediate
@@ -30,9 +29,9 @@ def base(tmp_path):
 
 
 def _model(base, **kw):
+    kw = {"base_revision": "0" * 40, **kw}
     cfg = StrandsDeciderConfig(
         base_model=str(base),
-        base_revision="0" * 40,
         torch_dtype="float32",
         head_type="token_readout",
         render="strands-chat",
@@ -81,7 +80,7 @@ def test_every_expert_gets_a_gradient(base):
         assert m.gate_up_b.grad is not None and m.gate_up_b.grad.abs().sum() > 0
 
 
-def test_save_load_merge_export_and_soup(base, tmp_path):
+def test_save_load_merge_and_soup(base, tmp_path):
     model = _model(base, expert_lora=True)
     _perturb(model)
     want = _hidden(model.torso, IDS)
@@ -103,15 +102,6 @@ def test_save_load_merge_export_and_soup(base, tmp_path):
     assert expert_lora.merge_and_unwrap(merged) == len(LAYERS)
     assert not expert_lora.modules(merged)
     torch.testing.assert_close(_hidden(merged, IDS), want, rtol=1e-4, atol=1e-4)
-
-    # the export loads as a plain Gemma 4 decoder: the merged weights, saved in bfloat16
-    out = tmp_path / "out"
-    export_v2(str(ckpt), str(out))
-    exported = transformers.AutoModel.from_pretrained(str(out), dtype=torch.float32)
-    mine = merged.state_dict()
-    for name, w in exported.state_dict().items():
-        assert torch.equal(w, mine[name].bfloat16().float()), name
-    assert any(k.endswith("experts.gate_up_proj") for k in mine)
 
 
 def test_expert_lora_needs_a_token_readout_and_lora():
@@ -172,3 +162,27 @@ def test_the_cuda_grouped_path_matches_the_cpu_loop():
     cpu = layer.bfloat16()(x.bfloat16(), idx, w).float()
     gpu = layer.cuda()(x.bfloat16().cuda(), idx.cuda(), w.cuda()).float().cpu()
     torch.testing.assert_close(gpu, cpu, rtol=0.02, atol=0.02)
+
+
+def test_the_export_folds_the_expert_adapters_as_the_module_merge_does(tmp_path):
+    from core_support import gemma4_tokenizer_path
+    from test_export_v2 import HUB_ID, REVISION, _base, _tensors
+
+    from training.export_v2 import export_v2, write_base_record
+
+    base = tmp_path / "base"
+    _base(base, gemma4_tokenizer_path(), moe=True)
+    model = _model(base, expert_lora=True, base_revision=REVISION)
+    _perturb(model)
+    ckpt, out = tmp_path / "ckpt", tmp_path / "out"
+    model.save_pretrained(str(ckpt))
+    assert write_base_record(str(ckpt), str(base), REVISION)
+    export_v2(str(ckpt), str(out), base_model=HUB_ID)
+
+    merged = model.torso.merge_and_unload()
+    assert expert_lora.merge_and_unwrap(merged) == len(LAYERS)
+    mine, theirs = merged.state_dict(), _tensors(out)
+    for name in [k for k in mine if k.endswith(("experts.gate_up_proj", "experts.down_proj"))]:
+        exported = theirs[f"model.language_model.{name}"]
+        assert torch.equal(exported, mine[name].bfloat16()), name
+        assert not torch.equal(exported, _tensors(base)[f"model.language_model.{name}"])
