@@ -42,7 +42,7 @@ MODEL_CONFIG_FILE = "config.json"
 HIDDEN = "hidden"  # h, the final-norm hidden state at the last token: nothing applied
 RAW_LOGITS = "raw_logits"  # z = W h: the readout applied, not the soft-cap or the temperature
 CAPPED_LOGITS = "capped_logits"  # tanh(z / c) * c: the soft-cap applied, not the temperature
-FINAL_LOGITS = "final_logits"  # tanh(z / c) * c / T: both (strands-decider-vllm's model's)
+FINAL_LOGITS = "final_logits"  # tanh(z / c) * c / T: both, as in strands-decider-vllm's model
 PROBABILITIES = "probabilities"  # softmax of the final logits, over the k codes or all 255
 STAGES = (HIDDEN, RAW_LOGITS, CAPPED_LOGITS, FINAL_LOGITS, PROBABILITIES)
 
