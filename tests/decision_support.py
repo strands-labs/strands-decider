@@ -53,7 +53,7 @@ def tokenizer():
     """The toy tokenizer of tests/core_support.py, with Gemma 4's ids where the interface
     fixes them, so that a checkpoint's tokenizer passes the core's `check_tokenizer`: the
     control tokens at `CONTROL_TOKEN_IDS`, `<eos>` at 1, and each code at its id in
-    `CODE_TOKEN_IDS` (docs/spec.md, The codes). The other words take the free ids from 0 up."""
+    `CODE_TOKEN_IDS` (docs/spec.md, section 2). The other words take the free ids from 0 up."""
     from tokenizers import AddedToken, Regex, Tokenizer, models, pre_tokenizers
 
     words = ["<unk>", "\n", " ", ".", "<", ">", "/", '"', "=", "—", "answer", "model", "user"]

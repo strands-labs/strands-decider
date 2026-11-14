@@ -46,6 +46,7 @@ import transformers
 
 from strands_decider.backends import transformers as tb
 from strands_decider.core import (
+    NO_VISION,
     attention_mask,
     evaluate,
     question_probabilities,
@@ -57,7 +58,6 @@ from strands_decider.core import (
     round_to_bf16,
     soft_tokens,
 )
-from strands_decider.core.request import NO_VISION
 
 CUDA = torch.cuda.is_available()
 MPS = getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available()
@@ -591,7 +591,7 @@ def _rendered_image(data: bytes):
      (768, 768, "PNG"), (97, 1301, "GIF"), (1080, 2400, "PNG")],
 )  # fmt: skip
 def test_the_spec_resize_then_the_processor_is_gemma4s_pil_processor(w, h, fmt):
-    """docs/spec.md section 11.1, for E2B, E4B, 26B-A4B and 31B: the spec's bicubic resize
+    """docs/spec.md section 3.3, for E2B, E4B, 26B-A4B and 31B: the spec's bicubic resize
     (`resize_image`), then the processor without its own, gives the pixels the PIL processor
     gives with its own, wherever Pillow resizes the width first. Pillow 13 does the height
     first when it shrinks more than twice as much as the width (the 1080 x 2400 case), and its
@@ -837,7 +837,7 @@ GOLDENS = "golden_vectors.jsonl"
 def golden_probabilities(path, backend) -> dict:
     """`backend`'s code probabilities on the goldens at `path`, keyed as `read_golden_vectors`
     keys the reference's, after checking that every line renders to the goldens' ids, spans,
-    image hashes and codes exactly (section 10, conformance condition 1)."""
+    image hashes and codes exactly (section 10: the runtime's ids equal the goldens')."""
     ck = backend.checkpoint
     tok = ck.tokenizer()
     out = {}
@@ -1111,7 +1111,7 @@ def test_mps_calls_take_turns_across_backends(ckpt, kind, monkeypatch):
 
 
 def test_an_intermediate_checkpoints_float32_readout_is_rounded_to_bf16(tmp_path):
-    """Section 7.1: a runtime that reads an f32 readout rounds it to bf16 first."""
+    """Section 7.1 (W is bf16): a runtime that reads an f32 readout rounds it to bf16 first."""
     from safetensors.torch import save_file
 
     path = intermediate_checkpoint(tmp_path / "mid")
