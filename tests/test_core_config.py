@@ -241,7 +241,7 @@ def test_bad_values_are_errors(field, value, match):
 
 @pytest.mark.parametrize("field", ["prompt", "attention_mode", "pooling", "inputs", "interface"])
 def test_a_huge_integer_anywhere_is_a_plain_valueerror(field):
-    """A value too large to print (Python 3.11 refuses int-to-str past 4,300 digits) is
+    """A value too large to print (Python refuses int-to-str past 4,300 digits) is
     described by its size, so the error is the schema's, not the interpreter's."""
     value = [10**5000] if field == "inputs" else 10**5000
     with pytest.raises(ValueError) as e:

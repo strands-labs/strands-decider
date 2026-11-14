@@ -58,7 +58,7 @@ SPECIAL_TOKENS = (
     "<image|>", "<audio|>", "<|video|>",
 )  # fmt: skip
 EVERY_SPECIAL = "".join(SPECIAL_TOKENS)
-# Whitespace: Python's str.isspace, 29 code points on every Python from 3.10. The template
+# Whitespace: Python's str.isspace, 29 code points on every Python from 3.11. The template
 # strips it from the ends of request text and collapses it in an option (docs/spec.md, section
 # 3.1); which characters it is, render and the whitespace_edges golden fix.
 WHITESPACE = (

@@ -92,8 +92,8 @@ def check_float32_scale(name: str, v: Any) -> float:
 
 def _shown(v: Any) -> str:
     """`v` for a message: an integer past a double's range by its size, since its digits may
-    be too many to print (Python 3.11 and later refuse to), a list or tuple item by item, and
-    anything long cut short."""
+    be too many to print (Python refuses to), a list or tuple item by item, and anything long
+    cut short."""
     if isinstance(v, int) and not isinstance(v, bool) and abs(v).bit_length() > 1024:
         return f"an integer of {abs(v).bit_length()} bits"
     if isinstance(v, (list, tuple)):
