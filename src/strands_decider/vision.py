@@ -459,14 +459,15 @@ def load_vision_engine(
     config: EngineConfig | None = None,
     *,
     attn_implementation: str | None = None,
-    image_long_side: int = 448,
+    image_long_side: int | None = None,
 ) -> VisionEngine:
     """A vision engine configured as `create_app` configures a text one (device, prefix
-    cache, `max_batch`, model name), plus the image settings."""
+    cache, `max_batch`, model name), plus the image settings. An explicit
+    `image_long_side` overrides the config; otherwise its value is preserved."""
     base = config or EngineConfig()
-    names = {f.name for f in fields(EngineConfig)}
-    cfg = VisionEngineConfig(
-        **{k: v for k, v in asdict(base).items() if k in names}, image_long_side=image_long_side
-    )
+    names = {f.name for f in fields(VisionEngineConfig)}
+    cfg = VisionEngineConfig(**{k: v for k, v in asdict(base).items() if k in names})
+    if image_long_side is not None:
+        cfg.image_long_side = image_long_side
     model = VisionDeciderModel.load(checkpoint, attn_implementation=attn_implementation)
     return VisionEngine(model, cfg)
