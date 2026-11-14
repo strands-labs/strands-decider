@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import shutil
 from types import SimpleNamespace
@@ -555,3 +556,14 @@ def test_a_token_readout_is_not_switched_to_serving_attention():
     assert serving_attn_override(pointer, e2b, False, None) == "eager"
     assert serving_attn_override(pointer, e2b, True, None) is None  # training
     assert serving_attn_override(pointer, e2b, False, "sdpa") is None  # the caller named one
+
+
+def test_bf16_autocast_trains_with_fp32_master_weights(corpus, tmp_path, monkeypatch):
+    """The forward runs in bf16 under autocast; the trained weights and their updates stay fp32."""
+    cfg = _tiny_run(corpus, tmp_path, monkeypatch, bf16_autocast=True, log_every=1)
+    out = T.train(cfg)
+    hist = json.load(open(os.path.join(out, "history.json"), encoding="utf-8"))
+    losses = [h["loss"] for h in hist if "loss" in h]
+    assert losses and all(math.isfinite(x) for x in losses)
+    head = load_head_state(out)["proj.weight"]
+    assert head.dtype == torch.float32
