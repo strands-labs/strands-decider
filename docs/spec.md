@@ -28,7 +28,7 @@ Other fields are ignored, as in v1, and values are never coerced. A question has
 
 An absent noul key keeps its default description, "the statement does not hold for this state" for `false` and "the statement holds for this state" for `true`. A null description shows the option's name alone. As in v1, a question may omit `type`, and is then a noul when its criteria are absent, null or an object with keys among `false` and `true`, a choice when they are another object, and a score when they are an array.
 
-Content, meaning a state, an instruction, an option's name or a description, nests at most 100 levels deep, where a scalar is level 0 and an object or an array is one level deeper than the deepest value in it. Numbers that are not finite or too large for a double, integers of more than 4,300 digits and lone surrogates are refused. Every JSON request v1 accepts is accepted, except content past these limits, a non-null `audio` and images that section 1.1 refuses and v1 does not. A request without a state is accepted too.
+Content, meaning a state, an instruction, an option's name or a description, nests at most 100 levels deep, where a scalar is level 0 and an object or an array is one level deeper than the deepest value in it, so an empty one is level 1. Numbers that are not finite (`1e400` reads as infinity), integers of more than 4,300 digits and lone surrogates are refused. Every JSON request v1 accepts is accepted, except content past these limits, a non-null `audio` and images that section 1.1 refuses and v1 does not. A request without a state is accepted too.
 
 ### 1.1 Images
 
@@ -143,7 +143,7 @@ N = (H / 48) × (W / 48)
 
 At aspect ratios such as 35:2 the double's last bit decides the floor. `tests/fixtures/core/image_soft_tokens.json` gives N for 4,906 sizes.
 
-A runtime decodes the file as v1 does (`strands_decider.vision.decode_image`). It refuses a file that fails to decode, with v1's `image could not be decoded`, and one whose decoded size is neither the header's nor its transpose (`strands_decider.core.check_decoded_size`). It resizes the pixels to the W × H of the decoded, oriented size with `strands_decider.core.resize_image`, Pillow's bicubic filter on the width and then on the height. That filter is cubic convolution with a = -0.5, widened by the downscale factor, with weights in 22-bit fixed point, and `spec_resize` in `tests/core_support.py` writes it in numpy. The runtime then runs the checkpoint's image processor with `do_resize=False`, checks that the processor counts N soft tokens, and puts the vision encoder's N vectors in place of the placeholders.
+A runtime decodes the file as v1 does (`strands_decider.vision.decode_image`). It refuses a file that fails to decode and one whose decoded size is neither the header's nor its transpose (`strands_decider.core.check_decoded_size`). It resizes the pixels to the W × H of the decoded, oriented size with `strands_decider.core.resize_image`, Pillow's bicubic filter on the width and then on the height. That filter is cubic convolution with a = -0.5, widened by the downscale factor, with weights in 22-bit fixed point, and `spec_resize` in `tests/core_support.py` writes it in numpy. The runtime then runs the checkpoint's image processor with `do_resize=False`, checks that the processor counts N soft tokens, and puts the vision encoder's N vectors in place of the placeholders.
 
 ### 3.4 Example
 
@@ -185,7 +185,7 @@ i < S:   j < S     the state sees the whole state, never a question
 i >= S:  j < L     a question sees the whole prompt
 ```
 
-The mask applies on every layer, sliding-window layers included, with no window, and positions are the token indices. Image placeholders are state tokens like any other. The state never sees a question, so its keys and values serve every question, and no question sees another. A runtime that keeps them across requests keys them on the state's ids and each image's sha256, in order (`RenderedImage.sha256`), and reuses them only when the whole state matches, since the state attends both ways.
+The mask applies on every layer, sliding-window layers included, with no window, and positions are the token indices. Image placeholders are state tokens like any other. No question sees another, and the state never sees a question, so its keys and values serve every question. A runtime that keeps them across requests keys them on the state's ids and each image's sha256, in order (`RenderedImage.sha256`), and reuses them only when the whole state matches, since the state attends both ways.
 
 ## 7. The readout
 
@@ -235,7 +235,7 @@ p = softmax(z[0:k])    float32, over the question's own k codes
 | `release`, the released model | `([A-Za-z0-9][A-Za-z0-9_.-]*/)?[A-Za-z0-9][A-Za-z0-9_.-]*` |
 | `source`, the public training code and recipe | `https://[!-~]+` |
 
-Validation is strict. A runtime reads `interface` first, since other decision-model formats use the same file names, then `format_version`. A missing or unknown field, a value of the wrong type and a `prompt` the runtime does not implement are errors. Integers have no fraction or exponent. `temperature` and `final_logit_softcapping` must be normal float32 values, and their quotient finite in float32. A runtime refuses, and never truncates, a prompt longer than `max_length_validated` unless its operator raises the limit. `tests/fixtures/core/decision_config.json` is an example.
+Validation is strict. A runtime reads `interface` first, since other decision-model formats use the same file names, then `format_version`. A missing or unknown field, a value of the wrong type and a `prompt` the runtime does not implement are errors. Integers have no fraction or exponent. `temperature` and `final_logit_softcapping` must be normal float32 values, and `final_logit_softcapping / temperature` finite in float32. A runtime refuses, and never truncates, a prompt longer than `max_length_validated` unless its operator raises the limit. `tests/fixtures/core/decision_config.json` is an example.
 
 ## 9. The checkpoint layout
 
@@ -243,7 +243,7 @@ A decision checkpoint is its base model's own multimodal checkpoint, with any fi
 
 | file | contents |
 | --- | --- |
-| `config.json` | The base's. Its `text_config.final_logit_softcapping`, or a top-level one, must equal `decision_config.json`'s. |
+| `config.json` | The base's. Any `final_logit_softcapping` it gives, under `text_config` or at the top level, must equal `decision_config.json`'s. |
 | `model.safetensors`, or shards with `model.safetensors.index.json` | The base's tensors in bf16, fine-tuning merged in. No adapter, and no `lm_head`, which Gemma 4 ties to the embedding. |
 | `processor_config.json` | The base's. Image requests need `patch_size` 16, `pooling_kernel_size` 3, `max_soft_tokens` 280 and `image_seq_length` 280 (`strands_decider.core.check_image_processor`). |
 | `tokenizer.json`, `tokenizer_config.json` | The base's, with no `chat_template`. |
