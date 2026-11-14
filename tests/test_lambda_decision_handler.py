@@ -461,7 +461,11 @@ def test_other_decision_configs_are_refused(load, tmp_path):
 
 
 @pytest.fixture
-def build_artifact():
+def build_artifact(monkeypatch):
+    # The script puts the checkout's src/ first on sys.path when it is loaded. A copy of sys.path
+    # is put back after the test, so that later tests read the installed distribution's metadata
+    # rather than an editable install's egg-info in src/ (which has no LICENSE).
+    monkeypatch.setattr(sys, "path", list(sys.path))
     spec = importlib.util.spec_from_file_location(
         "build_artifact", DECISION / "scripts" / "build_artifact.py"
     )

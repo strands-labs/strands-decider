@@ -21,6 +21,7 @@ import importlib
 import importlib.util
 import json
 import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -55,10 +56,15 @@ def result(tmp_path_factory):
             importlib.import_module(module)
         else:
             pytest.importorskip(module)
-    spec = importlib.util.spec_from_file_location("shim_check", SCRIPT)
-    shim_check = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(shim_check)
-    res = shim_check.run(Path(SRC), Path(LIB), tmp_path_factory.mktemp("shim"))
+    # The check puts the checkout's src/, llama.cpp's gguf-py and its own directory first on
+    # sys.path. A copy of sys.path is put back afterwards, so that later tests read the installed
+    # distribution's metadata rather than an editable install's egg-info in src/.
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(sys, "path", list(sys.path))
+        spec = importlib.util.spec_from_file_location("shim_check", SCRIPT)
+        shim_check = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(shim_check)
+        res = shim_check.run(Path(SRC), Path(LIB), tmp_path_factory.mktemp("shim"))
     print(
         json.dumps({k: v for k, v in res.items() if k != "golden_answers"}, indent=1, default=str)
     )
