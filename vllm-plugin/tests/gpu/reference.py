@@ -6,7 +6,7 @@
 ``--requests``: JSON Lines of System One requests (``state``, ``questions``, optional ``images`` as base64). Each is
 rendered with the core library (``strands_decider.core.render``) and the checkpoint's prompt template. Each image is
 decoded as v1 decodes it, resized to the specification's W x H with Pillow's bicubic resampling and prepared by the
-checkpoint's image processor with its resize off (section 11.1): ``Gemma4ImageProcessorPil``, or the 12B's
+checkpoint's image processor with its resize off (section 3.3): ``Gemma4ImageProcessorPil``, or the 12B's
 ``Gemma4UnifiedImageProcessor``. ``--resize torchvision`` instead lets transformers' torchvision backend resize the
 decoded image itself, as stock vLLM would; it measures that difference and is not the reference.
 
@@ -39,7 +39,7 @@ IMAGE_FORMATS = ("PNG", "JPEG", "WEBP", "GIF")
 
 
 def spec_size(w: int, h: int) -> tuple[int, int]:
-    """Section 3.2's W and H."""
+    """Section 3.3's W and H."""
     f = math.sqrt(645120 / (h * w))
     H = math.floor((f * h) / 48) * 48
     W = math.floor((f * w) / 48) * 48
@@ -51,7 +51,7 @@ def spec_size(w: int, h: int) -> tuple[int, int]:
 
 
 def bicubic(im, width, height):
-    """Section 11.1's resize, for a core library without ``resize_image`` (which is the same): Pillow's bicubic
+    """Section 3.3's resize, for a core library without ``resize_image`` (which is the same): Pillow's bicubic
     resampling, the width's pass and then the height's, each left out when its size does not change. Two calls,
     because Pillow 13 does the height's pass first in some downscales."""
     if im.size[0] != width:
@@ -62,7 +62,7 @@ def bicubic(im, width, height):
 
 
 def decode(data: bytes):
-    """v1's decode: first frame, EXIF orientation, transparency onto white, RGB (specification, section 11.1)."""
+    """v1's decode: first frame, EXIF orientation, transparency onto white, RGB (specification, section 3.3)."""
     from PIL import Image, ImageOps
 
     img = Image.open(io.BytesIO(data), formats=IMAGE_FORMATS)

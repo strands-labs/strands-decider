@@ -1,13 +1,13 @@
 """Image preprocessing for the plugin's multimodal architectures: the specification's pixels, and placeholder counts
 that match them.
 
-The specification (section 11.1) resizes a decoded image to its W x H with Pillow's bicubic resampling, then runs the
+The specification (section 3.3) resizes a decoded image to its W x H with Pillow's bicubic resampling, then runs the
 checkpoint's image processor with its own resize off (``do_resize=False``). The plugin's server does the resize and
 passes ``do_resize=False`` with each image request. Two things in vLLM 0.33 would not follow:
 
 - **The placeholder count.** vLLM expands each ``<|image|>`` into N placeholders by its own formula on the image's
   size (``Gemma4ProcessingInfo._compute_num_soft_tokens``), which assumes the processor will resize. On an image
-  already at W x H that formula is not N for 1,787 of the 3,200 sizes of the core's soft-token table, and the encoder's
+  already at W x H that formula is not N for 1,827 of the 4,906 sizes of the core's soft-token table, and the encoder's
   output would then not fit the placeholders. :class:`DeciderMultiModalProcessor` counts one placeholder per 48 x 48
   pixels (patch size times pooling kernel) when the request turns the resize off, which is what the processor
   produces, and refuses an image whose sides are not multiples of 48. With the resize on (vLLM's own startup

@@ -8,7 +8,7 @@ its choosing, which vLLM then uses as the image's cache key. This server takes v
    template. Each image becomes ``<|image>``, N ``<|image|>`` and ``<image|>`` first in the state, and S counts them.
 2. It decodes each image as v1 does (first frame, EXIF orientation, transparency onto white, RGB) and resizes it to
    the specification's W x H, computed from the decoded size, with the core's ``resize_image``: Pillow's bicubic
-   resampling, the width's pass and then the height's, the reference resize for every size (section 11.1).
+   resampling, the width's pass and then the height's, the reference resize for every size (section 3.3).
    vLLM's processor then runs with its own resize off (``do_resize=False``), so the pixels the encoder gets are the
    reference's; W and H are multiples of 48, and the processor's count of soft tokens is N.
 3. For each question it sends vLLM the prompt with each image's line collapsed to the single ``<|image|>`` that vLLM's
@@ -29,10 +29,11 @@ its files dropped, so buffered bodies are bounded in aggregate. uvicorn answers 
 connections.
 
 Endpoints: ``POST /v1/systemone`` and ``POST /invocations`` (the same handler, for SageMaker), ``GET /ping`` and
-``GET /health``. A request the server, the core library or the engine refuses gets HTTP 400 with
-``{"detail": "..."}``; any other failure is logged and gets HTTP 500 with only an error id. The engine keeps serving
-either way. The server has no authentication and binds 127.0.0.1 unless told otherwise: expose it beyond the machine
-only behind the deployment's own authentication, such as SageMaker's IAM-signed endpoint or an authenticating proxy.
+``GET /health``. A request the server, the core library or the engine refuses gets HTTP 422 with
+``{"detail": "..."}``, as v1's server answers refusals; any other failure is logged and gets HTTP 500 with only an
+error id. The engine keeps serving either way. The server has no authentication and binds 127.0.0.1 unless told
+otherwise: expose it beyond the machine only behind the deployment's own authentication, such as SageMaker's IAM-signed
+endpoint or an authenticating proxy.
 """
 
 from __future__ import annotations
@@ -61,7 +62,7 @@ from . import ARCH_FOR_BASE, PREFIX_END_KEY, SERVER_CONFIG_KEY, __version__, log
 
 #: Gemma 4's image placeholder, which vLLM's processor expands.
 IMAGE_SOFT = "<|image|>"
-#: The side, in pixels, of one soft token's patch group (pooling_kernel_size x patch_size, specification 3.2).
+#: The side, in pixels, of one soft token's patch group (pooling_kernel_size x patch_size, specification 3.3).
 SOFT_TOKEN_SIDE = 48
 IMAGE_FORMATS = ("PNG", "JPEG", "WEBP", "GIF")
 MAX_IMAGES = 4
@@ -70,6 +71,7 @@ LOOPBACK = ("127.0.0.1", "::1", "localhost")
 CORE_REQUIREMENT = "strands-decider>=0.3.1.dev0,<0.5"
 #: What the server uses from the core library, all required at startup.
 CORE_NAMES = (
+    "parse_request",
     "render",
     "read",
     "DecisionConfig",
@@ -80,7 +82,8 @@ CORE_NAMES = (
 )
 
 #: The default body limit is four image files of IMAGE_FILE_BYTES each, base64-encoded, plus TEXT_BYTES of text and
-#: JSON (93 MiB). 16 MiB holds a photo of the core's largest size (4,096 x 4,096 pixels) as JPEG or WebP.
+#: JSON (93 MiB). 16 MiB, the core's cap on an image file (MAX_IMAGE_BYTES), holds a photo of its largest size
+#: (4,096 x 4,096 pixels) as JPEG or WebP.
 IMAGE_FILE_BYTES = 16 * 2**20
 TEXT_BYTES = 8 * 2**20
 #: Bodies up to this size are read at once. A larger one first reserves its size from the server's budget of
@@ -104,7 +107,7 @@ def default_max_body(takes_images: bool) -> int:
 
 
 class Refused(ValueError):
-    """A request the server will not answer (HTTP 400)."""
+    """A request the server will not answer (HTTP 422)."""
 
 
 class Mismatch(RuntimeError):
@@ -120,13 +123,15 @@ def require_core() -> SimpleNamespace:
     no copy of the core's checks or its resize."""
     try:
         from strands_decider import core
-        from strands_decider.core.request import has_images
     except ImportError as e:
         raise SystemExit(
             f"strands-decider-vllm serve needs the core library, strands_decider.core ({CORE_REQUIREMENT}): "
-            f"install it with pip install 'strands-decider-vllm[serve]' ({e})"
+            f"install it, on Python 3.11 or later, with pip install 'strands-decider-vllm[serve]' ({e})"
         ) from e
     missing = [n for n in CORE_NAMES if not hasattr(core, n)]
+    if "parse_request" not in missing and not hasattr(core, "Request"):
+        # The pydantic request, whose images parse_request leaves undecoded.
+        missing.append("Request")
     if "read" not in missing and "stage" not in inspect.signature(core.read).parameters:
         missing.append("read(stage=)")
     if "check_tokenizer" not in missing and (
@@ -138,7 +143,7 @@ def require_core() -> SimpleNamespace:
             f"strands-decider-vllm serve: the installed core library has no {', '.join(missing)}; the server "
             f"needs {CORE_REQUIREMENT} at PR #129's head or later"
         )
-    return SimpleNamespace(**{n: getattr(core, n) for n in CORE_NAMES}, has_images=has_images)
+    return SimpleNamespace(**{n: getattr(core, n) for n in CORE_NAMES})
 
 
 # --- the checkpoint -------------------------------------------------------------------------------------------------
@@ -249,7 +254,7 @@ def decode_image(data: bytes) -> Any:
 
 
 def prepare_image(data: bytes, tokens: int, target: Any, resize: Any) -> Any:
-    """The decoded image, resized to W x H (specification, section 11.1). ``target(width, height)`` gives W and H
+    """The decoded image, resized to W x H (specification, section 3.3). ``target(width, height)`` gives W and H
     from the decoded size, after the orientation: the core's ``check_decoded_size`` for this image, which refuses a
     decoded size that is neither the header's nor its transpose. ``resize`` is the core's ``resize_image``: Pillow's
     bicubic resampling, the width's pass and then the height's, the same pixels on every Pillow version."""
@@ -319,7 +324,7 @@ def parse_body(raw: bytes | bytearray) -> dict:
 
 
 def refusal(e: BaseException) -> bool:
-    """Whether ``e`` refuses the request (HTTP 400): the server's or the core library's refusal (Refused), or the
+    """Whether ``e`` refuses the request (HTTP 422): the server's or the core library's refusal (Refused), or the
     engine's (vLLM's VLLMValidationError, which AsyncLLM.generate raises for a request its input processing or its
     engine core refuses). Anything else is a server fault."""
     from vllm.exceptions import VLLMValidationError
@@ -468,7 +473,13 @@ class Decider:
             body = parse_body(body)
         elif not isinstance(body, dict):
             raise Refused(f"the body must be a JSON object, not {type(body).__name__}")
-        if self.core.has_images(body):
+        # The request's own checks first, then images the checkpoint cannot take, before any is decoded, then the
+        # images and the prompt's length as the core renders it (docs/architecture.md, The core's runtime interface).
+        try:
+            request = self.core.parse_request(body)
+        except ValueError as e:  # the core library refuses the request
+            raise Refused(str(e)) from e
+        if request.images:
             if not self.takes_images:
                 raise Refused(
                     "this checkpoint does not take images: its decision_config.json inputs are "
@@ -478,9 +489,9 @@ class Decider:
                 raise Refused(f"image requests are refused: {self.image_problem}")
         try:
             return self.core.render(
-                body, self.tokenizer, self.config.prompt, max_length=self.max_length
+                request, self.tokenizer, self.config.prompt, max_length=self.max_length
             )
-        except ValueError as e:  # the core library refuses the request
+        except ValueError as e:  # the core library refuses an image or the prompt's length
             raise Refused(str(e)) from e
 
     def prepare_images(self, rendered: Any) -> list[Any]:
@@ -713,7 +724,7 @@ def build_app(decider_factory: Any) -> Any:
             return JSONResponse({"detail": "the client disconnected"}, status_code=400)
         except Exception as e:
             if refusal(e):
-                raise HTTPException(status_code=400, detail=str(e)) from e
+                raise HTTPException(status_code=422, detail=str(e)) from e
             error_id = uuid.uuid4().hex[:16]
             logger.exception("strands-decider: request failed (error id %s)", error_id)
             return JSONResponse(

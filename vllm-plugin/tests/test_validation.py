@@ -69,7 +69,7 @@ def test_top_k_that_cannot_drop_a_code_passes(top_k):
 
 @pytest.mark.parametrize("logprobs", [N_CODES, -1])
 def test_every_code_without_allowed_token_ids_passes(logprobs):
-    # The specification's other request form: all 255 codes' logprobs, renormalized over the question's.
+    # The other request form docs/architecture.md describes: all 255 codes' logprobs, renormalized over the question's.
     check_sampling(sampling(allowed_token_ids=None, logprobs=logprobs))
 
 
