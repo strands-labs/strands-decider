@@ -19,8 +19,8 @@ images the vision encoder and the pixel preprocessing; `evaluate` joins the piec
 checked and counted from their file headers, which Pillow reads (`decode_image`,
 `soft_tokens`), never decoded here; `resize_image` is the spec's resize for a runtime's
 decoded pixels. Pillow is imported only for an image, so the core imports without it.
-`agreement` measures a runtime's probabilities against the reference's (docs/spec.md, Golden
-vectors and conformance). v1's engines are untouched: the core sits beside them.
+`agreement` measures a runtime's probabilities against the reference's (docs/spec.md,
+section 10). v1's engines are untouched: the core sits beside them.
 """
 
 from __future__ import annotations

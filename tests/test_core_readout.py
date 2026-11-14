@@ -1,4 +1,4 @@
-"""The readout (docs/spec.md, The readout) on small arrays, and the runtime glue.
+"""The readout (docs/spec.md, section 7) on small arrays, and the runtime glue.
 
 Torch-free: numpy, tokenizers and pydantic, and Pillow for the image requests. Nothing here
 needs Gemma 4's tokenizer; the end-to-end test uses a toy one. The precision regime (a bf16

@@ -1,4 +1,4 @@
-"""`decision_config.json` (docs/spec.md, The decision_config.json schema): strict, with
+"""`decision_config.json` (docs/spec.md, section 8): strict, with
 an `interface` discriminator, the inputs a checkpoint takes, and a required provenance in
 public formats: a Hub id, a commit, a model name and an https URL. Keeping private paths out
 of a released checkpoint is the release export's job, not the loader's. Torch-free; the

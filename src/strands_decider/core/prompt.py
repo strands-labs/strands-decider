@@ -332,8 +332,8 @@ def _refuse_plain_added_tokens(tok: Tokenizer) -> None:
     if plain:
         raise ValueError(
             f"the tokenizer has added tokens that are not special, {plain[:5]}: request text "
-            "would be matched to them, which the interface forbids (docs/spec.md, From text "
-            "to token ids)"
+            "would be matched to them, which the interface forbids (docs/spec.md, section "
+            "3.2)"
         )
 
 

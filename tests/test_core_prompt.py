@@ -59,9 +59,9 @@ SPECIAL_TOKENS = (
 )  # fmt: skip
 EVERY_SPECIAL = "".join(SPECIAL_TOKENS)
 # Whitespace: Python's str.isspace, 29 code points on every Python from 3.10. The template
-# strips it from the ends of request text and collapses it in an option (docs/spec.md, 3.1).
-# The whitespace_edges golden pins it.
-SPEC_WHITESPACE = (
+# strips it from the ends of request text and collapses it in an option (docs/spec.md, section
+# 3.1); which characters it is, render and the whitespace_edges golden fix.
+WHITESPACE = (
     "\t\n\x0b\x0c\r"  # U+0009 to U+000D
     "\x1c\x1d\x1e\x1f"  # U+001C to U+001F
     " \x85\xa0\u1680"  # U+0020, U+0085, U+00A0, U+1680
@@ -337,11 +337,12 @@ CASES: dict[str, dict] = {
         },
     },
 }
-# Requests given as JSON text, for the reading half of the JSON rules (docs/spec.md, Rendering
-# content): a number with an exponent or a fraction is a double (1e3 renders 1000.0), -0 is the
-# integer 0, more digits than a double holds round to the nearest double, a number too small
-# for one is 0.0, a key given twice keeps its last value at its first place, and escapes
-# (an escaped slash, a surrogate pair) are read. The goldens publish these bodies as text.
+# Requests given as JSON text, for the reading half of render's JSON rules, which the goldens
+# make normative (docs/spec.md): a number with an exponent or a fraction is a double (1e3
+# renders 1000.0), -0 is the integer 0, more digits than a double holds round to the nearest
+# double, a number too small for one is 0.0, a key given twice keeps its last value at its
+# first place, and escapes (an escaped slash, a surrogate pair) are read. The goldens publish
+# these bodies as text.
 BODIES = {
     "json_reading": (
         '{"state": {"e3": 1e3, "E3": 1E3, "neg_zero": -0, "neg_zero_float": -0.0, "frac": 1.10, '
@@ -470,8 +471,8 @@ def test_golden_text(goldens, key):
 
 @pytest.mark.parametrize("key", GOLDEN_IDS)
 def test_golden_ids(goldens, key):
-    """Exactly the goldens' ids, with any of the four Gemma 4 tokenizer.json files docs/spec.md
-    lists: every golden was measured to give the same ids with all four."""
+    """Exactly the goldens' ids, with any of the four Gemma 4 tokenizer.json files in
+    GEMMA4_TOKENIZERS: every golden was measured to give the same ids with all four."""
     tok = gemma4_tokenizer()
     g = goldens[key]
     assert _golden_case(g["case"], g["variant"], tok) == g
@@ -556,7 +557,7 @@ def test_structured_content_follows_v1_render_content():
 # ---- JSON and whitespace, by rules written out apart from the json module ---------------
 
 
-def _spec_float(x: float) -> str:
+def _written_float(x: float) -> str:
     """A double as the template writes it, built from a rule rather than from repr: the
     shortest digits that read back as the same double; positional with at least one digit
     after the point when its first digit's decimal exponent e is in [-4, 16), else
@@ -591,13 +592,13 @@ _ESCAPES = {
 }
 
 
-def _spec_string(s: str) -> str:
+def _written_string(s: str) -> str:
     return (
         '"' + "".join(_ESCAPES.get(c, f"\\u{ord(c):04x}" if ord(c) < 0x20 else c) for c in s) + '"'
     )
 
 
-def _spec_json(v, level: int = 0) -> str:
+def _written_json(v, level: int = 0) -> str:
     """JSON as the template writes it, written from rules, independently of the json module."""
     pad, inner = "  " * level, "  " * (level + 1)
     if v is None:
@@ -607,15 +608,17 @@ def _spec_json(v, level: int = 0) -> str:
     if isinstance(v, int):
         return str(v)
     if isinstance(v, float):
-        return _spec_float(v)
+        return _written_float(v)
     if isinstance(v, str):
-        return _spec_string(v)
+        return _written_string(v)
     if not v:
         return "{}" if isinstance(v, dict) else "[]"
     if isinstance(v, dict):
-        items = [f"{inner}{_spec_string(k)}: {_spec_json(x, level + 1)}" for k, x in v.items()]
+        items = [
+            f"{inner}{_written_string(k)}: {_written_json(x, level + 1)}" for k, x in v.items()
+        ]
         return "{\n" + ",\n".join(items) + "\n" + pad + "}"
-    return "[\n" + ",\n".join(inner + _spec_json(x, level + 1) for x in v) + "\n" + pad + "]"
+    return "[\n" + ",\n".join(inner + _written_json(x, level + 1) for x in v) + "\n" + pad + "]"
 
 
 def _random_json(rng: random.Random, depth: int = 0):
@@ -690,9 +693,9 @@ def test_json_renders_by_written_out_rules():
     rng = random.Random(31)
     for _ in range(3000):
         v = {"k": _random_json(rng)} if rng.random() < 0.5 else [_random_json(rng)]
-        assert render_content(v) == _spec_json(v), v
+        assert render_content(v) == _written_json(v), v
     for x in (1e-4, 1e-5, 1e15, 1e16, 1e21, 123456789.0, 1.5e-7, -2.5e300, 0.30000000000000004):
-        assert render_content([x]) == f"[\n  {_spec_float(x)}\n]" == f"[\n  {x!r}\n]"
+        assert render_content([x]) == f"[\n  {_written_float(x)}\n]" == f"[\n  {x!r}\n]"
     # A JSON number with a fraction or an exponent is a double; without one, an integer.
     assert (
         render_content(json.loads("[1e3, 1.0, -0, 100, 1E-2]"))
@@ -709,15 +712,15 @@ def test_whitespace_is_pythons_29_code_points():
     are not whitespace, are kept."""
     from strands_decider.core.prompt import DESCRIPTION_SEPARATOR, render_content
 
-    assert len(SPEC_WHITESPACE) == 29 == len(set(SPEC_WHITESPACE))
-    assert set(SPEC_WHITESPACE) == {chr(c) for c in range(sys.maxunicode + 1) if chr(c).isspace()}
-    run = re.compile(f"[{re.escape(SPEC_WHITESPACE)}]+")
+    assert len(WHITESPACE) == 29 == len(set(WHITESPACE))
+    assert set(WHITESPACE) == {chr(c) for c in range(sys.maxunicode + 1) if chr(c).isspace()}
+    run = re.compile(f"[{re.escape(WHITESPACE)}]+")
     rng = random.Random(9)
-    pool = [*SPEC_WHITESPACE, "a", "b", "\u200b", "\ufeff", "é"]
+    pool = [*WHITESPACE, "a", "b", "\u200b", "\ufeff", "é"]
     for _ in range(2000):
         t = "".join(rng.choice(pool) for _ in range(rng.randint(0, 12)))
-        assert render_content(t) == t.strip(SPEC_WHITESPACE), ascii(t)
-        name = run.sub(" ", t.strip(SPEC_WHITESPACE))
+        assert render_content(t) == t.strip(WHITESPACE), ascii(t)
+        name = run.sub(" ", t.strip(WHITESPACE))
         criteria = {t: None, "other": None}
         req = {"state": "s", "questions": {"q": {"instructions": "x", "criteria": criteria}}}
         _, parts = render_text(req, PLAIN)
@@ -1710,7 +1713,7 @@ def test_a_hand_over_whose_code_check_fails_changes_nothing(monkeypatch):
 
 # sha256 of each Gemma 4 base model's chat_template.jinja seen, and what its generation prompt
 # adds after `<|turn>model\n` with thinking off: E2B and E4B nothing; 12B, 26B-A4B and 31B an
-# empty thought channel, which strands-chat leaves out (docs/spec.md, The two variants).
+# empty thought channel, which strands-chat leaves out (docs/spec.md, section 3.1).
 # The templates show where strands-chat comes from; the core never renders with them, and a
 # decision checkpoint ships none.
 EMPTY_THOUGHT = "<|channel>thought\n<channel|>"
@@ -1769,8 +1772,8 @@ def test_chat_ids_match_hugging_face_apply_chat_template():
     `apply_chat_template(..., tokenize=True)` gives for the body as one user turn, with
     each template given, for requests without special-token strings. (With them HF's one
     call matches them as control tokens, which the spec forbids. A runtime must not render
-    these prompts with a chat template in any case, and a decision checkpoint ships none:
-    docs/spec.md sections 3.5 and 9.) With the 12B, 26B-A4B and 31B templates, HF's ids end
+    these prompts with a chat template in any case, and a decision checkpoint ships none,
+    docs/spec.md sections 3.1 and 9.) With the 12B, 26B-A4B and 31B templates, HF's ids end
     with the empty thought channel, which strands-chat leaves out."""
     pytest.importorskip("jinja2")
     transformers = pytest.importorskip("transformers")
@@ -1888,7 +1891,7 @@ def test_render_content_matches_v1():
     from strands_decider.prompting import render_content as prompting_render_content
 
     values = [None, "", "  x \n", {"b": 1, "a": ["é", {"c": None}]}, [], [1, "two"], {}]
-    values += [f"{w}a{w}b{w}" for w in SPEC_WHITESPACE] + ["\ufeffa\u200b", SPEC_WHITESPACE + "x"]
+    values += [f"{w}a{w}b{w}" for w in WHITESPACE] + ["\ufeffa\u200b", WHITESPACE + "x"]
     values += [CASES[n]["state"] for n in ("json_rendering", "whitespace_edges", "json_reading")]
     values += [
         [x] for x in (1.0, -0.0, 1e-05, 1e16, 0.1 + 0.2, 5e-324, 1.7976931348623157e308, 10**30)

@@ -1,4 +1,4 @@
-"""The 255 answer codes of the decision interface (docs/spec.md, The codes).
+"""The 255 answer codes of the decision interface (docs/spec.md, section 2).
 
 A question with k options binds its options, in rendered order, to the first k codes. The
 readout has one row per code, so a code means "the option listed with this code in this
