@@ -321,8 +321,8 @@ or `--dtype bfloat16` chooses; the first line the command prints names the devic
 request may carry images when the checkpoint's `decision_config.json` lists `image` in
 `inputs`; `--vision` is not needed, and warns. Images need the `vision` extra
 (`pip install "strands-decider[vision]"`, Pillow and torchvision; the 12B's image processor
-exists only for torchvision). A request whose `audio` field is a non-empty list is refused with
-422, since audio is not part of the interface; other fields the interface does not define are
+exists only for torchvision). A request whose `audio` field is anything but null is refused
+with 422, since the interface takes no audio; other fields the interface does not define are
 ignored, as v1 ignores them. `--no-prefix-cache` runs one full pass per question (the spec's
 reference on CUDA in bf16); `--max-batch` and `--max-batch-tokens` bound the questions of one
 pass over a state. The server answers `--max-concurrency` requests at a time on the model

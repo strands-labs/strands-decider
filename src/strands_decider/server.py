@@ -13,9 +13,9 @@ import threading
 import time
 import warnings
 from collections.abc import AsyncIterator, Callable
-from typing import Any
+from typing import Annotated, Any
 
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Body, Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from . import __version__
@@ -202,6 +202,13 @@ def create_app(
         engine = build()
         app.state.engine = engine
         try:
+            if isinstance(engine, DecisionEngine) and not decision:
+                # The routes below were chosen for v1's request model, which would drop `audio`
+                # and require a `state`: a decision engine is served from its checkpoint's path.
+                raise TypeError(
+                    "build_engine gave a DecisionEngine, but the server takes v1's requests: "
+                    "serve a decision checkpoint by its path, without build_engine"
+                )
             # Listener binds only after lifespan startup returns, so /health (/ping)
             # fails until this is done.
             if warmup:
@@ -233,14 +240,6 @@ def create_app(
         engine: SystemOneEngine = request.app.state.engine
         return engine
 
-    async def decision_body(request: Request) -> Any:
-        """The JSON the client sent, for a decision engine, which checks it with the core:
-        v1's request model drops fields it does not know, `audio` among them, which the
-        interface refuses. None for v1 engines, which take the parsed request as before."""
-        if isinstance(request.app.state.engine, DecisionEngine):
-            return await request.json()
-        return None
-
     # SageMaker and AgentCore Runtime call /ping and /invocations; each is the same
     # handler as the path above it. /ping is async: a sync handler would wait for a free
     # thread in the pool that /invocations fills (40 threads), and SageMaker allows a
@@ -262,20 +261,14 @@ def create_app(
             "vision": vision,
         }
 
-    @app.post("/v1/systemone", response_model=SystemOneResponse)
-    @app.post("/invocations", response_model=SystemOneResponse)
-    def systemone(
-        request: SystemOneRequest,
-        eng: SystemOneEngine = Depends(get_engine),
-        body: Any = Depends(decision_body),
-    ) -> JSONResponse:
+    def answer(eng: SystemOneEngine, request: Any) -> JSONResponse:
         started = time.perf_counter()
         # A decision engine bounds its own concurrency and its backend takes turns on MPS, so
         # its refusals never wait behind the server's lock.
         lock = contextlib.nullcontext() if isinstance(eng, DecisionEngine) else guard
         try:
             with lock:
-                response = eng.evaluate(request if body is None else body)
+                response = eng.evaluate(request)
         except EngineBusy as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
         except ValueError as exc:
@@ -285,6 +278,26 @@ def create_app(
         payload = response.model_dump()
         payload["latency_ms"] = round(elapsed_ms, 2)
         return JSONResponse(content=payload)
+
+    if decision:
+        # A decision engine takes the JSON the client sent and checks it with the core
+        # (docs/spec.md, section 1). v1's request model would drop `audio`, which the interface
+        # refuses, and require a `state`, which the interface does not.
+        @app.post("/v1/systemone", response_model=SystemOneResponse)
+        @app.post("/invocations", response_model=SystemOneResponse)
+        def systemone_decision(
+            body: Annotated[Any, Body()], eng: SystemOneEngine = Depends(get_engine)
+        ) -> JSONResponse:
+            return answer(eng, body)
+
+    else:
+
+        @app.post("/v1/systemone", response_model=SystemOneResponse)
+        @app.post("/invocations", response_model=SystemOneResponse)
+        def systemone(
+            request: SystemOneRequest, eng: SystemOneEngine = Depends(get_engine)
+        ) -> JSONResponse:
+            return answer(eng, request)
 
     return app
 

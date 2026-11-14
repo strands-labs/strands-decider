@@ -196,13 +196,15 @@ def test_serve_takes_a_dtype(ckpt):
 
 
 def test_serve_refusals_over_http(ckpt, tmp_path):
-    """Through create_app and HTTP: audio, five images, and images on a text-only checkpoint
-    are each refused with 422 and the interface's message."""
+    """Through create_app and HTTP: any audio but null, five images, and images on a text-only
+    checkpoint are each refused with 422 and the interface's message."""
     img = image_b64(64, 48)
     with TestClient(server.create_app(str(ckpt), device="cpu", warmup=False)) as client:
         r = client.post("/v1/systemone", json={**request(), "audio": ["UklGRiQAAABXQVZF"]})
         assert r.status_code == 422 and r.json()["detail"] == "audio input is not supported"
-        assert client.post("/v1/systemone", json={**request(), "audio": []}).status_code == 200
+        r = client.post("/v1/systemone", json={**request(), "audio": []})
+        assert r.status_code == 422 and r.json()["detail"] == "audio input is not supported"
+        assert client.post("/v1/systemone", json={**request(), "audio": None}).status_code == 200
         r = client.post("/v1/systemone", json=request([img] * 5))
         assert (
             r.status_code == 422 and r.json()["detail"] == "5 images; this server takes at most 4"
@@ -232,6 +234,28 @@ class _StubBackend:
 
         self.calls.append((len(state), len(questions), len(images)))
         return [np.full(255, 1 / 255) for _ in questions]
+
+
+def test_serve_hands_the_core_the_json_the_client_sent(ckpt):
+    """A decision checkpoint's request is checked by the core alone, not by v1's request model
+    as well: one without a state is answered as one with an empty state (docs/spec.md,
+    section 1), where v1's model requires a state, and a JSON array gets the core's message.
+    A decision engine handed to create_app through build_engine is refused at startup, since
+    the routes then take v1's request model."""
+    body = request()
+    with TestClient(server.create_app(str(ckpt), device="cpu", warmup=False)) as client:
+        empty = client.post("/v1/systemone", json={**body, "state": ""})
+        del body["state"]
+        r = client.post("/v1/systemone", json=body)
+        assert r.status_code == 200, r.text
+        assert r.json()["answers"] == empty.json()["answers"]
+        r = client.post("/v1/systemone", json=[body])
+        assert r.status_code == 422 and r.json()["detail"] == "a request must be a JSON object"
+    engine = load_decision_engine(str(ckpt), device="cpu")
+    app = server.create_app("x", device="cpu", warmup=False, build_engine=lambda: engine)
+    with pytest.raises(TypeError, match="build_engine gave a DecisionEngine"):
+        with TestClient(app):
+            pass
 
 
 def test_another_runtime_plugs_in_by_device(ckpt, monkeypatch):

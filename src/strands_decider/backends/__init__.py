@@ -1,2 +1,2 @@
-"""Runtimes for decision checkpoints (docs/spec.md, section 11): each implements
-`strands_decider.core.Backend` for one framework."""
+"""Runtimes for decision checkpoints (docs/architecture.md, The core's runtime interface): each
+implements `strands_decider.core.Backend` for one framework."""

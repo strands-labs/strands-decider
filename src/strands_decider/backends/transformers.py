@@ -1,6 +1,6 @@
 """The transformers backend: decision checkpoints on PyTorch, on CPU, CUDA or Apple's MPS.
 
-It is the reference runtime of docs/spec.md (sections 10 and 11), the PyTorch model behind
+It is the reference runtime of docs/spec.md (section 10), the PyTorch model behind
 `strands_decider.core.evaluate`, and implements the core's `Backend`: given a state's token
 ids, its images with their spans, and each question's ids, it returns each question's final-norm hidden state at its last token
 (`outputs = "hidden"`).
@@ -9,7 +9,7 @@ Loading (section 9). A decision checkpoint is the base model's own multimodal ch
 loaded with transformers' class for it: `Gemma4ForConditionalGeneration` for E2B, E4B, 26B-A4B
 and 31B, `Gemma4UnifiedForConditionalGeneration` for the 12B. `readout.safetensors` and
 `decision_config.json` sit beside it, the latter validated by the core's `DecisionConfig`. The
-audio encoder is not built: audio is not part of the interface (section 12), and transformers'
+audio encoder is not built: the interface refuses audio (section 1), and transformers'
 audio tower has no SDPA path. A checkpoint made before that layout, a bare `Gemma4TextModel`
 whose `decision_config.json` predates `interface` and `inputs`, loads as text only, with a
 warning for each missing field. It names no prompt, so it runs on token ids rendered elsewhere;
@@ -32,7 +32,7 @@ tests/test_backend_transformers.py checks that the two agree.
 The readout (section 7.1). Rows are float32, which holds a bf16 decoder's values exactly; the
 core's `Readout` does the bf16 GEMM and then the soft-cap and the temperature in float32.
 
-Images (section 11.1). Each file is decoded as v1 decodes it (`vision.decode_image`), its
+Images (section 3.3). Each file is decoded as v1 decodes it (`vision.decode_image`), its
 decoded size checked against its header (`check_decoded_size`), resized to the size the image
 processor would choose for the decoded, oriented size by the spec's bicubic resize
 (`resize_image`: the width's pass, then the height's), and given to the checkpoint's image
@@ -69,6 +69,7 @@ from ..core import (
     CODES,
     CONTROL_TOKEN_IDS,
     HIDDEN,
+    NO_VISION,
     DecisionConfig,
     Readout,
     RenderedImage,
@@ -84,7 +85,6 @@ from ..core.images import (
     IMAGE_SOFT,
 )
 from ..core.readout import MODEL_CONFIG_FILE, READOUT_FILE, load_safetensors
-from ..core.request import NO_VISION
 from ..refusals import RequestRefused
 
 if TYPE_CHECKING:
@@ -102,10 +102,10 @@ MODEL_TYPES = {"gemma4": (MULTIMODAL, False), "gemma4_unified": (MULTIMODAL, Tru
 DECODER_MODEL_TYPES = {"gemma4_text": False, "gemma4_unified_text": True}
 PROCESSOR_FILE = "processor_config.json"
 TOKENIZER_FILE = "tokenizer.json"
-# The image processor every Gemma 4 base names (section 9), by checkpoint class.
+# The image processor every Gemma 4 base names in its processor_config.json, by checkpoint class.
 IMAGE_PROCESSOR_TYPES = {False: "Gemma4ImageProcessor", True: "Gemma4UnifiedImageProcessor"}
-# Gemma 4's media placeholders (section 3.6, and the bases' config.json): image, audio and
-# video. A bare decoder's config does not carry them.
+# Gemma 4's media placeholders (the bases' config.json): image, audio and video. A bare
+# decoder's config does not carry them.
 MEDIA_TOKEN_IDS = (258880, 258881, 258884)
 
 # The dtype each device runs in, unless the caller names one. CPU: float32, since bf16 is 3 to
@@ -295,7 +295,7 @@ def image_processor_problem(processor_config: Any, unified: bool) -> str | None:
     """Why images cannot be served with this `processor_config.json`, or None. The soft-token
     count N depends on the processor's patch size, pooling kernel and soft-token budget, so a
     processor with other values would put a different number of vectors where the prompt has
-    N placeholders (docs/spec.md, sections 3.2 and 9)."""
+    N placeholders (docs/spec.md, sections 3.3 and 9)."""
     if not isinstance(processor_config, dict):
         return f"the checkpoint has no {PROCESSOR_FILE}, so image requests are refused"
     ip = processor_config.get("image_processor")
@@ -334,7 +334,7 @@ def decode(image: RenderedImage) -> Image.Image:
 
 
 def resize(image: RenderedImage, img: Image.Image) -> Image.Image:
-    """The decoded `img` of `image` resized as docs/spec.md section 11.1 says: to the size
+    """The decoded `img` of `image` resized as docs/spec.md section 3.3 says: to the size
     the processor would choose for the decoded, oriented size (which must be the header's or
     its transpose: `check_decoded_size`), by the spec's bicubic resize (`resize_image`, the
     width's pass, then the height's, the same on every Pillow)."""
@@ -645,7 +645,7 @@ class TransformersBackend:
     # ---- images -------------------------------------------------------------------------
 
     def prepare_pixels(self, images: Sequence[RenderedImage]) -> dict[str, torch.Tensor]:
-        """The vision encoder's inputs for `images` (section 11.1), on the device: each file
+        """The vision encoder's inputs for `images` (section 3.3), on the device: each file
         decoded as v1 decodes it, its decoded size checked against its header, resized by the
         spec's bicubic resize (`resize` here, the core's `resize_image`), then through the
         checkpoint's image processor with its own resize off. Checks that the processor counts

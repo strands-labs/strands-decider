@@ -8,10 +8,10 @@ checkpoint (section 8: the interface field, never the file names, tells it apart
 `DecisionEngine` answers a v1 request with the core: `strands_decider.core.evaluate` renders
 it with the checkpoint's prompt, a backend runs the decoder, and the core reads the answers.
 It takes the request as the JSON the client sent, so that fields v1's request model does not
-know reach the core's checks: a non-empty `audio` list, the interface's name for audio
-(docs/spec.md, section 12), is refused rather than dropped. Other unknown fields are ignored,
-as v1 ignores them. On a torch
-device (cpu, cuda, mps) the backend is the transformers one (`backends/transformers.py`).
+know reach the core's checks: any `audio` but null, which the interface refuses
+(docs/spec.md, section 1), is refused rather than dropped. Other unknown fields are ignored,
+as v1 ignores them. On a torch device (cpu, cuda, mps) the backend is the transformers one
+(`backends/transformers.py`).
 """
 
 from __future__ import annotations
@@ -22,21 +22,22 @@ import re
 import sys
 import threading
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Any
 
 from .core import (
+    NO_VISION,
     STAGES,
     DecisionConfig,
     Readout,
     RenderedRequest,
     load_tokenizer,
+    parse_request,
     read,
     render,
 )
 from .core.config import FILENAME, IMAGE, INTERFACE
 from .core.readout import check_rendered, check_stage
-from .core.request import NO_VISION, has_images, parse_request
 from .refusals import EngineBusy, RequestRefused
 from .schema import (
     ChoiceQuestion,
@@ -238,16 +239,17 @@ class DecisionEngine:
     def takes_images(self) -> bool:
         return IMAGE in self.config.inputs and not self.image_problem
 
-    def _render(self, payload: Any) -> RenderedRequest:
-        """The request rendered once, or the core's refusal of it, in the order the spec pins
-        (section 11.1) and `core.evaluate` keeps: the request's own checks, its images left
-        out; then images the checkpoint, or a backend with an `image_problem`, cannot take,
-        before any is decoded; then the images' files and the prompt's length, by rendering it."""
+    def _render(self, request: SystemOneRequest | dict[str, Any]) -> RenderedRequest:
+        """The request rendered once, or the core's refusal of it, in the order `core.evaluate`
+        keeps (docs/architecture.md, The core's runtime interface): the request's own checks,
+        which leave its images undecoded; then images the checkpoint, or a backend with an
+        `image_problem`, cannot take, before any is decoded; then the images' files and the
+        prompt's length, by rendering the parsed request."""
         try:
-            parse_request(payload, images=False)
+            req = parse_request(request)
         except ValueError as e:
             raise RequestRefused(str(e)) from e
-        if has_images(payload):
+        if req.images:
             if IMAGE not in self.config.inputs:
                 raise RequestRefused(
                     "this checkpoint does not take images: its decision_config.json inputs "
@@ -257,7 +259,7 @@ class DecisionEngine:
                 raise RequestRefused(self.image_problem)
         try:
             rendered = render(
-                payload,
+                req,
                 self.tokenizer,
                 self.config.prompt,
                 max_length=self.max_length or self.config.max_length_validated,
@@ -270,9 +272,8 @@ class DecisionEngine:
             raise RuntimeError(str(e)) from e
         return rendered
 
-    def evaluate(self, request: SystemOneRequest | Mapping[str, Any]) -> SystemOneResponse:
-        payload = request.model_dump() if isinstance(request, SystemOneRequest) else request
-        rendered = self._render(payload)
+    def evaluate(self, request: SystemOneRequest | dict[str, Any]) -> SystemOneResponse:
+        rendered = self._render(request)
         state = list(rendered.state_ids)
         questions = [list(q.question_ids) for q in rendered.questions.values()]
         if not self._slots.acquire(timeout=self.queue_timeout):
