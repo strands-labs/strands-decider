@@ -81,6 +81,11 @@ class TrainConfig:
     # mask (strands_decider.prefix_split_attention); 0 = always masked. The reference v2
     # recipe uses 1024. Speed only: the attention is the same up to rounding.
     attn_split: int = 0
+    # Run the forward under bf16 autocast: the LoRA and readout matmuls then run in bf16 on
+    # their fp32 master weights, as the reference v2 trainer runs them, instead of in fp32
+    # on an fp32 copy of every adapted layer's input (peft's default). The backbone is bf16
+    # either way. Changes numerics slightly; the optimizer state stays fp32.
+    bf16_autocast: bool = False
     pointer_dim: int = 256
     # A frozen teacher's option distribution per training row (data/teacher.py): JSONL of
     # {"i": row index in the concatenated train_files, "probs": [...canonical order]}.
@@ -833,16 +838,17 @@ def train(cfg: TrainConfig) -> str:
             tokens = tokens + batch["attention_mask"].sum()
             if world > 1:  # what DDP's no_sync() sets: all-reduce on the step's last forward
                 fwd.require_backward_grad_sync = part.last
-            out = fwd(
-                input_ids=batch["input_ids"],
-                attention_mask=batch["attention_mask"],
-                n_slots=batch["n_slots"],
-                opt_idx=batch.get("opt_idx"),
-                prefix_end=batch.get("prefix_end"),
-                labels=batch["labels"],
-                label_dist=batch.get("label_dist"),
-                weights=batch.get("weights"),
-            )
+            with torch.autocast(device, dtype=torch.bfloat16, enabled=cfg.bf16_autocast):
+                out = fwd(
+                    input_ids=batch["input_ids"],
+                    attention_mask=batch["attention_mask"],
+                    n_slots=batch["n_slots"],
+                    opt_idx=batch.get("opt_idx"),
+                    prefix_end=batch.get("prefix_end"),
+                    labels=batch["labels"],
+                    label_dist=batch.get("label_dist"),
+                    weights=batch.get("weights"),
+                )
             step_loss = out["loss"] * part.weights
             if cfg.kl_frozen_weight > 0:
                 assert refs is not None  # populated above when kl_frozen_weight > 0
