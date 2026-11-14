@@ -7,11 +7,11 @@ socket is opened. Each check is a PASS/FAIL line:
 
 1. the default context (``--max-model-len``) is ``--max-length`` plus 1;
 2. a request rendered to exactly ``--max-length`` tokens is answered (the server's ``Decider``, on the engine);
-3. a request one token longer is refused by the server (HTTP 400) before it reaches the engine;
+3. a request one token longer is refused by the server (HTTP 422) before it reaches the engine;
 4. vLLM itself refuses a prompt of exactly ``max_model_len`` tokens with ``VLLMValidationError``: the reason the
    default context is one token longer than the longest prompt;
 5. a request the engine core refuses (no ``prefix_end``) makes ``AsyncLLM.generate`` raise ``VLLMValidationError``,
-   which the server answers with HTTP 400 (``server.refusal``); the engine keeps serving;
+   which the server answers with HTTP 422 (``server.refusal``); the engine keeps serving;
 6. with a checkpoint that takes images, a burst of image requests through the server's HTTP app (in process, on
    httpx's ASGI transport): vLLM's own image preprocessing (every call of the plugin's multimodal processor, which
    vLLM's renderer makes) runs on a thread other than the event loop's, and ``GET /ping`` keeps answering, timed
@@ -113,7 +113,7 @@ async def run(d, length: int, max_model_len: int) -> None:
             isinstance(e, VLLMValidationError)
             and "strands-decider" in str(e)
             and server.refusal(e),
-            f"a request the engine core refuses raises {type(e).__name__} (HTTP 400): {str(e)[:100]}",
+            f"a request the engine core refuses raises {type(e).__name__} (HTTP 422): {str(e)[:100]}",
         )
     again = await d.decide(body)
     check(again["answers"] == out["answers"], "the engine serves on, with the same answer")

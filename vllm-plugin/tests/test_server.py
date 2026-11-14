@@ -253,10 +253,11 @@ def test_the_server_uses_the_cores_helpers_and_needs_every_one(monkeypatch):
     c = server.require_core()
     for name in server.CORE_NAMES:
         assert getattr(c, name) is getattr(core, name)
-    for name in ("check_decoded_size", "resize_image"):
+    # Request: a core whose parse_request predates the pydantic request (and decodes its images).
+    for name in ("parse_request", "Request", "check_decoded_size", "resize_image"):
         with monkeypatch.context() as m:
             m.delattr(core, name)
-            with pytest.raises(SystemExit, match=name):
+            with pytest.raises(SystemExit, match=f"has no {name}"):
                 server.require_core()
 
 
@@ -418,24 +419,35 @@ def test_http_text_and_image_requests_and_health(client):
             {"state": "x", "images": [b64(b"GIF89a" + b"\x00" * 4)], "questions": QUESTIONS},
             "could not be read",
         ),
-        ({"state": "x", "images": None, "questions": QUESTIONS}, "images must be a list"),
-        ({"questions": QUESTIONS}, "state"),
-        ({"state": "x", "questions": {}}, "question"),
+        (
+            {"state": "x", "images": None, "questions": QUESTIONS},
+            "images: Input should be a valid list",
+        ),
+        ({"state": "x", "questions": QUESTIONS, "audio": []}, "audio input is not supported"),
+        ({"state": "x", "questions": {}}, "questions: Dictionary should have at least 1 item"),
     ],
 )
-def test_bad_requests_get_400_and_the_server_keeps_serving(client, body, match):
+def test_bad_requests_get_422_and_the_server_keeps_serving(client, body, match):
     c, _ = client()
     with c:
         st, out = post(c, body)
-        assert st == 400 and match in out["detail"], out
+        assert st == 422 and match in out["detail"], out
         assert post(c, {"state": "x", "questions": QUESTIONS})[0] == 200
+
+
+def test_a_request_without_a_state_is_answered_as_one_with_an_empty_state(client):
+    c, _ = client()
+    with c:
+        st, out = post(c, {"questions": QUESTIONS})
+        assert st == 200, out
+        assert out["answers"] == post(c, {"state": "", "questions": QUESTIONS})[1]["answers"]
 
 
 def test_images_for_a_text_only_checkpoint_are_refused_before_decoding(client):
     c, engine = client(inputs=("text",))
     with c:
         st, out = post(c, {"state": "x", "images": ["not even base64"], "questions": QUESTIONS})
-        assert st == 400 and out["detail"] == (
+        assert st == 422 and out["detail"] == (
             'this checkpoint does not take images: its decision_config.json inputs are ["text"]'
         )
         assert engine.calls == []
@@ -449,11 +461,11 @@ def test_images_for_another_image_processor_are_refused(client):
     )
     with c:
         st, out = post(c, {"state": "x", "images": [b64(png(8, 8))], "questions": QUESTIONS})
-        assert st == 400 and "patch_size" in out["detail"]
+        assert st == 422 and "patch_size" in out["detail"]
         assert post(c, {"state": "x", "questions": QUESTIONS})[0] == 200, "text is still served"
 
 
-def test_an_engine_refusal_is_400(client):
+def test_an_engine_refusal_is_422(client):
     # AsyncLLM.generate raises VLLMValidationError for a request its engine core refuses (the end-to-end tiers'
     # tests/gpu/engine_checks.py checks this on a real engine).
     from vllm.exceptions import VLLMValidationError
@@ -463,7 +475,7 @@ def test_an_engine_refusal_is_400(client):
     )
     with c:
         st, out = post(c, {"state": "x", "questions": QUESTIONS})
-        assert st == 400 and "strands-decider: no" in out["detail"]
+        assert st == 422 and "strands-decider: no" in out["detail"]
 
 
 @pytest.mark.parametrize(
@@ -502,11 +514,11 @@ def test_an_expansion_that_differs_from_the_render_is_500_never_an_answer(client
         ("[" * 100000 + "]" * 100000, "the body is not JSON"),
     ],
 )
-def test_a_body_that_is_not_a_json_object_is_400(client, raw, match):
+def test_a_body_that_is_not_a_json_object_is_422(client, raw, match):
     c, engine = client()
     with c:
         r = c.post("/v1/systemone", content=raw, headers={"content-type": "application/json"})
-        assert r.status_code == 400 and match in r.json()["detail"], r.text
+        assert r.status_code == 422 and match in r.json()["detail"], r.text
         assert engine.calls == []
 
 
@@ -888,7 +900,7 @@ def test_a_prompt_over_the_validated_length_is_refused(client):
     c, _ = client()
     with c:
         st, out = post(c, {"state": "word " * 9000, "questions": QUESTIONS})
-        assert st == 400 and "exceeds the limit of 8192 tokens" in out["detail"]
+        assert st == 422 and "exceeds the limit of 8192 tokens" in out["detail"]
 
 
 # --- the engine's settings ------------------------------------------------------------------------------------------

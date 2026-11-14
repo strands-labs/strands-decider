@@ -26,7 +26,7 @@
 #   images    strands-decider-vllm serve on MM_MODEL (tests/gpu/server_client.py images): text, one, two and four
 #             images, refusals with the server still healthy, and the image-content cache test (a different image of
 #             the same size reuses nothing; a further question on the same image reuses its state)
-#   textonly  strands-decider-vllm serve on MM_TEXT_MODEL: images refused with the specification's message
+#   textonly  strands-decider-vllm serve on MM_TEXT_MODEL: images refused with the core library's message
 #   mmtext    vllm serve on MM_MODEL with the multimodal architecture: the text rows of main answered alike
 set -u
 MODEL=$(cd "$1" && pwd); ROWS=$(cd "$(dirname "$2")" && pwd)/$(basename "$2"); OUT=$3

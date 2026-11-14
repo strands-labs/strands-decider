@@ -1,12 +1,12 @@
 """GPU checks of the plugin's server (``strands-decider-vllm serve``) against a running instance. Needs Pillow.
 
 - ``images``: text and image requests are answered in v1's format; one image, two images and four images; refusals
-  (five images, bad base64, a file that is not an image, a body that is not JSON) get HTTP 400 and the server keeps
+  (five images, bad base64, a file that is not an image, a body that is not JSON) get HTTP 422 and the server keeps
   serving; the image-content cache test, on exact counts of cached tokens: after a request with one photo, a request
   with a different photo of the same size, the same text and the same question reuses no cached token, a further
   question on the first photo reuses its state's full blocks, and repeats reuse all but their last token's;
   ``--text-only URL`` checks that a server of a text-only checkpoint refuses images with the
-  specification's message and still answers text.
+  core library's message and still answers text.
 - ``textonly``: only that last check, against ``--url``.
 - ``answers``: every request of ``--requests`` (System One requests, images inline) at ``--concurrency``; writes each
   question's code probabilities to ``--out``; with ``--expect`` (a ``reference.py`` output) reports top-1 agreement
@@ -165,12 +165,12 @@ def scenario_images(a):
         (
             "images not a list",
             {"state": "x", "images": "abc", "questions": QUESTIONS},
-            "images must be a list",
+            "images: Input should be a valid list",
         ),
         ("not JSON", b"{not json", "not JSON"),
     ]:
         st, r, _ = post(url, body)
-        check(st == 400 and want in str(r), f"{name}: HTTP {st} ({str(r)[:120]})")
+        check(st == 422 and want in str(r), f"{name}: HTTP {st} ({str(r)[:120]})")
         check(health(url) == 200 and post(url, good)[0] == 200, f"{name}: the server keeps serving")
 
     # The image-content cache test, on exact counts of cached tokens. Two different photos of the same size have the
@@ -256,7 +256,7 @@ def scenario_images(a):
 def scenario_textonly(url):
     st, r, _ = post(url, {"state": "x", "images": ["not even base64"], "questions": QUESTIONS})
     check(
-        st == 400
+        st == 422
         and r
         == 'this checkpoint does not take images: its decision_config.json inputs are ["text"]',
         f"text-only checkpoint: images refused before decoding (HTTP {st})",

@@ -25,8 +25,9 @@ What this plugin adds to vLLM, and nothing else:
   content, and every block that ends past S a digest of the state and the question x[S:L). A different question on the
   same state reuses the state's full blocks; nothing else is shared.
 - Per-request checks in the engine core: a request to a Strands Decider model that the workers could not serve as a
-  decision gets HTTP 400 before it is scheduled (:mod:`strands_decider_vllm.validation`), and a decision prompt with
-  images is scheduled whole or not at all (:mod:`strands_decider_vllm.scheduling`).
+  decision gets HTTP 400 from vLLM's server, and 422 from the plugin's, before it is scheduled
+  (:mod:`strands_decider_vllm.validation`), and a decision prompt with images is scheduled whole or not at all
+  (:mod:`strands_decider_vllm.scheduling`).
 - A server, ``strands-decider-vllm serve`` (:mod:`strands_decider_vllm.server`), that answers the System One request
   (``POST /v1/systemone``, images included) with vLLM's engine in process.
 

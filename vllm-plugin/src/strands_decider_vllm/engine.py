@@ -2,7 +2,7 @@
 before it is scheduled.
 
 vLLM's engine core turns a ``VLLMValidationError`` raised in ``EngineCore.preprocess_add_request`` into an error output
-for that request alone (HTTP 400 from the OpenAI server and from the plugin's server) and keeps serving, whereas an
+for that request alone (HTTP 400 from the OpenAI server, 422 from the plugin's server) and keeps serving, whereas an
 exception a worker raises during a step kills the engine and fails every request in flight. The plugin therefore wraps
 ``preprocess_add_request``: for an engine that serves one of the plugin's architectures it runs
 :func:`strands_decider_vllm.validation.check_request` and :func:`~strands_decider_vllm.validation.check_images` on
