@@ -184,6 +184,7 @@ def soup(checkpoints: list[str], out: str, replace: bool = False) -> str:
     os.makedirs(os.path.join(out, "lora"), exist_ok=True)
 
     if cfg.get("use_lora"):
+        assert acfg is not None  # check_one_recipe reads it whenever use_lora is set
         r = acfg["r"]
         # PEFT scales by alpha / r, or alpha / sqrt(r) with rsLoRA: keep that scale at rank n * r
         alpha = acfg["lora_alpha"] * (math.sqrt(n) if acfg.get("use_rslora") else n)
@@ -206,7 +207,8 @@ def soup(checkpoints: list[str], out: str, replace: bool = False) -> str:
         }
         save_file(souped, os.path.join(out, "lora", EXPERTS))
         e_alpha = cfg["expert_lora_alpha"]
-        e_alpha = acfg["lora_alpha"] if e_alpha is None else e_alpha  # before the rescale
+        if e_alpha is None:  # the adapter's alpha before the rescale above
+            e_alpha = (acfg or cfg)["lora_alpha"]
         cfg = {**cfg, "expert_lora_r": n * cfg["expert_lora_r"], "expert_lora_alpha": n * e_alpha}
 
     head = soup_heads([load_head_state(c) for c in checkpoints], cfg["head_type"])

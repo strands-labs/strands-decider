@@ -38,7 +38,7 @@ import re
 import shutil
 import struct
 from collections.abc import Callable
-from functools import partial
+from functools import partial, reduce
 from typing import Any
 
 import torch
@@ -181,12 +181,13 @@ def merge_shards(base: str, out: str, deltas: list[dict[str, Callable[[], torch.
                 t = f.get_tensor(name)
                 if name in left:
                     left.discard(name)
-                    w, acc = t.float(), None
+                    w = t.float()
+                    acc = torch.zeros_like(w)  # 0 + x is x exactly: the sum is the seeds' own
                     for seed in deltas:
                         d = seed[name]() if name in seed else torch.zeros_like(w)
                         if d.shape != t.shape:
                             raise ValueError(f"{name}: adapter update {d.shape}, base {t.shape}")
-                        acc = w + d if acc is None else acc + (w + d)
+                        acc = acc + (w + d)
                     t = acc / len(deltas)
                 if name.startswith(DECODER):
                     t = t.to(torch.bfloat16)
@@ -356,7 +357,8 @@ def export_v2(
         "provenance": {"base_model": hub_id, "base_revision": revision},
     }
     softcap = core.DecisionConfig.from_dict(decision).final_logit_softcapping  # before any write
-    weight = sum(load_head_state(p)["proj.weight"].float() for p in paths) / len(paths)
+    heads = [load_head_state(p)["proj.weight"].float() for p in paths]
+    weight = reduce(torch.add, heads) / len(paths)
     deltas = [adapter_deltas(p, cfg) for p in paths]  # one recipe: the first's settings
 
     os.makedirs(out, exist_ok=True)
