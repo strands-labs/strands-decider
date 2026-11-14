@@ -38,7 +38,7 @@ jobs:
           # checks are pydantic's and its image headers Pillow's, so both are at their floors.
           - python: "3.11"
             torch: torch==2.7.1
-            pins: transformers==5.15.0 peft==0.21.0 huggingface_hub==1.5.0 pydantic==2.7.0 pillow==10.0.0
+            pins: transformers==5.15.0 peft==0.21.0 huggingface_hub==1.5.0 pydantic==2.7.0 pillow==13.0.0
           # The newest versions that pyproject.toml admits.
           # torchvision runs the 12B's image processor checks (tests/test_core_images.py).
           - python: "3.12"
@@ -160,7 +160,7 @@ jobs:
       - if: steps.fetch.outputs.available == 'true'
         run: |
           python -m pip install --no-deps -e .
-          python -m pip install numpy tokenizers pytest pydantic jinja2 "transformers>=5.15,<6" "pillow>=10"
+          python -m pip install numpy tokenizers pytest pydantic jinja2 "transformers>=5.15,<6" "pillow>=13"
       - if: steps.fetch.outputs.available == 'true'
         env:
           HF_HUB_OFFLINE: "1"
