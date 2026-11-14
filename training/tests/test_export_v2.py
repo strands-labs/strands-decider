@@ -123,7 +123,6 @@ def _train(tmp_path, base, data, seed):
             base_model=str(base),
             base_revision=REVISION,
             head_type="token_readout",
-            render="strands-chat",
             attention_mode="prefix_bidir",
             lora_targets=GEMMA_TARGETS,
             lora_r=4,

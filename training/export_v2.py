@@ -288,14 +288,10 @@ def export_v2(
     if os.path.isdir(out) and os.listdir(out):
         raise FileExistsError(f"{out}: not empty")
     cfg = StrandsDeciderConfig.from_json(config_path(checkpoint))
-    if (cfg.head_type, cfg.render, cfg.attention_mode) != (
-        "token_readout",
-        core.CHAT,
-        "prefix_bidir",
-    ):
+    if (cfg.head_type, cfg.attention_mode) != ("token_readout", "prefix_bidir"):
         raise ValueError(
-            "a decision checkpoint is a token_readout checkpoint rendered strands-chat under "
-            f"prefix_bidir, not {cfg.head_type} / {cfg.render} / {cfg.attention_mode}"
+            "a decision checkpoint is a token_readout checkpoint under prefix_bidir, "
+            f"not {cfg.head_type} / {cfg.attention_mode}"
         )
     if cfg.temperature_by_kind:
         raise ValueError(
@@ -321,7 +317,7 @@ def export_v2(
     decision = {
         "interface": core.INTERFACE,
         "format_version": core.FORMAT_VERSION,
-        "prompt": cfg.render,
+        "prompt": core.CHAT,
         "inputs": ["text"],
         "codes": list(core.CODES),
         "token_ids": list(core.CODE_TOKEN_IDS),
