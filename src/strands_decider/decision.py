@@ -22,6 +22,7 @@ import re
 import sys
 import threading
 import time
+import warnings
 from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Any
 
@@ -193,7 +194,9 @@ class DecisionEngine:
     agree). At most `max_concurrency` requests run on the backend at once. One at a time, the
     default, keeps a burst of long or image requests from holding several states' keys and
     values on the device together. The others wait up to `queue_timeout` seconds (None: no
-    limit) and then get `EngineBusy`. Refusals raise `RequestRefused`, and every refusal the
+    limit) and then get `EngineBusy`. A prompt longer than `max_length` tokens, by default the
+    checkpoint's `max_length_validated`, is refused; a `max_length` above it is the operator's
+    decision (docs/spec.md, section 8). Refusals raise `RequestRefused`, and every refusal the
     core makes is decided before a request waits. An image file that its header accepts but
     that does not decode is found by the backend, which decodes it once it has a slot: under
     load such a request may wait, or get `EngineBusy`, before its refusal. A failure on a
@@ -214,6 +217,7 @@ class DecisionEngine:
     ):
         if max_concurrency < 1:
             raise ValueError("max_concurrency must be at least 1")
+        check_max_length(max_length)
         if queue_timeout is not None and queue_timeout <= 0:
             raise ValueError("queue_timeout must be positive, or None for no limit")
         stage = getattr(backend, "outputs", None)
@@ -335,7 +339,16 @@ class DecisionEngine:
         served, so that the first requests do not pay for lazy initialisation. The backend
         compiles nothing per shape, so v1's sweep over question counts is not needed."""
         started = time.perf_counter()
+        limit = self.max_length or self.config.max_length_validated
         for request in warm_up_requests(images=self.takes_images):
+            rendered = render(request.model_dump(), self.tokenizer, self.config.prompt)
+            longest = max(len(q.ids) for q in rendered.questions.values())
+            if longest > limit:  # a served length below the warm-up prompts'
+                print(
+                    f"[strands-decider] a warm-up request of {longest} tokens is longer than "
+                    f"the {limit} served, and is skipped"
+                )
+                continue
             self.evaluate(request)
         print(f"[strands-decider] warmed up in {time.perf_counter() - started:.1f} s")
 
@@ -420,6 +433,15 @@ def backend_loader(device: str) -> Callable[..., Backend]:
     return _IMPORTED[target]
 
 
+def check_max_length(max_length: int | None) -> None:
+    """ValueError unless `max_length` is None (the checkpoint's `max_length_validated`) or a
+    number of tokens, at least 1."""
+    if max_length is not None and (
+        isinstance(max_length, bool) or not isinstance(max_length, int) or max_length < 1
+    ):
+        raise ValueError(f"max_length must be a number of tokens, at least 1, not {max_length!r}")
+
+
 def check_dtype(device: str, dtype: str | None) -> None:
     """ValueError unless the backend for `device` takes `dtype` (None: its own)."""
     allowed = getattr(backend_loader(device), "dtypes", None)
@@ -447,6 +469,7 @@ def load_decision_engine(
     (validated strictly), readout.safetensors and the tokenizer, are read here for every
     backend. `reuse_state=False` runs each question as one full prompt; on CUDA in bfloat16
     that is the reference of docs/spec.md section 10."""
+    check_max_length(max_length)  # before anything loads
     loader = backend_loader(device)
     check_dtype(device, dtype)
     path = _local_dir(checkpoint, revision)
@@ -455,6 +478,14 @@ def load_decision_engine(
     if isinstance(raw, dict) and "interface" not in raw:
         raise refuse_intermediate(checkpoint)
     config = DecisionConfig.from_dict(raw)
+    if max_length is not None and max_length > config.max_length_validated:
+        warnings.warn(  # before the weights load, which may take minutes
+            f"serving prompts of up to {max_length} tokens, past the "
+            f"{config.max_length_validated} tokens at which the checkpoint was validated "
+            "(decision_config.json max_length_validated): its answers to longer prompts are "
+            "not validated",
+            stacklevel=2,
+        )
     readout = Readout.load(path, config)
     # Its control and code ids checked before any weight loads, and handed to the core as it is
     # checked, so that neither the check nor render keeps a copy (about 170 MB for Gemma 4's).
@@ -507,6 +538,7 @@ __all__ = [
     "backend_loader",
     "check_device",
     "check_dtype",
+    "check_max_length",
     "checkpoint_kind",
     "load_decision_engine",
     "refuse_intermediate",

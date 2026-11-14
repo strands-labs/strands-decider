@@ -120,6 +120,13 @@ def serve_cmd(
         "--revision",
         help="Decision checkpoints on the Hub: the branch, tag or commit to load.",
     ),
+    max_length: int | None = typer.Option(
+        None,
+        "--max-length",
+        help="Decision checkpoints: refuse prompts longer than this many tokens (default: "
+        "decision_config.json's max_length_validated). Raising it past the validated length is "
+        "the operator's decision.",
+    ),
     warmup: bool = typer.Option(
         True,
         "--warmup/--no-warmup",
@@ -147,6 +154,7 @@ def serve_cmd(
             max_concurrency=max_concurrency,
             queue_timeout=queue_timeout,
             revision=revision,
+            max_length=max_length,
         )
     except ValueError as e:
         raise typer.BadParameter(str(e)) from e

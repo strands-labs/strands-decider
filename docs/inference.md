@@ -331,9 +331,13 @@ pass over a state. The server answers `--max-concurrency` requests at a time on 
 (default 1), so a burst of long or image requests cannot hold several states on the GPU
 together; the others wait up to `--queue-timeout` seconds (default 60) and then get 503. A
 refused request is answered at once, without waiting. `--revision` names the branch, tag or
-commit of a checkpoint on the Hub. `/health` reports the backend, the device, the dtype,
-whether images are served and the concurrency. `--device-map` does not apply, and `--dtype`
-and `--revision` apply to decision checkpoints only.
+commit of a checkpoint on the Hub. A prompt longer than the checkpoint's `max_length_validated`
+is refused with 422, never truncated; `--max-length N` serves prompts of up to N tokens
+instead, and a value above the validated length, which is the operator's decision
+([spec.md](spec.md), section 8), is warned about at startup. `/health` reports the backend,
+the device, the dtype, the longest prompt served, whether images are served and the
+concurrency. `--device-map` does not apply, and `--dtype`, `--revision` and `--max-length`
+apply to decision checkpoints only.
 
 A checkpoint from before the interface, whose `decision_config.json` has no `interface`, names
 no prompt, so `ask` and `serve` refuse it; `TransformersBackend` runs it on token ids rendered

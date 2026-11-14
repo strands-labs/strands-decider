@@ -27,6 +27,7 @@ from .decision import (
     EngineBusy,
     check_device,
     check_dtype,
+    check_max_length,
     checkpoint_kind,
     load_decision_engine,
     refuse_intermediate,
@@ -109,6 +110,7 @@ def create_app(
     dtype: str | None = None,
     queue_timeout: float | None = 60.0,
     revision: str | None = None,
+    max_length: int | None = None,
 ) -> FastAPI:
     if max_concurrency is not None and max_concurrency < 1:
         raise ValueError("--max-concurrency must be at least 1")
@@ -127,6 +129,10 @@ def create_app(
         check_dtype(device, dtype)  # imports the device's backend: its import errors show here
         if queue_timeout is not None and queue_timeout <= 0:
             raise ValueError("--queue-timeout must be positive")
+        try:
+            check_max_length(max_length)
+        except ValueError:
+            raise ValueError("--max-length must be at least 1") from None
         if vision:
             warnings.warn(
                 "--vision is for v1 checkpoints: a decision checkpoint takes images when its "
@@ -139,8 +145,12 @@ def create_app(
                 stacklevel=2,
             )
     elif build_engine is None:
-        # v1's engines take neither.
-        for flag, value in (("--dtype", dtype), ("--revision", revision)):
+        # v1's engines take none of these.
+        for flag, value in (
+            ("--dtype", dtype),
+            ("--revision", revision),
+            ("--max-length", max_length),
+        ):
             if value is not None:
                 raise ValueError(f"{flag} is for decision checkpoints")
     if not decision:
@@ -178,6 +188,7 @@ def create_app(
                 max_concurrency=max_concurrency or 1,
                 queue_timeout=queue_timeout,
                 revision=revision,
+                max_length=max_length,
             )
         if vision:
             from .vision import load_vision_engine
@@ -330,6 +341,7 @@ def serve(
     dtype: str | None = None,
     queue_timeout: float | None = 60.0,
     revision: str | None = None,
+    max_length: int | None = None,
 ) -> None:
     import uvicorn
 
@@ -347,6 +359,7 @@ def serve(
         dtype=dtype,
         queue_timeout=queue_timeout,
         revision=revision,
+        max_length=max_length,
     )
     # Single worker: the model owns the GPU, and forking more would just duplicate it.
     uvicorn.run(app, host=host, port=port, workers=1)

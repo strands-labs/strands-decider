@@ -604,6 +604,49 @@ def test_serve_command_options(ckpt, tmp_path, monkeypatch):
     assert len(started) == 1
 
 
+def test_serve_takes_a_max_length(ckpt, tmp_path, monkeypatch, capsys):
+    """`--max-length` is the longest prompt served, in place of the checkpoint's
+    max_length_validated (4096 here): a prompt of that many tokens is answered and a longer one
+    refused with 422, never truncated; a value past the validated length warns; a value below
+    the warm-up prompts' length skips them rather than fail the start; and the flag is refused
+    below 1 and for v1 checkpoints, before anything is announced."""
+    import uvicorn
+    from typer.testing import CliRunner
+
+    from strands_decider.core import render
+
+    engine = load_decision_engine(str(ckpt), device="cpu")
+    rendered = render(request(), engine.tokenizer, engine.config.prompt)
+    longest = max(len(q.ids) for q in rendered.questions.values())
+    started = []
+    monkeypatch.setattr(uvicorn, "run", lambda app, **kw: started.append(app))
+    for limit, status in ((longest, 200), (longest - 1, 422)):
+        args = ["serve", str(ckpt), "--device", "cpu", "--no-warmup", "--max-length", str(limit)]
+        out = CliRunner().invoke(cli.app, args)
+        assert out.exit_code == 0, out.output
+        with TestClient(started[-1]) as client:
+            assert client.get("/health").json()["max_length"] == limit
+            got = client.post("/v1/systemone", json=request())
+        assert got.status_code == status, got.text
+        if status == 422:
+            assert f"exceeds the limit of {limit} tokens" in got.json()["detail"]
+    with pytest.warns(UserWarning, match="past the 4096 tokens at which the checkpoint was"):
+        with TestClient(server.create_app(str(ckpt), device="cpu", warmup=False, max_length=8192)):
+            pass
+    with TestClient(server.create_app(str(ckpt), device="cpu", max_length=8)) as client:
+        assert client.get("/health").json()["max_length"] == 8
+    assert "longer than the 8 served, and is skipped" in capsys.readouterr().out
+    for bad, hint in (
+        ([str(ckpt), "--device", "cpu", "--max-length", "0"], "--max-length must be at least 1"),
+        ([str(tmp_path), "--device", "cpu", "--max-length", "100"], "--max-length is for decision"),
+    ):
+        out = CliRunner().invoke(cli.app, ["serve", *bad])
+        assert out.exit_code == 2 and "serving" not in out.output, out.output
+        assert hint in " ".join(out.output.split()).replace("│ ", ""), out.output
+    with pytest.raises(ValueError, match="max_length must be a number of tokens"):
+        load_decision_engine(str(ckpt), device="cpu", max_length=0)
+
+
 def test_ask_reports_a_refused_request_as_a_usage_error(tmp_path, monkeypatch):
     import base64
 
