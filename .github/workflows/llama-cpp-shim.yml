@@ -43,7 +43,7 @@ jobs:
       - run: >-
           python -m pip install numpy==2.5.4 transformers==5.20.2 safetensors==0.8.0
           sentencepiece==0.2.1 "protobuf>=4.21,<5" pyyaml==6.0.3 tqdm==4.70.1 tokenizers==0.23.2
-          pillow==13.0.0 pytest
+          pillow==13.0.0 pydantic==2.14.3 pytest
       - name: Build llama.cpp and the shim
         run: sh deploy/lambda/decision/scripts/build_native.sh "$RUNNER_TEMP/llama.cpp" "$RUNNER_TEMP/llama-build"
       - name: Run the shim against transformers

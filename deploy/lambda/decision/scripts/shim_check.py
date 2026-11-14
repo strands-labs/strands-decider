@@ -4,9 +4,9 @@
 
 SRC is the patched llama.cpp source (its convert_hf_to_gguf.py and gguf-py), LIB the shim
 (`libdecision.so`) built against it. The check needs torch, transformers, safetensors,
-sentencepiece, numpy, tokenizers and Pillow, and no GPU and no download; it takes about a minute
-after the build. tests/test_llama_cpp_shim.py runs it, and so does the Lambda image build, on the
-image's own library.
+sentencepiece, numpy, tokenizers, pydantic and Pillow, and no GPU and no download; it takes about
+a minute after the build. tests/test_llama_cpp_shim.py runs it, and so does the Lambda image
+build, on the image's own library.
 
 It makes, from a fixed seed, a Gemma 4 checkpoint shaped like E2B but tiny: 15 decoder layers,
 four sliding then one full, three times, as E2B alternates them, with KV sharing in the last five,
@@ -147,7 +147,7 @@ def tokenizer_json() -> dict:
 
 
 def make_checkpoint(d: Path) -> Path:
-    """The tiny checkpoint in the decision layout (docs/spec.md, The checkpoint layout)."""
+    """The tiny checkpoint in the decision layout (docs/spec.md, section 9)."""
     import torch
     import transformers
     from safetensors.torch import save_file
