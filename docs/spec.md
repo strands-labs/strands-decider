@@ -2,9 +2,9 @@
 
 This document is the contract of the decision interface that the Strands Decider v2 models use. It covers the request and the response, the files a published checkpoint carries, and what a runtime must reproduce to serve one. Paths are relative to the repository root.
 
-The reference implementation is `strands_decider.core` (`src/strands_decider/core/`). This document gives the template's strings and the rules the models were trained on. For the rendering details it leaves out, such as which characters are whitespace, how JSON numbers and escapes are written, the line breaks around images and which malformed request gets which message, `strands_decider.core.render`, `strands_decider.core.parse_request` and the render goldens (`tests/fixtures/core/render_goldens.json`) are normative.
+The reference implementation is `strands_decider.core` (`src/strands_decider/core/`). This document gives the template's strings, and section 3.1 says what defines the text a request fills them with. `strands_decider.core.parse_request` and, for images, `strands_decider.core.decode_images` are normative for which malformed request gets which message.
 
-Token ids are those of Gemma 4's tokenizer. A checkpoint's normative tokenizer is its base's `tokenizer.json` at `provenance.base_revision` (section 8). The ids here and in the goldens are those of the file with sha256 `cc8d3a0ce36466ccc1278bf987df5f71db1719b9ca6b4118264f45cb627bfe0f`, from `google/gemma-4-E2B-it` at revision `3e22461f65e89153144f8adb70e3b8c2cc9845a7`. The other three Gemma 4 files that `tests/core_support.py` lists give the same ids on every golden.
+Token ids are those of Gemma 4's tokenizer. A checkpoint's normative tokenizer is its base's `tokenizer.json` at `provenance.base_revision` (section 8). The ids here and in the render goldens (section 3.1) are those of the file with sha256 `cc8d3a0ce36466ccc1278bf987df5f71db1719b9ca6b4118264f45cb627bfe0f`, from `google/gemma-4-E2B-it` at revision `3e22461f65e89153144f8adb70e3b8c2cc9845a7`. The other three Gemma 4 files that `tests/core_support.py` lists give the same ids on every golden.
 
 ## 1. The request and the response
 
@@ -26,7 +26,7 @@ Other fields are ignored, as in v1, and values are never coerced. A question has
 | `choice` | An object of 2 to 255 option names, each to a description (a string, object, array or null). | the object's |
 | `score` | An array of 2 to 10 level descriptions (strings), lowest first. | `0` to `L-1` |
 
-An absent noul key keeps its default description, "the statement does not hold for this state" for `false` and "the statement holds for this state" for `true`. A null description shows the option's name alone. As in v1, a question may omit `type`, and is then a noul when its criteria are absent, null or an object with keys among `false` and `true`, a choice when they are another object, and a score when they are an array.
+An absent noul key keeps its default description, "the statement does not hold for this state" for `false` and "the statement holds for this state" for `true`. A null description, a noul's too, means the option has none. As in v1, a question may omit `type`, and is then a noul when its criteria are absent, null or an object with keys among `false` and `true`, a choice when they are another object, and a score when they are an array.
 
 Content, meaning a state, an instruction, an option's name or a description, nests at most 100 levels deep, where a scalar is level 0 and an object or an array is one level deeper than the deepest value in it, so an empty one is level 1. Numbers that are not finite (`1e400` reads as infinity), integers of more than 4,300 digits and lone surrogates are refused. Every JSON request v1 accepts is accepted, except content past these limits, a non-null `audio` and images that section 1.1 refuses and v1 does not. A request without a state is accepted too.
 
@@ -112,7 +112,7 @@ Answer with the code of one option.
 </question>
 ```
 
-The header is `Decide whether the statement is true of the state.` for a noul, `Select exactly one option.` for a choice and `Rate the state against the ordered levels below (lowest first).` for a score. A line whose content renders empty is left out, and so is an option's empty name or description, with its separator. A string renders stripped of leading and trailing whitespace, and an object or an array as Python's `json.dumps(value, indent=2, ensure_ascii=False)` writes it. An option's name and description are collapsed onto one line.
+The header is `Decide whether the statement is true of the state.` for a noul, `Select exactly one option.` for a choice and `Rate the state against the ordered levels below (lowest first).` for a score. Prompts are rendered by `strands_decider.core.render`, and the render goldens (`tests/fixtures/core/render_goldens.json`) define the exact text and token ids.
 
 `strands-chat` is what Gemma 4's chat template renders for one user turn holding the body, with the generation prompt added and thinking off, but without the empty thought channel of the 12B, 26B-A4B and 31B templates. A runtime never builds either prompt with a chat template.
 
