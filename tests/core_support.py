@@ -32,8 +32,9 @@ after the images.
 tests/fixtures/core/image_pixels.json holds the pixel goldens of docs/spec.md (Images, in The
 runtime interface): for each test image, the sha256 of its RGB bytes as v1 decodes it and
 after the bicubic resize to (W, H), made with PIXELS_PILLOW; STRANDS_DECIDER_REGEN_PIXELS=1
-rewrites it (Pillow only). `reference_pixels` is v1's decode, and `reference_resize` the
-spec's resize, the core's `resize_image`.
+rewrites it (Pillow only). `reference_pixels` is v1's decode, `reference_resize` the
+spec's resize, the core's `resize_image`, and `spec_resize` the spec's resize rule written
+out in numpy, without Pillow, as an oracle for both.
 """
 
 from __future__ import annotations
@@ -46,6 +47,7 @@ import os
 import random
 from functools import lru_cache
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -441,6 +443,79 @@ def reference_resize(img, width: int, height: int):
     from strands_decider.core import resize_image
 
     return resize_image(img, width, height)
+
+
+# ---- the spec's resize rule in numpy, without Pillow: a test oracle --------------------
+
+
+def _bicubic(x: float) -> float:
+    """The cubic convolution kernel with a = -0.5 (Keys), support 2."""
+    a, x = -0.5, abs(x)
+    if x < 1.0:
+        return ((a + 2.0) * x - (a + 3.0)) * x * x + 1
+    if x < 2.0:
+        return (((x - 5) * x + 8) * x - 4) * a
+    return 0.0
+
+
+_PRECISION_BITS = 22  # 32 - 8 - 2: the fixed-point coefficients' fraction bits
+
+
+def _coefficients(in_size: int, out_size: int) -> list[tuple[int, list[int]]]:
+    """For each output index, its first input index and its fixed-point weights, by the
+    spec's rule (Pillow's precompute_coeffs and normalize_coeffs_8bpc)."""
+    scale = in_size / out_size
+    filterscale = max(scale, 1.0)
+    inverse = 1.0 / filterscale  # multiplied by, as Pillow does, not divided by
+    support = 2.0 * filterscale
+    out = []
+    for i in range(out_size):
+        center = (i + 0.5) * scale
+        lo = max(int(center - support + 0.5), 0)  # int() truncates, as C's cast does
+        hi = min(int(center + support + 0.5), in_size)
+        weights = [_bicubic((j + lo - center + 0.5) * inverse) for j in range(hi - lo)]
+        total = 0.0
+        for w in weights:
+            total += w
+        if total != 0.0:
+            weights = [w / total for w in weights]
+        fixed = [int((-0.5 if w < 0 else 0.5) + w * (1 << _PRECISION_BITS)) for w in weights]
+        out.append((lo, fixed))
+    return out
+
+
+def _resample(pixels: Any, out_size: int, axis: int) -> Any:
+    import numpy as np
+
+    src = np.moveaxis(pixels, axis, 0).astype(np.int64)
+    out = np.empty((out_size, *src.shape[1:]), np.uint8)
+    for i, (lo, weights) in enumerate(_coefficients(src.shape[0], out_size)):
+        acc = np.full(src.shape[1:], 1 << (_PRECISION_BITS - 1), np.int64)
+        for j, w in enumerate(weights):
+            acc += src[lo + j] * w
+        out[i] = np.clip(acc >> _PRECISION_BITS, 0, 255)
+    return np.moveaxis(out, 0, axis)
+
+
+def spec_resize(pixels: Any, width: int, height: int) -> Any:
+    """docs/spec.md's bicubic resize (section 11.1) of RGB pixels, an array [h, w, 3] of
+    uint8, to [height, width, 3], written from the spec's text with numpy alone: the
+    horizontal pass, its 8-bit result, then the vertical pass; a pass whose size does not
+    change is left out. A test oracle, which holds the rule as the spec writes it to
+    `resize_image` and to Pillow, byte for byte."""
+    import numpy as np
+
+    pixels = np.ascontiguousarray(pixels, dtype=np.uint8)
+    if pixels.ndim != 3 or pixels.shape[2] != 3:
+        raise ValueError(f"spec_resize takes RGB pixels [h, w, 3], not {pixels.shape}")
+    if not (isinstance(width, int) and isinstance(height, int)) or width < 1 or height < 1:
+        raise ValueError(f"a resized image is at least 1 x 1 pixels, not {width!r} x {height!r}")
+    out = pixels
+    if out.shape[1] != width:
+        out = _resample(out, width, axis=1)
+    if out.shape[0] != height:
+        out = _resample(out, height, axis=0)
+    return out
 
 
 PIXELS_DIR = FIXTURES / "pixels"
