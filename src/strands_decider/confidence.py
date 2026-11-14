@@ -1,8 +1,7 @@
 """The confidence formulas of the System One response, without dependencies.
 
 `derive_confidence` gives a choice's confidence and `derive_score_confidence` a score's. The v1
-engines (through `prompting.py`) and the torch-free core (`strands_decider.core`), which does
-not import pydantic, both use them.
+engines (through `prompting.py`) and the torch-free core (`strands_decider.core`) both use them.
 """
 
 from __future__ import annotations

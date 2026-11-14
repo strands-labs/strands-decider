@@ -676,7 +676,7 @@ def _png(
 
 
 def _on_white(c, a):
-    """The spec's compositing of a channel c with alpha a onto white, in integers."""
+    """Pillow's alpha_composite of a channel c with alpha a onto white, in integers."""
     y = 128 * (c * a + 255 * (255 - a) + 128)
     return (((y >> 8) + y) >> 15) if a else 255
 
