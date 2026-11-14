@@ -242,15 +242,48 @@ def musique_pairs(rows: Iterable[dict], n_questions: int, seed: int = 0) -> list
     return [r for k in pick for r in by[k]]
 
 
-def fits(examples: list[Example], tokenizer: Any, max_tokens: int) -> list[Example]:
-    """Drop rows whose rendered prompt exceeds the window (truncation would cut options)."""
-    from strands_decider.prompting import build_prompt
+def fits(
+    examples: list[Example], tokenizer: Any, max_tokens: int, frame: Any = None
+) -> list[Example]:
+    """Drop rows whose rendered prompt exceeds the window (truncation would cut options).
 
-    return [
-        e
-        for e in examples
-        if len(tokenizer(build_prompt(e.state, e.to_question())[0])["input_ids"]) <= max_tokens
-    ]
+    With `frame` (prompting.chat_frame), measure the lettered prompt instead, with every
+    phrasing of the question, because the collator samples one and refuses a prompt that is
+    too long. `frame` "strands-chat" measures core.render's prompt the same way; a row it
+    refuses is dropped too.
+    """
+    from strands_decider import core
+    from strands_decider.prompting import build_prompt, lettered_prompt
+
+    if frame is None:
+        return [
+            e
+            for e in examples
+            if len(tokenizer(build_prompt(e.state, e.to_question())[0])["input_ids"]) <= max_tokens
+        ]
+
+    if frame == core.CHAT:
+        tok = tokenizer.backend_tokenizer
+
+        def chat_len(e: Example) -> float:
+            try:
+                return max(
+                    len(core.render(e.to_request(i), tok, core.CHAT).questions["q"].ids)
+                    for i in e.all_instructions()
+                )
+            except ValueError:  # core.render refuses the row
+                return float("inf")
+
+        return [e for e in examples if chat_len(e) <= max_tokens]
+
+    def longest(e: Example) -> int:
+        texts = [
+            "".join(lettered_prompt(e.state, e.to_question(i), frame)) for i in e.all_instructions()
+        ]
+        ids = tokenizer(texts, add_special_tokens=False)["input_ids"]
+        return max(len(x) for x in ids)
+
+    return [e for e in examples if longest(e) <= max_tokens]
 
 
 def main(argv: list[str] | None = None) -> None:

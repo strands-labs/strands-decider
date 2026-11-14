@@ -24,6 +24,9 @@ dependencies = [
     "uvicorn[standard]>=0.30",
     "numpy>=1.24",
     "safetensors>=0.4",
+    # Imported directly by hidden_engine.py and the torch-free core (strands_decider.core),
+    # not only through transformers.
+    "tokenizers>=0.22",
 ]
 
 [project.optional-dependencies]
@@ -53,9 +56,12 @@ cpu = []
 benchmark = ["boto3>=1.34", "matplotlib>=3.8"]
 dev = [
     "pillow>=10",
+    # The chat-template tests (tests/test_core_prompt.py) render Gemma 4's templates.
+    "jinja2>=3.1",
     "pytest>=8.0",
     "ruff>=0.6",
-    "mypy>=1.15,<3",
+    # 2.4 is the first mypy that reads numpy 2.5's stubs for the 3.10 target (tool.mypy).
+    "mypy>=2.4,<3",
     "pre-commit>=3.7",
     "commitizen>=3.28",
 ]
@@ -171,7 +177,8 @@ format = "ruff format {args:.}"
 detached = true
 dependencies = [
     "ruff>=0.6",
-    "mypy>=1.15,<3",
+    # 2.4 or later: see the dev extra.
+    "mypy>=2.4,<3",
     "pydantic>=2.7",
     "fastapi>=0.115",
     "uvicorn[standard]>=0.30",

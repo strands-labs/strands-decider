@@ -173,6 +173,45 @@ genericity is lost. With it, the only strategy that survives gradient descent is
 actually reading the option text. Score questions are the exception — their slots are
 ordinal, so they are only ever *reversed* (rubric and label together), never permuted.
 
+### Opt-in: the token readout
+
+A training config can replace the pointer head with a token readout, the readout of the
+reference v2 decision models. Three keys select it:
+
+- `head_type: token_readout`. The head is one linear map, 255 outputs and no bias, on the
+  hidden state of the last prompt token. Output k scores the option listed under code k. Each
+  output starts as the base model's LM head row of that code's token, so before training the
+  head gives the base model's own preference among the codes. On Gemma 4 its logits get the
+  same cap as the LM head's (`final_logit_softcapping`), saved with the checkpoint as
+  `readout_softcap`. The outputs past the question's option
+  count are masked.
+- `render: strands-chat` or `lettered` (one of them is required with the token readout).
+  `strands-chat` is the reference v2 template, rendered by `strands_decider.core.render` as
+  `docs/spec.md` defines it; the prompt splits where `render` says the state ends. `lettered` is
+  the earlier v2 template: the prompt goes through the
+  tokenizer's chat template, with thinking off: a system line, then `State:`, `Question:` and
+  `Options:` in the user turn. The options are listed under letter codes: `A` to `Z`, then
+  `AA`, `AB` and so on, the first 255 that the tokenizer encodes as one token. Training
+  shuffles the options of a choice question only; a yes/no or score question keeps its order.
+- `attention_mode: causal` (the default) or `prefix_bidir`. With `prefix_bidir` the prompt
+  splits where the state ends. A state token sees all of the state, in both directions, and
+  never the question. A question token sees the state and all of its own question. The
+  full-attention layers take this mask. The sliding-window layers of Gemma 4 take it too,
+  without their window (512 or 1,024 tokens), as the reference v2 models train. The
+  linear-attention layers of Qwen3.5 stay causal. Other layer types are refused. It needs SDPA
+  or eager attention.
+
+`lr_floor` sets where the cosine learning-rate schedule ends (the reference recipe uses 0.1), and
+`adam_betas` the AdamW betas (default `[0.9, 0.95]`; the reference recipe uses `[0.9, 0.999]`).
+With `save_every`, each save also writes `resume-<step>.pt` (the last two are kept): set
+`resume_from` to one to continue a stopped run, on the same config and number of GPUs, as the
+unbroken run would have.
+`python -m training.train`, `training.soup` and `training.evaluate calibrate` work with a token
+readout checkpoint. The engines in this repository refuse one. To serve it, export it to the
+v2 package layout, `python -m training.export_v2 <checkpoint> <package>` (merged bf16 weights,
+`readout.safetensors`, `decision_config.json`; strands-chat with `prefix_bidir` only), and
+serve the package with the vLLM runtime, `strands-decider-vllm`.
+
 ## Design decisions worth knowing
 
 **Causal attention, read at the right tokens.** The note sketching this architecture likened
@@ -220,7 +259,8 @@ encoding rather than guess whether it has a batch dimension.
 
 ```
 src/strands_decider/              -- published package (inference only)
-  schema.py       wire types; the confidence formula
+  schema.py       wire types
+  confidence.py   the confidence formulas, without dependencies
   prompting.py    state/question rendering; slot <-> option binding
   modeling.py     LLM torso (Qwen3 or hybrid Qwen3.5) + pointer (or slot) readout;
                   masked softmax; KL reference; is_hybrid
@@ -233,6 +273,8 @@ src/strands_decider/              -- published package (inference only)
   hf_export.py    a checkpoint as a Hugging Face model folder (safetensors, card, manifest)
   naming.py       release naming helpers (used by hf_export and release scripts)
   vision.py       Qwen3.5 vision-tower engine (`serve --vision`, `ask --image`)
+  core/           the decision interface without torch (docs/spec.md): prompt
+                  rendering, the code readout, decision_config.json, the runtime contract
 
 training/                         -- not published; run as `python -m training.<module>`
   train.py        LoRA + readout training loop (`python -m training.train`)
@@ -312,10 +354,12 @@ tests/            pytest only: test_core (no GPU), test_server (stubbed), test_g
                   test_catchall, test_distill, test_hf_export, test_checkpoint_load,
                   test_cli_build, test_data_identity, test_configs, test_run_recipe,
                   test_llm_client, test_cli_exit,
-                  test_ddp (`-m distributed` for the multi-GPU runs)
+                  test_ddp (`-m distributed` for the multi-GPU runs);
+                  test_core_prompt, test_core_readout, test_core_config (the torch-free core)
 docs/             architecture.md -- this document; inference.md -- serving a checkpoint:
-                  install, ask, serve, the HTTP API, a Mac
-.github/          workflows/tests.yml -- the CPU tests; workflows/generators-live-test.yml
+                  install, ask, serve, the HTTP API, a Mac; spec.md -- the decision interface
+.github/          workflows/tests.yml -- the CPU tests, and the torch-free core's tests against
+                  the pinned Gemma 4 tokenizer; workflows/generators-live-test.yml
                   and .github/scripts/check_generator_rows.py -- one live batch per generator backend
 ```
 

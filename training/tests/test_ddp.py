@@ -424,6 +424,44 @@ def test_ddp_matches_single_process_variants(corpus, tmp_path, over):
     _assert_same_run(ref, _run(corpus, tmp_path / "b", 4, **over), 4)
 
 
+@pytest.mark.parametrize("world", [1, pytest.param(2, marks=pytest.mark.distributed)])
+def test_a_resumed_run_continues_as_the_unbroken_one(corpus, tmp_path, world):
+    """Stop after step k, resume, finish: the unbroken run's steps, losses and weights, exactly.
+
+    The run saves at steps 3 and 6 of 8: 3 is mid-epoch before an eval, 6 is in epoch 1 after
+    a step that spans the epoch boundary. With EMA, teacher KL and length grouping on.
+    """
+    from safetensors.torch import load_file
+
+    over = dict(save_every=3, ema_decay=0.9)
+    ref = _run(corpus, tmp_path / "a", world, **over)
+    saved = tmp_path / "a" / f"w{world}"
+    assert sorted(p.name for p in saved.glob("resume-*")) == [
+        "resume-0000003.pt",
+        "resume-0000006.pt",
+    ]
+    for k in (3, 6):
+        got = _run(
+            corpus, tmp_path / f"r{k}", world, resume_from=str(saved / f"resume-{k:07d}.pt"), **over
+        )
+        for r, g in zip(ref["ranks"], got["ranks"], strict=True):
+            n = len(g["grads"])
+            assert n == 8 - k
+            assert g["rows"][:n] == r["rows"][k : k + n]
+            assert all(
+                torch.equal(x, y)
+                for a, b in zip(g["grads"], r["grads"][k:], strict=True)
+                for x, y in zip(a, b, strict=True)
+            )
+        assert got["history"] == ref["history"]
+        out = tmp_path / f"r{k}" / f"w{world}"
+        files = sorted(p.relative_to(saved) for p in saved.rglob("*.safetensors"))
+        assert files and files == sorted(p.relative_to(out) for p in out.rglob("*.safetensors"))
+        for f in files:
+            a, b = load_file(saved / f), load_file(out / f)
+            assert a.keys() == b.keys() and all(torch.equal(a[x], b[x]) for x in a)
+
+
 @pytest.mark.distributed
 def test_ddp_init_from_matches_single_process(corpus, tmp_path):
     """init_from a trained checkpoint."""
@@ -449,6 +487,32 @@ def test_ddp_frozen_torso(corpus, plain_run, tmp_path):
 def test_ddp_refuses_ranks_that_hold_different_data(corpus, tmp_path):
     res = _run(corpus, tmp_path, 2, expect_ok=False, skew_rank1=True)
     assert "ranks hold different training data" in res["stdout"] + res["stderr"]
+
+
+def _keep_where_rank(rank: int, world: int, port: int, out: str) -> None:
+    import torch.distributed as dist
+
+    from training.distributed import keep_where
+
+    os.environ.update(RANK=str(rank), WORLD_SIZE=str(world), LOCAL_WORLD_SIZE=str(world))
+    dist.init_process_group(
+        "gloo", init_method=f"tcp://127.0.0.1:{port}", rank=rank, world_size=world
+    )
+    rows = [{"n": n} for n in range(2501)]
+    kept = keep_where(rows, lambda xs: [x for x in xs if x["n"] % 7 not in (0, 3)])
+    torch.save([x["n"] for x in kept], f"{out}/{rank}.pt")
+    dist.destroy_process_group()
+
+
+@pytest.mark.distributed
+def test_keep_where_shares_a_filter_out_and_agrees(tmp_path):
+    """Every rank gets the serial filter's rows, in order, from its share of the work."""
+    world = 3
+    torch.multiprocessing.spawn(
+        _keep_where_rank, args=(world, _free_port(), str(tmp_path)), nprocs=world
+    )
+    want = [n for n in range(2501) if n % 7 not in (0, 3)]
+    assert all(torch.load(tmp_path / f"{r}.pt") == want for r in range(world))
 
 
 def test_train_refuses_more_ranks_than_rows(monkeypatch):
@@ -485,6 +549,29 @@ def test_plan_shares_out_exactly_the_steps_rows(world):
         assert seen == [(j, i) for j in range(4) for i in range(8)]
         assert all(0 < b - a <= 8 for p in plan for _, a, b in p)
         assert plan == plan_step(step, lengths, world)  # deterministic
+
+
+def test_plan_of_a_large_step_is_fast_and_exact():
+    """30 rows x 91 micro-batches at 32 ranks (the E2B run): every row once, in well under 1 s.
+
+    The search used for few micro-batches took ~55 s per step here.
+    """
+    import time
+
+    rng = random.Random(0)
+    lengths = [
+        rng.choice([rng.randrange(150, 3000)] * 9 + [rng.randrange(3000, 30000)])
+        for _ in range(2730)
+    ]
+    order = sorted(range(2730), key=lambda i: -lengths[i])
+    step = [order[k : k + 30] for k in range(0, 2730, 30)]
+    rng.shuffle(step)
+    t = time.perf_counter()
+    plan = plan_step(step, lengths, 32)
+    assert time.perf_counter() - t < 0.5
+    assert len(plan) == 32 and all(plan)
+    seen = sorted((j, i) for p in plan for j, a, b in p for i in range(a, b))
+    assert seen == [(j, i) for j in range(91) for i in range(30)]
 
 
 def test_plan_balances_better_than_even_halves():
@@ -644,3 +731,63 @@ def test_replay_shards_merge_to_the_single_process_file(corpus, tmp_path, monkey
 
 if __name__ == "__main__" and sys.argv[1:2] == ["worker"]:
     worker(sys.argv[2])
+
+
+def _e2b_step(seed=0):
+    """A step of the E2B run's shape: 91 micro-batches of 30 rows, lengths of the v2 mix."""
+    rng = random.Random(seed)
+    lengths = [
+        rng.choice([rng.randrange(150, 3000)] * 9 + [rng.randrange(3000, 48000)])
+        for _ in range(2730)
+    ]
+    order = sorted(range(2730), key=lambda i: -lengths[i])
+    step = [order[k : k + 30] for k in range(0, 2730, 30)]
+    rng.shuffle(step)
+    return lengths, step
+
+
+@pytest.mark.parametrize("world", [8, 16, 32])
+def test_a_slice_budget_caps_a_forward_and_keeps_the_steps_rows(world):
+    """Every slice is under the cap (or one row), and the step's rows are unchanged."""
+    budget = 56000
+    lengths, step = _e2b_step()
+    plan = plan_step(step, lengths, world, budget)
+    assert len(plan) == world and all(plan)
+    seen = sorted((j, i) for p in plan for j, a, b in p for i in range(a, b))
+    assert seen == [(j, i) for j in range(91) for i in range(30)]
+    for p in plan:
+        for j, a, b in p:
+            rows = step[j][a:b]
+            cost = len(rows) * max(lengths[i] for i in rows)
+            assert cost <= budget or len(rows) == 1, (j, a, b, cost)
+    uncapped = max(
+        len(step[j][a:b]) * max(lengths[i] for i in step[j][a:b])
+        for p in plan_step(step, lengths, world)
+        for j, a, b in p
+    )
+    assert uncapped > budget  # the cap is what bounds it, not the data
+
+
+def test_the_slice_budget_does_not_change_which_rows_a_step_trains():
+    """The cap only moves rows between ranks: the step's (micro-batch, row) set is the same."""
+    lengths, step = _e2b_step(1)
+    rows = sorted((j, i) for p in plan_step(step, lengths, 8) for j, a, b in p for i in range(a, b))
+    capped = sorted(
+        (j, i) for p in plan_step(step, lengths, 8, 56000) for j, a, b in p for i in range(a, b)
+    )
+    assert rows == capped
+
+
+def test_the_slice_budget_cuts_the_same_micro_batches_at_any_world_size():
+    """A micro-batch's cut points come from the cap, so they do not depend on the GPU count."""
+    lengths, step = _e2b_step(2)
+    cuts = {}
+    for world in (8, 16, 32):
+        plan = plan_step(step, lengths, world, 56000)
+        for p in plan:
+            for j, a, b in p:
+                cuts.setdefault(world, {}).setdefault(j, set()).add((a, b))
+    over = [j for j, c in cuts[8].items() if len(c) > 1]
+    assert over, "no micro-batch was cut: the test step does not exercise the cap"
+    for j in over:
+        assert cuts[8][j] == cuts[16][j] == cuts[32][j], j

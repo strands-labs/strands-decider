@@ -230,3 +230,95 @@ def test_a_token_budget_per_forward_keeps_the_answers(tmp_path):
     sizes = lambda e: [len(range(*c[0].indices(7))) for c in e._chunks(st, rendered)]  # noqa: E731
     assert sizes(tight) == [1] * 7  # the budget binds
     assert sizes(plain) == [4, 3]  # off: max_batch only, as before
+
+
+def _tiny_gemma4_torso(vocab=64):
+    """A Gemma 4 E2B-shaped text decoder: KV-shared layers, sliding layers, one KV head."""
+    torch.manual_seed(0)
+    text = transformers.Gemma4TextConfig(
+        vocab_size=vocab,
+        hidden_size=32,
+        intermediate_size=64,
+        num_hidden_layers=len(LAYERS),
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        head_dim=16,
+        global_head_dim=16,
+        layer_types=LAYERS,
+        sliding_window=8,
+        final_logit_softcapping=30.0,
+        tie_word_embeddings=True,
+        pad_token_id=0,
+        max_position_embeddings=4096,
+        hidden_size_per_layer_input=8,
+        vocab_size_per_layer_input=vocab,
+        num_kv_shared_layers=1,
+        attn_implementation="sdpa",
+    )
+    return transformers.Gemma4TextModel(text).eval()
+
+
+def _padded_batch(width_lengths=(40, 24, 33), ends=(12, 7, 20), vocab=64):
+    torch.manual_seed(1)
+    width = max(width_lengths)
+    ids = torch.zeros(len(width_lengths), width, dtype=torch.long)
+    mask = torch.zeros(len(width_lengths), width, dtype=torch.long)
+    for i, n in enumerate(width_lengths):
+        ids[i, :n] = torch.randint(1, vocab, (n,))
+        mask[i, :n] = 1
+    return ids, mask, torch.tensor(ends), list(width_lengths)
+
+
+def _run(torso, ids, mask, prefix_end, split_min):
+    """Last real token's hidden state summed, and its gradient w.r.t. every parameter."""
+    from strands_decider import prefix_split_attention as P
+    from strands_decider.modeling import prefix_bidir_masks
+
+    if split_min:
+        P.install(torso, split_min)
+        P.set_rows(prefix_end, mask)
+    masks = prefix_bidir_masks(torso.config, mask, prefix_end, torch.float32)
+    torso.zero_grad(set_to_none=True)
+    hidden = torso(input_ids=ids, attention_mask=masks).last_hidden_state
+    last = mask.sum(1) - 1
+    hidden[torch.arange(len(last)), last].sum().backward()
+    return hidden.detach(), {
+        n: p.grad.clone() for n, p in torso.named_parameters() if p.grad is not None
+    }
+
+
+def test_split_attention_equals_the_dense_mask_in_forward_and_backward():
+    """Two unmasked calls per row == the masked call: activations and gradients, under
+    gradient checkpointing (which recomputes each layer in backward), on a padded batch of a
+    real Gemma 4 decoder with sliding and KV-shared layers.
+
+    It is also the test that a real Gemma 4 honours the per-layer mask dict, including its
+    sliding-window layers, which prefix_bidir gives the full mask without their window.
+    """
+    ids, mask, prefix_end, lengths = _padded_batch()
+    dense_torso, split_torso = _tiny_gemma4_torso().train(), _tiny_gemma4_torso().train()
+    for t in (dense_torso, split_torso):
+        t.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+    dense, g_dense = _run(dense_torso, ids, mask, prefix_end, 0)
+    split, g_split = _run(split_torso, ids, mask, prefix_end, 1)  # min_length 1: always split
+
+    for i, n in enumerate(lengths):  # only the real positions are read
+        torch.testing.assert_close(split[i, :n], dense[i, :n], rtol=1e-4, atol=1e-4)
+    assert g_dense.keys() == g_split.keys() and g_dense
+    for (
+        name,
+        g,
+    ) in g_dense.items():  # per tensor, relative to its largest entry (measured: <= 1.1e-5)
+        diff = (g_split[name] - g).abs().max() / g.abs().max().clamp_min(1e-12)
+        assert diff < 1e-4, (name, float(diff))
+
+
+def test_split_attention_keeps_the_masked_call_under_its_minimum_length():
+    from strands_decider import prefix_split_attention as P
+
+    ids, mask, prefix_end, _ = _padded_batch()
+    torso = _tiny_gemma4_torso().train()
+    dense, _ = _run(torso, ids, mask, prefix_end, 0)
+    short, _ = _run(torso, ids, mask, prefix_end, ids.shape[1] + 1)  # every batch is shorter
+    torch.testing.assert_close(short, dense)
+    assert torso.config._attn_implementation == P.NAME  # installed, and left in place

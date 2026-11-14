@@ -29,8 +29,11 @@ from __future__ import annotations
 
 import contextlib
 import functools
+import heapq
+import math
 import os
 from collections.abc import Callable, Iterator
+from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from typing import Any, NamedTuple
 
@@ -74,9 +77,10 @@ def entry_point(fn: Callable[..., Any]) -> Callable[..., Any]:
         if torch.cuda.is_available():
             torch.cuda.set_device(local_rank)
         # The timeout is a backstop: under torchrun a rank that raises exits, and the
-        # launcher then stops the others rather than leaving them in a collective.
+        # launcher then stops the others rather than leaving them in a collective. Long
+        # enough for one rank's slow start (data loading on a large corpus) on a multi-node run.
         dist.init_process_group(
-            "nccl" if torch.cuda.is_available() else "gloo", timeout=timedelta(minutes=30)
+            "nccl" if torch.cuda.is_available() else "gloo", timeout=timedelta(hours=2)
         )
         try:
             with contextlib.ExitStack() as stack:
@@ -106,6 +110,40 @@ def all_reduce(values: list[float], op: str = "sum") -> list[float]:
     dist.all_reduce(t, op=dist.ReduceOp.SUM if op == "sum" else dist.ReduceOp.MAX)
     result: list[float] = t.tolist()
     return result
+
+
+def keep_where(examples: list[Any], keep: Callable[[list[Any]], list[Any]]) -> list[Any]:
+    """`keep(examples)` (a row filter returning a subset of its rows), shared out.
+
+    Each rank runs `keep` on every world-th row, in chunks on a pool of threads (this
+    host's CPUs over its ranks), and the ranks swap the verdicts. A length check that
+    tokenises every row then costs a fraction of the serial time: HF fast tokenizers
+    release the GIL. `keep` must be thread-safe and decide each row on its own. Every
+    rank must hold the same `examples`; all get the same rows back, in order.
+    """
+    rank, _, world = env()
+    mine = examples[rank::world]
+    threads = max(1, (os.cpu_count() or 1) // int(os.environ.get("LOCAL_WORLD_SIZE", "1")))
+    with ThreadPoolExecutor(threads) as pool:
+        chunks = pool.map(keep, [mine[i : i + 1000] for i in range(0, len(mine), 1000)])
+        kept = [ex for chunk in chunks for ex in chunk]
+    if world == 1:
+        return kept
+    ids = {id(ex) for ex in kept}
+    flags = torch.zeros(len(examples), dtype=torch.uint8, device=_device())
+    flags[rank::world] = torch.tensor([id(ex) in ids for ex in mine], dtype=torch.uint8)
+    dist.all_reduce(flags)
+    return [examples[i] for i in flags.nonzero().flatten().tolist()]
+
+
+def all_gather(obj: Any) -> list[Any]:
+    """`obj` of every rank, in rank order; [obj] at world size 1."""
+    world = env()[2]
+    if world == 1:
+        return [obj]
+    out: list[Any] = [None] * world
+    dist.all_gather_object(out, obj)
+    return out
 
 
 def wrap(model: torch.nn.Module, seed: int) -> torch.nn.Module:
@@ -157,34 +195,65 @@ def _best_cuts(lens: list[int], k: int) -> tuple[int, list[tuple[int, int]]]:
 
 
 def plan_step(
-    batches: list[list[int]], lengths: list[int], world: int
+    batches: list[list[int]], lengths: list[int], world: int, budget: int = 0
 ) -> list[list[tuple[int, int, int]]]:
     """Each rank's slices (micro-batch j of the step, row start, row stop) for one step.
 
     Every rank gets at least one slice and no forward exceeds a micro-batch, so no rank
     needs more memory than the 1-GPU run. Deterministic in its inputs: every rank
     computes the same plan.
+
+    `budget` > 0 caps a slice's padded size, rows x longest row, in the unit of `lengths`
+    (prompt characters): a micro-batch over the cap is cut into more slices until each is
+    under it, or until its rows are one per slice. The cap bounds a forward's activations
+    and its attention mask, which is what runs a GPU out of memory, and it changes nothing
+    else: the rows of a step, their order and the summed gradient are the same, because
+    how the rows are shared out is free (module docstring). A single row longer than the
+    cap is still forwarded whole.
     """
     per = [[lengths[i] for i in b] for b in batches]
     assert world <= sum(map(len, per)), "more ranks than rows in the step"
 
+    @functools.cache
+    def cuts(j: int, k: int) -> list[tuple[int, int, int]]:
+        lens = per[j]
+        return [
+            ((b - a) * max(lens[a:b]) + FORWARD_OVERHEAD, a, b) for a, b in _best_cuts(lens, k)[1]
+        ]
+
+    def under_budget(j: int, k: int) -> int:
+        """The least number of slices >= k that keeps micro-batch j's slices under `budget`."""
+        if budget <= 0:
+            return k
+        while k < len(per[j]) and max(c for c, _, _ in cuts(j, k)) - FORWARD_OVERHEAD > budget:
+            k += 1
+        return k
+
     def assign(n: list[int]) -> tuple[tuple[bool, int], list[list[tuple[int, int, int]]]]:
-        slices = []
-        for j, k in enumerate(n):
-            lens = per[j]
-            for a, b in _best_cuts(lens, k)[1]:
-                slices.append(((b - a) * max(lens[a:b]) + FORWARD_OVERHEAD, j, a, b))
+        slices = [(c, j, a, b) for j, k in enumerate(n) for c, a, b in cuts(j, k)]
         slices.sort(key=lambda t: (-t[0], t[1], t[2]))
-        load = [0] * world
+        heap = [(0, q) for q in range(world)]  # (load, rank): pops the least loaded, lowest rank
         ranks: list[list[tuple[int, int, int]]] = [[] for _ in range(world)]
         for c, j, a, b in slices:
-            r = min(range(world), key=lambda q: (load[q], q))
-            load[r] += c
+            load, r = heap[0]
+            heapq.heapreplace(heap, (load + c, r))
             ranks[r].append((j, a, b))
         # Fewer slices than ranks leaves a rank idle, so such a plan always scores worse.
-        return (len(slices) < world, max(load)), [sorted(x) for x in ranks]
+        return (len(slices) < world, max(load for load, _ in heap)), [sorted(x) for x in ranks]
 
-    n = [1] * len(batches)
+    if len(batches) >= world:
+        # Enough micro-batches to go round: LPT of whole ones, after cutting each that costs
+        # more than a mean rank load into that many slices. The search below costs seconds
+        # per step at this size (30 rows x 91 micro-batches: 7 s at 8 ranks, 55 s at 32).
+        whole = [len(lens) * max(lens) + FORWARD_OVERHEAD for lens in per]
+        mean = sum(whole) / world
+        plan = assign(
+            [under_budget(j, min(len(per[j]), math.ceil(c / mean))) for j, c in enumerate(whole)]
+        )[1]
+        assert all(plan), "a rank got no slice"
+        return plan
+
+    n = [under_budget(j, 1) for j in range(len(batches))]
     best = assign(n)
     # Greedy: add one slice at a time to the micro-batch where it lowers the slowest
     # rank's load most, up to a fixed budget of 2 * world extra slices, and keep the
@@ -240,16 +309,28 @@ class StepSlices:
     rows train some twice and some never, silently.
     """
 
-    def __init__(self, loader: DataLoader, kl_slots: int, grad_accum: int, total_steps: int):
+    def __init__(
+        self,
+        loader: DataLoader,
+        kl_slots: int,
+        grad_accum: int,
+        total_steps: int,
+        budget: int = 0,
+    ):
         self.loader = loader
+        self.budget = budget  # cap on a slice's padded size, in prompt characters (plan_step)
         self.examples = loader.dataset.examples
         self.collate = loader.collate_fn
         self.grad_accum = grad_accum
         self.rank, _, self.world = env()
-        self.lengths = [example_length(ex) for ex in self.examples]
+        # The length-grouped sampler has them already; recomputing is minutes on 17M rows.
+        self.lengths = getattr(loader.batch_sampler, "lengths", None) or [
+            example_length(ex) for ex in self.examples
+        ]
         self.kl_slots = kl_slots  # rows with at most this many options get the frozen KL
         self.open: list[list[int]] = []
         self.windows = 0  # steps (windows of grad_accum micro-batches) handed out so far
+        self.skip = 0  # micro-batches the next epoch passes over: a resumed run's done ones
 
         n_teacher = sum(getattr(ex, "teacher", None) is not None for ex in self.examples)
         facts = [
@@ -285,14 +366,15 @@ class StepSlices:
                 )
             )
         dist.broadcast_object_list(order, src=0)
-        for idx in order[0]:
+        skip, self.skip = self.skip, 0
+        for idx in order[0][skip:]:
             self.open.append(idx)
             if len(self.open) == self.grad_accum:
                 window, self.open = self.open, []
                 yield from self._step(window)
 
     def _step(self, window: list[list[int]]) -> Iterator[dict[str, Any]]:
-        mine = plan_step(window, self.lengths, self.world)[self.rank]
+        mine = plan_step(window, self.lengths, self.world, self.budget)[self.rank]
         first = self.windows * self.grad_accum
         self.windows += 1
         for j, idx in enumerate(window):
@@ -312,5 +394,11 @@ class StepSlices:
                     start=a,
                 )
                 done = b
-                yield batch
+                if batch["part"].last:
+                    final = batch
+                else:
+                    yield batch
             self.collate.skip(rows[done:])
+        # The step's last forward comes once the window's rows are all drawn for, so a
+        # checkpoint taken at it holds the collator's end-of-step state (train.py resume).
+        yield final

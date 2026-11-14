@@ -40,6 +40,7 @@ from rich.console import Console
 from rich.table import Table
 from torch.utils.data import DataLoader
 
+from strands_decider.confidence import derive_confidence, derive_score_confidence
 from strands_decider.infer import EngineConfig, SystemOneEngine
 from strands_decider.modeling import (
     MASK_VALUE,
@@ -47,7 +48,6 @@ from strands_decider.modeling import (
     config_path,
     masked_log_softmax,
 )
-from strands_decider.schema import derive_confidence, derive_score_confidence
 
 from .data.collate import CollatorConfig, SystemOneCollator
 from .data.format import Example, read_jsonl
@@ -137,9 +137,34 @@ def collect_logits(
     model = SystemOneEngine(model, EngineConfig(device=device)).model
     coll = SystemOneCollator(
         model.tokenizer,
-        CollatorConfig(max_length=max_length),
+        CollatorConfig(max_length=max_length, render=getattr(model.config, "render", "numbered")),
         train=False,  # no option shuffling: evaluation must be deterministic
     )
+    # A prompt over max_length would make the collator refuse its whole batch and stop the
+    # run, as training drops such rows rather than stop (train.py). Drop them here too and
+    # say how many: a held-out fold is not worth losing over one long row.
+    from strands_decider import core
+    from strands_decider.prompting import chat_frame
+
+    from .data.multistep import fits
+
+    render = getattr(model.config, "render", "numbered")
+    frame: Any = None
+    if render == "lettered":
+        frame = chat_frame(model.tokenizer)
+    elif render == core.CHAT:
+        frame = core.CHAT
+    kept = fits(examples, model.tokenizer, max_length, frame)
+    if len(kept) < len(examples):
+        print(
+            f"[strands-decider] eval: dropped {len(examples) - len(kept)} of {len(examples)} rows "
+            f"over max_length {max_length}"
+        )
+    if not kept:
+        raise ValueError(
+            f"every one of the {len(examples)} rows is longer than max_length {max_length}"
+        )
+    examples = kept
     loader = DataLoader(
         ExampleDataset(examples), batch_size=batch_size, shuffle=False, collate_fn=coll
     )
@@ -152,6 +177,7 @@ def collect_logits(
             attention_mask=batch["attention_mask"],
             n_slots=batch["n_slots"],
             opt_idx=batch.get("opt_idx"),
+            **({"prefix_end": batch["prefix_end"]} if "prefix_end" in batch else {}),
             temperature=1.0,  # raw logits; calibration is applied afterwards
         )
         logits = out["logits"].float()

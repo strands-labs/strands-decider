@@ -14,6 +14,7 @@ at 4096 tokens; see training/hardware.md, "The Qwen3.5 torso" and "Larger torsos
 
 from __future__ import annotations
 
+import glob
 import json
 import math
 import os
@@ -27,15 +28,18 @@ import typer
 from torch.utils.data import DataLoader, Dataset
 
 from strands_decider.modeling import (
+    HEAD_TYPES,
     StrandsDeciderConfig,
     StrandsDeciderModel,
     checkpoint_dir,
     config_path,
 )
+from strands_decider.prompting import chat_frame
 
 from . import distributed
 from .data.collate import CollatorConfig, SystemOneCollator
 from .data.format import Example, load_examples, split_examples
+from .data.multistep import fits
 from .data.sampling import LengthGroupedBatchSampler, example_length, padding_fraction
 
 
@@ -68,6 +72,20 @@ class TrainConfig:
     # (modeling.HostEmbedding). For one GPU: under torchrun every rank would hold a copy.
     host_embeddings: bool = False
     freeze_torso: bool = False
+    # "pointer" (the default) or "token_readout" (modeling.TokenReadoutHead), which goes with
+    # render "lettered" or "strands-chat" and takes attention_mode "causal" or "prefix_bidir".
+    head_type: str = "pointer"
+    render: str = "numbered"
+    attention_mode: str = "causal"
+    # Micro-batches of at least this many padded tokens run prefix_bidir without its dense
+    # mask (strands_decider.prefix_split_attention); 0 = always masked. The reference v2
+    # recipe uses 1024. Speed only: the attention is the same up to rounding.
+    attn_split: int = 0
+    # Run the forward under bf16 autocast: the LoRA and readout matmuls then run in bf16 on
+    # their fp32 master weights, as the reference v2 trainer runs them, instead of in fp32
+    # on an fp32 copy of every adapted layer's input (peft's default). The backbone is bf16
+    # either way. Changes numerics slightly; the optimizer state stays fp32.
+    bf16_autocast: bool = False
     pointer_dim: int = 256
     # A frozen teacher's option distribution per training row (data/teacher.py): JSONL of
     # {"i": row index in the concatenated train_files, "probs": [...canonical order]}.
@@ -108,6 +126,11 @@ class TrainConfig:
     # temperatures are reset to 1: calibrate the result. freeze_torso: true trains the head
     # alone on the checkpoint's frozen adapter.
     init_from: str | None = None
+    # Continue a stopped run from a `resume-<step>.pt` that save_every wrote in its output_dir
+    # (the last two are kept): trained weights, optimizer, schedule, step, data position and
+    # random states. Same config and world size; the run trains the steps it had left as the
+    # unbroken run would have.
+    resume_from: str | None = None
 
     # optimisation
     epochs: int = 1
@@ -119,7 +142,11 @@ class TrainConfig:
     # With init_from both start trained, and no value is measured for that yet.
     head_lr: float = 1e-3
     weight_decay: float = 0.01
+    # AdamW (beta1, beta2); the reference recipe trains with (0.9, 0.999).
+    adam_betas: tuple[float, float] = (0.9, 0.95)
     warmup_ratio: float = 0.03
+    # The cosine schedule ends at lr_floor x the peak (0: at zero; the reference recipe: 0.1).
+    lr_floor: float = 0.0
     max_grad_norm: float = 1.0
     # > 0 keeps an exponential moving average of the trained weights (adapter and head), in
     # fp32, updated after every optimizer step with decay min(ema_decay, (1 + step) /
@@ -134,6 +161,12 @@ class TrainConfig:
     # so that every saved train_config.json from before it existed still reproduces the
     # run it describes; the shipped configs turn it on.
     group_by_length: bool = False
+    # Cap on one forward's padded size (rows x longest row) under torchrun, in prompt
+    # characters (training.data.sampling.example_length); 0 = no cap. It bounds activations
+    # and the attention mask without changing the rows of a step or the gradient: only how
+    # the ranks share the step's rows out. 56000 is about the reference trainer's 32,768
+    # padded tokens on the v2 data (measured: at least 1.735 characters per token).
+    slice_char_budget: int = 0
     length_group_mega: int = 50
     ordinal_smoothing: float = 0.1
     reverse_score_prob: float = 0.5
@@ -158,9 +191,10 @@ class TrainConfig:
         # pointer-only architecture; a typo in any other key still raises.
         known = set(cls.__dataclass_fields__)
         for k, v in raw.items():
-            if k == "head_type" and v != "pointer":
+            if k == "head_type" and v not in HEAD_TYPES:
                 raise ValueError(
-                    f"{path}: head_type={v!r}; this version trains pointer-head checkpoints only"
+                    f"{path}: head_type={v!r}; this version trains "
+                    "pointer-head and token-readout-head checkpoints only"
                 )
             if k not in known and k not in RETIRED_YAML_KEYS:
                 raise ValueError(f"{path}: unknown config key {k!r}")
@@ -172,12 +206,15 @@ class TrainConfig:
 
 # Slot-era TrainConfig keys the current dataclass no longer carries. Dropped silently by
 # from_yaml so a published recipe still parses; a typo in any other key raises.
-RETIRED_YAML_KEYS = frozenset({"num_slots", "head_type", "head_hidden", "head_init"})
+RETIRED_YAML_KEYS = frozenset({"num_slots", "head_hidden", "head_init"})
 
 
 # The fields of a TrainConfig that a checkpoint fixes: with init_from they are the checkpoint's.
 INIT_FROM_ARCH = (
     "base_model",
+    "head_type",
+    "render",
+    "attention_mode",
     "pointer_dim",
     "use_lora",
     "lora_r",
@@ -294,7 +331,7 @@ def _build_optimizer(model: StrandsDeciderModel, cfg: TrainConfig) -> torch.opti
     if torso_params:
         groups.append({"params": torso_params, "lr": cfg.lr, "weight_decay": 0.0})
     groups = [g for g in groups if g["params"]]
-    return torch.optim.AdamW(groups, betas=(0.9, 0.95), eps=1e-8)
+    return torch.optim.AdamW(groups, betas=(cfg.adam_betas[0], cfg.adam_betas[1]), eps=1e-8)
 
 
 class _Ema:
@@ -327,11 +364,34 @@ class _Ema:
         self.live = []
 
 
-def _lr_lambda(step: int, warmup: int, total: int) -> float:
+def _save_resume(out_dir: str, state: dict[str, Any]) -> None:
+    """Write `out_dir`/resume-<step>.pt whole or not at all, and keep the last two."""
+    path = os.path.join(out_dir, f"resume-{state['step']:07d}.pt")
+    torch.save(state, path + ".tmp")
+    os.replace(path + ".tmp", path)
+    for old in sorted(glob.glob(os.path.join(out_dir, "resume-*.pt")))[:-2]:
+        os.remove(old)
+
+
+def _scheduler(
+    optim: torch.optim.Optimizer, warmup: int, total: int, floor: float
+) -> torch.optim.lr_scheduler.LambdaLR:
+    """Linear warmup then cosine to `floor`, counting optimizer steps from 1.
+
+    LambdaLR passes the number of completed steps, so the first update would run at
+    `_lr_lambda(0)` = 0 and the last would stop short of the floor. The reference recipe
+    counts from 1: update 1 runs at 1/warmup and update `total` runs exactly at the floor.
+    """
+    return torch.optim.lr_scheduler.LambdaLR(
+        optim, lambda s: _lr_lambda(s + 1, warmup, total, floor)
+    )
+
+
+def _lr_lambda(step: int, warmup: int, total: int, floor: float = 0.0) -> float:
     if step < warmup:
         return step / max(1, warmup)
     progress = (step - warmup) / max(1, total - warmup)
-    return 0.5 * (1.0 + math.cos(math.pi * min(1.0, progress)))
+    return floor + (1.0 - floor) * 0.5 * (1.0 + math.cos(math.pi * min(1.0, progress)))
 
 
 @torch.no_grad()  # type: ignore[untyped-decorator]
@@ -349,6 +409,7 @@ def evaluate_loss(
             attention_mask=batch["attention_mask"],
             n_slots=batch["n_slots"],
             opt_idx=batch.get("opt_idx"),
+            prefix_end=batch.get("prefix_end"),
             labels=batch["labels"],
             label_dist=batch.get("label_dist"),
             weights=batch.get("weights"),
@@ -448,6 +509,27 @@ def _teacher_kl(tea: torch.Tensor, stu: torch.Tensor, direction: str) -> torch.T
     return _kl(target.clamp_min(1e-12).log(), stu, real, direction)
 
 
+def _dump_nonfinite(out_dir: str, step: int, rank: int, seen: list) -> str:
+    """Save the forwards of a step whose gradient is not finite (those with a non-finite loss,
+    else all of them) to `out_dir`, and return the error message."""
+    bad = [i for i, (loss, _) in enumerate(seen) if not torch.isfinite(loss)]
+    keep = bad or list(range(len(seen)))
+    path = os.path.join(out_dir, f"nonfinite-step{step}-rank{rank}.pt")
+    os.makedirs(out_dir, exist_ok=True)
+    torch.save(
+        [
+            {"forward": i, "loss": seen[i][0].cpu()}
+            | {k: v.cpu() if torch.is_tensor(v) else v for k, v in seen[i][1].items()}
+            for i in keep
+        ],
+        path,
+    )
+    return (
+        f"step {step}: gradient norm is not finite (rank {rank}; forwards with a non-finite "
+        f"loss: {bad or 'none'}); their batches are in {path}"
+    )
+
+
 @distributed.entry_point  # under torchrun, this process is one rank of the run
 def train(cfg: TrainConfig) -> str:
     rank, _, world = distributed.env()
@@ -462,6 +544,11 @@ def train(cfg: TrainConfig) -> str:
     torch.manual_seed(cfg.seed)
     random.seed(cfg.seed)
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    # No cuDNN attention in training. With a boolean attention mask (prefix_bidir, padding) SDPA
+    # may dispatch to it, and its backward has returned NaN gradients from a finite loss: torch
+    # 2.14 + cuDNN 9.24 on B200, Gemma 4 E2B, a micro-batch of short rows. The memory-efficient
+    # and math kernels give finite gradients on the same rows; only the kernel choice changes.
+    torch.backends.cuda.enable_cudnn_sdp(False)
 
     if cfg.init_from:
         model = _init_from(cfg)
@@ -480,6 +567,10 @@ def train(cfg: TrainConfig) -> str:
             # score confidence; without it a score could never reach high confidence.
             ordinal_smoothing=cfg.ordinal_smoothing,
             pointer_dim=cfg.pointer_dim,
+            head_type=cfg.head_type,
+            render=cfg.render,
+            attention_mode=cfg.attention_mode,
+            attn_split=cfg.attn_split,
         )
         if cfg.lora_targets:
             model_cfg.lora_targets = list(cfg.lora_targets)
@@ -488,6 +579,9 @@ def train(cfg: TrainConfig) -> str:
         )
         if cfg.freeze_torso:
             model.freeze_torso()
+    # After _init_from, which sets head_type from the checkpoint.
+    if cfg.head_type == "token_readout" and cfg.kl_frozen_weight > 0:
+        raise ValueError("head_type token_readout does not train with a frozen-KL reference yet")
     # Checkpointing needs a grad-requiring input; a frozen torso has none, and it
     # buys nothing anyway since no backward pass traverses it.
     if cfg.gradient_checkpointing and not cfg.freeze_torso:
@@ -545,6 +639,22 @@ def train(cfg: TrainConfig) -> str:
         train_examples = train_examples + kl_rows
         random.Random(cfg.seed).shuffle(train_examples)
         print(f"[strands-decider] +{len(kl_rows):,} KL-only rows (weight {cfg.kl_only_weight})")
+    if cfg.render in ("lettered", "strands-chat"):
+        # The data builds measure the numbered prompt; these are other lengths (chat
+        # template). Drop what does not fit rather than stop on it mid-run.
+        frame = chat_frame(model.tokenizer) if cfg.render == "lettered" else cfg.render
+        sizes = len(train_examples), len(val_examples)
+
+        def fit(rows: list[Example]) -> list[Example]:
+            return fits(rows, model.tokenizer, cfg.max_length, frame)
+
+        # Shared out over the ranks: tokenising every row is hours on 17M rows.
+        train_examples = distributed.keep_where(train_examples, fit)
+        val_examples = distributed.keep_where(val_examples, fit)
+        print(
+            f"[strands-decider] {cfg.render} prompts over max_length {cfg.max_length}: dropped "
+            f"{sizes[0] - len(train_examples):,} train and {sizes[1] - len(val_examples):,} val rows"
+        )
     print(f"[strands-decider] train={len(train_examples):,} val={len(val_examples):,}")
     if not train_examples:
         raise SystemExit("no training examples; run `python -m training.data build` first")
@@ -555,6 +665,7 @@ def train(cfg: TrainConfig) -> str:
         ordinal_smoothing=cfg.ordinal_smoothing,
         reverse_score_prob=cfg.reverse_score_prob,
         seed=cfg.seed,
+        render=cfg.render,
     )
     train_collate = SystemOneCollator(model.tokenizer, coll_cfg, train=True)
     if cfg.group_by_length:
@@ -599,12 +710,13 @@ def train(cfg: TrainConfig) -> str:
         collate_fn=SystemOneCollator(model.tokenizer, coll_cfg, train=False),
     )
 
-    steps_per_epoch = max(1, len(train_loader) // cfg.grad_accum)
+    per_epoch = len(train_loader)  # micro-batches
+    steps_per_epoch = max(1, per_epoch // cfg.grad_accum)
     total_steps = cfg.max_steps or steps_per_epoch * cfg.epochs
     warmup = max(1, int(total_steps * cfg.warmup_ratio))
 
     optim = _build_optimizer(model, cfg)
-    sched = torch.optim.lr_scheduler.LambdaLR(optim, lambda s: _lr_lambda(s, warmup, total_steps))
+    sched = _scheduler(optim, warmup, total_steps, cfg.lr_floor)
 
     if rank == 0:
         os.makedirs(cfg.output_dir, exist_ok=True)
@@ -613,7 +725,9 @@ def train(cfg: TrainConfig) -> str:
     if world > 1:  # each rank iterates its share of every step's rows instead
         # 0 for kl_slots: all rows are eligible under a pointer-head reference, so no
         # eligibility counter is needed in StepSlices.
-        train_loader = distributed.StepSlices(train_loader, 0, cfg.grad_accum, total_steps)
+        train_loader = distributed.StepSlices(
+            train_loader, 0, cfg.grad_accum, total_steps, cfg.slice_char_budget
+        )
 
     refs = None
     if cfg.precompute_frozen_kl and cfg.kl_frozen_weight > 0:
@@ -626,6 +740,12 @@ def train(cfg: TrainConfig) -> str:
         ref_model = StrandsDeciderModel.load(
             cfg.kl_frozen_reference, attn_implementation=cfg.attn_implementation
         )
+        if ref_model.config.head_type != cfg.head_type:
+            # The KL targets are read as the student's head reads its options.
+            raise ValueError(
+                f"kl_frozen_reference {cfg.kl_frozen_reference} has head_type "
+                f"{ref_model.config.head_type!r}; the student's is {cfg.head_type!r}"
+            )
         ref_model.to(device).eval()
         own = ref_model.tokenizer.get_vocab() == model.tokenizer.get_vocab()
         print(
@@ -651,25 +771,84 @@ def train(cfg: TrainConfig) -> str:
     running_tkl = 0.0
     history: list[dict[str, float]] = []
     done = False
+    first_epoch, resumed = 0, None
+    if cfg.resume_from:
+        state = torch.load(cfg.resume_from, map_location="cpu", weights_only=False)
+        if (state["total_steps"], len(state["ranks"])) != (total_steps, world):
+            raise ValueError(
+                f"{cfg.resume_from}: {state['total_steps']} steps on {len(state['ranks'])} "
+                f"ranks; this run has {total_steps} on {world}"
+            )
+        params = dict(model.named_parameters())
+        with torch.no_grad():
+            for n, v in state["params"].items():
+                params[n].copy_(v)
+            for held, v in zip(ema.avg if ema else [], state["ema"] or [], strict=True):
+                held.copy_(v)
+        optim.load_state_dict(state["optim"])
+        sched.load_state_dict(state["sched"])
+        train_collate.rng.setstate(state["collate"])
+        step, history, resumed = state["step"], state["history"], state["ranks"][rank]
+        running, running_kl, running_tkl = resumed["running"]
+        micro = step * cfg.grad_accum
+        first_epoch, skip = divmod(micro, per_epoch)
+        done = step >= total_steps
+        if cfg.group_by_length:
+            sampler.epoch = first_epoch
+        # The epoch's order is drawn again from its starting random state, its done
+        # micro-batches pass uncollated, then the saved state comes back. At an epoch's
+        # end the saved state is the next epoch's starting one.
+        torch.set_rng_state(resumed["epoch_rng"] if skip else resumed["rng"])
+        if resumed["cuda"] is not None:  # dropout's; the order is drawn on the CPU
+            torch.cuda.set_rng_state(resumed["cuda"])
+        if not skip:
+            resumed = None
+        if world > 1:
+            train_loader.skip, train_loader.windows = skip, step
+        else:
 
-    for epoch in range(cfg.epochs):
+            def collate_after(rows: list[Example]) -> dict[str, Any] | None:
+                nonlocal skip
+                if skip:
+                    skip -= 1
+                    return None
+                return train_collate(rows)
+
+            train_loader.collate_fn = collate_after
+        print(f"[strands-decider] resumed from {cfg.resume_from} at step {step}")
+    step0 = step
+    seen: list[tuple[torch.Tensor, dict[str, Any]]] = []  # this step's (loss, batch) per forward
+    tokens: Any = 0.0  # real (non-pad) tokens this rank ran since the last log line
+    t_log = time.time()
+
+    for epoch in range(first_epoch, cfg.epochs):
         if done:
             break
+        epoch_rng = torch.get_rng_state()
         for batch in train_loader:
+            if batch is None:  # a done micro-batch of a resumed run
+                continue
+            if resumed is not None:
+                torch.set_rng_state(resumed["rng"])
+                resumed = None
             # Under torchrun a forward is this rank's slice of a micro-batch (distributed.py).
             part = batch.pop("part", distributed.WHOLE)
             batch = {k: v.to(device, non_blocking=True) for k, v in batch.items()}
+            # Stays on the device until the log step.
+            tokens = tokens + batch["attention_mask"].sum()
             if world > 1:  # what DDP's no_sync() sets: all-reduce on the step's last forward
                 fwd.require_backward_grad_sync = part.last
-            out = fwd(
-                input_ids=batch["input_ids"],
-                attention_mask=batch["attention_mask"],
-                n_slots=batch["n_slots"],
-                opt_idx=batch.get("opt_idx"),
-                labels=batch["labels"],
-                label_dist=batch.get("label_dist"),
-                weights=batch.get("weights"),
-            )
+            with torch.autocast(device, dtype=torch.bfloat16, enabled=cfg.bf16_autocast):
+                out = fwd(
+                    input_ids=batch["input_ids"],
+                    attention_mask=batch["attention_mask"],
+                    n_slots=batch["n_slots"],
+                    opt_idx=batch.get("opt_idx"),
+                    prefix_end=batch.get("prefix_end"),
+                    labels=batch["labels"],
+                    label_dist=batch.get("label_dist"),
+                    weights=batch.get("weights"),
+                )
             step_loss = out["loss"] * part.weights
             if cfg.kl_frozen_weight > 0:
                 assert refs is not None  # populated above when kl_frozen_weight > 0
@@ -694,7 +873,7 @@ def train(cfg: TrainConfig) -> str:
                     step_loss = step_loss + (coef * per_row).mean() * part.kl
                 else:
                     step_loss = step_loss + cfg.kl_frozen_weight * kl
-                running_kl += float(kl)
+                running_kl += kl.detach()
             if (
                 cfg.teacher_weight > 0
                 and "has_teacher" in batch
@@ -705,20 +884,26 @@ def train(cfg: TrainConfig) -> str:
                 tea = batch["teacher"][has][:, : stu.shape[-1]]
                 tkl = _teacher_kl(tea, stu, cfg.kl_direction).mean() * part.teacher
                 step_loss = step_loss + cfg.teacher_weight * tkl
-                running_tkl += float(tkl)
+                running_tkl += tkl.detach()
             # DDP averages the ranks' gradients; `* world` makes that the 1-GPU sum.
             loss = step_loss * world / cfg.grad_accum
             loss.backward()
-            running += float(step_loss)
+            running += step_loss.detach()  # on the device: no sync per forward
+            seen.append((step_loss.detach(), batch))  # for the non-finite guard below
             micro += 1
 
             ends_step = part.last if world > 1 else micro % cfg.grad_accum == 0
             if not ends_step:
                 continue
 
-            torch.nn.utils.clip_grad_norm_(
+            norm = torch.nn.utils.clip_grad_norm_(
                 [p for p in model.parameters() if p.requires_grad], cfg.max_grad_norm
             )
+            # One sync per step. A non-finite gradient would turn every weight into NaN at
+            # optim.step() and the run would go on training on NaN: stop before it, loudly.
+            if not torch.isfinite(norm):
+                raise FloatingPointError(_dump_nonfinite(cfg.output_dir, step + 1, rank, seen))
+            seen.clear()
             optim.step()
             sched.step()
             optim.zero_grad(set_to_none=True)
@@ -727,18 +912,22 @@ def train(cfg: TrainConfig) -> str:
                 ema.update(step)
 
             if step % cfg.log_every == 0:
-                running, running_kl, running_tkl = distributed.all_reduce(
-                    [running, running_kl, running_tkl]
+                running, running_kl, running_tkl, tokens = distributed.all_reduce(
+                    [float(running), float(running_kl), float(running_tkl), float(tokens)]
                 )  # each rank holds its slices' part
+                window_s, t_log = time.time() - t_log, time.time()
                 avg = running / (cfg.log_every * cfg.grad_accum)
-                rate = step / max(1e-6, time.time() - t0)
+                rate = (step - step0) / max(1e-6, time.time() - t0)
                 mem = torch.cuda.max_memory_allocated() / 2**30 if device == "cuda" else 0.0
                 mem = distributed.all_reduce([mem], "max")[0]
                 print(
                     f"[strands-decider] epoch {epoch} step {step}/{total_steps} "
                     f"loss {avg:.4f} lr {sched.get_last_lr()[0]:.2e} "
-                    f"{rate:.2f} step/s peak_mem {mem:.1f}GiB"
+                    f"{rate:.2f} step/s peak_mem {mem:.1f}GiB "
+                    f"window {window_s:.2f}s tokens {int(tokens)} "
+                    f"{tokens / max(1e-6, window_s) / world:.0f} tok/s/gpu"
                 )
+                tokens = 0.0
                 entry = {"step": step, "loss": avg}
                 if cfg.kl_frozen_weight > 0:
                     entry["kl"] = running_kl / (cfg.log_every * cfg.grad_accum)
@@ -755,6 +944,35 @@ def train(cfg: TrainConfig) -> str:
                 print(f"[strands-decider] eval @ {step}: {metrics}")
                 history.append({"step": step, **metrics})
 
+            if cfg.save_every and step % cfg.save_every == 0:
+                cuda = torch.cuda.get_rng_state() if device == "cuda" else None
+                ranks = distributed.all_gather(
+                    {
+                        "epoch_rng": epoch_rng,
+                        "rng": torch.get_rng_state(),
+                        "cuda": cuda,
+                        "running": [float(running), float(running_kl), float(running_tkl)],
+                    }
+                )
+                if rank == 0:
+                    _save_resume(
+                        cfg.output_dir,
+                        {
+                            "step": step,
+                            "total_steps": total_steps,
+                            "params": {
+                                n: p.detach().cpu()
+                                for n, p in model.named_parameters()
+                                if p.requires_grad
+                            },
+                            "ema": ema.avg if ema else None,
+                            "optim": optim.state_dict(),
+                            "sched": sched.state_dict(),
+                            "collate": train_collate.rng.getstate(),
+                            "history": history,
+                            "ranks": ranks,
+                        },
+                    )
             if cfg.save_every and step % cfg.save_every == 0 and rank == 0:
                 if ema is not None:
                     ema.apply()  # save the average, then train on from the live weights
