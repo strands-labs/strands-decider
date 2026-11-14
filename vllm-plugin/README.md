@@ -258,9 +258,20 @@ import requests
 
 
 def decide(url, token_ids, prefix_end, code_ids):
-    body = {"model": "m", "prompt": token_ids, "max_tokens": 1, "temperature": 1.0, "top_p": 1.0, "top_k": -1,
-            "min_p": 0.0, "seed": 0, "logprobs": len(code_ids), "allowed_token_ids": code_ids,
-            "return_tokens_as_token_ids": True, "vllm_xargs": {"prefix_end": prefix_end}}
+    body = {
+        "model": "m",
+        "prompt": token_ids,
+        "max_tokens": 1,
+        "temperature": 1.0,
+        "top_p": 1.0,
+        "top_k": -1,
+        "min_p": 0.0,
+        "seed": 0,
+        "logprobs": len(code_ids),
+        "allowed_token_ids": code_ids,
+        "return_tokens_as_token_ids": True,
+        "vllm_xargs": {"prefix_end": prefix_end},
+    }
     resp = requests.post(f"{url}/v1/completions", json=body, timeout=600)
     resp.raise_for_status()
     top = resp.json()["choices"][0]["logprobs"]["top_logprobs"][0]
