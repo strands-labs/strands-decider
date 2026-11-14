@@ -287,7 +287,9 @@ def test_a_direct_invocation(load):
     handler = load()
     payload = handler.handler(REQUEST, None)
     assert payload["answers"]["team"]["choice"] == "billing"
-    with pytest.raises(ValueError, match="at least one question"):
+    stateless = {k: v for k, v in REQUEST.items() if k != "state"}  # the state is optional
+    assert handler.handler(stateless, None)["answers"].keys() == payload["answers"].keys()
+    with pytest.raises(ValueError, match=r"^questions: Dictionary should have at least 1 item"):
         handler.handler({"state": "s", "questions": {}}, None)
 
 
@@ -298,8 +300,9 @@ def test_a_direct_invocation(load):
         (url_event("GET", "/v1/systemone"), 405, "Method Not Allowed"),
         (url_event("POST", "/health"), 405, "Method Not Allowed"),
         (url_event("POST", "/v1/systemone", raw="{not json"), 422, "the body is not JSON"),
-        (url_event("POST", "/v1/systemone", ["a", "list"]), 422, "a request must be an object"),
-        (url_event("POST", "/v1/systemone", {"state": "s"}), 422, "at least one question"),
+        (url_event("POST", "/v1/systemone", ["a", "list"]), 422, "a request must be a JSON object"),
+        (url_event("POST", "/v1/systemone", {"state": "s"}), 422, "questions: Field required"),
+        (url_event("POST", "/v1/systemone", {**REQUEST, "audio": []}), 422, "audio input is not supported"),
         (url_event("POST", "/v1/systemone", {**REQUEST, "images": [image_b64("checker-64x48.png")] * 5}), 422,
          "5 images; this server takes at most 4"),
         (url_event("POST", "/v1/systemone", {**REQUEST, "images": ["not base64!"]}), 422, "image is not valid base64"),
@@ -416,7 +419,7 @@ def test_an_on_demand_load_answers_once_ready(load):
 
 
 def test_an_artifact_without_a_vision_tower_refuses_images(load, tmp_path):
-    from strands_decider.core.request import NO_VISION
+    from strands_decider.core import NO_VISION
 
     handler = load(write_checkpoint(tmp_path / "text", vision=False))
     assert handler._model.result().health()["inputs"] == ["text"]

@@ -2,7 +2,7 @@
 // through ctypes. It runs the Gemma 4 decoder of a decision checkpoint under the prefix_bidir mask
 // (docs/spec.md, section 6) and copies out the final-norm hidden state at each question's last
 // token, which the core's readout reads. With a vision tower loaded (sd_load_vision), the state
-// may hold images, whose rows take the place of their placeholders (section 11.1).
+// may hold images, whose rows take the place of their placeholders (section 3.3).
 //
 // prefix_bidir, with S state tokens: a state token sees every state token, in both directions,
 // and no question token; a question token sees the whole prompt, in both directions; no layer

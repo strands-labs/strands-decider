@@ -52,7 +52,8 @@ def _request_image(data: bytes) -> RenderedImage:
 @pytest.mark.parametrize("name", sorted(IMAGE_FILES))
 def test_prepared_pixels_are_the_goldens(name):
     """Decoded and resized to the bytes of tests/fixtures/core/image_pixels.json (docs/spec.md,
-    Images): the decode, the orientation, and Pillow's bicubic resize to resized_size's size."""
+    sections 3.3 and 10): the decode, the orientation, and Pillow's bicubic resize to
+    resized_size's size."""
     golden = json.loads((FIXTURES / "image_pixels.json").read_text(encoding="utf-8"))["images"][
         name
     ]
