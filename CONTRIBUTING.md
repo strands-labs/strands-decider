@@ -59,7 +59,7 @@ GitHub provides additional document on [forking a repository](https://help.githu
 
 ## Development
 
-The package needs Python 3.10 or later. Install it with the `dev` extra, which adds pytest, ruff, pre-commit and commitizen. Training and the data build need the `train` extra as well ([training/README.md](training/README.md#setup)):
+The package needs Python 3.10.7 or later. Install it with the `dev` extra, which adds pytest, ruff, pre-commit and commitizen. Training and the data build need the `train` extra as well ([training/README.md](training/README.md#setup)):
 
 ```bash
 python3 -m venv .venv

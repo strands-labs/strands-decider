@@ -36,8 +36,9 @@ MAX_IMAGE_PIXELS = 4096 * 4096
 # Bytes per image file, checked before Pillow reads it. 16 MiB holds a photo of MAX_IMAGE_PIXELS
 # as JPEG or WebP. Gemma 4's processor shrinks every image to at most 645,120 pixels, so a larger
 # file adds nothing the model sees, and the cap bounds the work of reading a header: on Pillow
-# 13, under 2 s for the worst files measured. Pillow 12 and earlier read a GIF comment of many
-# sub-blocks in quadratic time, so there a 16 MiB GIF can take minutes.
+# 13, under 2 s for the worst files measured. Pillow 12.3, the floor on Python 3.10, which
+# Pillow 13 does not support, reads a GIF comment of many sub-blocks in quadratic time, so there
+# a 16 MiB GIF can take minutes.
 MAX_IMAGE_BYTES = 16 * 2**20
 # v1's prefix rule (vision.decode_image), applied after stripping surrounding whitespace, with
 # `\w` written out in ASCII so that it does not follow the interpreter's Unicode tables.

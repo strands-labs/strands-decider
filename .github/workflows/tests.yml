@@ -34,11 +34,13 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # The tested floor versions and the lowest supported Python. The core's request
-          # checks are pydantic's and its image headers Pillow's, so both are at their floors.
+          # The tested floor versions and the lowest supported Python. setup-python resolves
+          # "3.10" to the newest 3.10 release, past the 3.10.7 floor. The core's request checks
+          # are pydantic's and its image headers Pillow's, so both are at their floors. Pillow
+          # 13 does not support Python 3.10, so this leg's floor is 12.3.
           - python: "3.10"
             torch: torch==2.7.1
-            pins: transformers==5.15.0 peft==0.21.0 huggingface_hub==1.5.0 pydantic==2.7.0 pillow==10.0.0
+            pins: transformers==5.15.0 peft==0.21.0 huggingface_hub==1.5.0 pydantic==2.7.0 pillow==12.3.0
           # The newest versions that pyproject.toml admits.
           # torchvision runs the 12B's image processor checks (tests/test_core_images.py).
           - python: "3.12"
@@ -160,7 +162,7 @@ jobs:
       - if: steps.fetch.outputs.available == 'true'
         run: |
           python -m pip install --no-deps -e .
-          python -m pip install numpy tokenizers pytest pydantic jinja2 "transformers>=5.15,<6" "pillow>=10"
+          python -m pip install numpy tokenizers pytest pydantic jinja2 "transformers>=5.15,<6" "pillow>=13"
       - if: steps.fetch.outputs.available == 'true'
         env:
           HF_HUB_OFFLINE: "1"
