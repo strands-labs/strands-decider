@@ -59,8 +59,9 @@ SPECIAL_TOKENS = (
 )  # fmt: skip
 EVERY_SPECIAL = "".join(SPECIAL_TOKENS)
 # Whitespace: Python's str.isspace, 29 code points on every Python from 3.11. The template
-# strips it from the ends of request text and collapses it in an option (docs/spec.md, section
-# 3.1); which characters it is, render and the whitespace_edges golden fix.
+# strips it from the ends of request text and collapses it in an option (render_content and
+# question_block in prompt.py); which characters it is, render and the whitespace_edges golden
+# fix.
 WHITESPACE = (
     "\t\n\x0b\x0c\r"  # U+0009 to U+000D
     "\x1c\x1d\x1e\x1f"  # U+001C to U+001F
