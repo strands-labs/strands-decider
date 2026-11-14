@@ -2,11 +2,11 @@
 
 This document is the contract of the decision interface that the Strands Decider v2 models use. It covers the request and the response, the files a published checkpoint carries, and what a runtime must reproduce to serve one. Paths are relative to the repository root.
 
-The reference implementation is `strands_decider.core` (`src/strands_decider/core/`), which needs `tokenizers`, numpy and pydantic, and Pillow for images. This document gives the template's strings and the rules the models were trained on. For the rendering details it leaves out, such as which characters are whitespace, how JSON numbers and escapes are written, the line breaks around images and which malformed request gets which message, `strands_decider.core.render`, `strands_decider.core.parse_request` and the render goldens (`tests/fixtures/core/render_goldens.json`) are normative.
+The reference implementation is `strands_decider.core` (`src/strands_decider/core/`). This document gives the template's strings and the rules the models were trained on. For the rendering details it leaves out, such as which characters are whitespace, how JSON numbers and escapes are written, the line breaks around images and which malformed request gets which message, `strands_decider.core.render`, `strands_decider.core.parse_request` and the render goldens (`tests/fixtures/core/render_goldens.json`) are normative.
 
 Token ids are those of Gemma 4's tokenizer. A checkpoint's normative tokenizer is its base's `tokenizer.json` at `provenance.base_revision` (section 8). The ids here and in the goldens are those of the file with sha256 `cc8d3a0ce36466ccc1278bf987df5f71db1719b9ca6b4118264f45cb627bfe0f`, from `google/gemma-4-E2B-it` at revision `3e22461f65e89153144f8adb70e3b8c2cc9845a7`. The other three Gemma 4 files that `tests/core_support.py` lists give the same ids on every golden.
 
-## 1. The request
+## 1. The request and the response
 
 A request is v1's `POST /v1/systemone` body.
 
@@ -28,15 +28,17 @@ Other fields are ignored, as in v1, and values are never coerced. A question has
 
 An absent noul key keeps its default description, "the statement does not hold for this state" for `false` and "the statement holds for this state" for `true`. A null description shows the option's name alone. As in v1, a question may omit `type`, and is then a noul when its criteria are absent, null or an object with keys among `false` and `true`, a choice when they are another object, and a score when they are an array.
 
-Content, meaning a state, an instruction, an option's name or a description, nests at most 100 levels deep. Numbers that are not finite, integers of more than 4,300 digits and lone surrogates are refused. Every JSON request v1 accepts is accepted, except content past these limits, a non-null `audio` and images that section 1.1 refuses and v1 does not. A request without a state is accepted too.
+Content, meaning a state, an instruction, an option's name or a description, nests at most 100 levels deep, where a scalar is level 0 and an object or an array is one level deeper than the deepest value in it. Numbers that are not finite or too large for a double, integers of more than 4,300 digits and lone surrogates are refused. Every JSON request v1 accepts is accepted, except content past these limits, a non-null `audio` and images that section 1.1 refuses and v1 does not. A request without a state is accepted too.
 
 ### 1.1 Images
 
-Each image is a [PNG](https://www.w3.org/TR/png/), [JPEG](https://www.w3.org/Graphics/JPEG/itu-t81.pdf), [WebP](https://www.rfc-editor.org/rfc/rfc9649) or [GIF](https://www.w3.org/Graphics/GIF/spec-gif89a.txt) file, the first frame of an animated one. It is sent in standard base64 ([RFC 4648](https://www.rfc-editor.org/rfc/rfc4648), section 4), optionally behind a `data:image/<subtype>;base64,` prefix, with whitespace stripped from its ends and refused inside it. Each file is at most 16,777,216 bytes (16 MiB), and its header gives at most 16,777,216 pixels (4096 × 4096). The images are checked in order, with v1's messages and a new one for the byte cap. A checkpoint whose `decision_config.json` `inputs` lack `image` refuses every request with images.
+Each image is a [PNG](https://www.w3.org/TR/png/), [JPEG](https://www.w3.org/Graphics/JPEG/itu-t81.pdf), [WebP](https://www.rfc-editor.org/rfc/rfc9649) or [GIF](https://www.w3.org/Graphics/GIF/spec-gif89a.txt) file, the first frame of an animated one. It is sent in standard base64 ([RFC 4648](https://www.rfc-editor.org/rfc/rfc4648), section 4), optionally behind a `data:image/<subtype>;base64,` prefix, with whitespace stripped from its ends and refused inside it. Each file is at most 16,777,216 bytes (16 MiB), and its header gives at most 16,777,216 pixels (4096 × 4096). A checkpoint whose `decision_config.json` `inputs` lack `image` refuses every request with images.
 
 ### 1.2 The response
 
-A response is v1's `SystemOneResponse`, with `model`, `answers` by question name and `usage`. Its `input_tokens` counts the state once and then each question, and `output_tokens` the questions.
+A response is v1's `SystemOneResponse`, with `model`, `answers` by question name and `usage`. `usage` holds `input_tokens`, which counts the state once and then each question, and `output_tokens`, the number of questions.
+
+Each answer has its question's `type` and these fields.
 
 | type | answer fields |
 | --- | --- |
@@ -112,7 +114,7 @@ Answer with the code of one option.
 
 The header is `Decide whether the statement is true of the state.` for a noul, `Select exactly one option.` for a choice and `Rate the state against the ordered levels below (lowest first).` for a score. A line whose content renders empty is left out, and so is an option's empty name or description, with its separator. A string renders stripped of leading and trailing whitespace, and an object or an array as Python's `json.dumps(value, indent=2, ensure_ascii=False)` writes it. An option's name and description are collapsed onto one line.
 
-`strands-chat` is what Gemma 4's chat template renders for one user turn holding the body, with the generation prompt and thinking off, but without the empty thought channel of the 12B, 26B-A4B and 31B templates. A runtime never builds either prompt with a chat template.
+`strands-chat` is what Gemma 4's chat template renders for one user turn holding the body, with the generation prompt added and thinking off, but without the empty thought channel of the 12B, 26B-A4B and 31B templates. A runtime never builds either prompt with a chat template.
 
 ### 3.2 Token ids
 
@@ -124,7 +126,7 @@ Control tokens come only from the template and the image lines, and are emitted 
 | `<\|turn>` | 105 | `<\|image\|>` | 258880 |
 | `<turn\|>` | 106 | `<image\|>` | 258882 |
 
-Every text run between them is encoded on its own as plain text, with nothing added and no special or added token matched. That is `encode_special_tokens = True` with `add_special_tokens=False` in Hugging Face `tokenizers`, and `parse_special = false` in llama.cpp. So `<turn|>` in a state is text. When it loads a checkpoint, a runtime refuses its tokenizer unless each control token has this id, each code is one token with its `token_ids` entry, and every added token is special (`strands_decider.core.load_tokenizer`).
+Every text run between them is encoded on its own as plain text, with nothing added and no special or added token matched. That is `encode_special_tokens = True` with `add_special_tokens=False` in Hugging Face `tokenizers`, and `add_special = false` with `parse_special = false` in llama.cpp. So `<turn|>` in a state is text. When it loads a checkpoint, a runtime refuses its tokenizer unless each control token has this id, each code is one token with its `token_ids` entry, and every added token is special (`strands_decider.core.load_tokenizer`).
 
 ### 3.3 Images
 
@@ -141,7 +143,7 @@ N = (H / 48) × (W / 48)
 
 At aspect ratios such as 35:2 the double's last bit decides the floor. `tests/fixtures/core/image_soft_tokens.json` gives N for 4,906 sizes.
 
-A runtime decodes the file as v1 does (`strands_decider.vision.decode_image`). It resizes the pixels to the W × H of the decoded, oriented size with `strands_decider.core.resize_image`, Pillow's bicubic filter on the width and then on the height (cubic convolution with a = -0.5, widened by the downscale factor, with weights in 22-bit fixed point; `spec_resize` in `tests/core_support.py` writes it in numpy). It runs the checkpoint's image processor with `do_resize=False`, and the vision encoder's N vectors replace the placeholders.
+A runtime decodes the file as v1 does (`strands_decider.vision.decode_image`). It refuses a file that fails to decode, with v1's `image could not be decoded`, and one whose decoded size is neither the header's nor its transpose (`strands_decider.core.check_decoded_size`). It resizes the pixels to the W × H of the decoded, oriented size with `strands_decider.core.resize_image`, Pillow's bicubic filter on the width and then on the height. That filter is cubic convolution with a = -0.5, widened by the downscale factor, with weights in 22-bit fixed point, and `spec_resize` in `tests/core_support.py` writes it in numpy. The runtime then runs the checkpoint's image processor with `do_resize=False`, checks that the processor counts N soft tokens, and puts the vision encoder's N vectors in place of the placeholders.
 
 ### 3.4 Example
 
@@ -164,11 +166,11 @@ Answer with the code of one option.
 <answer>
 ```
 
-The golden gives its ids. The goldens cover every question type in both variants, 255 options, special-token strings in request text, and images.
+The golden gives its ids.
 
 ## 4. The state boundary S
 
-The state part is `<bos>`, `<|turn>user\n` in `strands-chat`, and the state block through its `</state>\n`. S is its length in tokens, and the question part is the rest. A runtime encodes the two parts separately and concatenates their ids, so no token straddles S. It counts S from what it encoded, never by searching for `</state>`, which a state may hold. Every question of a request shares the state part. With Gemma 4's tokenizer the separate encodings equal one encoding of the joined text (`tests/test_core_prompt.py`).
+The state part is `<bos>`, `<|turn>user\n` in `strands-chat`, and the state block through its `</state>\n`. S is its length in tokens, the question part is the rest, and L is the prompt's length. A runtime encodes the two parts separately and concatenates their ids, so no token straddles S. It counts S from what it encoded, never by searching for `</state>`, which a state may hold. Every question of a request shares the state part.
 
 ## 5. Where the answer is read
 
@@ -183,7 +185,7 @@ i < S:   j < S     the state sees the whole state, never a question
 i >= S:  j < L     a question sees the whole prompt
 ```
 
-The mask applies on every layer, sliding-window layers included, with no window, and positions are the token indices. Image placeholders are state tokens like any other. No question sees another, so the state's keys and values serve every question. A runtime that keeps them across requests keys them on the state's ids and each image's sha256, in order (`RenderedImage.sha256`), and reuses them only when the whole state matches, since the state attends both ways.
+The mask applies on every layer, sliding-window layers included, with no window, and positions are the token indices. Image placeholders are state tokens like any other. The state never sees a question, so its keys and values serve every question, and no question sees another. A runtime that keeps them across requests keys them on the state's ids and each image's sha256, in order (`RenderedImage.sha256`), and reuses them only when the whole state matches, since the state attends both ways.
 
 ## 7. The readout
 
@@ -233,7 +235,7 @@ p = softmax(z[0:k])    float32, over the question's own k codes
 | `release`, the released model | `([A-Za-z0-9][A-Za-z0-9_.-]*/)?[A-Za-z0-9][A-Za-z0-9_.-]*` |
 | `source`, the public training code and recipe | `https://[!-~]+` |
 
-Validation is strict. A runtime reads `interface` first, since other decision-model formats use the same file names, then `format_version`. A missing or unknown field, a value of the wrong type and a `prompt` the runtime does not implement are errors. Integers have no fraction or exponent. `temperature`, `final_logit_softcapping` and their quotient must be normal float32 values. A runtime refuses, and never truncates, a prompt longer than `max_length_validated` unless its operator raises the limit. `tests/fixtures/core/decision_config.json` is an example.
+Validation is strict. A runtime reads `interface` first, since other decision-model formats use the same file names, then `format_version`. A missing or unknown field, a value of the wrong type and a `prompt` the runtime does not implement are errors. Integers have no fraction or exponent. `temperature` and `final_logit_softcapping` must be normal float32 values, and their quotient finite in float32. A runtime refuses, and never truncates, a prompt longer than `max_length_validated` unless its operator raises the limit. `tests/fixtures/core/decision_config.json` is an example.
 
 ## 9. The checkpoint layout
 
@@ -241,7 +243,7 @@ A decision checkpoint is its base model's own multimodal checkpoint, with any fi
 
 | file | contents |
 | --- | --- |
-| `config.json` | The base's. Its `final_logit_softcapping` must equal `decision_config.json`'s. |
+| `config.json` | The base's. Its `text_config.final_logit_softcapping`, or a top-level one, must equal `decision_config.json`'s. |
 | `model.safetensors`, or shards with `model.safetensors.index.json` | The base's tensors in bf16, fine-tuning merged in. No adapter, and no `lm_head`, which Gemma 4 ties to the embedding. |
 | `processor_config.json` | The base's. Image requests need `patch_size` 16, `pooling_kernel_size` 3, `max_soft_tokens` 280 and `image_seq_length` 280 (`strands_decider.core.check_image_processor`). |
 | `tokenizer.json`, `tokenizer_config.json` | The base's, with no `chat_template`. |
@@ -268,7 +270,7 @@ A runtime conforms for a checkpoint when it passes these goldens.
 
 1. The render goldens, exactly, with the pinned tokenizer.
 2. The readout goldens (`tests/fixtures/core/readout_goldens.json`). From each golden h its GEMM gives every z within one bf16 step, and from each golden z it gives every probability within 1e-5.
-3. The checkpoint's `golden_vectors.jsonl`, at least 1,000 questions, each line a request with its `variant`, `state_ids`, `images` (`sha256`, `span`) and, by question, `question_ids`, `codes` and the reference's `probabilities`. Its ids equal the goldens', and it meets the bounds below on top-1 agreement and on the mean of each question's largest probability difference, |Δp| (`strands_decider.core.agreement`).
+3. The checkpoint's `golden_vectors.jsonl`, at least 1,000 questions. Each line is an object with `request`, `variant`, `state_ids`, `images` (each with `sha256` and `span`) and `questions`, holding by name each question's `question_ids`, `codes` and the reference's `probabilities`. The reference is the PyTorch model in bf16 under `prefix_bidir`, read as section 7 says, and the set covers every question type, states up to `max_length_validated`, many options, and images where `inputs` holds `image`. The runtime's ids equal the goldens', and it meets the bounds below on top-1 agreement and on the mean of each question's largest probability difference, |Δp| (`strands_decider.core.agreement`).
 
 | weight format | top-1 agreement | mean \|Δp\| |
 | --- | --- | --- |
