@@ -51,7 +51,7 @@ vision = ["pillow>=13", "torchvision>=0.22"]
 # release that changed it would change answers without an error; the backend also refuses
 # another mlx-vlm at load. mlx is capped at the minor version tested, for the same reason:
 # mlx-vlm 0.7.12 needs mlx 0.32.4, and needs no mlx-lm. Pillow decodes and resizes images; its
-# bicubic filter is the spec's reference (docs/spec.md section 11.1).
+# bicubic filter is the spec's reference (docs/spec.md section 3.3).
 mlx = [
     "mlx>=0.32.4,<0.33; sys_platform == 'darwin' and platform_machine == 'arm64'",
     "mlx-lm>=0.32,<0.33; sys_platform == 'darwin' and platform_machine == 'arm64'",

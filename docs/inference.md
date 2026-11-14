@@ -77,8 +77,10 @@ Transformers' `causal_conv1d_fn` falls back to its reference PyTorch path. On CP
 `chunk_gated_delta_rule` also falls back. On MPS, `mps_kernels.py` replaces that second
 function, so only the first fallback matters there, and it costs 32 ms a forward.
 
-**macOS (Apple silicon) with MLX.** The `mlx` extra adds mlx and mlx-lm, and `--device mlx`
-runs the torso on Metal through mlx-lm ([Serving on a Mac with MLX](#serving-on-a-mac-with-mlx)).
+**macOS (Apple silicon) with MLX.** The `mlx` extra adds mlx, mlx-lm, mlx-vlm and Pillow, and
+`--device mlx` runs the torso on Metal through mlx-lm
+([Serving on a Mac with MLX](#serving-on-a-mac-with-mlx)), or a decision checkpoint through
+mlx-vlm ([Decision checkpoints on MLX](#decision-checkpoints-on-mlx)).
 MLX is opt-in: with the extra installed, a command without `--device` still runs on MPS.
 
 ```bash
@@ -445,8 +447,9 @@ strands-decider ask CHECKPOINT --device mlx --state "A photo from the support ch
 strands-decider serve CHECKPOINT --device mlx --port 8099
 ```
 
-The backend implements the core's `Backend` (spec section 11) over mlx-vlm's own Gemma 4
-classes, unpatched:
+The backend implements the core's `Backend`
+([runtime interface](../docs/architecture.md#the-cores-runtime-interface)) over mlx-vlm's own
+Gemma 4 classes, unpatched:
 
 - Every pass hands mlx-vlm a mask, which it gives every layer as it is, so `prefix_bidir` holds
   on every layer with no sliding window. The state is encoded once, into plain KV caches, and

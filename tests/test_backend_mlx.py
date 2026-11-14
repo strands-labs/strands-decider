@@ -1405,7 +1405,7 @@ def test_a_decoded_size_that_is_not_the_headers_is_refused_by_forward(backends, 
 
 
 def test_the_resize_meets_the_cores_pixel_goldens(backends):
-    """docs/spec.md section 11.1's pixel conformance: the backend's decode of each golden image
+    """docs/spec.md section 10's pixel conformance: the backend's decode of each golden image
     is the golden's decoded pixels (exactly for PNG, GIF and lossless WebP, within 1 per channel
     otherwise), and its resize of those decoded pixels, read back from the processor's output,
     is the golden's resized pixels byte for byte. The goldens were made with Pillow 12.2."""
@@ -1413,7 +1413,6 @@ def test_the_resize_meets_the_cores_pixel_goldens(backends):
 
     from core_support import FIXTURES
 
-    from strands_decider.core.images import image_size
     from strands_decider.core.prompt import RenderedImage as RI
 
     goldens = json.loads((FIXTURES / "image_pixels.json").read_text())["images"]
@@ -1426,7 +1425,8 @@ def test_the_resize_meets_the_cores_pixel_goldens(backends):
         diff = int(np.abs(ours.astype(int) - theirs.astype(int)).max())
         assert diff == 0 if exact else diff <= 1, (name, diff)
         decoded = (FIXTURES / "pixels" / f"{name}.png").read_bytes()  # the golden's, not ours
-        _, w, h = image_size(decoded)
+        with Image.open(io.BytesIO(decoded)) as img:
+            w, h = img.size
         im = RI(
             data=decoded,
             format="PNG",

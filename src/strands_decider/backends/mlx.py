@@ -1,4 +1,5 @@
-"""Decision checkpoints on Apple silicon through mlx-vlm (docs/spec.md, The runtime interface).
+"""Decision checkpoints on Apple silicon through mlx-vlm (docs/architecture.md, The core's
+runtime interface).
 
 The checkpoint is the Gemma 4 base's own multimodal checkpoint with the fine-tuning merged in
 (spec section 9), or an MLX artifact converted from it (`strands-decider convert-mlx`,
@@ -31,9 +32,9 @@ The checkpoint is the Gemma 4 base's own multimodal checkpoint with the fine-tun
   GEMM, the soft-cap, the temperature and the softmax in the spec's precision regime.
 
 `ask` and `serve` reach this backend through `strands_decider.decision`, which registers
-`load_backend` for `--device mlx` and puts the core and the request checks around it. Audio is
-not part of the interface yet (spec section 12): the core refuses it, and the audio encoder and
-its projection are dropped at load and never run.
+`load_backend` for `--device mlx` and puts the core and the request checks around it. The
+interface takes no audio (spec section 1): the core refuses it, and the audio encoder and its
+projection are dropped at load and never run.
 
 mlx-vlm is pinned to the release tested (the `mlx` extra), and another is refused at load:
 this module calls its internals, `get_input_embeddings`, the language model's `__call__`
@@ -62,13 +63,13 @@ try:
     from mlx.utils import tree_map_with_path
 except ImportError as e:  # pragma: no cover - depends on the platform
     raise ImportError(
-        "the MLX backend needs macOS on Apple silicon, Python 3.11 or later, and the mlx extra: "
-        "pip install 'strands-decider[mlx]' (on another platform or Python the extra installs "
-        "nothing)"
+        "the MLX backend needs macOS on Apple silicon and the mlx extra: "
+        "pip install 'strands-decider[mlx]' (on another platform the extra installs nothing)"
     ) from e
 
 from ..core import (
     HIDDEN,
+    NO_VISION,
     DecisionConfig,
     RenderedImage,
     attention_mask,
@@ -78,7 +79,6 @@ from ..core import (
 )
 from ..core.config import IMAGE
 from ..core.images import IMAGE_FORMATS
-from ..core.request import NO_VISION
 from ..refusals import RequestRefused
 from .mlx_format import bases_form, check_mlx_vlm, conformance
 
@@ -218,7 +218,7 @@ def image_processor(path: Path, unified: bool) -> tuple[Any | None, str]:
 
 
 def prepare_image(image: RenderedImage, processor: Any) -> dict[str, np.ndarray]:
-    """One image's pixels for the vision encoder (docs/spec.md section 11.1): decoded as v1
+    """One image's pixels for the vision encoder (docs/spec.md section 3.3): decoded as v1
     decodes it; its decoded, oriented size held to its header's (`check_decoded_size`, which
     gives the size to resize to); resized by the spec's bicubic resize (`resize_image`: the
     width's pass, then the height's, the same on every Pillow); then prepared by the image
