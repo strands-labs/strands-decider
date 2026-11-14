@@ -36,7 +36,7 @@ class Backend(Protocol):
         "hidden"         the final-norm hidden state at the last token, [hidden]
         "raw_logits"     z = W h, the readout applied: [255], or the question's [k]
         "capped_logits"  tanh(z / c) * c, the soft-cap applied, not the temperature
-        "final_logits"   tanh(z / c) * c / T, both applied (as strands-decider-vllm returns them)
+        "final_logits"   tanh(z / c) * c / T, both applied, as in strands-decider-vllm's model
         "probabilities"  the codes' probabilities: the question's k, or all 255
 
     Every backend takes images: `forward` gets the state's images, which are empty for a

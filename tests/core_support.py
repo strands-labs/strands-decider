@@ -59,10 +59,20 @@ GEMMA4_TOKENIZER_SHA256 = "cc8d3a0ce36466ccc1278bf987df5f71db1719b9ca6b4118264f4
 # Every known Gemma 4 tokenizer.json, by sha256: where each is shipped. docs/spec.md refers to
 # this list, and every golden gives the same ids with all four.
 GEMMA4_TOKENIZERS = {
-    GEMMA4_TOKENIZER_SHA256: "google/gemma-4-E2B-it@3e22461f, 26B-A4B@4d7ae498, 31B@842da379",
-    "ab26b2add729e6f645bd869f228f14190a06615538f3be6f7786f33d13d78ad2": "google/gemma-4-E2B-it@4adf1574",
-    "91d9cf86906f78e197021fda88214d448e5c120665d0243a8e776e046986c6bc": "google/gemma-4-E4B-it@4ecc2ba6",
-    "9788bdb6a021b3170357cd3587b5d622b1177561ad3c5bf43d73728fd71aeacb": "google/gemma-4-12B-it@43c9d014",
+    GEMMA4_TOKENIZER_SHA256: (
+        "google/gemma-4-E2B-it@3e22461f65e89153144f8adb70e3b8c2cc9845a7, "
+        "google/gemma-4-26B-A4B-it@4d7ae4984b7db7de8f8457170b3f1a419ee76d52, "
+        "google/gemma-4-31B-it@842da3794eaa0b77d5f08bae87a17459d91ff475"
+    ),
+    "ab26b2add729e6f645bd869f228f14190a06615538f3be6f7786f33d13d78ad2": (
+        "google/gemma-4-E2B-it@4adf15748de9e1a0097b6274cee9c15836c41c37"
+    ),
+    "91d9cf86906f78e197021fda88214d448e5c120665d0243a8e776e046986c6bc": (
+        "google/gemma-4-E4B-it@4ecc2ba63bcac23ba4a767fc87025b1450f84c9c"
+    ),
+    "9788bdb6a021b3170357cd3587b5d622b1177561ad3c5bf43d73728fd71aeacb": (
+        "google/gemma-4-12B-it@43c9d014b231474fa7212dbb48a762566c2b255d"
+    ),
 }
 TOKENIZER_ENV = "STRANDS_DECIDER_GEMMA4_TOKENIZER"
 TEMPLATES_ENV = "STRANDS_DECIDER_GEMMA4_TEMPLATES"
