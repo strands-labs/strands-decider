@@ -1,4 +1,5 @@
-"""What a runtime provides, and the glue around it (docs/spec.md, The runtime interface).
+"""What a runtime provides, and the glue around it (docs/architecture.md, The core's runtime
+interface).
 
 A runtime runs the decoder. This core does the rest: it renders the request, hands the
 runtime one state and its questions as token ids, with the state's images and where their

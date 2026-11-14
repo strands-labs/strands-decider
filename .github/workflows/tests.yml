@@ -171,8 +171,8 @@ jobs:
         run: |
           python -c "import importlib.util as u, sys; sys.exit(u.find_spec('torch') is not None)"
           python -m pytest -q -rs tests/test_core_prompt.py tests/test_core_readout.py tests/test_core_config.py tests/test_core_images.py
-      # The other three Gemma 4 tokenizer.json files docs/spec.md lists (From text to token
-      # ids): fetched here, with the token, and tested in the next step, without it. A gated
+      # The other three Gemma 4 tokenizer.json files (tests/core_support.py, GEMMA4_TOKENIZERS):
+      # fetched here, with the token, and tested in the next step, without it. A gated
       # file skips that step with a warning, as the first fetch does.
       - if: steps.fetch.outputs.available == 'true'
         id: fetch_others

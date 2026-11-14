@@ -1,13 +1,14 @@
 """Shared by the torch-free core's tests (tests/test_core_*.py).
 
-The render goldens and properties run against Gemma 4's real tokenizer. It is 32 MB, so it
-is not committed: point STRANDS_DECIDER_GEMMA4_TOKENIZER at a copy of `tokenizer.json`, and
-the tests check its sha256 before they trust it. It may be any of the four Gemma 4 files
-docs/spec.md lists (GEMMA4_TOKENIZERS), since the E2B, E4B and 12B repositories now ship
-slightly different ones: the goldens were made with the pinned file (google/gemma-4-E2B-it at
-GEMMA4_REVISION, which 26B-A4B and 31B also ship), which regenerating them needs, and every
-golden gives the same ids with all four. Without a tokenizer those tests skip; the tests that
-need only text, numbers or a toy tokenizer always run.
+The render goldens and properties run against Gemma 4's real tokenizer. It is 32 MB, so it is
+not committed: point STRANDS_DECIDER_GEMMA4_TOKENIZER at a copy of `tokenizer.json`, and the
+tests check its sha256 before they trust it. It may be any of the four known Gemma 4 files
+(GEMMA4_TOKENIZERS, which docs/spec.md refers to), since the E2B, E4B and 12B repositories now
+ship slightly different ones: the goldens were made with the pinned file
+(google/gemma-4-E2B-it at GEMMA4_REVISION, which 26B-A4B and 31B also ship), which
+regenerating them needs, and every golden gives the same ids with all four. Without a
+tokenizer those tests skip; the tests that need only text, numbers or a toy tokenizer always
+run.
 
     STRANDS_DECIDER_GEMMA4_TOKENIZER=/path/to/tokenizer.json pytest tests/test_core_*.py
 
@@ -29,12 +30,12 @@ Gemma 4's real image processors (which needs transformers, Pillow and torchvisio
 STRANDS_DECIDER_REGEN_SOFT_TOKENS=1 rewrites the table alone. Regenerate the render goldens
 after the images.
 
-tests/fixtures/core/image_pixels.json holds the pixel goldens of docs/spec.md (Images, in The
-runtime interface): for each test image, the sha256 of its RGB bytes as v1 decodes it and
+tests/fixtures/core/image_pixels.json holds the pixel goldens of docs/spec.md (section 10):
+for each test image, the sha256 of its RGB bytes as v1 decodes it and
 after the bicubic resize to (W, H), made with PIXELS_PILLOW; STRANDS_DECIDER_REGEN_PIXELS=1
 rewrites it (Pillow only). `reference_pixels` is v1's decode, `reference_resize` the
-spec's resize, the core's `resize_image`, and `spec_resize` the spec's resize rule written
-out in numpy, without Pillow, as an oracle for both.
+spec's resize, the core's `resize_image`, and `spec_resize` that resize, Pillow's bicubic
+filter, written out in numpy, without Pillow, as an oracle for both.
 """
 
 from __future__ import annotations
@@ -55,7 +56,8 @@ FIXTURES = Path(__file__).parent / "fixtures" / "core"
 GEMMA4_REPO = "google/gemma-4-E2B-it"
 GEMMA4_REVISION = "3e22461f65e89153144f8adb70e3b8c2cc9845a7"
 GEMMA4_TOKENIZER_SHA256 = "cc8d3a0ce36466ccc1278bf987df5f71db1719b9ca6b4118264f45cb627bfe0f"
-# Every Gemma 4 tokenizer.json docs/spec.md lists, by sha256: where each is shipped.
+# Every known Gemma 4 tokenizer.json, by sha256: where each is shipped. docs/spec.md refers to
+# this list, and every golden gives the same ids with all four.
 GEMMA4_TOKENIZERS = {
     GEMMA4_TOKENIZER_SHA256: "google/gemma-4-E2B-it@3e22461f, 26B-A4B@4d7ae498, 31B@842da379",
     "ab26b2add729e6f645bd869f228f14190a06615538f3be6f7786f33d13d78ad2": "google/gemma-4-E2B-it@4adf1574",
@@ -77,7 +79,7 @@ PIXELS_PILLOW = "12.2.0"
 
 @lru_cache(maxsize=1)
 def _gemma4_path() -> tuple[str, str] | None:
-    """The tokenizer's path and sha256, if it is one of docs/spec.md's Gemma 4 files."""
+    """The tokenizer's path and sha256, if it is one of the Gemma 4 files in GEMMA4_TOKENIZERS."""
     p = os.environ.get(TOKENIZER_ENV)
     if not p:
         return None
@@ -87,8 +89,8 @@ def _gemma4_path() -> tuple[str, str] | None:
         digest = hashlib.sha256(f.read()).hexdigest()
     if digest not in GEMMA4_TOKENIZERS:
         raise AssertionError(
-            f"{p} has sha256 {digest}, which is not one of the Gemma 4 tokenizer.json files "
-            f"docs/spec.md lists: {sorted(GEMMA4_TOKENIZERS)}"
+            f"{p} has sha256 {digest}, which is not one of the known Gemma 4 tokenizer.json "
+            f"files: {sorted(GEMMA4_TOKENIZERS)}"
         )
     return p, digest
 
@@ -297,7 +299,7 @@ def _offset_first_frame(gif: bytes, *, screen: tuple[int, int], offset: tuple[in
 
 # Aspect ratios w:h = 280:m^2, in lowest terms, where 280 h / w = m^2 is a perfect square, so
 # that f h / 48 = m in exact arithmetic and the floor is decided by the double's last bit
-# (docs/spec.md, The state block); where m divides 280, f w / 48 = 280 / m is an integer too.
+# (docs/spec.md, section 3.3); where m divides 280, f w / 48 = 280 / m is an integer too.
 # m = 1 to 24, each at KNIFE_EDGE_SCALES, both ways round.
 KNIFE_EDGE_RATIOS = tuple(
     (280 // math.gcd(280, m * m), m * m // math.gcd(280, m * m)) for m in range(1, 25)
@@ -462,8 +464,8 @@ _PRECISION_BITS = 22  # 32 - 8 - 2: the fixed-point coefficients' fraction bits
 
 
 def _coefficients(in_size: int, out_size: int) -> list[tuple[int, list[int]]]:
-    """For each output index, its first input index and its fixed-point weights, by the
-    spec's rule (Pillow's precompute_coeffs and normalize_coeffs_8bpc)."""
+    """For each output index, its first input index and its fixed-point weights, as Pillow
+    computes them (precompute_coeffs and normalize_coeffs_8bpc)."""
     scale = in_size / out_size
     filterscale = max(scale, 1.0)
     inverse = 1.0 / filterscale  # multiplied by, as Pillow does, not divided by
@@ -498,11 +500,11 @@ def _resample(pixels: Any, out_size: int, axis: int) -> Any:
 
 
 def spec_resize(pixels: Any, width: int, height: int) -> Any:
-    """docs/spec.md's bicubic resize (section 11.1) of RGB pixels, an array [h, w, 3] of
-    uint8, to [height, width, 3], written from the spec's text with numpy alone: the
+    """docs/spec.md's bicubic resize (section 3.3) of RGB pixels, an array [h, w, 3] of
+    uint8, to [height, width, 3], written with numpy alone: Pillow's bicubic filter, the
     horizontal pass, its 8-bit result, then the vertical pass; a pass whose size does not
-    change is left out. A test oracle, which holds the rule as the spec writes it to
-    `resize_image` and to Pillow, byte for byte."""
+    change is left out. A test oracle, which holds `resize_image` and Pillow to the rule the
+    spec names, byte for byte, and lets the pixel goldens be checked without Pillow."""
     import numpy as np
 
     pixels = np.ascontiguousarray(pixels, dtype=np.uint8)

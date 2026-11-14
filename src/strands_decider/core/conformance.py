@@ -1,4 +1,4 @@
-"""Conformance on answers (docs/spec.md, Golden vectors and conformance): the two measures and
+"""Conformance on answers (docs/spec.md, section 10): the two measures and
 their bounds, computed one way for every runtime.
 
 A runtime's code probabilities are compared with the reference's, question by question:
@@ -129,8 +129,8 @@ def agreement(
 
 
 def read_golden_vectors(path: str | os.PathLike[str]) -> dict[tuple[int, str], list[float]]:
-    """The reference probabilities of a `golden_vectors.jsonl` (docs/spec.md, Golden vectors
-    and conformance), keyed by (line number from 0, question name), for `agreement`."""
+    """The reference probabilities of a `golden_vectors.jsonl` (docs/spec.md, section 10),
+    keyed by (line number from 0, question name), for `agreement`."""
     out: dict[tuple[int, str], list[float]] = {}
     with open(path, encoding="utf-8") as f:
         for line_number, line in enumerate(f):

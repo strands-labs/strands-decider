@@ -1,8 +1,8 @@
-"""A checkpoint's tokenizer, checked against the interface (docs/spec.md, From text to token ids).
+"""A checkpoint's tokenizer, checked against the interface (docs/spec.md, section 3.2).
 
 The tokenizer that is normative for a checkpoint is its own: its base's `tokenizer.json` at
-`provenance.base_revision`. Gemma 4's sizes ship slightly different files (the spec lists
-them), so a runtime checks, when it loads a checkpoint, the ids the prompt and the readout
+`provenance.base_revision`. Gemma 4's sizes ship slightly different files (tests/core_support.py
+lists them), so a runtime checks, when it loads a checkpoint, the ids the prompt and the readout
 depend on: each control token at the id the spec gives, each code one token whose id is the
 checkpoint's `token_ids` entry, and every added token special, so that request text, which
 is encoded with special-token matching off, can never produce one.
@@ -31,7 +31,7 @@ if TYPE_CHECKING:
 
 TOKENIZER_FILE = "tokenizer.json"
 
-# The control tokens' ids in Gemma 4's tokenizer (docs/spec.md, From text to token ids). The
+# The control tokens' ids in Gemma 4's tokenizer (docs/spec.md, section 3.2). The
 # image tokens' ids are also config.json's boi_token_id, image_token_id and eoi_token_id.
 CONTROL_TOKEN_IDS: dict[str, int] = {
     BOS: 2,
@@ -43,7 +43,7 @@ CONTROL_TOKEN_IDS: dict[str, int] = {
 }
 
 
-# Each code's token id in Gemma 4's tokenizer, in code order (docs/spec.md, The codes): the same
+# Each code's token id in Gemma 4's tokenizer, in code order (docs/spec.md, section 2): the same
 # in all four of its known tokenizer.json files.
 # fmt: off
 CODE_TOKEN_IDS: tuple[int, ...] = (
@@ -106,7 +106,7 @@ def check_tokenizer(
         ]
         raise ValueError(
             f"decision_config.json's token_ids are not Gemma 4's for codes {bad[:5]} "
-            "(docs/spec.md, The codes)"
+            "(docs/spec.md, section 2)"
         )
     # Encoded as request text is: plain text, special-token matching off, by a fresh copy,
     # which also refuses a tokenizer with added tokens that are not special.

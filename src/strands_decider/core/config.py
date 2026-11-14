@@ -1,12 +1,12 @@
 """`decision_config.json`: what a runtime needs, beyond the weights, to serve a checkpoint.
 
-The schema is docs/spec.md's (The decision_config.json schema). Validation is strict: a
-file without `"interface": "strands-decider"`, a missing required field, an unknown
-field, a value of the wrong type, and a prompt this runtime does not implement are all
-errors. The file carries the soft-cap, so a converted decoder (GGUF, MLX) needs no
-`config.json` beside it. It names the inputs the checkpoint takes (`inputs`: text, and
-images where it serves them), and its provenance is required: the image processor, the
-tokenizer and any part not fine-tuned come from the base model at `base_revision`.
+The schema is docs/spec.md's (section 8). Validation is strict: a file without `"interface":
+"strands-decider"`, a missing required field, an unknown field, a value of the wrong type, and
+a prompt this runtime does not implement are all errors. The file carries the soft-cap, so a
+converted decoder (GGUF, MLX) needs no `config.json` beside it. It names the inputs the
+checkpoint takes (`inputs`: text, and images where it serves them), and its provenance is
+required: the image processor, the tokenizer and any part not fine-tuned come from the base
+model at `base_revision`.
 """
 
 from __future__ import annotations
@@ -55,12 +55,12 @@ OPTIONAL: tuple[str, ...] = ()
 # The provenance fields every checkpoint gives; `release` and `source` are optional.
 PROVENANCE_REQUIRED = ("base_model", "base_revision")
 
-# The readout's soft-cap and temperature act in float32 (docs/spec.md, The readout), so
+# The readout's soft-cap and temperature act in float32 (docs/spec.md, section 7), so
 # each must be a normal float32: a value past these bounds would become inf or lose precision.
 F32_MAX = 3.4028234663852886e38
 F32_MIN_NORMAL = 1.1754943508222875e-38
 # Token ids and max_length_validated fit a signed 32-bit integer, so that every runtime can
-# hold them (docs/spec.md, The decision_config.json schema).
+# hold them (docs/spec.md, section 8).
 INT32_MAX = 2**31 - 1
 
 
@@ -103,7 +103,7 @@ def _shown(v: Any) -> str:
     return text if len(text) <= 200 else text[:200] + "..."
 
 
-# The provenance formats (docs/spec.md, The decision_config.json schema), ASCII and whole.
+# The provenance formats (docs/spec.md, section 8), ASCII and whole.
 _HUB_NAME = r"[A-Za-z0-9][A-Za-z0-9_.-]*"
 _HUB_ID = re.compile(rf"{_HUB_NAME}/[A-Za-z0-9_.-]+", re.ASCII)
 _RELEASE = re.compile(rf"({_HUB_NAME}/)?{_HUB_NAME}", re.ASCII)

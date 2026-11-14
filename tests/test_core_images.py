@@ -1,4 +1,4 @@
-"""Image input (docs/spec.md, sections 1.1 and 3.2): the checks, the size and N.
+"""Image input (docs/spec.md, sections 1.1 and 3.3): the checks, the size and N.
 
 Pillow reads an image's format and size from its file header, never its pixels, and the core
 counts its soft tokens N as Gemma 4's image processors do. These tests check the checks and
@@ -291,7 +291,7 @@ def test_data_uri_prefix_is_v1s():
 
 
 def test_surrounding_whitespace_is_stripped():
-    """The string is stripped of whitespace as request text is (docs/spec.md, 3.1), Unicode's
+    """The string is stripped of whitespace as `render` strips request text, Unicode's
     included; U+FEFF is not whitespace, so a byte order mark makes it invalid base64."""
     png = image_b64("checker-64x48.png")
     want = image_bytes("checker-64x48.png")
@@ -681,8 +681,9 @@ def _on_white(c, a):
     return (((y >> 8) + y) >> 15) if a else 255
 
 
-def test_decoding_follows_the_specs_rules():
-    """The decode cases the spec defines, by what v1 does with Pillow: bit depths, 16-bit
+def test_v1_decodes_by_these_rules():
+    """The decode cases a runtime's decoder must match, as v1's decode gives them with Pillow
+    and the pixel goldens pin them (docs/spec.md, sections 3.3 and 10): bit depths, 16-bit
     samples, transparency (composited onto white, and where it is not), CMYK, and a GIF's
     canvas."""
     pytest.importorskip("PIL")
@@ -772,8 +773,8 @@ def test_decoding_follows_the_specs_rules():
 
 def test_the_processor_with_its_resize_off_takes_the_resized_pixels():
     """Gemma4ImageProcessorPil's own resize is Pillow's bicubic to (W, H): it gives the same
-    pixel values as resizing first and calling it with do_resize=False, as section 11.1 has
-    the runtime do."""
+    pixel values as resizing first and calling it with do_resize=False, as docs/spec.md
+    section 3.3 has the runtime do."""
     transformers = pytest.importorskip("transformers")
     pytest.importorskip("PIL")
     np = pytest.importorskip("numpy")

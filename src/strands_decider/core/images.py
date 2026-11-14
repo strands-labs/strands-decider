@@ -1,4 +1,4 @@
-"""Image input (docs/spec.md, sections 1.1 and 3.2): the checks, the size and N.
+"""Image input (docs/spec.md, sections 1.1 and 3.3): the checks, the size and N.
 
 A request's image is a base64 file: PNG, JPEG, WebP or GIF. The core checks it and reads its
 format, width and height from its header with Pillow, never decoding its pixels, and from the
@@ -83,9 +83,8 @@ def resized_size(
     Gemma4UnifiedImageProcessor, which size alike).
 
     A runtime resizes to it (`resize_image`) before the processor, with the processor's own
-    resize off (docs/spec.md, section 11.1), and calls it with the decoded image's width and
-    height,
-    after its EXIF orientation, not the header's: swapping them swaps W and H.
+    resize off (docs/spec.md, section 3.3), and calls it with the decoded image's width and
+    height, after its EXIF orientation, not the header's: swapping them swaps W and H.
     `check_decoded_size` checks the decoded size against the header and calls it so;
     `soft_tokens` counts its soft tokens, which do not swap."""
     if not (isinstance(width, int) and isinstance(height, int)) or width < 1 or height < 1:
@@ -173,7 +172,7 @@ def check_image_processor(processor_config: Mapping[str, Any] | str | os.PathLik
     `patch_size` 16, `pooling_kernel_size` 3 and `max_soft_tokens` 280, under
     `image_processor` or at its top level, and `image_seq_length`, wherever it is given,
     280. ValueError otherwise: a runtime refuses image requests for such a checkpoint
-    (docs/spec.md, The checkpoint layout)."""
+    (docs/spec.md, section 9)."""
     if not isinstance(processor_config, Mapping):
         path = os.fspath(processor_config)
         if os.path.isdir(path):
