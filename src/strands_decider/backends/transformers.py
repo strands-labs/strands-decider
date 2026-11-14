@@ -15,11 +15,18 @@ whose `decision_config.json` predates `interface` and `inputs`, loads as text on
 warning for each missing field. It names no prompt, so it runs on token ids rendered elsewhere;
 `strands-decider ask` and `serve` refuse it.
 
-The mask (section 6). Every layer gets the prefix_bidir mask as an explicit boolean mask, in a
-dict keyed by layer type. The dict replaces Gemma 4's own mask construction: the causal rule,
-the sliding windows, and the bidirectional image blocks of the larger sizes
-(`use_bidirectional_attention: "vision"`) all go. The model runs SDPA, which applies the mask
-it is given and no window of its own. An image's placeholders are state tokens like any other.
+The mask (section 6). The decoder's layers run `prefix_bidir_attention`, PyTorch's SDPA made
+never causal, and every layer gets the backend's form of the prefix_bidir mask, in a dict keyed
+by layer type. The dict replaces Gemma 4's own mask construction: the causal rule, the sliding
+windows, and the bidirectional image blocks of the larger sizes (`use_bidirectional_attention:
+"vision"`) all go. SDPA applies the mask it is given and no window of its own. The mask is never
+a dense L x L one, which costs L^2 bytes as booleans and more once SDPA has turned it into a
+float mask. A pass over a whole prompt takes the state's length (`StateSplit`): each layer attends
+the state's queries to the state's keys and the question's queries to every key, unmasked. The
+state's own pass takes no mask. A batch of questions over the state's keys and values takes,
+when its questions differ in length, one row of key columns per question, [rows, 1, 1, S +
+width], which PyTorch's memory-efficient kernel on CUDA still expands over the batch's
+queries. An image's placeholders are state tokens like any other.
 
 State reuse (section 6). By default a state with several questions is encoded once, its keys
 and values kept for every layer, and the questions then run over them at positions S
@@ -111,7 +118,7 @@ MEDIA_TOKEN_IDS = (258880, 258881, 258884)
 # The dtype each device runs in, unless the caller names one. CPU: float32, since bf16 is 3 to
 # 4 times slower on CPUs without bf16 instructions (E2B with an image on 16 EPYC 7R13 cores:
 # 1.8 s against 6.5 s for the state). CUDA: bf16, the reference precision. MPS: bf16. On
-# random-weight models with Gemma 4's head sizes it runs, SDPA with boolean masks included, and
+# random-weight models with Gemma 4's head sizes it runs, SDPA with and without boolean masks, and
 # lands as far from float32 on CPU as bf16 on CPU does; float32 on MPS matches float32 on CPU
 # to 1e-3 (measured with torch 2.15.0 on an M4 Pro; tests/test_backend_transformers.py,
 # test_mps_*).
@@ -363,6 +370,118 @@ def load_image_processor(path: str, unified: bool) -> Any:
     return transformers.Gemma4ImageProcessorPil.from_pretrained(path)
 
 
+# ---- attention ----------------------------------------------------------------------------
+
+# The name `prefix_bidir_attention` is registered under in transformers' attention functions,
+# and set on the decoder's config at load; the vision encoder keeps transformers' SDPA.
+ATTENTION = "strands_decider_prefix_bidir"
+
+
+@dataclass(frozen=True)
+class StateSplit:
+    """The prefix_bidir mask of one whole prompt, by its state's length: the first `length`
+    tokens (the state) attend to the state, and the others (the question) to every token."""
+
+    length: int
+
+    def __getitem__(self, index: Any) -> StateSplit:
+        """The split itself, for an index that keeps every row and column: transformers 5.23
+        indexes each layer's mask so (`[:, :, 0:, :]`) ahead of Gemma 4's KV-shared layers.
+        Any other index is refused, since the split counts token positions from 0."""
+        whole = slice(None).indices(1 << 62)
+        if isinstance(index, tuple) and all(
+            isinstance(i, slice) and i.indices(1 << 62) == whole for i in index
+        ):
+            return self
+        raise TypeError(f"a StateSplit keeps every token; it cannot be indexed by {index!r}")
+
+
+def _sdpa(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    mask: torch.Tensor | None,
+    scale: float | None,
+) -> torch.Tensor:
+    """PyTorch's SDPA, never causal, for queries [rows, heads, n, head_dim] over keys and
+    values [rows, kv heads, keys, head_dim], under a boolean `mask` broadcastable to
+    [rows, heads, n, keys] or none; returns [rows, heads, n, head_dim]. Grouped keys and values
+    go to SDPA as they are only with no mask and head_dim at most 256, on CPU, or on CUDA in
+    bf16 or fp16 (in float32, torch 2.7's CUDA SDPA takes them only in its math kernel, with an
+    n x keys matrix per head); otherwise each is repeated per query head, as transformers' SDPA
+    attention does. MPS always repeats them, which torch 2.7 and 2.15 run alike."""
+    groups = query.shape[1] // key.shape[1]
+    gqa = (
+        groups > 1
+        and mask is None
+        and query.shape[-1] <= 256
+        and (query.device.type == "cpu" or (query.is_cuda and query.dtype != torch.float32))
+    )
+    if groups > 1 and not gqa:
+        key = key.repeat_interleave(groups, dim=1)
+        value = value.repeat_interleave(groups, dim=1)
+    out: torch.Tensor = torch.nn.functional.scaled_dot_product_attention(
+        query, key, value, attn_mask=mask, scale=scale, enable_gqa=gqa
+    )
+    return out
+
+
+def prefix_bidir_attention(
+    module: torch.nn.Module,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    attention_mask: torch.Tensor | StateSplit | None,
+    **kwargs: Any,
+) -> tuple[torch.Tensor, None]:
+    """A decoder layer's attention, the signature of transformers' attention functions:
+    SDPA (`_sdpa`), never causal, under `attention_mask`. None: every query attends to every
+    key. A boolean tensor: as SDPA applies it. A `StateSplit`: two SDPA calls with no mask,
+    the state's queries over the state's keys, then the question's over every key; when the
+    question is 64k+1 tokens long, the second call also takes the state's last query, and
+    drops its row, so that no call is 64k+1 queries over a longer run of keys (see
+    `_over_state`). Returns [rows, tokens, heads, head_dim] and no attention weights. A soft-cap
+    or a position bias, which no Gemma 4 layer has, is refused."""
+    for name in ("softcap", "position_bias"):
+        if kwargs.get(name) is not None:
+            raise NotImplementedError(f"prefix_bidir_attention takes no {name}")
+    scale = kwargs.get("scaling")
+    if not isinstance(attention_mask, StateSplit):
+        return _sdpa(query, key, value, attention_mask, scale).transpose(1, 2).contiguous(), None
+    s = attention_mask.length
+    rows, heads, n, dim = query.shape
+    if not 0 < s < n or key.shape[2] != n:
+        raise ValueError(
+            f"a StateSplit of {s} tokens is for a whole prompt, longer than its state: "
+            f"{n} queries over {key.shape[2]} keys"
+        )
+    out = query.new_empty(rows, n, heads, dim)
+    out[:, :s] = _sdpa(query[:, :, :s], key[:, :, :s], value[:, :, :s], None, scale).transpose(1, 2)
+    first = s - 1 if (n - s) % 64 == 1 else s
+    rest = _sdpa(query[:, :, first:], key, value, None, scale)
+    out[:, s:] = rest[:, :, s - first :].transpose(1, 2)
+    return out, None
+
+
+def _use_prefix_bidir_attention(model: Any, layout: str) -> None:
+    """Run the decoder's attention through `prefix_bidir_attention`, and check that every
+    decoder layer does: a model that cannot switch is only warned about, and transformers'
+    SDPA with no mask is causal, so the state would not see its own later tokens."""
+    import transformers
+
+    transformers.AttentionInterface.register(ATTENTION, prefix_bidir_attention)
+    model.set_attn_implementation(ATTENTION if layout == DECODER else {"text_config": ATTENTION})
+    layers = [m for m in model.modules() if type(m).__name__.endswith("TextAttention")]
+    # transformers' only record of the attention a layer runs is its config's private field.
+    got = {m.config._attn_implementation for m in layers}  # noqa: SLF001
+    if not layers or got != {ATTENTION}:
+        raise RuntimeError(
+            f"transformers {transformers.__version__} did not set the decoder's attention to "
+            f"{ATTENTION!r} (its layers run {sorted(map(str, got))}), so the prefix_bidir mask "
+            "cannot be applied"
+        )
+
+
 # ---- the state's keys and values ----------------------------------------------------------
 
 
@@ -460,6 +579,7 @@ def _load_model(ckpt: Checkpoint, dtype: torch.dtype, *, vision: bool) -> torch.
             )
         expected = _AUDIO_PREFIXES + (() if vision else _VISION_PREFIXES)
     model, info = loaded
+    _use_prefix_bidir_attention(model, ckpt.layout)
     missing = sorted(info.get("missing_keys") or [])
     if missing:
         raise ValueError(
@@ -703,14 +823,16 @@ class TransformersBackend:
     def _decode(
         self,
         ids: torch.Tensor,
-        mask: torch.Tensor,
+        mask: torch.Tensor | StateSplit | None,
         positions: torch.Tensor,
         cache: StateCache | None = None,
         pixels: dict[str, torch.Tensor] | None = None,
     ) -> torch.Tensor:
-        """The final-norm hidden states of `ids` [rows, n], every layer under `mask` (boolean,
-        [rows, 1, n, cached + n]), at `positions` [rows, n]. `pixels` (`prepare_pixels`) go to
-        the pass whose ids hold the images' placeholders."""
+        """The final-norm hidden states of `ids` [rows, n], every layer under `mask`, which
+        `prefix_bidir_attention` applies (None: every token sees every token, the cached ones
+        included; or a boolean mask broadcastable to [rows, 1, n, cached + n]; or a
+        `StateSplit`), at `positions` [rows, n]. `pixels` (`prepare_pixels`) go to the pass
+        whose ids hold the images' placeholders."""
         extra = pixels or {}
         out = self.decoder(
             input_ids=ids,
@@ -728,12 +850,10 @@ class TransformersBackend:
         self, state: list[int], question: list[int], pixels: dict[str, torch.Tensor] | None
     ) -> torch.Tensor:
         """One prompt, one forward pass under prefix_bidir: the reference of section 10."""
-        s, n = len(state), len(state) + len(question)
-        mask = torch.ones(n, n, dtype=torch.bool, device=self.device)
-        mask[:s, s:] = False
+        n = len(state) + len(question)
         ids = torch.tensor([state + question], device=self.device)
         positions = torch.arange(n, device=self.device).view(1, -1)
-        return self._decode(ids, mask.view(1, 1, n, n), positions, None, pixels)[0, -1]
+        return self._decode(ids, StateSplit(len(state)), positions, None, pixels)[0, -1]
 
     def _batches(self, s: int, questions: list[list[int]]) -> list[list[int]]:
         """Consecutive runs of question indices: at most `max_batch` rows, and rows x (S + the
@@ -761,9 +881,9 @@ class TransformersBackend:
         """The state once, then the questions in batches over its keys and values."""
         s = len(state)
         cache = StateCache()
-        mask = torch.ones(1, 1, s, s, dtype=torch.bool, device=self.device)
         ids = torch.tensor([state], device=self.device)
-        self._decode(ids, mask, torch.arange(s, device=self.device).view(1, -1), cache, pixels)
+        # The state sees the state, all of it: no mask.
+        self._decode(ids, None, torch.arange(s, device=self.device).view(1, -1), cache, pixels)
         cache.freeze(s)
         rows: list[torch.Tensor] = [torch.empty(0)] * len(questions)
         for batch in self._batches(s, questions):
@@ -777,12 +897,15 @@ class TransformersBackend:
             ids = torch.full((len(qs), width), self.pad_id, dtype=torch.long)
             for r, q in enumerate(qs):
                 ids[r, : len(q)] = torch.tensor(q)
-            lengths = torch.tensor([len(q) for q in qs], device=self.device)
             # Each row sees the state and its own question, never the padding after it; padding
-            # rows see the same, so no row is fully masked.
-            cols = torch.arange(s + width, device=self.device)
-            keep = cols.view(1, -1) < (s + lengths).view(-1, 1)
-            mask = keep[:, None, None, :].expand(len(qs), 1, width, s + width)
+            # rows see the same, so no row is fully masked. One row of key columns per question,
+            # for all its queries; no mask when no row has padding.
+            mask: torch.Tensor | None = None
+            if any(len(q) < width for q in qs):
+                lengths = torch.tensor([len(q) for q in qs], device=self.device)
+                cols = torch.arange(s + width, device=self.device)
+                keep = cols.view(1, -1) < (s + lengths).view(-1, 1)
+                mask = keep[:, None, None, :]  # [rows, 1, 1, S + width]
             positions = (torch.arange(width, device=self.device) + s).expand(len(qs), -1)
             hidden = self._decode(ids.to(self.device), mask, positions, cache)
             for r, i in enumerate(batch):

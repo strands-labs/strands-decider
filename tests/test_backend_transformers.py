@@ -3,8 +3,9 @@ Gemma 4 checkpoints in the spec's layout, generated here: no download, CPU in CI
 
 - loading: both multimodal classes, the intermediate bare decoder (text only, warnings), and
   the checkpoints it refuses;
-- the mask: what every decoder layer receives is docs/spec.md section 6's prefix_bidir mask,
-  compared with the core's explicit `attention_mask`, and sliding windows have no effect;
+- the mask: what SDPA gets in every decoder layer is docs/spec.md section 6's prefix_bidir
+  mask in the backend's form (never causal, no dense mask), the hidden states are those of the
+  core's explicit `attention_mask`, and sliding windows have no effect;
 - state reuse: the state once and then the questions is the full pass of each prompt;
 - the readout: rows are the decoder's hidden states, and the core's regime turns them into
   the answers;
@@ -20,8 +21,10 @@ STRANDS_DECIDER_TEST_CHECKPOINT set to a real decision checkpoint.
 from __future__ import annotations
 
 import base64
+import contextlib
 import io
 import json
+import math
 import os
 import warnings
 
@@ -187,6 +190,14 @@ def test_refuses_what_is_not_a_decision_checkpoint(tmp_path):
         tb.Checkpoint.open(str(path))
 
 
+def test_a_model_that_keeps_plain_sdpa_is_refused(ckpt, monkeypatch):
+    """transformers only warns when a model cannot switch its attention, and plain SDPA with
+    no mask is causal; the load refuses such a model rather than serve it."""
+    monkeypatch.setattr(transformers.PreTrainedModel, "set_attn_implementation", lambda *a: None)
+    with pytest.raises(RuntimeError, match="did not set the decoder's attention"):
+        tb.TransformersBackend.load(str(ckpt), images=False)
+
+
 def test_devices_and_dtypes():
     assert tb.default_dtype("cpu") == torch.float32
     assert tb.default_dtype("cuda:1") == torch.bfloat16
@@ -199,29 +210,49 @@ def test_devices_and_dtypes():
 
 
 class _Recorder:
-    """Wraps transformers' SDPA attention and records the mask each decoder layer gets."""
+    """Wraps the backend's SDPA call (`_sdpa`, which only the decoder's layers make) and
+    records (mask, query tokens, key tokens) for each call: the arguments `_sdpa` gets, which
+    it hands to PyTorch's SDPA with no `is_causal`."""
 
     def __init__(self, inner):
         self.inner = inner
-        self.calls: list[tuple[int, torch.Tensor]] = []
+        self.calls: list[tuple[torch.Tensor | None, int, int]] = []
 
-    def __call__(self, module, query, key, value, attention_mask, **kwargs):
-        if type(module).__name__.endswith("TextAttention"):
-            self.calls.append((module.layer_idx, attention_mask))
-        return self.inner(module, query, key, value, attention_mask, **kwargs)
+    def __call__(self, query, key, value, mask, scale):
+        self.calls.append((mask, query.shape[2], key.shape[2]))
+        return self.inner(query, key, value, mask, scale)
 
 
 @pytest.fixture
 def recorder(monkeypatch):
-    from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
-
-    rec = _Recorder(ALL_ATTENTION_FUNCTIONS["sdpa"])
-    monkeypatch.setitem(ALL_ATTENTION_FUNCTIONS, "sdpa", rec)
+    rec = _Recorder(tb._sdpa)
+    monkeypatch.setattr(tb, "_sdpa", rec)
     return rec
 
 
+def _tokens(backend, n: int, seed: int = 1) -> list[int]:
+    g = np.random.default_rng(seed)
+    vocab = backend.checkpoint.tokenizer().get_vocab_size()
+    return [int(t) for t in g.integers(10, vocab - 10, n)]
+
+
+def test_only_the_decoder_runs_prefix_bidir_attention(backends, kind):
+    for b in backends:
+        layers = [m for m in b.model.modules() if type(m).__name__.endswith("TextAttention")]
+        assert layers and {m.config._attn_implementation for m in layers} == {tb.ATTENTION}
+        vision = getattr(b.decoder, "vision_tower", None)
+        if vision is not None:
+            assert vision.config._attn_implementation == "sdpa"
+
+
 @pytest.mark.parametrize("images", [[], IMAGES[:1]], ids=["text", "image"])
-def test_every_layer_gets_the_prefix_bidir_mask(backends, kind, recorder, images):
+def test_every_layer_attends_under_prefix_bidir(backends, kind, recorder, images):
+    """What SDPA gets in each layer, sliding-window layers included (no layer has a window):
+    in a full pass, the state's S queries over the state's keys, then the question's over all
+    n keys, each with no mask; over a reused state, the state's queries over its keys with no
+    mask, then each batch of questions over the state's keys and their own, with one row of
+    key columns per question where the batch has padding. That none is causal is the
+    equivalence test's to show."""
     if images:
         _needs_images(kind)
     full, reuse = backends
@@ -229,32 +260,107 @@ def test_every_layer_gets_the_prefix_bidir_mask(backends, kind, recorder, images
     s = len(state)
     full.forward(state, questions[:1], r.images)
     n = s + len(questions[0])
-    want = torch.from_numpy(attention_mask(s, n))
-    layers = [i for i, _ in recorder.calls]
-    assert layers == list(range(len(full.decoder.config.get_text_config().layer_types)))
-    for _, m in recorder.calls:  # sliding-window layers included: no layer has a window
-        assert m.dtype == torch.bool and m.shape == (1, 1, n, n)
-        assert torch.equal(m[0, 0].cpu(), want)
+    nl = len(full.decoder.config.get_text_config().layer_types)
+    assert len(recorder.calls) == 2 * nl
+    for i, (m, q, k) in enumerate(recorder.calls):
+        assert m is None and (q, k) == ((s, s) if i % 2 == 0 else (n - s, n))
 
     recorder.calls.clear()
     reuse.forward(state, questions, r.images)
-    nl = len(layers)
     state_pass, rest = recorder.calls[:nl], recorder.calls[nl:]
-    for _, m in state_pass:
-        assert torch.equal(m[0, 0].cpu(), torch.ones(s, s, dtype=torch.bool))
-    # Then batches of two questions over the state: row i sees the state and its own
-    # question, which is row S.. of that prompt's prefix_bidir mask.
+    assert all(m is None and (q, k) == (s, s) for m, q, k in state_pass)
     batches = [questions[:2], questions[2:]]
     assert len(rest) == nl * len(batches)
     for b, qs in enumerate(batches):
         width = max(map(len, qs))
         width += width % 64 == 1  # never a 64k+1-wide pass over the state
-        for _, m in rest[b * nl : (b + 1) * nl]:
-            assert m.shape == (len(qs), 1, width, s + width)
-            for row, q in enumerate(qs):
-                ref = torch.from_numpy(attention_mask(s, s + len(q)))[s:]
-                assert torch.equal(m[row, 0, : len(q), : s + len(q)].cpu(), ref)
-                assert not m[row, 0, :, s + len(q) :].any()  # never the padding
+        for m, q, k in rest[b * nl : (b + 1) * nl]:
+            assert (q, k) == (width, s + width)
+            if all(len(x) == width for x in qs):
+                assert m is None
+                continue
+            assert m.dtype == torch.bool and m.shape == (len(qs), 1, 1, s + width)
+            for row, x in enumerate(qs):  # the state and its own question, never the padding
+                assert m[row, 0, 0, : s + len(x)].all() and not m[row, 0, 0, s + len(x) :].any()
+
+
+@contextlib.contextmanager
+def _stock_sdpa():
+    """transformers' own SDPA attention in place of the backend's, for references under the
+    core's dense masks: with a mask, it is never causal (transformers 5.15 to 5.23)."""
+    from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
+
+    ALL_ATTENTION_FUNCTIONS[tb.ATTENTION] = ALL_ATTENTION_FUNCTIONS["sdpa"]
+    try:
+        yield
+    finally:
+        del ALL_ATTENTION_FUNCTIONS[tb.ATTENTION]  # the local override; the registration stays
+
+
+def _dense_mask_cases(backend, r, state, questions, dtype, bound):
+    """Every hidden state of a full pass under `StateSplit` against that of transformers' own
+    SDPA attention under the core's dense prefix_bidir mask, a 65-token question's included
+    (whose pass takes the state's last query as well, and drops its row); and the state's own
+    pass with no mask against transformers' SDPA under an all-True S x S mask; relative to the
+    hidden states' scale."""
+    pixels = backend.prepare_pixels(r.images) if r.images else None
+
+    def run(ids, mask):
+        positions = torch.arange(ids.shape[1]).view(1, -1)
+        with torch.inference_mode():
+            if isinstance(mask, torch.Tensor):
+                with _stock_sdpa():
+                    h = backend._decode(ids, mask, positions, None, pixels)
+            else:
+                h = backend._decode(ids, mask, positions, None, pixels)
+        return h[0].float().numpy()
+
+    def rel(a, b):
+        return float(np.abs(a - b).max()) / max(1.0, float(np.abs(a).max()))
+
+    s = len(state)
+    for question in (questions[0], _tokens(backend, 65)):
+        n = s + len(question)
+        prompt = torch.tensor([state + question])
+        ref = run(prompt, torch.from_numpy(attention_mask(s, n)).view(1, 1, n, n))
+        assert rel(ref, run(prompt, tb.StateSplit(s))) < bound, dtype
+        # The bound tells a wrong mask apart: with none, the state sees the question.
+        assert rel(ref, run(prompt, None)) > bound, dtype
+    alone = torch.tensor([state])
+    assert rel(run(alone, torch.ones(1, 1, s, s, dtype=torch.bool)), run(alone, None)) < bound
+
+
+@pytest.mark.parametrize(("dtype", "bound"), [(torch.float32, 2e-5), (torch.bfloat16, 0.3)])
+@pytest.mark.parametrize("images", [[], IMAGES[:1]], ids=["text", "image"])
+def test_the_backends_masks_give_the_dense_masks_hidden_states(ckpt, kind, images, dtype, bound):
+    """On CPU: float32 to float rounding (the bound of state reuse against the full pass); bf16
+    to bf16's rounding, which reaches 0.03 with torch 2.15 and 0.18 with 2.7, where a wrong mask
+    (the state seeing the question) moves these hidden states by more than 1."""
+    if images:
+        _needs_images(kind)
+    backend = tb.TransformersBackend.load(str(ckpt), dtype=dtype, reuse_state=False)
+    r, state, questions = _rendered(backend, request(images))
+    _dense_mask_cases(backend, r, state, questions, dtype, bound)
+
+
+def test_the_dense_masks_hidden_states_with_e2bs_heads(tmp_path):
+    """E2B's attention layout, one key/value head for 8 query heads and full layers of
+    head_dim 512, whose keys and values are repeated per query head when unmasked; float32, to
+    float rounding (up to 3e-5 with torch 2.7's CPU kernels)."""
+    path = decision_checkpoint(
+        tmp_path / "e2b", GEMMA4, text=E2B_HEADS, decision={"inputs": ["text"]}
+    )
+    backend = tb.TransformersBackend.load(str(path), reuse_state=False)
+    r, state, questions = _rendered(backend, request())
+    _dense_mask_cases(backend, r, state, questions, torch.float32, 1e-4)
+
+
+def test_a_state_split_refuses_an_index_that_drops_tokens():
+    split = tb.StateSplit(5)
+    assert split[:, :, slice(-0, None), :] is split and split[:, :, :, :] is split
+    for index in ((slice(None), slice(None), slice(-1, None), slice(None)), 0):
+        with pytest.raises(TypeError, match="keeps every token"):
+            split[index]
 
 
 def test_sliding_windows_have_no_effect(ckpt, kind, tmp_path):
@@ -272,9 +378,10 @@ def test_sliding_windows_have_no_effect(ckpt, kind, tmp_path):
     assert np.array_equal(a.forward(state, questions), b.forward(state, questions))
 
 
-def test_the_mask_is_not_gemma4s_own(backends):
-    """The causal, windowed mask transformers builds by default gives other hidden states, so
-    the tests above would notice the backend falling back to it."""
+def test_without_its_masks_the_decoder_attends_otherwise(backends):
+    """Called without the backend's masks, the decoder attends otherwise (transformers builds
+    no mask for a registered attention function, so every token sees every token), which gives
+    other hidden states: the tests above would notice the backend dropping its masks."""
     full, _ = backends
     _, state, questions = _rendered(full, request())
     ids = torch.tensor([state + questions[0]])
@@ -284,17 +391,25 @@ def test_the_mask_is_not_gemma4s_own(backends):
 
 
 def test_the_state_never_sees_a_question(backends):
+    """The state's hidden states are the same beside two different questions: to the bit when
+    the two prompts are equally long, and to float rounding when they are not, since torch's
+    CPU elementwise kernels can round an element differently in their vectorised and scalar
+    paths, and which path an element takes depends on the tensor's length."""
     full, _ = backends
     _, state, questions = _rendered(full, request())
     captured = []
     hook = full.decoder.register_forward_hook(
         lambda mod, args, out: captured.append(out.last_hidden_state[0, : len(state)].clone())
     )
+    n = len(questions[0])
     try:
+        full.forward(state, [questions[0], _tokens(full, n)])
         full.forward(state, questions[:2])
     finally:
         hook.remove()
-    assert torch.equal(captured[0], captured[1])
+    assert len(questions[1]) != n and torch.equal(captured[0], captured[1])
+    a, b = captured[2].numpy(), captured[3].numpy()
+    assert np.abs(a - b).max() < 2e-5 * max(1.0, float(np.abs(a).max()))
 
 
 # ---- state reuse --------------------------------------------------------------------------
@@ -317,15 +432,36 @@ def test_state_reuse_is_the_full_pass(backends, kind, images):
 
 
 def test_no_pass_over_the_state_is_64k_plus_1_wide(backends, recorder):
-    """A batch whose longest question is 65 tokens runs 66 wide: one more masked column."""
-    _, reuse = backends
+    """No SDPA call is 65 queries over a longer run of keys: a batch whose longest question is
+    65 tokens runs 66 wide, one more masked column, even when every question is 65 tokens; and
+    a full pass of a 65-token question attends the state's last query too, and drops it."""
+    full, reuse = backends
     _, state, _ = _rendered(reuse, request())
-    g = np.random.default_rng(1)
-    vocab = reuse.checkpoint.tokenizer().get_vocab_size()
-    qs = [[int(t) for t in g.integers(10, vocab - 10, n)] for n in (65, 40)]
-    reuse.forward(state, qs)
-    widths = {m.shape[2] for _, m in recorder.calls if m.shape[2] != len(state)}
-    assert widths == {66}
+    s = len(state)
+    qs = [_tokens(reuse, n, seed) for n, seed in ((65, 1), (40, 2), (65, 3))]
+    reuse.forward(state, qs[:2])
+    reuse.forward(state, [qs[0], qs[2]])  # no shorter question: the pad column still masked
+    full.forward(state, qs[:1])
+    assert {q for _, q, k in recorder.calls if k > q} == {66}
+    over_state = [m for m, q, k in recorder.calls if (q, k) == (66, s + 66)]
+    assert over_state and all(
+        m is not None and m[:, 0, 0, : s + 65].all() and not m[:, 0, 0, s + 65 :].any()
+        for m in over_state[len(over_state) // 2 :]
+    )
+
+
+def test_a_batch_without_padding_takes_no_mask(backends, recorder):
+    """Questions of one length run unmasked over the state, and give the full passes' rows."""
+    full, reuse = backends
+    _, state, _ = _rendered(reuse, request())
+    qs = [_tokens(reuse, 40, seed) for seed in (4, 5)]
+    a = full.forward(state, qs)
+    recorder.calls.clear()
+    b = reuse.forward(state, qs)
+    s = len(state)
+    batch = [m for m, q, k in recorder.calls if (q, k) == (40, s + 40)]
+    assert batch and all(m is None for m in batch)
+    assert np.abs(a - b).max() < 2e-5 * max(1.0, float(np.abs(a).max()))
 
 
 def test_one_question_is_one_full_pass(backends):
@@ -379,11 +515,10 @@ def test_rows_are_the_decoders_hidden_states_and_the_core_reads_them(ckpt, kind)
     # A bf16 decoder's values, unrounded and unscaled: float32 holds them exactly.
     assert np.array_equal(round_to_bf16(rows), rows)
     ids = torch.tensor([state + questions[0]])
-    s, n = len(state), ids.shape[1]
-    m = torch.from_numpy(attention_mask(s, n)).view(1, 1, n, n)
+    split = tb.StateSplit(len(state))
     with torch.inference_mode():
         h = backend.decoder(
-            input_ids=ids, attention_mask={t: m for t in backend.layer_types}
+            input_ids=ids, attention_mask={t: split for t in backend.layer_types}
         ).last_hidden_state[0, -1]
     assert np.array_equal(h.float().numpy(), rows[0])
     # The answers are the core's precision regime on those rows: the bf16 GEMM, then the cap
@@ -724,13 +859,13 @@ E2B_HEADS = {
 }
 
 
-def _question_batches(backend, widths, seed=0):
-    """A 300-token state and, for each width, three questions padded to that width in one
-    batch over the state's keys and values."""
+def _question_batches(backend, widths, seed=0, state_len=300):
+    """A `state_len`-token state and, for each width, three questions padded to that width in
+    one batch over the state's keys and values."""
     g = np.random.default_rng(seed)
     vocab = backend.checkpoint.tokenizer().get_vocab_size()
     toks = lambda n: [int(t) for t in g.integers(10, vocab - 10, n)]  # noqa: E731
-    state = toks(300)
+    state = toks(state_len)
     return state, [(w, [toks(w), toks(w - 7), toks(w - 30)]) for w in widths]
 
 
@@ -738,24 +873,156 @@ WIDTHS_64K_PLUS_1 = (64, 65, 66, 129, 193)
 
 
 @pytest.mark.skipif(not CUDA, reason="needs CUDA")
-@pytest.mark.parametrize(("dtype", "bound"), [(torch.float32, 1e-3), (torch.bfloat16, 0.03)])
-def test_cuda_question_batches_of_64k_plus_1_tokens_over_a_cached_state(tmp_path, dtype, bound):
-    """torch 2.7's CUDA SDPA gave wrong attention (relative error up to 0.68) for E2B's layout
-    in a forward that continues a cached state with 65, 129 or another 64k+1 query tokens;
-    v1 serves E2B with eager attention for it. A batch of questions over a reused state is such
-    a forward, its width the longest question's. Relative to the hidden states' scale, state
-    reuse must stay within float rounding of the full passes."""
+def test_cuda_question_batches_of_64k_plus_1_tokens_over_a_cached_state(tmp_path):
+    """On torch 2.7, E2B's layout goes wrong on CUDA in passes of 64k+1 query tokens (64k+1:
+    65, 129, ..., 385): v1 saw it in a batch of questions over a cached state 65 or 129 wide,
+    and serves E2B with eager attention for it; under a dense mask, whole prompts of 385 and 449
+    tokens go wrong too (at 385, one row of the first layer's attention; the hidden states by up
+    to 0.84, float32, H100), though an isolated SDPA call on random inputs does not. State reuse and full
+    passes on CUDA, for a 300-token state and a 321-token one, must stay within float rounding of
+    one CPU pass per prompt of transformers' own SDPA attention under the core's dense mask,
+    relative to the hidden states' scale (1.7e-4 at most, torch 2.7 and 2.14). float32 only: in
+    bf16 this random-weight model lies up to 0.78 from float32 with any mask, which leaves no
+    bound on the hidden states that tells a fault from rounding; the bf16 checks are
+    test_cuda_every_attention_call_against_float64 and
+    test_cuda_prefix_bidir_attention_against_float64."""
+    path = decision_checkpoint(
+        tmp_path / "e2b", GEMMA4, text=E2B_HEADS, decision={"inputs": ["text"]}
+    )
+    cpu = tb.TransformersBackend.load(str(path), dtype=torch.float32, reuse_state=False)
+    full = tb.TransformersBackend.load(
+        str(path), device="cuda", dtype=torch.float32, reuse_state=False
+    )
+    reuse = tb.TransformersBackend.load(str(path), device="cuda", dtype=torch.float32)
+
+    def dense(state, q):  # on CPU, transformers' own SDPA attention under the core's dense mask
+        s, n = len(state), len(state) + len(q)
+        m = torch.from_numpy(attention_mask(s, n)).view(1, 1, n, n)
+        with torch.inference_mode(), _stock_sdpa():
+            h = cpu._decode(torch.tensor([state + q]), m, torch.arange(n).view(1, -1))
+        return h[0, -1].numpy()
+
+    for state_len in (300, 321):
+        state, cases = _question_batches(reuse, WIDTHS_64K_PLUS_1, state_len=state_len)
+        for width, qs in cases:
+            assert reuse._batches(len(state), qs) == [[0, 1, 2]]  # one pass, `width` wide
+            ref = np.stack([dense(state, q) for q in qs])
+            for got in (full.forward(state, qs), reuse.forward(state, qs)):
+                rel = float(np.abs(ref - got).max()) / max(1.0, float(np.abs(ref).max()))
+                assert rel < 1e-3, (state_len, width, rel)
+
+
+class _Float64Check:
+    """Wraps the backend's SDPA call and measures each call's output against float64 on the
+    call's own inputs, relative to the output's scale: the largest error over all calls, and
+    the number of calls of several rows with no mask (an unpadded batch over a cached state)."""
+
+    def __init__(self, inner):
+        self.inner = inner
+        self.calls = 0
+        self.unpadded_batches = 0
+        self.worst = 0.0
+
+    def __call__(self, query, key, value, mask, scale):
+        out = self.inner(query, key, value, mask, scale)
+        groups = query.shape[1] // key.shape[1]
+        k = key.double().repeat_interleave(groups, dim=1)
+        v = value.double().repeat_interleave(groups, dim=1)
+        scale = query.shape[-1] ** -0.5 if scale is None else scale
+        scores = query.double() @ k.transpose(-1, -2) * scale
+        if mask is not None:
+            scores = scores.masked_fill(~mask, -torch.inf)
+        ref = scores.softmax(-1) @ v
+        err = float((out.double() - ref).abs().max() / ref.abs().max())
+        assert math.isfinite(err), err
+        self.calls += 1
+        self.unpadded_batches += mask is None and query.shape[0] > 1
+        self.worst = max(self.worst, err)
+        return out
+
+
+@pytest.mark.skipif(not CUDA, reason="needs CUDA")
+@pytest.mark.parametrize(("dtype", "bound"), [(torch.bfloat16, 0.02), (torch.float32, 1e-4)])
+def test_cuda_every_attention_call_against_float64(tmp_path, monkeypatch, dtype, bound):
+    """Every attention call E2B's layout makes on CUDA, in full passes and over a reused state
+    (states of 300 and 321 tokens, questions 64, 65 and 129 wide, a batch without padding),
+    against float64 on its own inputs. The worst call is 0.0038 in bf16 and 9e-6 in float32 on
+    torch 2.7 and 2.14; at this PR's earlier head, transformers' SDPA under the dense mask was
+    off by 0.97 in float32 and 0.93 in bf16 on torch 2.7, at a whole prompt of 385 tokens."""
     path = decision_checkpoint(
         tmp_path / "e2b", GEMMA4, text=E2B_HEADS, decision={"inputs": ["text"]}
     )
     full = tb.TransformersBackend.load(str(path), device="cuda", dtype=dtype, reuse_state=False)
     reuse = tb.TransformersBackend.load(str(path), device="cuda", dtype=dtype)
-    state, cases = _question_batches(reuse, WIDTHS_64K_PLUS_1)
-    for width, qs in cases:
-        assert reuse._batches(len(state), qs) == [[0, 1, 2]]  # one pass, `width` wide
-        a, b = full.forward(state, qs), reuse.forward(state, qs)
-        rel = float(np.abs(a - b).max()) / max(1.0, float(np.abs(a).max()))
-        assert rel < bound, (width, rel)
+    check = _Float64Check(tb._sdpa)
+    monkeypatch.setattr(tb, "_sdpa", check)
+    for state_len in (300, 321):
+        state, cases = _question_batches(reuse, (64, 65, 129), state_len=state_len)
+        for _, qs in cases:
+            full.forward(state, qs)
+            reuse.forward(state, qs)
+        q = cases[0][1][0]  # 64 tokens, so no 64k+1 column either
+        reuse.forward(state, [q, q[::-1]])  # one length: no padding, no mask
+    assert check.calls and check.unpadded_batches, (check.calls, check.unpadded_batches)
+    assert check.worst < bound, (dtype, check.worst)
+
+
+@pytest.mark.skipif(not CUDA, reason="needs CUDA")
+@pytest.mark.parametrize("head_dim", [256, 512])
+@pytest.mark.parametrize(("dtype", "bound"), [(torch.bfloat16, 0.02), (torch.float32, 1e-4)])
+def test_cuda_prefix_bidir_attention_against_float64(head_dim, dtype, bound):
+    """One layer's attention on CUDA, with E2B's heads (8 query heads, one key/value head) laid
+    out as Gemma 4's layers lay them out, against float64 under the core's mask, on random
+    inputs: whole prompts under StateSplit(321) of 385 tokens (64k+1) and 386, the state's own
+    pass of 321 tokens, and batches of two questions over 300 cached keys, 66 wide with padding
+    and 40 wide without. Relative to the output's scale, one call's rounding here is 0.002 to
+    0.003 in bf16, on torch 2.7 and 2.14. It checks each kernel the backend calls, flash among
+    them on torch 2.7; the fault torch 2.7 shows inside the model under a dense mask does not
+    show in an isolated call on random inputs (test_cuda_every_attention_call_against_float64
+    checks the calls the model makes)."""
+    g = torch.Generator(device="cuda").manual_seed(0)
+
+    def heads(rows, n, h):  # [rows, n, heads, dim] made [rows, heads, n, dim], as a layer does
+        x = torch.randn(rows, n, h, head_dim, generator=g, device="cuda") * head_dim**-0.25
+        return x.to(dtype).transpose(1, 2)
+
+    def check(out, q, k, v, allowed):  # allowed: [rows, n, keys] booleans
+        k64 = k.double().repeat_interleave(q.shape[1] // k.shape[1], dim=1)
+        v64 = v.double().repeat_interleave(q.shape[1] // v.shape[1], dim=1)
+        scores = (q.double() @ k64.transpose(-1, -2)).masked_fill(~allowed[:, None], -torch.inf)
+        ref = (scores.softmax(-1) @ v64).transpose(1, 2)
+        rel = float((out.double() - ref).abs().max() / ref.abs().max())
+        assert rel < bound, (dtype, head_dim, tuple(q.shape), rel)
+
+    s = 321
+    for n in (385, 386):
+        q, k, v = heads(1, n, 8), heads(1, n, 1), heads(1, n, 1)
+        out, _ = tb.prefix_bidir_attention(None, q, k, v, tb.StateSplit(s), scaling=1.0)
+        check(out, q, k, v, torch.from_numpy(attention_mask(s, n)).cuda()[None])
+    q, k, v = heads(1, s, 8), heads(1, s, 1), heads(1, s, 1)
+    out, _ = tb.prefix_bidir_attention(None, q, k, v, None, scaling=1.0)
+    check(out, q, k, v, torch.ones(1, s, s, dtype=torch.bool, device="cuda"))
+    cached = 300
+    q, k, v = heads(2, 66, 8), heads(2, cached + 66, 1), heads(2, cached + 66, 1)
+    keep = torch.arange(cached + 66, device="cuda")[None] < torch.tensor(
+        [[cached + 65], [cached + 40]], device="cuda"
+    )  # a 65-token question and a 40-token one, in a batch 66 wide
+    out, _ = tb.prefix_bidir_attention(None, q, k, v, keep[:, None, None, :], scaling=1.0)
+    check(out, q, k, v, keep[:, None, :].expand(2, 66, cached + 66))
+    q, k, v = heads(2, 40, 8), heads(2, cached + 40, 1), heads(2, cached + 40, 1)
+    out, _ = tb.prefix_bidir_attention(None, q, k, v, None, scaling=1.0)  # no padding: no mask
+    check(out, q, k, v, torch.ones(2, 40, cached + 40, dtype=torch.bool, device="cuda"))
+
+
+def test_prefix_bidir_attention_refuses_what_it_does_not_apply():
+    q = torch.zeros(1, 2, 5, 4)
+    with pytest.raises(NotImplementedError, match="softcap"):
+        tb.prefix_bidir_attention(None, q, q, q, None, softcap=30.0)
+    with pytest.raises(NotImplementedError, match="position_bias"):
+        tb.prefix_bidir_attention(None, q, q, q, None, position_bias=torch.zeros(1, 2, 5, 5))
+    for split, keys in ((tb.StateSplit(0), 5), (tb.StateSplit(5), 5), (tb.StateSplit(2), 7)):
+        with pytest.raises(ValueError, match="for a whole prompt"):
+            tb.prefix_bidir_attention(None, q, torch.zeros(1, 2, keys, 4), q, split)
 
 
 # ---- a real checkpoint --------------------------------------------------------------------
