@@ -34,10 +34,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # The tested floor versions and the lowest supported Python.
+          # The tested floor versions and the lowest supported Python. The core's request
+          # checks are pydantic's and its image headers Pillow's, so both are at their floors.
           - python: "3.10"
             torch: torch==2.7.1
-            pins: transformers==5.15.0 peft==0.21.0 huggingface_hub==1.5.0
+            pins: transformers==5.15.0 peft==0.21.0 huggingface_hub==1.5.0 pydantic==2.7.0 pillow==10.0.0
           # The newest versions that pyproject.toml admits.
           # torchvision runs the 12B's image processor checks (tests/test_core_images.py).
           - python: "3.12"
