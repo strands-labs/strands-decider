@@ -50,6 +50,11 @@ cuda = ["flash-linear-attention>=0.5; sys_platform == 'linux'"]
 # every device installs the same way.
 mps = []
 cpu = []
+# vLLM backend for `strands_decider.hidden_engine.HiddenStateEngine`: the torso runs on vLLM's
+# offline `LLM` (CUDA, Linux), the head on the CPU in numpy. See src/strands_decider/vllm_engine.py.
+# Pinned loosely: the backend uses the stable `LLM.encode` and `PoolerConfig(pooling_type="ALL")`
+# surface, which is current from vLLM 0.9 onwards.
+vllm = ["vllm>=0.9; sys_platform == 'linux'"]
 benchmark = ["boto3>=1.34", "matplotlib>=3.8"]
 dev = [
     "pillow>=10",
@@ -131,6 +136,8 @@ module = [
     "yaml",
     "mlx.*",
     "mlx_lm.*",
+    "vllm",
+    "vllm.*",
     "PIL.*",
     "tokenizers",
 ]
