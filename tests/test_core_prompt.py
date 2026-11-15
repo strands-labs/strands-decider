@@ -1884,7 +1884,7 @@ def test_v1_text_only_engine_refuses_images_with_no_vision():
     from strands_decider import hidden_engine
     from strands_decider.core import NO_VISION
 
-    assert NO_VISION in inspect.getsource(hidden_engine.HiddenStateEngine.evaluate)
+    assert NO_VISION in inspect.getsource(hidden_engine.HiddenStateEngine._evaluate_images)
 
 
 def test_render_content_matches_v1():
