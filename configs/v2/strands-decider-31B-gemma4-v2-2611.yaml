@@ -1,23 +1,24 @@
-# strands-decider-31B-gemma4-v2-2611: Strands Decider v2 31B, the run-1 one-stage recipe, for training/train.py.
-# Source: the finetune section of the v2 run-1 decision_config.json (261111/31B/run-1).
+# strands-decider-31B-gemma4-v2-2611: Strands Decider v2 31B, the released v2 models' one-stage recipe, for training/train.py.
+# Source: the training record of the released v2 model of this size.
 #   base google/gemma-4-31B-it, revision 842da3794eaa0b77d5f08bae87a17459d91ff475.
-# Data: train.jsonl / dev.jsonl (SD-1.31r-legal-strict-v7A-MO, 17,480,385 rows) converted with
+# Data: v2 rows (train.jsonl / dev.jsonl) converted with
 #   `python -m training.data.strands_v2`.
 # Step math: 8 x 335 = 2,680 rows per optimizer step, independent of the GPU count
-#   -> 6,522 steps (ref 6,523; ref per rank batch_size 8, accum 16, token_budget 8,192 on 24 GPUs).
-# Sort window 8 x 384 = 3,072; assumed ref 3,072 = world x batch_size x accum (E2B's
-#   training_config records sort_window 3,072; the other sizes' were not read).
-# slice_char_budget 14000 is the ref token_budget 8,192 at 56,000 characters per 32,768 tokens.
+#   -> 6,522 steps on the released models' training set (their own run: 6,523 steps, with a budget of 8,192
+#   padded tokens per micro-batch).
+# Sort window 8 x 384 = 3,072 rows (the released models' run sorted within windows of 3,072 rows).
+# slice_char_budget 14000 stands for a budget of 8,192 padded tokens per forward (56,000 characters per
+#   32,768 tokens).
 # Not mapped: lora.dropout 0.05 (no key; the model's
 #   lora_dropout default is 0.05); brier_weight 0.0 (no key); pooling "last" / readout_mode "trained"
 #   (what token_readout does); augment true -> shuffle_options.
 train_files: ["data/train_examples.jsonl"]
-val_files: ["data/dev_examples.jsonl"]   # S3 dev.jsonl
+val_files: ["data/dev_examples.jsonl"]
 base_model: "google/gemma-4-31B-it"
 base_revision: "842da3794eaa0b77d5f08bae87a17459d91ff475"
 head_type: "token_readout"
 attention_mode: "prefix_bidir"
-attn_split: 1024        # E2B ref training_config; speed only
+attn_split: 1024        # speed only
 bf16_autocast: true    # the v2 trainer computes the LoRA and readout matmuls in bf16
 max_length: 16384
 use_lora: true
@@ -36,7 +37,7 @@ head_lr: 1.0e-4
 weight_decay: 0.0
 adam_betas: [0.9, 0.999]
 warmup_ratio: 0.05
-lr_floor: 0.1           # ref: linear warmup, cosine to 0.1x
+lr_floor: 0.1           # linear warmup, then cosine to 0.1x
 max_grad_norm: 1.0
 gradient_checkpointing: true
 shuffle_options: true
