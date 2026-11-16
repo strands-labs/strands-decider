@@ -97,14 +97,14 @@ class ExpertLoRA(nn.Module):
         final.index_add_(0, perm // top_k, out)
         return final.to(hidden_states.dtype)
 
-    @torch.no_grad()
     def merged(self) -> Any:
         """The base experts with s * B @ A added per expert (float32 sum, weights' dtype)."""
-        for w, a, b in (
-            (self.base.gate_up_proj, self.gate_up_a, self.gate_up_b),
-            (self.base.down_proj, self.down_a, self.down_b),
-        ):
-            w.copy_((w.float() + delta(a.to(w.device), b.to(w.device), self.scale)).to(w.dtype))
+        with torch.no_grad():
+            for w, a, b in (
+                (self.base.gate_up_proj, self.gate_up_a, self.gate_up_b),
+                (self.base.down_proj, self.down_a, self.down_b),
+            ):
+                w.copy_((w.float() + delta(a.to(w.device), b.to(w.device), self.scale)).to(w.dtype))
         return self.base
 
 
@@ -141,7 +141,6 @@ def state_dict(torso: nn.Module) -> dict[str, torch.Tensor]:
     }
 
 
-@torch.no_grad()
 def load_state(torso: nn.Module, tensors: dict[str, torch.Tensor]) -> None:
     found = modules(torso)
     keys = {f"{n}.{p}" for n in found for p in PARTS}
@@ -150,9 +149,10 @@ def load_state(torso: nn.Module, tensors: dict[str, torch.Tensor]) -> None:
             f"expert adapter: {len(keys - set(tensors))} tensors missing, "
             f"{len(set(tensors) - keys)} unexpected"
         )
-    for name, m in found.items():
-        for p in PARTS:
-            getattr(m, p).copy_(tensors[f"{name}.{p}"])
+    with torch.no_grad():
+        for name, m in found.items():
+            for p in PARTS:
+                getattr(m, p).copy_(tensors[f"{name}.{p}"])
 
 
 def merge_and_unwrap(torso: nn.Module) -> int:

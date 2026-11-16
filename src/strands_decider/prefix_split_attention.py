@@ -57,9 +57,10 @@ def prefix_split_forward(
     rows = _STATE["rows"]
     b, heads, length, dim = query.shape
     if rows is None or len(rows) != b or length < _STATE["min_length"] or dropout:
-        return sdpa_attention_forward(
+        plain: tuple[torch.Tensor, None] = sdpa_attention_forward(
             module, query, key, value, attention_mask, dropout=dropout, scaling=scaling, **kwargs
         )
+        return plain
     groups = heads // key.shape[1]
     key, value = _repeat_kv(key, groups), _repeat_kv(value, groups)
     out = []

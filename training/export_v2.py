@@ -66,7 +66,8 @@ def base_dir(base_model: str, revision: str | None) -> str:
     """The base's files on disk: a local directory, or its Hub snapshot in the local cache."""
     if os.path.isdir(base_model):
         return base_model
-    return snapshot_download(base_model, revision=revision, local_files_only=True)
+    snapshot: str = snapshot_download(base_model, revision=revision, local_files_only=True)
+    return snapshot
 
 
 def _shards(d: str) -> list[str]:
