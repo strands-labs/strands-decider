@@ -345,7 +345,7 @@ def build_remote_script(
     environment_dir = str(Path(environment_path).parent)
     environment_object = f"s3://{bucket_name}/{object_prefix}/environment.yaml"
     benchmark_command = (
-        "env PYTHONPATH=src /usr/local/bin/uv run --project benchmark --locked --python 3.12 "
+        "env PYTHONPATH=src /usr/local/bin/uv run --project benchmark --python 3.12 "
         f"python -m benchmark.runner run {command}"
     )
 
