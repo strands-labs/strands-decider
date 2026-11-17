@@ -245,8 +245,8 @@ class _StubBackend:
 
 def test_serve_hands_the_core_the_json_the_client_sent(ckpt):
     """A decision checkpoint's request is checked by the core alone, not by v1's request model
-    as well: one without a state is answered as one with an empty state (docs/spec.md,
-    section 1), where v1's model requires a state, and a JSON array gets the core's message.
+    as well: one without a state is answered as one with an empty state (`parse_request`),
+    where v1's model requires a state, and a JSON array gets the core's message.
     A decision engine handed to create_app through build_engine is refused at startup, since
     the routes then take v1's request model."""
     body = request()

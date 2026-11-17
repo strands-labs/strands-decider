@@ -1,11 +1,11 @@
 """The transformers backend (src/strands_decider/backends/transformers.py) on tiny random-weight
-Gemma 4 checkpoints in the spec's layout, generated here: no download, CPU in CI.
+Gemma 4 checkpoints in the decision checkpoint's layout, generated here: no download, CPU in CI.
 
 - loading: both multimodal classes, the intermediate bare decoder (text only, warnings), and
   the checkpoints it refuses;
-- the mask: what SDPA gets in every decoder layer is docs/spec.md section 6's prefix_bidir
-  mask in the backend's form (never causal, no dense mask), the hidden states are those of the
-  core's explicit `attention_mask`, and sliding windows have no effect;
+- the mask: what SDPA gets in every decoder layer is the prefix_bidir mask in the backend's
+  form (never causal, no dense mask), the hidden states are those of the core's explicit
+  `attention_mask`, and sliding windows have no effect;
 - state reuse: the state once and then the questions is the full pass of each prompt;
 - the readout: rows are the decoder's hidden states, and the core's regime turns them into
   the answers;
@@ -657,7 +657,7 @@ def test_a_backend_without_its_vision_encoder_refuses_images(ckpt):
         ({"image_processor_type": "SiglipImageProcessor"}, "names image processor"),
     ],
 )
-def test_an_image_processor_off_the_spec_refuses_images(tmp_path, processor, match):
+def test_an_image_processor_the_core_refuses_refuses_images(tmp_path, processor, match):
     from strands_decider.decision import DecisionEngine
 
     path = decision_checkpoint(tmp_path / "p", GEMMA4, processor=processor)
@@ -746,12 +746,12 @@ def _rendered_image(data: bytes):
     [(64, 48, "PNG"), (640, 480, "JPEG"), (300, 40, "WEBP"), (1, 100, "PNG"), (1200, 900, "JPEG"),
      (768, 768, "PNG"), (97, 1301, "GIF"), (1080, 2400, "PNG")],
 )  # fmt: skip
-def test_the_spec_resize_then_the_processor_is_gemma4s_pil_processor(w, h, fmt):
-    """docs/spec.md section 3.3, for E2B, E4B, 26B-A4B and 31B: the spec's bicubic resize
-    (`resize_image`), then the processor without its own, gives the pixels the PIL processor
-    gives with its own, wherever Pillow resizes the width first. Pillow 13 does the height
-    first when it shrinks more than twice as much as the width (the 1080 x 2400 case), and its
-    pixels then differ by a few levels: the spec's resize is the reference."""
+def test_the_cores_resize_then_the_processor_is_gemma4s_pil_processor(w, h, fmt):
+    """For E2B, E4B, 26B-A4B and 31B: the core's bicubic resize (`resize_image`), then the
+    processor without its own, gives the pixels the PIL processor gives with its own, wherever
+    Pillow resizes the width first. Pillow 13 does the height first when it shrinks more than
+    twice as much as the width (the 1080 x 2400 case), and its pixels then differ by a few
+    levels: the core's resize is the reference."""
     from PIL import Image
 
     rendered = _rendered_image(_photo(w, h, fmt, w * h))
@@ -765,7 +765,7 @@ def test_the_spec_resize_then_the_processor_is_gemma4s_pil_processor(w, h, fmt):
     one_call = decoded.resize(target, Image.Resampling.BICUBIC)
     if np.array_equal(np.asarray(one_call), np.asarray(resize_image(decoded, *target))):
         assert torch.equal(ours["pixel_values"], theirs["pixel_values"])
-    else:  # Pillow 13, height first: within a few levels, and ours is the spec's
+    else:  # Pillow 13, height first: within a few levels, and ours is the core's
         assert (ours["pixel_values"] - theirs["pixel_values"]).abs().max() <= 16 / 255
 
 
@@ -800,7 +800,7 @@ def test_a_decoded_size_that_is_not_the_headers_is_refused(backends, kind, monke
 
 @pytest.mark.skipif(not (HAS_UNIFIED and TORCHVISION), reason="needs the 12B's processor")
 @pytest.mark.parametrize(("w", "h"), [(64, 48), (640, 480), (300, 40), (1, 100)])
-def test_the_12bs_processor_counts_the_cores_n_from_the_spec_resize(w, h):
+def test_the_12bs_processor_counts_the_cores_n_from_the_cores_resize(w, h):
     from PIL import Image
 
     proc = transformers.Gemma4UnifiedImageProcessor()
@@ -1059,7 +1059,7 @@ def _fits_in_float32(backend) -> bool:
 
 @pytest.mark.skipif(not REAL, reason="set STRANDS_DECIDER_TEST_CHECKPOINT to a decision checkpoint")
 def test_a_real_checkpoint():
-    """A real decision checkpoint, on CUDA when there is one: it loads in the spec's layout,
+    """A real decision checkpoint, on CUDA when there is one: it loads in its layout,
     an image request runs where it takes images, and on the test request state reuse gives
     the full passes' choice, and every noul, score and probability within REAL_REQUEST_BOUND."""
     device = "cuda" if CUDA else "cpu"
@@ -1124,9 +1124,9 @@ def test_a_real_checkpoint_reuses_states_as_full_passes_in_float32():
             assert rel < 1e-3, (len(state), width, rel)
 
 
-# ---- model goldens (docs/spec.md, section 10) ---------------------------------------------
+# ---- model goldens -----------------------------------------------------------------------
 #
-# A golden_vectors.jsonl line, as section 10 gives it: {"request", "variant", "state_ids",
+# A golden_vectors.jsonl line (`read_golden_vectors`): {"request", "variant", "state_ids",
 # "images": [{"sha256", "span"}], "questions": {name: {"question_ids", "codes",
 # "probabilities"}}}. The core reads the reference's probabilities (`read_golden_vectors`) and
 # measures a runtime against them (`agreement`, `Agreement.conforms`).
@@ -1137,7 +1137,7 @@ GOLDENS = "golden_vectors.jsonl"
 def golden_probabilities(path, backend) -> dict:
     """`backend`'s code probabilities on the goldens at `path`, keyed as `read_golden_vectors`
     keys the reference's, after checking that every line renders to the goldens' ids, spans,
-    image hashes and codes exactly (section 10: the runtime's ids equal the goldens')."""
+    image hashes and codes exactly (a runtime's ids equal the goldens')."""
     ck = backend.checkpoint
     tok = ck.tokenizer()
     out = {}
@@ -1165,7 +1165,7 @@ def golden_probabilities(path, backend) -> dict:
 
 
 def write_goldens(path, backend, requests) -> None:
-    """Goldens in section 10's format, from `backend` (one full pass per prompt, as the
+    """Goldens in golden_vectors.jsonl's format, from `backend` (one full pass per prompt, as the
     reference runtime computes them)."""
     ck = backend.checkpoint
     tok = ck.tokenizer()
@@ -1220,7 +1220,7 @@ def test_the_goldens_check_passes_its_own_goldens_and_catches_a_wrong_id(backend
 
 @pytest.mark.skipif(not REAL, reason="set STRANDS_DECIDER_TEST_CHECKPOINT to a decision checkpoint")
 def test_a_real_checkpoint_meets_its_goldens():
-    """Section 10: the rendered ids are the goldens', and in bf16 the runtime conforms (top-1
+    """The rendered ids are the goldens', and in bf16 the runtime conforms (top-1
     agreement at least 98% and mean |dp| at most 0.02, on at least 1,000 questions), both with
     one full pass per prompt (the reference) and with the state reused."""
     from strands_decider.core import agreement, read_golden_vectors
@@ -1411,7 +1411,7 @@ def test_mps_calls_take_turns_across_backends(ckpt, kind, monkeypatch):
 
 
 def test_an_intermediate_checkpoints_float32_readout_is_rounded_to_bf16(tmp_path):
-    """Section 7.1 (W is bf16): a runtime that reads an f32 readout rounds it to bf16 first."""
+    """W is bf16: a runtime that reads an f32 readout rounds it to bf16 first."""
     from safetensors.torch import save_file
 
     path = intermediate_checkpoint(tmp_path / "mid")

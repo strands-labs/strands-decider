@@ -67,7 +67,7 @@ def serve_cmd(
         False,
         "--no-prefix-cache",
         help="Encode each question with its own copy of the state; for a decision checkpoint, "
-        "one full pass per question (the spec's reference on CUDA in bfloat16).",
+        "one full pass per question (the reference, on CUDA in bfloat16).",
     ),
     model_name: str | None = typer.Option(
         None,
@@ -229,7 +229,7 @@ def ask_cmd(
     if kind == INTERMEDIATE:
         raise typer.BadParameter(str(refuse_intermediate(checkpoint)))
     if kind == DECISION:
-        # A decision checkpoint (docs/spec.md): images go in the request, and the checkpoint's
+        # A decision checkpoint: images go in the request, and the checkpoint's
         # decision_config.json says whether it takes them.
         from .decision import RequestRefused, check_device, check_dtype, load_decision_engine
 

@@ -353,7 +353,7 @@ src/strands_decider/              -- published package (inference only)
   core/           the decision interface without torch: prompt rendering, the code
                   readout, decision_config.json, the runtime contract
   backends/       runtimes for decision checkpoints; transformers.py runs them on PyTorch
-                  (CPU, CUDA, MPS), with images, and is the spec's reference runtime
+                  (CPU, CUDA, MPS), with images, and is the reference runtime
   decision.py     decision checkpoints behind ask and serve: the core, and a backend per
                   device kind (BACKENDS; another runtime registers its own)
 

@@ -114,8 +114,8 @@ def create_app(
 ) -> FastAPI:
     if max_concurrency is not None and max_concurrency < 1:
         raise ValueError("--max-concurrency must be at least 1")
-    # A decision checkpoint (docs/spec.md) is served by the core and a decision backend;
-    # anything else takes v1's path below, unchanged. Tests inject `build_engine` and skip this.
+    # A decision checkpoint is served by the core and a decision backend; anything else takes
+    # v1's path below, unchanged. Tests inject `build_engine` and skip this.
     kind = checkpoint_kind(checkpoint, revision=revision) if build_engine is None else None
     if kind == INTERMEDIATE:
         raise refuse_intermediate(checkpoint)
@@ -176,7 +176,7 @@ def create_app(
     def _default_build_engine() -> SystemOneEngine | DecisionEngine:
         if decision:
             # Images follow the checkpoint's decision_config.json `inputs`, not --vision;
-            # --no-prefix-cache runs each question as one full prompt (the spec's reference).
+            # --no-prefix-cache runs each question as one full prompt (the reference).
             return load_decision_engine(
                 checkpoint,
                 device=device,
@@ -303,8 +303,8 @@ def create_app(
 
     if decision:
         # A decision engine takes the JSON the client sent and checks it with the core
-        # (docs/spec.md, section 1). v1's request model would drop `audio`, which the interface
-        # refuses, and require a `state`, which the interface does not.
+        # (`parse_request`). v1's request model would drop `audio`, which the core refuses, and
+        # require a `state`, which the core does not.
         @app.post("/v1/systemone", response_model=SystemOneResponse)
         @app.post("/invocations", response_model=SystemOneResponse)
         async def systemone_decision(

@@ -1,21 +1,22 @@
 """The transformers backend: decision checkpoints on PyTorch, on CPU, CUDA or Apple's MPS.
 
-It is the reference runtime of docs/spec.md (section 10), the PyTorch model behind
-`strands_decider.core.evaluate`, and implements the core's `Backend`: given a state's token
+It is the reference runtime, the PyTorch model behind `strands_decider.core.evaluate`: a
+checkpoint's `golden_vectors.jsonl` holds its probabilities, in bf16 on CUDA with
+`reuse_state=False`. It implements the core's `Backend`: given a state's token
 ids, its images with their spans, and each question's ids, it returns each question's final-norm hidden state at its last token
 (`outputs = "hidden"`).
 
-Loading (section 9). A decision checkpoint is the base model's own multimodal checkpoint,
+Loading. A decision checkpoint is the base model's own multimodal checkpoint,
 loaded with transformers' class for it: `Gemma4ForConditionalGeneration` for E2B, E4B, 26B-A4B
 and 31B, `Gemma4UnifiedForConditionalGeneration` for the 12B. `readout.safetensors` and
 `decision_config.json` sit beside it, the latter validated by the core's `DecisionConfig`. The
-audio encoder is not built: the interface refuses audio (section 1), and transformers'
+audio encoder is not built: the core refuses audio, and transformers'
 audio tower has no SDPA path. A checkpoint made before that layout, a bare `Gemma4TextModel`
 whose `decision_config.json` predates `interface` and `inputs`, loads as text only, with a
 warning for each missing field. It names no prompt, so it runs on token ids rendered elsewhere;
 `strands-decider ask` and `serve` refuse it.
 
-The mask (section 6). The decoder's layers run `prefix_bidir_attention`, PyTorch's SDPA made
+The mask. The decoder's layers run `prefix_bidir_attention`, PyTorch's SDPA made
 never causal, and every layer gets the backend's form of the prefix_bidir mask, in a dict keyed
 by layer type. The dict replaces Gemma 4's own mask construction: the causal rule, the sliding
 windows, and the bidirectional image blocks of the larger sizes (`use_bidirectional_attention:
@@ -28,20 +29,20 @@ when its questions differ in length, one row of key columns per question, [rows,
 width], which PyTorch's memory-efficient kernel on CUDA still expands over the batch's
 queries. An image's placeholders are state tokens like any other.
 
-State reuse (section 6). By default a state with several questions is encoded once, its keys
+State reuse. By default a state with several questions is encoded once, its keys
 and values kept for every layer, and the questions then run over them at positions S
 onwards: the state never attends to a question, so its keys and values are the same for every
 question. Questions run in batches (`max_batch`, `max_batch_tokens`), padded on the right,
 each one seeing only the state and itself. A single question, and every question with
-`reuse_state=False`, is one full prompt in one forward pass, the reference of section 10.
+`reuse_state=False`, is one full prompt in one forward pass, the reference.
 tests/test_backend_transformers.py checks that the two agree.
 
-The readout (section 7.1). Rows are float32, which holds a bf16 decoder's values exactly; the
+The readout. Rows are float32, which holds a bf16 decoder's values exactly; the
 core's `Readout` does the bf16 GEMM and then the soft-cap and the temperature in float32.
 
-Images (section 3.3). Each file is decoded as v1 decodes it (`vision.decode_image`), its
+Images. Each file is decoded as v1 decodes it (`vision.decode_image`), its
 decoded size checked against its header (`check_decoded_size`), resized to the size the image
-processor would choose for the decoded, oriented size by the spec's bicubic resize
+processor would choose for the decoded, oriented size by the core's bicubic resize
 (`resize_image`: the width's pass, then the height's), and given to the checkpoint's image
 processor with its own resize off. For E2B, E4B, 26B-A4B and 31B that is
 `Gemma4ImageProcessorPil`, whose pixels this reproduces wherever Pillow resizes the width
@@ -276,7 +277,7 @@ class Checkpoint:
             raise ValueError(
                 f'{path}: {FILENAME} inputs name "image", but the checkpoint is a bare text '
                 "decoder with no vision encoder; an image checkpoint has the base's multimodal "
-                "layout (docs/spec.md, section 9)"
+                "layout"
             )
         readout = Readout.load(path, config)
         return cls(
@@ -302,7 +303,7 @@ def image_processor_problem(processor_config: Any, unified: bool) -> str | None:
     """Why images cannot be served with this `processor_config.json`, or None. The soft-token
     count N depends on the processor's patch size, pooling kernel and soft-token budget, so a
     processor with other values would put a different number of vectors where the prompt has
-    N placeholders (docs/spec.md, sections 3.3 and 9)."""
+    N placeholders (`check_image_processor`)."""
     if not isinstance(processor_config, dict):
         return f"the checkpoint has no {PROCESSOR_FILE}, so image requests are refused"
     ip = processor_config.get("image_processor")
@@ -341,10 +342,10 @@ def decode(image: RenderedImage) -> Image.Image:
 
 
 def resize(image: RenderedImage, img: Image.Image) -> Image.Image:
-    """The decoded `img` of `image` resized as docs/spec.md section 3.3 says: to the size
-    the processor would choose for the decoded, oriented size (which must be the header's or
-    its transpose: `check_decoded_size`), by the spec's bicubic resize (`resize_image`, the
-    width's pass, then the height's, the same on every Pillow)."""
+    """The decoded `img` of `image` resized to the size the processor would choose for the
+    decoded, oriented size (which must be the header's or its transpose: `check_decoded_size`),
+    by the core's bicubic resize (`resize_image`, the width's pass, then the height's, the same
+    on every Pillow)."""
     try:
         width, height = check_decoded_size(image, *img.size)
     except ValueError as e:
@@ -561,7 +562,7 @@ def _load_model(ckpt: Checkpoint, dtype: torch.dtype, *, vision: bool) -> torch.
         conf.audio_config = None
         if not vision:
             conf.vision_config = None
-        # Made redundant by prefix_bidir, and bypassed by the mask dict in any case (section 6).
+        # Made redundant by prefix_bidir, and bypassed by the mask dict in any case.
         conf.get_text_config().use_bidirectional_attention = None
         cls = getattr(transformers, UNIFIED_ARCHITECTURE if ckpt.unified else ARCHITECTURE, None)
         if cls is None:
@@ -704,7 +705,7 @@ class TransformersBackend:
         """Load `checkpoint` (a directory, a Hub repo id, or an opened `Checkpoint`) onto
         `device`, in `dtype` (`DEVICE_DTYPES[device]` when None). The vision encoder is built
         when the checkpoint takes images and `images` is true; a checkpoint whose image
-        processor or tokenizer does not fit the spec loads without it, and its image requests
+        processor or tokenizer the core's checks refuse loads without it, and its image requests
         are refused with the reason (`image_problem`)."""
         ckpt = (
             checkpoint
@@ -765,12 +766,12 @@ class TransformersBackend:
     # ---- images -------------------------------------------------------------------------
 
     def prepare_pixels(self, images: Sequence[RenderedImage]) -> dict[str, torch.Tensor]:
-        """The vision encoder's inputs for `images` (section 3.3), on the device: each file
-        decoded as v1 decodes it, its decoded size checked against its header, resized by the
-        spec's bicubic resize (`resize` here, the core's `resize_image`), then through the
-        checkpoint's image processor with its own resize off. Checks that the processor counts
-        each image's N. The model runs its encoder on them in the pass that holds the state,
-        and puts each image's N vectors at its placeholders, in order."""
+        """The vision encoder's inputs for `images`, on the device: each file decoded as v1
+        decodes it, its decoded size checked against its header, resized by `resize` here (the
+        core's bicubic `resize_image`), then through the checkpoint's image processor with its
+        own resize off. Checks that the processor counts each image's N. The model runs its
+        encoder on them in the pass that holds the state, and puts each image's N vectors at its
+        placeholders, in order."""
         if self.image_processor is None:
             raise ValueError(self.image_problem or NO_VISION)
         pixels = [resize(im, decode(im)) for im in images]
@@ -849,7 +850,7 @@ class TransformersBackend:
     def _full_pass(
         self, state: list[int], question: list[int], pixels: dict[str, torch.Tensor] | None
     ) -> torch.Tensor:
-        """One prompt, one forward pass under prefix_bidir: the reference of section 10."""
+        """One prompt, one forward pass under prefix_bidir: the reference."""
         n = len(state) + len(question)
         ids = torch.tensor([state + question], device=self.device)
         positions = torch.arange(n, device=self.device).view(1, -1)

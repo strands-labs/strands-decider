@@ -1,15 +1,15 @@
-"""Decision checkpoints behind `strands-decider ask` and `serve` (docs/spec.md).
+"""Decision checkpoints behind `strands-decider ask` and `serve`.
 
 `ask` and `serve` take v1 checkpoints and decision checkpoints alike. A directory, or a Hub
 repo, whose `decision_config.json` says `"interface": "strands-decider"` is a decision
-checkpoint (section 8: the interface field, never the file names, tells it apart), and
+checkpoint (the interface field, never the file names, tells it apart), and
 `load_decision_engine` serves it; anything else takes v1's pointer path, unchanged.
 
 `DecisionEngine` answers a v1 request with the core: `strands_decider.core.evaluate` renders
 it with the checkpoint's prompt, a backend runs the decoder, and the core reads the answers.
 It takes the request as the JSON the client sent, so that fields v1's request model does not
-know reach the core's checks: any `audio` but null, which the interface refuses
-(docs/spec.md, section 1), is refused rather than dropped. Other unknown fields are ignored,
+know reach the core's checks: any `audio` but null, which the core refuses, is refused
+rather than dropped. Other unknown fields are ignored,
 as v1 ignores them. On a torch device (cpu, cuda, mps) the backend is the transformers one
 (`backends/transformers.py`).
 """
@@ -196,7 +196,7 @@ class DecisionEngine:
     values on the device together. The others wait up to `queue_timeout` seconds (None: no
     limit) and then get `EngineBusy`. A prompt longer than `max_length` tokens, by default the
     checkpoint's `max_length_validated`, is refused; a `max_length` above it is the operator's
-    decision (docs/spec.md, section 8). Refusals raise `RequestRefused`, and every refusal the
+    decision. Refusals raise `RequestRefused`, and every refusal the
     core makes is decided before a request waits. An image file that its header accepts but
     that does not decode is found by the backend, which decodes it once it has a slot: under
     load such a request may wait, or get `EngineBusy`, before its refusal. A failure on a
@@ -468,7 +468,7 @@ def load_decision_engine(
     device's own (float32 on CPU, bfloat16 on CUDA and MPS). The interface's files, decision_config.json
     (validated strictly), readout.safetensors and the tokenizer, are read here for every
     backend. `reuse_state=False` runs each question as one full prompt; on CUDA in bfloat16
-    that is the reference of docs/spec.md section 10."""
+    that is the reference, whose probabilities a checkpoint's golden_vectors.jsonl holds."""
     check_max_length(max_length)  # before anything loads
     loader = backend_loader(device)
     check_dtype(device, dtype)

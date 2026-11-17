@@ -1,6 +1,6 @@
 """Tiny random-weight decision checkpoints for the backend tests (no download).
 
-`decision_checkpoint` writes a directory in docs/spec.md's layout (section 9): the base's
+`decision_checkpoint` writes a directory in a decision checkpoint's layout: the base's
 multimodal class saved by transformers (`Gemma4ForConditionalGeneration`, or
 `Gemma4UnifiedForConditionalGeneration` for the 12B's encoder-free design) in bf16,
 `processor_config.json`, a word-level tokenizer with Gemma 4's control tokens and codes at
@@ -53,7 +53,7 @@ def tokenizer():
     """The toy tokenizer of tests/core_support.py, with Gemma 4's ids where the interface
     fixes them, so that a checkpoint's tokenizer passes the core's `check_tokenizer`: the
     control tokens at `CONTROL_TOKEN_IDS`, `<eos>` at 1, and each code at its id in
-    `CODE_TOKEN_IDS` (docs/spec.md, section 2). The other words take the free ids from 0 up."""
+    `CODE_TOKEN_IDS`. The other words take the free ids from 0 up."""
     from tokenizers import AddedToken, Regex, Tokenizer, models, pre_tokenizers
 
     words = ["<unk>", "\n", " ", ".", "<", ">", "/", '"', "=", "—", "answer", "model", "user"]
