@@ -196,8 +196,11 @@ def test_serve_takes_a_dtype(ckpt):
 
 
 def test_serve_refusals_over_http(ckpt, tmp_path):
-    """Through create_app and HTTP: any audio but null, five images, and images on a text-only
-    checkpoint are each refused with 422 and the interface's message."""
+    """Through create_app and HTTP: any audio but null, and images on a text-only checkpoint,
+    are each refused with 422 and the interface's message. The number of images is not
+    checked: five are answered, and the prompt's length is the only bound on how many fit."""
+    from strands_decider.core import render
+
     img = image_b64(64, 48)
     with TestClient(server.create_app(str(ckpt), device="cpu", warmup=False)) as client:
         r = client.post("/v1/systemone", json={**request(), "audio": ["UklGRiQAAABXQVZF"]})
@@ -205,10 +208,14 @@ def test_serve_refusals_over_http(ckpt, tmp_path):
         r = client.post("/v1/systemone", json={**request(), "audio": []})
         assert r.status_code == 422 and r.json()["detail"] == "audio input is not supported"
         assert client.post("/v1/systemone", json={**request(), "audio": None}).status_code == 200
+        assert client.post("/v1/systemone", json=request([img] * 5)).status_code == 200
+    engine = load_decision_engine(str(ckpt), device="cpu")
+    rendered = render(request([img] * 5), engine.tokenizer, engine.config.prompt)
+    limit = max(len(q.ids) for q in rendered.questions.values()) - 1
+    app = server.create_app(str(ckpt), device="cpu", warmup=False, max_length=limit)
+    with TestClient(app) as client:
         r = client.post("/v1/systemone", json=request([img] * 5))
-        assert (
-            r.status_code == 422 and r.json()["detail"] == "5 images; this server takes at most 4"
-        )
+        assert r.status_code == 422 and f"exceeds the limit of {limit} tokens" in r.json()["detail"]
         assert client.post("/v1/systemone", json=request([img] * 4)).status_code == 200
     text_only = decision_checkpoint(tmp_path / "t", GEMMA4, decision={"inputs": ["text"]})
     with TestClient(server.create_app(str(text_only), device="cpu", warmup=False)) as client:
