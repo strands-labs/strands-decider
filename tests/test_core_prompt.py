@@ -1047,8 +1047,9 @@ def test_image_spans_and_control_ids(which, variant):
 
 
 def test_images_are_checked_when_rendered():
-    """`images` is v1's: a list of strings, null or any other type refused; then at most 4
-    images, each a PNG, JPEG, WebP or GIF file (tests/test_core_images.py has the rest)."""
+    """`images` is v1's: a list of strings, null or any other type refused; then each image a
+    PNG, JPEG, WebP or GIF file, however many there are (tests/test_core_images.py has the
+    rest)."""
     for bad in (None, "", 0, {}, "aGk=", [1], [None], ("aGk=",)):
         with pytest.raises(ValueError, match=r"^images(\.0)?: Input should be a valid"):
             render_text({**CASES["support_ticket"], "images": bad}, PLAIN)
@@ -1056,10 +1057,7 @@ def test_images_are_checked_when_rendered():
         CASES["support_ticket"], PLAIN
     )
     png = image_b64("checker-64x48.png")
-    with pytest.raises(ValueError) as e:
-        render_text({**CASES["support_ticket"], "images": [png] * 5}, PLAIN)
-    assert str(e.value) == "5 images; this server takes at most 4"
-    assert render_text({**CASES["support_ticket"], "images": [png] * 4}, PLAIN)
+    assert render_text({**CASES["support_ticket"], "images": [png] * 5}, PLAIN)
     with pytest.raises(ValueError, match="image could not be read as PNG/JPEG/WEBP/GIF"):
         render_text({**CASES["support_ticket"], "images": ["aGk="]}, PLAIN)
 
@@ -1808,7 +1806,8 @@ def test_chat_ids_match_hugging_face_apply_chat_template():
 def test_request_parsing_matches_v1():
     """The core accepts and refuses what v1's pydantic models do, and infers a missing `type`
     the same way, but for a request without a state, which v1 refuses and the core reads as
-    one with an empty state. (Both count the images later: tests/test_core_images.py.)"""
+    one with an empty state. (Both check the images later, and only v1 counts them:
+    tests/test_core_images.py.)"""
     from strands_decider.core import parse_request
     from strands_decider.schema import SystemOneRequest
 

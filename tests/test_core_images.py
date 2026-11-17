@@ -391,14 +391,11 @@ def test_the_image_processors_settings_are_checked(tmp_path):
             check_image_processor(bad)
 
 
-def test_more_than_four_images_are_refused_before_any_is_decoded():
-    with pytest.raises(ValueError) as e:
-        decode_images(["not base64!"] * 5)
-    assert str(e.value) == "5 images; this server takes at most 4"
+def test_decode_images_takes_any_number_of_images():
     with pytest.raises(ValueError, match="image is not valid base64"):
-        decode_images(["not base64!"] * 4)
-    images = decode_images([image_b64(n) for n in list(IMAGE_FILES)[:4]])
-    assert [i.data for i in images] == [image_bytes(n) for n in list(IMAGE_FILES)[:4]]
+        decode_images(["not base64!"] * 5)
+    images = decode_images([image_b64(n) for n in IMAGE_FILES])
+    assert [i.data for i in images] == [image_bytes(n) for n in IMAGE_FILES]
 
 
 def test_audio_is_refused_rather_than_ignored():

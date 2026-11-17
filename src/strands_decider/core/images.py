@@ -8,11 +8,13 @@ state block, and the runtime's vision encoder fills the placeholders in. Decodin
 and preparing them for the encoder stay with the runtime.
 
 The checks are v1's (`strands_decider.vision.decode_image`), with its messages, and a cap on
-the file's bytes: at most 4 images; standard base64 (RFC 4648, not Python's rule, which varies
-by version), after an optional `data:image/...;base64,` prefix; at most 16 MiB of file; one of
-the four formats, as Pillow opens it; at most 4096 x 4096 pixels. A file whose header is sound
-may still fail to decode, and the runtime refuses it then, with v1's `image could not be
-decoded`. Image input needs Pillow, which the core imports only when it reads or resizes one.
+the file's bytes: standard base64 (RFC 4648, not Python's rule, which varies by version), after
+an optional `data:image/...;base64,` prefix; at most 16 MiB of file; one of the four formats, as
+Pillow opens it; at most 4096 x 4096 pixels. A file whose header is sound may still fail to
+decode, and the runtime refuses it then, with v1's `image could not be decoded`. Unlike v1, the
+core does not count a request's images: the prompt's length limit (`max_length_validated`) is
+the only bound on how many it carries. Image input needs Pillow, which the core imports only
+when it reads or resizes one.
 """
 
 from __future__ import annotations
@@ -30,8 +32,7 @@ from typing import Any
 
 # What v1 accepts (vision.IMAGE_FORMATS), named as Pillow names them. Pillow opens no other.
 IMAGE_FORMATS = ("PNG", "JPEG", "WEBP", "GIF")
-# v1's limits (vision.VisionEngineConfig): images per request, and pixels per image.
-MAX_IMAGES = 4
+# v1's limit on pixels per image (vision.VisionEngineConfig).
 MAX_IMAGE_PIXELS = 4096 * 4096
 # Bytes per image file, checked before Pillow reads it. 16 MiB holds a photo of MAX_IMAGE_PIXELS
 # as JPEG or WebP. Gemma 4's processor shrinks every image to at most 645,120 pixels, so a larger
@@ -283,8 +284,6 @@ def decode_image(
 
 
 def decode_images(images: Sequence[str]) -> tuple[EncodedImage, ...]:
-    """A request's images, checked as v1 checks them: at most MAX_IMAGES, counted before any is
-    decoded, then each in turn, every check of one before the next's (`decode_image`)."""
-    if len(images) > MAX_IMAGES:
-        raise ValueError(f"{len(images)} images; this server takes at most {MAX_IMAGES}")
+    """A request's images, each checked in turn, every check of one before the next's
+    (`decode_image`). Their number is not checked: the prompt's length limits it."""
     return tuple(decode_image(i) for i in images)

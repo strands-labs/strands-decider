@@ -15,7 +15,7 @@ A request is v1's `POST /v1/systemone` body.
 | `state` | A string, object or array. Optional, `""` when absent. |
 | `questions` | An object of at least one question, by name. |
 | `model` | A string. Optional. |
-| `images` | An array of at most 4 base64 image files (section 1.1). Optional. |
+| `images` | An array of base64 image files (section 1.1). Optional. |
 | `audio` | Null, or absent. Any other value is refused. |
 
 Other fields are ignored, as in v1, and values are never coerced. A question has a `type`, `instructions` (a string, object or array) and `criteria`.
