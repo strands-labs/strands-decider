@@ -113,10 +113,10 @@ Every setting is a CDK context value. Change it in `cdk.json`, or pass `-c key=v
 | `model` | `StrandsAgents/strands-decider-2B-qwen3.5-v1-2610` | The strands-decider model, a Hugging Face Hub id. Any Qwen3.5 model with a pointer head works. It names the stack. |
 | `model_revision` | `main` | The model's revision. Use a release's date tag (`YYMMDD`) to pin it ([docs/inference.md, Model artifact](../../docs/inference.md#model-artifact)). |
 | `snapstart` | `false` | `true` turns SnapStart on: new execution environments answer in about 6 s instead of up to 30 s, for about $39.50 a month while the stack exists ([What it costs](#what-it-costs)). Not for a decision checkpoint. |
-| `vision` | `false` | `true` adds the base model's vision tower, for requests with images ([Images](#images)) |
-| `image_long_side` | `448` | The longest side, in pixels, an image is scaled to, as for `serve --vision`; `768` makes a square image 576 tokens instead of 196 ([Image size](#image-size)) |
-| `decoder_precision` | `q8_0` | `f16` keeps the decoder unquantized: closer to the torch engine, and slower ([Precision](#precision)) |
-| `vision_precision` | `f16` | `f32` for the vision tower ([Precision](#precision)) |
+| `vision` | `false` | `true` adds the base model's vision tower, for requests with images ([Images](#images)). Not for a decision checkpoint, which takes images when its `inputs` list them. |
+| `image_long_side` | `448` | The longest side, in pixels, an image is scaled to, as for `serve --vision`; `768` makes a square image 576 tokens instead of 196 ([Image size](#image-size)). Not for a decision checkpoint. |
+| `decoder_precision` | `q8_0` | `f16` keeps the decoder unquantized: closer to the torch engine, and slower ([Precision](#precision)). Not for a decision checkpoint, whose decoder is Q8_0. |
+| `vision_precision` | `f16` | `f32` for the vision tower ([Precision](#precision)). Not for a decision checkpoint, whose vision tower is Q8_0. |
 | `max_request_tokens` | `24576`, `16384` for a decision checkpoint | The most tokens one request may forward, the state once plus every question; `0` for no limit ([Limits](#limits)) |
 | `decision` | `false` | `true` deploys a decision checkpoint, `checkpoint`, instead of `model` ([Decision checkpoints](#decision-checkpoints)) |
 | `checkpoint` | none | The decision checkpoint: a Hugging Face Hub id, or an `s3://bucket/prefix/` URI of a checkpoint directory in the same account. It names the stack. |
