@@ -306,10 +306,11 @@ The GGUF Q8_0 decoder meets the conformance bound the core records for that form
 
 ### What the build does
 
-`decision/scripts/build_native.sh` fetches llama.cpp at the commit in `decision/LLAMA_CPP_REV`,
-checks and applies each of the two patches in `decision/patches`, stopping at one that does not
-apply, and builds it and `decision/shim.c` for Graviton2 and later; the build fails if the library
-is not arm64 or holds an instruction Graviton2 lacks (i8mm, bf16, SVE). `decision/scripts/
+`decision/scripts/build_native.sh` fetches llama.cpp at the commit in `decision/LLAMA_CPP_REV`
+(release b12383), checks and applies the patch in `decision/patches`, which lets the shim make
+Gemma 4's full-attention layers non-causal, stopping if it does not apply, and builds it and
+`decision/shim.c` for Graviton2 and later; the build fails if the library is not arm64 or holds an
+instruction Graviton2 lacks (i8mm, bf16, SVE). `decision/scripts/
 shim_check.py` then runs that library against transformers on a tiny random Gemma 4 checkpoint
 (tests/test_llama_cpp_shim.py runs the same check), and the build fails unless the `prefix_bidir`
 mask, state reuse, the image rows and the answers are the reference's.

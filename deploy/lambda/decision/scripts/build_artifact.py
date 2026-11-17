@@ -28,9 +28,10 @@ checked against the sha256 the Hub records. The manifest digest is the sha256 of
 The checkpoint is checked before anything is converted, as a runtime checks it: decision_config.json
 must validate (`"interface": "strands-decider"`, the soft-cap among its required fields),
 config.json's `text_config.final_logit_softcapping` must equal it, and an image checkpoint's image
-processor must have the settings the core counts soft tokens for (`check_image_processor`). The llama.cpp tree must carry
-deploy/lambda/decision/patches: without the second, the converter takes the checkpoint for a
-pplx-decider one.
+processor must have the settings the core counts soft tokens for (`check_image_processor`). The
+llama.cpp tree must carry deploy/lambda/decision/patches. Its converter leaves a Strands Decider
+checkpoint to its own Gemma 4 classes: its pplx-decider loader claims only a Qwen3.5 backbone
+(ggml-org/llama.cpp#32156).
 """
 
 from __future__ import annotations
