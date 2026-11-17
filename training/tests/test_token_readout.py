@@ -116,6 +116,22 @@ def test_the_head_is_255_rows_capped_and_masked_to_the_options(corpus):
         assert torch.isinf(row[n:]).all() and row[:n].exp().sum() == pytest.approx(1.0)
 
 
+def test_under_bf16_autocast_the_cap_runs_in_float32():
+    """The product comes back in bf16 under autocast; the cap is then computed in float32, as
+    the runtimes compute it (docs/spec.md, section 7.1), not in bf16."""
+    torch.manual_seed(0)
+    head = TokenReadoutHead(32, softcap=30.0)
+    x = torch.randn(64, 32) * 4
+    with torch.autocast("cpu", dtype=torch.bfloat16):
+        z = head.proj(x)
+        logits = head(x, 255)
+    assert z.dtype == torch.bfloat16 and logits.dtype == torch.float32
+    want = 30.0 * torch.tanh(z.float() / 30.0)
+    assert torch.equal(logits, want)
+    in_bf16 = (30.0 * torch.tanh(z / 30.0)).float()  # what the head computed before
+    assert not torch.equal(in_bf16, want)
+
+
 @pytest.mark.parametrize("tied", [True, False])
 def test_the_readout_is_seeded_from_the_lm_head_rows(tmp_path, tied):
     from transformers import Qwen3ForCausalLM

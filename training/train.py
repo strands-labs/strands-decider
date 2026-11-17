@@ -88,9 +88,9 @@ class TrainConfig:
     # uses 1024. Speed only: the attention is the same up to rounding.
     attn_split: int = 0
     # Run the forward under bf16 autocast: the LoRA and readout matmuls then run in bf16 on
-    # their fp32 master weights, as the v2 trainer runs them, instead of in fp32
-    # on an fp32 copy of every adapted layer's input (peft's default). The backbone is bf16
-    # either way. Changes numerics slightly; the optimizer state stays fp32.
+    # their fp32 master weights, instead of in fp32 on an fp32 copy of every adapted layer's
+    # input (peft's default). The backbone is bf16 either way, and the readout's cap is
+    # computed in float32 either way. Changes numerics slightly; the optimizer state stays fp32.
     bf16_autocast: bool = False
     pointer_dim: int = 256
     # A frozen teacher's option distribution per training row (data/teacher.py): JSONL of

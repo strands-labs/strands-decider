@@ -300,7 +300,9 @@ class TokenReadoutHead(nn.Module):
 
     def forward(self, decide: torch.Tensor, n_options: int) -> torch.Tensor:
         """decide [B, d] -> logits [B, n_options]; masked_log_softmax masks each row's rest."""
-        logits: torch.Tensor = self.proj(self.dropout(decide))
+        # float32 from here on: under bf16 autocast the product comes back in bf16, and the
+        # runtimes cap, scale and normalise in float32 (docs/spec.md, section 7.1).
+        logits: torch.Tensor = self.proj(self.dropout(decide)).float()
         if self.softcap:
             logits = self.softcap * torch.tanh(logits / self.softcap)
         return logits[:, :n_options]
