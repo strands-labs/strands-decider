@@ -303,8 +303,9 @@ def test_a_direct_invocation(load):
         (url_event("POST", "/v1/systemone", ["a", "list"]), 422, "a request must be a JSON object"),
         (url_event("POST", "/v1/systemone", {"state": "s"}), 422, "questions: Field required"),
         (url_event("POST", "/v1/systemone", {**REQUEST, "audio": []}), 422, "audio input is not supported"),
+        # Five images of 266 tokens each make a prompt longer than max_length_validated (512).
         (url_event("POST", "/v1/systemone", {**REQUEST, "images": [image_b64("checker-64x48.png")] * 5}), 422,
-         "5 images; this server takes at most 4"),
+         "exceeds the limit"),
         (url_event("POST", "/v1/systemone", {**REQUEST, "images": ["not base64!"]}), 422, "image is not valid base64"),
         (url_event("POST", "/v1/systemone", {**REQUEST, "state": "word " * 600}), 422, "exceeds the limit"),
     ],
@@ -315,6 +316,16 @@ def test_refusals(load, event, status, detail):
     got_status, body = call(handler, event)
     assert got_status == status and detail in str(body["detail"])
     assert len(FakeBackend.calls) == n_calls  # refused before the backend ran
+
+
+def test_any_number_of_images_that_fit_the_prompt(load, tmp_path):
+    """The images are not counted: five are answered when the prompt holds them."""
+    handler = load(write_checkpoint(tmp_path / "long", max_length_validated=4096))
+    five = {**REQUEST, "images": [image_b64("checker-64x48.png")] * 5}
+    status, body = call(handler, url_event("POST", "/v1/systemone", five))
+    assert status == 200, body
+    _, _, images = FakeBackend.calls[-1]
+    assert len(images) == 5
 
 
 def test_the_request_limit(load):

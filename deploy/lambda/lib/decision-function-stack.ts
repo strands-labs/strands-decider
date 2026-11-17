@@ -36,9 +36,9 @@ const ASSET_EXCLUDE = [
 
 /**
  * The most tokens a request may forward by default, the state once plus every question. The
- * slowest request under it, 4 images and an 8,000-token state with the shortest questions after it,
- * takes about 640 s on Graviton2, inside the 15-minute timeout; at 24,576 it does not finish
- * (README.md, Decision checkpoints, Limits).
+ * slowest request measured under it, 4 images and an 8,000-token state with the shortest questions
+ * after it, takes about 640 s on Graviton2, inside the 15-minute timeout; at 24,576 it does not
+ * finish (README.md, Decision checkpoints, Limits).
  */
 export const DECISION_MAX_REQUEST_TOKENS = 16384;
 
