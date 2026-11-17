@@ -94,7 +94,7 @@ Other models therefore keep vLLM's attention, cache keys, scheduling and request
 - Model Runner V2 (`VLLM_USE_V2_MODEL_RUNNER=1`; the server sets it).
 - NVIDIA H100 80 GB is the only GPU tested. vLLM selects FlashAttention 4 for Gemma 4's two head sizes on Hopper. On Ampere or Ada GPUs vLLM's Gemma 4 hook picks Triton attention for the real checkpoints instead, which the plugin refuses; FlashAttention 2 there is untested.
 - vLLM's x86 CPU build runs the plugin too, on vLLM's CPU attention, for the tests' CPU tier (below). It is not a serving target: the checkpoints are bf16, and the tier runs tiny checkpoints in float32, which a CPU build of vLLM also accepts.
-- Python 3.10 or later, and 3.11 or later for the server, whose core library needs it.
+- Python 3.11 or later.
 - For the server: the core library, `strands_decider.core` (the `strands-decider` distribution, from PR #129's head on: `strands-decider>=0.3.1.dev0,<0.5`, the `serve` extra), with `tokenizers`, pydantic and Pillow 13 or later. A checkout installs as a `0.3.1.dev` version only when git can see its tags (`fetch-depth: 0` in GitHub Actions). The server requires every core function it uses at startup (`parse_request` with the pydantic `Request`, `render`, `read` with `stage=`, `check_tokenizer` with `hand_over=`, `check_image_processor`, `check_decoded_size`, `resize_image`), before the engine starts, and names what is missing; it keeps no copy of any of them.
 
 ## Install
