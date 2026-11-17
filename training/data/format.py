@@ -45,9 +45,9 @@ class Example:
     # instruction string, so the model never saw a task asked two ways -- and held-out
     # accuracy on weak tasks moves by up to 0.15 on rewording alone.
     instruction_variants: list[str] = field(default_factory=list)
-    # A soft target for noul/choice: one probability per option, in canonical order. The
-    # collator permutes it with the options and trains on it (label_dist); `label` stays
-    # the argmax, for metrics. None: one-hot on `label`, as before.
+    # A soft target: one probability per option, in canonical order. The collator permutes
+    # it with the options and trains on it (label_dist); `label` stays the argmax, for
+    # metrics. None: one-hot on `label` (a score: with the ordinal smoothing), as before.
     target: list[float] | None = None
     # Options whose order carries meaning (a score rubric stored as a choice): never shuffled.
     fixed_order: bool = False
@@ -57,9 +57,7 @@ class Example:
             raise ValueError(f"unknown kind: {self.kind}")
         if not 0 <= self.label < len(self.options):
             raise ValueError(f"label {self.label} out of range for {len(self.options)} options")
-        if self.target is not None and (
-            self.kind == "score" or len(self.target) != len(self.options)
-        ):
+        if self.target is not None and len(self.target) != len(self.options):
             raise ValueError(f"a {self.kind} target of {len(self.target)} for {self.n_options}")
 
     @property

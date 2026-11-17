@@ -169,6 +169,45 @@ def test_the_v2_converter_keeps_targets_and_fixed_order_and_drops_refusals(tmp_p
     assert (choice.label, choice.target, choice.fixed_order) == (1, None, True)
 
 
+def test_a_converted_row_renders_as_its_own_request_and_a_score_keeps_its_distribution(tok):
+    """A noul criteria key the row does not give renders with the core's default description,
+    a null one as a bare label, as the core renders the row's own request. A score row keeps
+    its distribution, which reaches label_dist with no ordinal smoothing."""
+    from training.data import strands_v2
+
+    def row(q, target, label=None):
+        return {"state": "the queue is full", "question": q, "target": target, "label": label}
+
+    def text(request):
+        return core.render_text(request, core.CHAT)
+
+    for crit in (
+        "absent",
+        {},
+        {"true": "it holds"},
+        {"false": None},
+        {"false": None, "true": None},
+    ):
+        q = {"type": "noul", "instructions": "Is it?"} | (
+            {} if crit == "absent" else {"criteria": crit}
+        )
+        r = row(q, 0.25, False)
+        own = {"state": r["state"], "questions": {"q": q}}
+        assert text(strands_v2.convert(r).to_request()) == text(own), crit
+    default = strands_v2.convert(row({"type": "noul", "instructions": "Is it?"}, 1.0, True))
+    assert default.options[1][1] == "the statement holds for this state"
+
+    q = {"type": "score", "instructions": "How bad?", "criteria": ["none", "some", "many"]}
+    soft, hard = strands_v2.convert(row(q, [0.1, 0.2, 0.7])), strands_v2.convert(row(q, 1))
+    assert (soft.label, soft.target) == (2, [0.1, 0.2, 0.7])
+    assert (hard.label, hard.target) == (1, None)
+    assert text(soft.to_request()) == text({"state": soft.state, "questions": {"q": q}})
+    coll = SystemOneCollator(
+        tok, CollatorConfig(render=core.CHAT, ordinal_smoothing=0.1), train=True
+    )
+    assert coll([soft])["label_dist"][0].tolist() == pytest.approx([0.1, 0.2, 0.7])
+
+
 def test_a_state_holding_control_token_text_stays_plain_text(tok):
     """`<bos>`/`<|turn>` in a request are text, never control tokens (docs/spec.md).
 

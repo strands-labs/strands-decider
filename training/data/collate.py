@@ -136,8 +136,8 @@ class SystemOneCollator:
     def _target_distribution(
         self, ex: Example, label: int, n_options: int, order: Sequence[int] | None
     ) -> torch.Tensor | None:
-        """Soft target: ordinal smoothing for score questions, or a noul/choice row's own
-        `target`, in slot order. None otherwise (plain NLL is right there).
+        """Soft target: a row's own `target`, else ordinal smoothing for a score question, in
+        slot order. None otherwise (plain NLL is right there).
 
         The smoothing is applied in *level* space and then mapped through the slot
         permutation, so a reversed rubric still spreads mass onto the neighbouring

@@ -8,16 +8,19 @@ label, source: {..., fixed_order?}}. It becomes an Example the trainer reads, fo
 
   noul    options [false, true] with the row's criteria; target P(true) -> [1 - p, p]
   choice  options in the criteria's order; target the distribution over them
-  score   options the levels; the label is the argmax (score rows train with ordinal smoothing)
+  score   options the levels; target the distribution over them, or one level
 
-`label` is the row's label as an option index. `target` is kept only when it is not one-hot, so
-a one-hot row trains exactly as before. `source.fixed_order` (a score converted to a choice) is
-kept: such rows are never shuffled.
+A noul criteria key that the row does not give gets the core's default description, as the
+core renders the request; a key given as null stays a bare label. `label` is the row's label
+as an option index (the target's argmax when the row has none). `target` is kept only when it
+is not one-hot, so a one-hot row trains exactly as before. `source.fixed_order` (a score
+converted to a choice) is kept: such rows are never shuffled.
 
 Rows without instructions (the key missing or null) are dropped and counted: the released v2
-models were trained without them. Rows that strands_decider.core refuses to render, rows with images (the Strands
-templates are text-only) and lines that are not JSON are dropped and counted too. The file is streamed, so it may
-be larger than memory; `--workers` processes convert it in parallel, in order.
+models were trained without them. Rows that strands_decider.core refuses to render, rows with
+images (training is text-only) and lines that are not JSON are dropped and counted too. The
+file is streamed, so it may be larger than memory; `--workers` processes convert it in
+parallel, in order.
 """
 
 from __future__ import annotations
@@ -32,6 +35,7 @@ from multiprocessing import Pool
 from typing import Any
 
 from strands_decider import core
+from strands_decider.core.request import NOUL_DEFAULT_CRITERIA
 
 from .format import Example
 
@@ -42,8 +46,8 @@ def convert(row: dict) -> Example:
     options: list[list[Any]]
     dist: list[float] | None
     if kind == "noul":
-        crit = crit or {}
-        options = [[k, crit.get(k)] for k in ("false", "true")]
+        crit = {**NOUL_DEFAULT_CRITERIA, **(crit or {})}  # a missing key: the core's default
+        options = [[k, crit[k]] for k in ("false", "true")]
         dist = [1.0 - float(target), float(target)]
         label = int(bool(row["label"]))
     elif kind == "choice":
@@ -56,8 +60,8 @@ def convert(row: dict) -> Example:
             [str(i), c if isinstance(c, str) else core.render_content(c)]
             for i, c in enumerate(crit)
         ]
-        dist = None
-        label = target.index(max(target)) if isinstance(target, list) else int(target)
+        dist = target if isinstance(target, list) else None
+        label = dist.index(max(dist)) if dist else int(target)
     return Example(
         kind=kind,
         state=row["state"],
@@ -80,7 +84,7 @@ def convert_line(line: str) -> tuple[str, str | None]:
         return "not_json", None
     if row.get("images"):
         return "image_rows", None
-    q = dict(row["question"])  # as the v2 trainer hands it to the core
+    q = dict(row["question"])  # as training hands it to the core
     if q.get("instructions") is None:
         return "no_instructions", None
     if q.get("type") == "score" and isinstance(q.get("criteria"), list):
