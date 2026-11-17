@@ -4,6 +4,7 @@ pointer config's JSON gains no keys."""
 from __future__ import annotations
 
 import hashlib
+import json
 
 import pytest
 import torch
@@ -78,9 +79,30 @@ def test_the_pointer_path_is_what_origin_main_computes(corpus):
     assert probs == pytest.approx(MAIN_PROBS, abs=2e-4)  # answers are rounded to 4 places
 
 
-def test_a_pointer_config_json_has_no_new_keys_and_a_readout_one_round_trips(tmp_path):
-    assert "render" not in StrandsDeciderConfig().to_json()
-    assert "attention_mode" not in StrandsDeciderConfig().to_json()
+# A default pointer config's JSON as `main` writes it: no key of the token readout is in it.
+MAIN_POINTER_CONFIG = {
+    "base_model": "Qwen/Qwen3-1.7B-Base",
+    "base_revision": None,
+    "head_dropout": 0.0,
+    "max_length": 3072,
+    "torch_dtype": "bfloat16",
+    "head_type": "pointer",
+    "pointer_dim": 256,
+    "temperature": 1.0,
+    "temperature_by_kind": {},
+    "ordinal_smoothing": 0.0,
+    "use_lora": True,
+    "lora_r": 16,
+    "lora_alpha": 32,
+    "lora_dropout": 0.05,
+    "lora_targets": ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
+    "force_bos": False,
+    "host_embeddings": False,
+}
+
+
+def test_a_pointer_config_json_is_mains_and_a_readout_one_round_trips(tmp_path):
+    assert StrandsDeciderConfig().to_json() == json.dumps(MAIN_POINTER_CONFIG, indent=2)
     cfg = StrandsDeciderConfig(head_type="token_readout", attention_mode="prefix_bidir")
     (tmp_path / "c.json").write_text(cfg.to_json())
     assert StrandsDeciderConfig.from_json(str(tmp_path / "c.json")) == cfg

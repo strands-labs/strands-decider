@@ -137,6 +137,7 @@ class StrandsDeciderConfig:
         # A pointer config's JSON stays the one earlier versions wrote and read.
         for key, default in (
             ("attention_mode", "causal"),
+            ("attn_split", 0),
             ("readout_softcap", None),
             ("expert_lora", False),
             ("expert_lora_r", 8),
@@ -164,10 +165,6 @@ class StrandsDeciderConfig:
                 f"{path}: head_type={head_type!r}; this version loads "
                 "pointer-head and token-readout-head checkpoints only"
             )
-        # Earlier token-readout builds wrote the prompt here; strands-chat is the only one now.
-        render = d.pop("render", "numbered")
-        if render not in ("numbered", "strands-chat"):
-            raise ValueError(f"{path}: render={render!r}; this version loads strands-chat only")
         # Drop any key the current dataclass does not know (e.g. legacy head_type="pointer",
         # num_slots, head_hidden, head_init, kl_frozen_weight on a released config).
         allowed = set(cls.__dataclass_fields__)

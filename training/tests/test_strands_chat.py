@@ -12,7 +12,7 @@ from core_support import gemma4_tokenizer, toy_tokenizer
 from transformers import PreTrainedTokenizerFast
 
 from strands_decider import core
-from strands_decider.modeling import StrandsDeciderConfig, code_token_ids
+from strands_decider.modeling import code_token_ids
 from training.data.collate import CollatorConfig, SystemOneCollator
 from training.data.format import Example, load_examples
 from training.data.multistep import fits
@@ -114,24 +114,12 @@ def test_fits_measures_the_strands_chat_prompt(tok):
     assert fits([one], tok, 10_000, core.CHAT) == []
 
 
-def test_a_token_readout_loads_strands_chat_and_refuses_lettered(tmp_path):
+def test_a_training_config_has_no_render_key(tmp_path):
     from training.train import TrainConfig
 
-    for render, ok in (("strands-chat", True), ("lettered", False)):
-        (tmp_path / "c.json").write_text(
-            json.dumps({"head_type": "token_readout", "render": render})
-        )
-        (tmp_path / "c.yaml").write_text(f"render: {render}\n")
-        if ok:
-            assert (
-                StrandsDeciderConfig.from_json(str(tmp_path / "c.json")).head_type
-                == "token_readout"
-            )
-            continue
-        with pytest.raises(ValueError, match="render='lettered'"):
-            StrandsDeciderConfig.from_json(str(tmp_path / "c.json"))
-        with pytest.raises(ValueError, match="render='lettered'"):
-            TrainConfig.from_yaml(str(tmp_path / "c.yaml"))
+    (tmp_path / "c.yaml").write_text("head_type: token_readout\nrender: strands-chat\n")
+    with pytest.raises(ValueError, match="unknown config key 'render'"):
+        TrainConfig.from_yaml(str(tmp_path / "c.yaml"))
 
 
 def test_the_readout_is_seeded_with_core_code_ids(tok, request):

@@ -205,9 +205,6 @@ class TrainConfig:
                     f"{path}: head_type={v!r}; this version trains "
                     "pointer-head and token-readout-head checkpoints only"
                 )
-            # Earlier token-readout recipes named their prompt; strands-chat is the only one now.
-            if k == "render" and v not in ("numbered", "strands-chat"):
-                raise ValueError(f"{path}: render={v!r}; this version trains strands-chat only")
             if k not in known and k not in RETIRED_YAML_KEYS:
                 raise ValueError(f"{path}: unknown config key {k!r}")
         raw = {k: v for k, v in raw.items() if k in known}
@@ -235,10 +232,9 @@ def _readout_defaults(cfg: TrainConfig) -> None:
             setattr(cfg, name, cfg.lr if value is None else value)
 
 
-# Slot-era TrainConfig keys, and the token readout's render (checked above), that the current
-# dataclass no longer carries. Dropped silently by
+# Slot-era TrainConfig keys the current dataclass no longer carries. Dropped silently by
 # from_yaml so a published recipe still parses; a typo in any other key raises.
-RETIRED_YAML_KEYS = frozenset({"num_slots", "head_hidden", "head_init", "render"})
+RETIRED_YAML_KEYS = frozenset({"num_slots", "head_hidden", "head_init"})
 
 
 # The fields of a TrainConfig that a checkpoint fixes: with init_from they are the checkpoint's.
