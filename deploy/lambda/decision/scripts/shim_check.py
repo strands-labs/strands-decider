@@ -54,7 +54,7 @@ for _parent in Path(__file__).resolve().parents:
 
 import numpy as np  # noqa: E402
 
-from strands_decider.core import CODES, CONTROL_TOKEN_IDS  # noqa: E402
+from strands_decider.core import CODE_TOKEN_IDS, CODES, CONTROL_TOKEN_IDS  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
 SEED = 20261110
@@ -115,23 +115,23 @@ PROCESSOR_CONFIG = {
 
 
 def tokenizer_json() -> dict:
-    """A byte-fallback BPE tokenizer of Gemma 4's size with its special tokens at Gemma 4's ids,
-    the printable ASCII characters, and every answer code one token (two-letter codes by merges)."""
+    """A byte-fallback BPE tokenizer of Gemma 4's size with its special tokens and its answer codes
+    at Gemma 4's ids (two-letter codes by merges), and the printable ASCII characters. The core
+    refuses a checkpoint whose code token ids are not Gemma 4's."""
     specials = {"<pad>": 0, "<eos>": 1, "<bos>": 2, "<unk>": 3, "<mask>": 4, "<|turn>": 105,
                 "<turn|>": 106, "<|image>": 255999, "<|audio>": 256000, "<|image|>": 258880,
                 "<|audio|>": 258881, "<image|>": 258882, "<audio|>": 258883}  # fmt: skip
     assert all(specials[k] == v for k, v in CONTROL_TOKEN_IDS.items())
     vocab: dict[str, int] = dict(specials)
-    ids = iter(i for i in range(VOCAB) if i not in specials.values())
+    vocab.update(zip(CODES, CODE_TOKEN_IDS, strict=True))
+    reserved = set(vocab.values())
+    ids = iter(i for i in range(VOCAB) if i not in reserved)
     for b in range(256):
         vocab[f"<0x{b:02X}>"] = next(ids)
     for c in [chr(i) for i in range(32, 127)] + ["\n"]:
-        vocab.setdefault(c, next(ids))
-    merges = []
-    for code in CODES:
-        if code not in vocab:
-            vocab[code] = next(ids)
-            merges.append([code[0], code[1]])
+        if c not in vocab:
+            vocab[c] = next(ids)
+    merges = [[code[0], code[1]] for code in CODES if len(code) == 2]
     for i in ids:
         vocab[f"<unused{i}>"] = i
     assert len(vocab) == VOCAB and sorted(vocab.values()) == list(range(VOCAB))
