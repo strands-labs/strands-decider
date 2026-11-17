@@ -232,6 +232,7 @@ def worker(cfg_path: str) -> None:
     rank = int(os.environ.get("RANK", "0"))
 
     grads, init = [], []
+    forwards = []  # the row count of each training forward of this rank
     rows = [[]]  # per optimizer step, the rows this rank collated: (unpadded ids, label)
     real_clip = torch.nn.utils.clip_grad_norm_
 
@@ -250,6 +251,7 @@ def worker(cfg_path: str) -> None:
     def call(self, batch):
         out = real_call(self, batch)
         if self.train:
+            forwards.append(len(batch))
             rows[-1].extend(
                 [
                     (tuple(ids[m.bool()].tolist()), int(lab))
@@ -273,7 +275,8 @@ def worker(cfg_path: str) -> None:
     cfg = TrainConfig(**spec)
     T.train(cfg)
     torch.save(
-        {"grads": grads, "rows": rows, "init": init}, os.path.join(cfg.output_dir, f"rank{rank}.pt")
+        {"grads": grads, "rows": rows, "init": init, "forwards": forwards},
+        os.path.join(cfg.output_dir, f"rank{rank}.pt"),
     )
 
 
@@ -766,6 +769,16 @@ def test_a_slice_budget_caps_a_forward_and_keeps_the_steps_rows(world):
         for j, a, b in p
     )
     assert uncapped > budget  # the cap is what bounds it, not the data
+
+
+def test_a_slice_budget_cuts_the_forwards_of_one_process_too(corpus, plain_run, tmp_path):
+    """Without torchrun, a budget cuts each micro-batch over it into several forwards (here a
+    budget of one character: one row each). The steps, their rows, the gradients and the loss
+    curve are the uncut run's."""
+    got = _run(corpus, tmp_path, 1, slice_char_budget=1)
+    _assert_same_run(plain_run, got, 1)
+    assert set(plain_run["ranks"][0]["forwards"]) == {8}  # whole micro-batches
+    assert got["ranks"][0]["forwards"] == [1] * (8 * 32)  # 8 steps of 32 rows
 
 
 def test_the_slice_budget_does_not_change_which_rows_a_step_trains():

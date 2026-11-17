@@ -22,7 +22,9 @@ micro-batches of one step very unequal (a batch of long documents next to batche
 rows), and a step takes as long as its slowest rank, so `plan_step` cuts the long
 micro-batches finer and gives short ones whole to single ranks.
 
-At world size 1 none of this runs, and train.py is the original single-process loop.
+At world size 1 none of this runs, and train.py is the original single-process loop. The
+exception is a run with `slice_char_budget`: one process then takes every slice of the plan
+(`StepSlices`), so the cap on a forward holds on one GPU as it does on many.
 """
 
 from __future__ import annotations
@@ -340,6 +342,8 @@ class StepSlices:
             total_steps,
             sum(i * x for i, x in enumerate(self.lengths)) % (2**31 - 1),
         ]
+        if self.world == 1:  # one process holds every slice: nothing to compare
+            return
         lo = torch.tensor(facts, dtype=torch.int64, device=_device())
         hi = lo.clone()
         dist.all_reduce(lo, op=dist.ReduceOp.MIN)
@@ -365,7 +369,8 @@ class StepSlices:
                     collate_fn=list,
                 )
             )
-        dist.broadcast_object_list(order, src=0)
+        if self.world > 1:
+            dist.broadcast_object_list(order, src=0)
         skip, self.skip = self.skip, 0
         for idx in order[0][skip:]:
             self.open.append(idx)

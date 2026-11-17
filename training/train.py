@@ -170,11 +170,12 @@ class TrainConfig:
     # so that every saved train_config.json from before it existed still reproduces the
     # run it describes; the shipped configs turn it on.
     group_by_length: bool = False
-    # Cap on one forward's padded size (rows x longest row) under torchrun, in prompt
-    # characters (training.data.sampling.example_length); 0 = no cap. It bounds activations
-    # and the attention mask without changing the rows of a step or the gradient: only how
-    # the ranks share the step's rows out. 56000 is about the v2 trainer's 32,768
-    # padded tokens on the v2 data (measured: at least 1.735 characters per token).
+    # Cap on one forward's padded size (rows x longest row), in prompt characters
+    # (training.data.sampling.example_length); 0 = no cap. It bounds activations and the
+    # attention mask without changing the rows of a step or the gradient: only how the
+    # step's rows are cut into forwards, on one GPU or shared out over the ranks under
+    # torchrun. 56000 is about 32,768 padded tokens on the v2 data (measured: at least
+    # 1.735 characters per token).
     slice_char_budget: int = 0
     length_group_mega: int = 50
     ordinal_smoothing: float = 0.1
@@ -765,7 +766,10 @@ def train(cfg: TrainConfig) -> str:
             print(
                 f"[strands-decider] {base.base_model}: not on disk, no {cfg.output_dir}/base.json"
             )
-    if world > 1:  # each rank iterates its share of every step's rows instead
+    # Under torchrun each rank iterates its share of every step's rows instead. With a slice
+    # budget one process does the same with every slice, so the cap holds on one GPU too.
+    sliced = world > 1 or cfg.slice_char_budget > 0
+    if sliced:
         # 0 for kl_slots: all rows are eligible under a pointer-head reference, so no
         # eligibility counter is needed in StepSlices.
         train_loader = distributed.StepSlices(
@@ -846,7 +850,7 @@ def train(cfg: TrainConfig) -> str:
             torch.cuda.set_rng_state(resumed["cuda"])
         if not skip:
             resumed = None
-        if world > 1:
+        if sliced:
             train_loader.skip, train_loader.windows = skip, step
         else:
 
@@ -895,7 +899,7 @@ def train(cfg: TrainConfig) -> str:
             step_loss = out["loss"] * part.weights
             if cfg.kl_frozen_weight > 0:
                 assert refs is not None  # populated above when kl_frozen_weight > 0
-                m, a = (part.micro, part.start) if world > 1 else (micro, 0)
+                m, a = (part.micro, part.start) if sliced else (micro, 0)
                 ref_lp = refs[m, a : a + batch["labels"].numel()]
                 stu = out["log_probs"]
                 # The reference is sized to the widest option count the run saw; a batch
@@ -935,7 +939,7 @@ def train(cfg: TrainConfig) -> str:
             seen.append((step_loss.detach(), batch))  # for the non-finite guard below
             micro += 1
 
-            ends_step = part.last if world > 1 else micro % cfg.grad_accum == 0
+            ends_step = part.last if sliced else micro % cfg.grad_accum == 0
             if not ends_step:
                 continue
 
