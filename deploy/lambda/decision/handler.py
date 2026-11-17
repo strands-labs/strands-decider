@@ -10,10 +10,11 @@ GGUF, and for images the vision tower's mmproj, that the image build converted f
 checkpoint. The readout and the soft-cap come from the checkpoint's readout.safetensors and
 decision_config.json, which the load validates.
 
-A request may carry at most 4 images, its prompts at most the checkpoint's max_length_validated
-tokens (the state, image placeholders included, plus a question), and at most
-DECIDER_MAX_REQUEST_TOKENS tokens in all, the state once, then every question: 16,384 unless it is
-set, which keeps the slowest request inside the 15-minute timeout on Graviton2, and 0 for no limit.
+A request's prompts may be at most the checkpoint's max_length_validated tokens (the state, image
+placeholders included, plus a question), the only bound on how many images it carries, and it may
+forward at most DECIDER_MAX_REQUEST_TOKENS tokens in all, the state once, then every question:
+16,384 unless it is set, which kept the slowest request measured, with 4 images, inside the
+15-minute timeout on Graviton2, and 0 for no limit.
 Each limit is checked before any image is decoded or any token is run. A request that breaks one,
 or carries an image that cannot be read, gets a 422; anything else that fails is a 500.
 

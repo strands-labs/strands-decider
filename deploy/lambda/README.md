@@ -352,13 +352,14 @@ assumes the environment read the files itself.
 
 - A prompt, the state with its image placeholders plus one question, may be at most the
   checkpoint's `max_length_validated` tokens, 8,192 for E2B; a longer one gets a 422.
-- At most 4 images per request, PNG, JPEG, WebP or GIF, each at most 4096 x 4096 pixels. They go
-  first in the state, each as up to 280 tokens.
+- Images are PNG, JPEG, WebP or GIF, each at most 4096 x 4096 pixels. They go first in the state,
+  each as up to 280 tokens, and their number is not limited: the prompt's length bounds how many
+  fit.
 - A request may forward at most `max_request_tokens` tokens, the state once plus every question,
   16,384 by default, and the function applies the same limit when `DECIDER_MAX_REQUEST_TOKENS` is
-  unset; `0` lifts it. That keeps the slowest request inside the 15-minute timeout on Graviton2,
-  the slowest host Lambda gives: 4 images and an 8,000-token state, then 137 questions up to the
-  limit, took 549 to 557 s there, and with the shortest questions, 121 of them, 499 s on
+  unset; `0` lifts it. That keeps the slowest request measured inside the 15-minute timeout on
+  Graviton2, the slowest host Lambda gives: 4 images and an 8,000-token state, then 137 questions
+  up to the limit, took 549 to 557 s there, and with the shortest questions, 121 of them, 499 s on
   Graviton3, about 640 s on Graviton2. A question after a long state costs about as much as 50 state tokens, so v1's
   24,576 is too many here: the same request at 24,540 tokens ran past the timeout on Graviton2.
 - Every limit is checked before any image is decoded or any token is run. A request that breaks one,
