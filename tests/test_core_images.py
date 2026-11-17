@@ -1,4 +1,4 @@
-"""Image input (docs/spec.md, sections 1.1 and 3.3): the checks, the size and N.
+"""Image input: the checks, the size and N.
 
 Pillow reads an image's format and size from its file header, never its pixels, and the core
 counts its soft tokens N as Gemma 4's image processors do. These tests check the checks and
@@ -38,11 +38,11 @@ from core_support import (
     image_b64,
     image_bytes,
     knife_edge_sizes,
+    numpy_resize,
     processor_soft_tokens,
     read_rgb_png,
     reference_pixels,
     reference_resize,
-    spec_resize,
 )
 
 from strands_decider.core import (
@@ -234,7 +234,7 @@ def test_base64_rule_is_python_312s_and_never_wider_than_this_pythons():
 
 
 def _rfc4648(s: str) -> bytes | None:
-    """RFC 4648 section 4, decoded bit by bit: an independent statement of the spec's rule."""
+    """RFC 4648 section 4, decoded bit by bit: an independent statement of the core's rule."""
     alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
     if len(s) % 4:
         return None
@@ -528,15 +528,15 @@ def test_the_resized_size_comes_from_the_decoded_size():
 
 
 # Formats whose decoding is exact arithmetic: PNG and GIF, and lossless WebP. JPEG and lossy
-# WebP decoders may differ from libjpeg-turbo's and libwebp's, within the spec's tolerance.
+# WebP decoders may differ from libjpeg-turbo's and libwebp's, within 1 per channel.
 EXACT_DECODES = {"checker-64x48.png", "dots-50x50.gif", "lossless-33x17.webp", "thin-1x300.png",
                  "offset-frame.gif", "tall-1080x2400.png", "wide-1600x1000.png"}  # fmt: skip
 
 
 def test_the_pixel_goldens_hold_without_pillow():
     """The procedure a runtime without Pillow follows: the goldens' decoded pixels, read from
-    tests/fixtures/core/pixels with zlib, have the goldens' hash, and the spec's resize of
-    them, here the numpy port, has the resized hash. The downscales are among them."""
+    tests/fixtures/core/pixels with zlib, have the goldens' hash, and their resize by the
+    numpy port has the resized hash. The downscales are among them."""
     np = pytest.importorskip("numpy")
     goldens = _pixel_goldens()["images"]
     assert any(g["resized"][0] < g["decoded"][0] for g in goldens.values())  # downscales
@@ -545,15 +545,14 @@ def test_the_pixel_goldens_hold_without_pillow():
         decoded = read_rgb_png(PIXELS_DIR / f"{name}.png")
         assert [decoded.shape[1], decoded.shape[0]] == g["decoded"], name
         assert hashlib.sha256(decoded.tobytes()).hexdigest() == g["decoded_sha256"], name
-        resized = spec_resize(np.ascontiguousarray(decoded), *g["resized"])
+        resized = numpy_resize(np.ascontiguousarray(decoded), *g["resized"])
         assert hashlib.sha256(resized.tobytes()).hexdigest() == g["resized_sha256"], name
 
 
 def test_the_reference_decode_and_resize_give_the_pixel_goldens():
     """v1's decode gives the goldens' decoded pixels, exactly where the format's decoding is
-    exact and within 1 per channel otherwise, as the spec's tolerance allows a decoder; and
-    resize_image of the goldens' decoded pixels gives the resized hash exactly, as does the
-    numpy port of the spec's resize."""
+    exact and within 1 per channel otherwise; and resize_image of the goldens' decoded pixels
+    gives the resized hash exactly, as does the numpy port of the resize."""
     pytest.importorskip("PIL")
     np = pytest.importorskip("numpy")
     from PIL import Image
@@ -569,12 +568,12 @@ def test_the_reference_decode_and_resize_give_the_pixel_goldens():
             assert np.abs(got.astype(int) - reference).max() <= 1, name
         resized = reference_resize(Image.fromarray(np.ascontiguousarray(reference)), *g["resized"])
         assert hashlib.sha256(resized.tobytes()).hexdigest() == g["resized_sha256"], name
-        ours = spec_resize(np.ascontiguousarray(reference), *g["resized"])
+        ours = numpy_resize(np.ascontiguousarray(reference), *g["resized"])
         assert ours.tobytes() == resized.tobytes(), name
 
 
-def test_the_specs_resize_is_pillows_bicubic():
-    """The spec's resize (cubic convolution, a = -0.5, its support scaled by the downscale
+def test_the_numpy_resize_is_pillows_bicubic():
+    """The numpy resize (cubic convolution, a = -0.5, its support scaled by the downscale
     factor, fixed-point weights, horizontal then vertical with an 8-bit result between them)
     is Pillow's BICUBIC, byte for byte, up and down, in one dimension or both: in one call
     before Pillow 13, and in two, width then height, on any version."""
@@ -598,7 +597,7 @@ def test_the_specs_resize_is_pillows_bicubic():
     for i, ((w, h), (tw, th)) in enumerate(sizes):
         a = np.random.default_rng(i).integers(0, 256, (h, w, 3), dtype=np.uint8)
         want = np.asarray(reference_resize(Image.fromarray(a), tw, th))
-        assert np.array_equal(spec_resize(a, tw, th), want), ((w, h), (tw, th))
+        assert np.array_equal(numpy_resize(a, tw, th), want), ((w, h), (tw, th))
         if one_call:
             single = Image.fromarray(a).resize((tw, th), Image.Resampling.BICUBIC)
             assert np.array_equal(np.asarray(single), want), ((w, h), (tw, th))
@@ -607,7 +606,7 @@ def test_the_specs_resize_is_pillows_bicubic():
 def test_pillow_13_resizes_a_tall_image_height_first():
     """Why the reference resizes in two calls: from Pillow 13, one call runs the height's pass
     first when the height shrinks by more than twice as much as the width, as it does for a
-    1,080 x 2,400 screenshot, and its pixels differ from the spec's by several levels."""
+    1,080 x 2,400 screenshot, and its pixels differ from resize_image's by several levels."""
     PIL = pytest.importorskip("PIL")
     np = pytest.importorskip("numpy")
     from PIL import Image
@@ -619,15 +618,15 @@ def test_pillow_13_resizes_a_tall_image_height_first():
     img = Image.fromarray(a.astype(np.uint8))
     single = np.asarray(img.resize((tw, th), Image.Resampling.BICUBIC)).astype(int)
     reference = np.asarray(reference_resize(img, tw, th)).astype(int)
-    assert np.array_equal(reference, spec_resize(np.asarray(img), tw, th))
+    assert np.array_equal(reference, numpy_resize(np.asarray(img), tw, th))
     if int(PIL.__version__.split(".")[0]) < 13:
         assert np.array_equal(single, reference)
     # From Pillow 13 the single call may differ (by 12 levels here on Pillow 13.0); nothing
-    # is asserted of it, since the spec's resize, resize_image, does not depend on it.
+    # is asserted of it, since resize_image does not depend on it.
 
 
-def test_resize_image_is_the_specs_resize_on_any_pillow():
-    """The core's resize_image, which every runtime may share, is the spec's resize byte for
+def test_resize_image_is_the_numpy_resize_on_any_pillow():
+    """The core's resize_image, which every runtime may share, is the numpy resize byte for
     byte, on the pixel goldens and on images shrunk and enlarged either way, whatever the
     Pillow version (its two single-axis calls do not depend on Pillow's pass order)."""
     pytest.importorskip("PIL")
@@ -651,7 +650,7 @@ def test_resize_image_is_the_specs_resize_on_any_pillow():
     ]:
         a = rng.integers(0, 256, (h, w, 3), dtype=np.uint8)
         out = resize_image(Image.fromarray(a), tw, th)
-        assert np.array_equal(np.asarray(out), spec_resize(a, tw, th)), ((w, h), (tw, th))
+        assert np.array_equal(np.asarray(out), numpy_resize(a, tw, th)), ((w, h), (tw, th))
     for bad in ((0, 5), (5, 0), (1.5, 2)):
         with pytest.raises(ValueError):
             resize_image(Image.new("RGB", (4, 4)), *bad)  # type: ignore[arg-type]
@@ -681,9 +680,8 @@ def _on_white(c, a):
 
 def test_v1_decodes_by_these_rules():
     """The decode cases a runtime's decoder must match, as v1's decode gives them with Pillow
-    and the pixel goldens pin them (docs/spec.md, sections 3.3 and 10): bit depths, 16-bit
-    samples, transparency (composited onto white, and where it is not), CMYK, and a GIF's
-    canvas."""
+    and the pixel goldens pin them: bit depths, 16-bit samples, transparency (composited onto
+    white, and where it is not), CMYK, and a GIF's canvas."""
     pytest.importorskip("PIL")
     np = pytest.importorskip("numpy")
     import io
@@ -771,8 +769,7 @@ def test_v1_decodes_by_these_rules():
 
 def test_the_processor_with_its_resize_off_takes_the_resized_pixels():
     """Gemma4ImageProcessorPil's own resize is Pillow's bicubic to (W, H): it gives the same
-    pixel values as resizing first and calling it with do_resize=False, as docs/spec.md
-    section 3.3 has the runtime do."""
+    pixel values as resizing first and calling it with do_resize=False, as a runtime does."""
     transformers = pytest.importorskip("transformers")
     pytest.importorskip("PIL")
     np = pytest.importorskip("numpy")
@@ -882,10 +879,10 @@ def test_validation_matches_v1():
     and decodes the image with Pillow, with v1's messages: exactly for the pixel limit, and
     up to v1's prefix where Pillow gives the reason.
 
-    Base64 is the spec's rule (RFC 4648), which is what Python 3.12's strict decode accepts;
-    Python before 3.12 accepts more. So for base64 the core is held to the rule, refuses
-    wherever v1 refuses, and matches v1's acceptance exactly only on 3.12. Every later step
-    is compared exactly, whenever both sides got past base64."""
+    Base64 is RFC 4648's rule, which is what Python 3.12's strict decode accepts; Python
+    before 3.12 accepts more. So for base64 the core is held to the rule, refuses wherever v1
+    refuses, and matches v1's acceptance exactly only on 3.12. Every later step is compared
+    exactly, whenever both sides got past base64."""
     import sys
 
     from strands_decider.core.images import DATA_URI
@@ -917,12 +914,12 @@ def test_validation_matches_v1():
         except ValueError as e:
             error = str(e)
         by_rule = _rfc4648(DATA_URI.sub("", data.strip()))
-        if by_rule is None:  # the spec refuses the base64
+        if by_rule is None:  # the rule refuses the base64
             assert error is not None and error.startswith(NOT_BASE64), (data[:40], error)
             if sys.version_info[:2] == (3, 12):
                 assert v1_error is not None and v1_error.startswith(NOT_BASE64), data[:40]
             continue
-        # The spec accepts the base64; v1 accepts at least as much on every version.
+        # The rule accepts the base64; v1 accepts at least as much on every version.
         assert error is None or not error.startswith(NOT_BASE64), (data[:40], error)
         assert v1_error is None or not v1_error.startswith(NOT_BASE64), (data[:40], v1_error)
         if v1_error is None:

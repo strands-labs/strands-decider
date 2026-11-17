@@ -1,4 +1,4 @@
-"""The readout (docs/spec.md, section 7) on small arrays, and the runtime glue.
+"""The readout on small arrays, and the runtime glue.
 
 Torch-free: numpy, tokenizers and pydantic, and Pillow for the image requests. Nothing here
 needs Gemma 4's tokenizer; the end-to-end test uses a toy one. The precision regime (a bf16
@@ -84,7 +84,7 @@ def _softmax64(s) -> list[float]:
 
 
 def _manual(z, k, c, t) -> list[float]:
-    """Section 7 from raw logits, one rounding at a time: bf16, the float32 cap and
+    """The readout from raw logits, one rounding at a time: bf16, the float32 cap and
     temperature, then the softmax (in float64 here; the core's float32 softmax is within
     1e-6 of it)."""
     return _softmax64([_after_the_gemm(_bf16(_f32(x)), c, t) for x in z[:k]])
@@ -399,12 +399,12 @@ def _bf16_step(z: float) -> float:
 
 
 def test_the_readout_goldens():
-    """tests/fixtures/core/readout_goldens.json, the readout apart from any decoder, by the
-    spec's two checks, each from the golden's input: the GEMM on the golden's weight and h
-    gives z within one bf16 step of the golden's (the core and the independent
-    reimplementation of strands-decider-vllm's arithmetic both give it exactly), and the
-    soft-cap, temperature and softmax applied to the golden's z give its probabilities to
-    1e-5 (the core's own, to 1e-7)."""
+    """tests/fixtures/core/readout_goldens.json, the readout apart from any decoder, by two
+    checks, each from the golden's input: the GEMM on the golden's weight and h gives z
+    within one bf16 step of the golden's (the core and the independent reimplementation of
+    strands-decider-vllm's arithmetic both give it exactly), and the soft-cap, temperature
+    and softmax applied to the golden's z give its probabilities to 1e-5 (the core's own, to
+    1e-7)."""
     g, w = readout_goldens()
     c = g["final_logit_softcapping"]
     assert w.shape == (255, 32) and c == 30.0 and len(g["cases"]) >= 6
@@ -491,7 +491,7 @@ def test_agreement_measures_top1_and_mean_dp():
 
 def test_conforms_applies_the_formats_recorded_bounds():
     """bf16's bounds for bf16 weights, at any size and whatever the activations; a quantized
-    format's only at a size docs/spec.md records, and otherwise no claim at all."""
+    format's only at a size BOUNDS records, and otherwise no claim at all."""
     from strands_decider.core import BOUNDS, Agreement, NoRecordedBound
 
     good, bad = Agreement(1200, 0.9908, 0.0104), Agreement(1200, 0.975, 0.0104)

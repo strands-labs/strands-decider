@@ -219,9 +219,10 @@ encoding rather than guess whether it has a batch dimension.
 
 ## The core's runtime interface
 
-The v2 models' decision interface is defined in [spec.md](spec.md), and `strands_decider.core`
-implements its torch-free half. This section is the core's Python contract with a runtime. It is
-our API, not the interface, so it can change without a new checkpoint format.
+Every v2 runtime imports `strands_decider.core`, so its code and its goldens
+(`tests/fixtures/core/`) define the v2 models' decision interface. This section is the core's
+Python API for a runtime. The goldens fix what a checkpoint depends on, and the API can change
+without a new checkpoint format.
 
 A runtime supplies the decoder as a `Backend` (`core/runtime.py`). Its `forward(state,
 questions, images)` takes the state's token ids, each question's ids and the state's images
@@ -257,9 +258,9 @@ lack `image`, renders the request (which checks each image's header), and checks
 prompt and code ids against the checkpoint. Only then does it call `forward`, once. A backend
 with no vision encoder raises `NO_VISION`, v1's text-only message, from `forward`. `read`,
 `question_probabilities`, `readout_logits` and `answer` are the readout's steps, public for
-runtimes that need them. A runtime may batch, cache the state's keys and values (keyed as
-spec.md section 6 says), or split the work across devices, provided each question's result is
-what it would be alone.
+runtimes that need them. A runtime may batch, cache the state's keys and values (keyed on the
+state's ids and each image's `sha256`, and reused only when the whole state matches), or split
+the work across devices, provided each question's result is what it would be alone.
 
 `render` encodes text with a private plain-text copy of the tokenizer, about 170 MB for Gemma
 4's, so that renders on several threads, and other users of the same tokenizer, cannot change
@@ -285,8 +286,8 @@ src/strands_decider/              -- published package (inference only)
   hf_export.py    a checkpoint as a Hugging Face model folder (safetensors, card, manifest)
   naming.py       release naming helpers (used by hf_export and release scripts)
   vision.py       Qwen3.5 vision-tower engine (`serve --vision`, `ask --image`)
-  core/           the decision interface without torch (docs/spec.md): prompt
-                  rendering, the code readout, decision_config.json, the runtime contract
+  core/           the decision interface without torch: prompt rendering, the code
+                  readout, decision_config.json, the runtime contract
 
 training/                         -- not published; run as `python -m training.<module>`
   train.py        LoRA + readout training loop (`python -m training.train`)
@@ -370,7 +371,7 @@ tests/            pytest only: test_core (no GPU), test_server (stubbed), test_g
                   test_core_prompt, test_core_readout, test_core_config, test_core_images
                   (the torch-free core)
 docs/             architecture.md -- this document; inference.md -- serving a checkpoint:
-                  install, ask, serve, the HTTP API, a Mac; spec.md -- the decision interface
+                  install, ask, serve, the HTTP API, a Mac
 .github/          workflows/tests.yml -- the CPU tests; workflows/generators-live-test.yml
                   and .github/scripts/check_generator_rows.py -- one live batch per generator backend
 ```

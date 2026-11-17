@@ -1,12 +1,11 @@
 """`decision_config.json`: what a runtime needs, beyond the weights, to serve a checkpoint.
 
-The schema is docs/spec.md's (section 8). Validation is strict: a file without `"interface":
-"strands-decider"`, a missing required field, an unknown field, a value of the wrong type, and
-a prompt this runtime does not implement are all errors. The file carries the soft-cap, so a
-converted decoder (GGUF, MLX) needs no `config.json` beside it. It names the inputs the
-checkpoint takes (`inputs`: text, and images where it serves them), and its provenance is
-required: the image processor, the tokenizer and any part not fine-tuned come from the base
-model at `base_revision`.
+Validation is strict: a file without `"interface": "strands-decider"`, a missing required
+field, an unknown field, a value of the wrong type, and a prompt this runtime does not
+implement are all errors. The file carries the soft-cap, so a converted decoder (GGUF, MLX)
+needs no `config.json` beside it. It names the inputs the checkpoint takes (`inputs`: text,
+and images where it serves them), and its provenance is required: the image processor, the
+tokenizer and any part not fine-tuned come from the base model at `base_revision`.
 """
 
 from __future__ import annotations
@@ -55,12 +54,12 @@ OPTIONAL: tuple[str, ...] = ()
 # The provenance fields every checkpoint gives; `release` and `source` are optional.
 PROVENANCE_REQUIRED = ("base_model", "base_revision")
 
-# The readout's soft-cap and temperature act in float32 (docs/spec.md, section 7), so
+# The readout's soft-cap and temperature act in float32 (readout.code_probabilities), so
 # each must be a normal float32: a value past these bounds would become inf or lose precision.
 F32_MAX = 3.4028234663852886e38
 F32_MIN_NORMAL = 1.1754943508222875e-38
 # Token ids and max_length_validated fit a signed 32-bit integer, so that every runtime can
-# hold them (docs/spec.md, section 8).
+# hold them.
 INT32_MAX = 2**31 - 1
 
 
@@ -103,7 +102,7 @@ def _shown(v: Any) -> str:
     return text if len(text) <= 200 else text[:200] + "..."
 
 
-# The provenance formats (docs/spec.md, section 8), ASCII and whole.
+# The provenance formats, each matched in full, in ASCII.
 _HUB_NAME = r"[A-Za-z0-9][A-Za-z0-9_.-]*"
 _HUB_ID = re.compile(rf"{_HUB_NAME}/[A-Za-z0-9_.-]+", re.ASCII)
 _RELEASE = re.compile(rf"({_HUB_NAME}/)?{_HUB_NAME}", re.ASCII)
@@ -190,6 +189,13 @@ class Provenance:
 
 @dataclass(frozen=True)
 class DecisionConfig:
+    """A checkpoint's decision_config.json, validated (`load`, `from_dict`).
+
+    A decision checkpoint holds its base model's config.json, processor_config.json,
+    tokenizer.json and tokenizer_config.json (with no chat template) at
+    `provenance.base_revision`, its weights as bf16 safetensors with any fine-tuning merged
+    in, readout.safetensors, this file and golden_vectors.jsonl."""
+
     interface: str
     format_version: int
     prompt: str

@@ -1,4 +1,5 @@
-"""A request as token ids: the prompt template of docs/spec.md.
+"""A request as token ids: the prompt template, whose exact text and ids the render goldens
+(tests/fixtures/core/render_goldens.json) pin.
 
 Each question becomes one prompt, `state part + question part`. The state part is
 identical for every question of a request and ends at S, its token count; a runtime
@@ -332,8 +333,7 @@ def _refuse_plain_added_tokens(tok: Tokenizer) -> None:
     if plain:
         raise ValueError(
             f"the tokenizer has added tokens that are not special, {plain[:5]}: request text "
-            "would be matched to them, which the interface forbids (docs/spec.md, section "
-            "3.2)"
+            "would be matched to them, which the interface forbids"
         )
 
 
@@ -466,7 +466,7 @@ def _plain_text_copy(tok: Tokenizer) -> Tokenizer:
 
 
 class _Encoder:
-    """Encodes pieces as the spec says: control tokens by id, text runs as plain text.
+    """Encodes pieces: control tokens by id, text runs as plain text.
 
     It reads the caller's tokenizer once, to copy it, and never changes it. Text goes
     through the private copy of `_plain_text_copy`, whose special-token matching is off

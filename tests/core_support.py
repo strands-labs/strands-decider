@@ -15,12 +15,11 @@ Gemma 4's real image processors (which needs transformers, Pillow and torchvisio
 STRANDS_DECIDER_REGEN_SOFT_TOKENS=1 rewrites the table alone. Regenerate the render goldens
 after the images.
 
-tests/fixtures/core/image_pixels.json holds the pixel goldens of docs/spec.md (section 10):
-for each test image, the sha256 of its RGB bytes as v1 decodes it and
-after the bicubic resize to (W, H), made with PIXELS_PILLOW; STRANDS_DECIDER_REGEN_PIXELS=1
-rewrites it (Pillow only). `reference_pixels` is v1's decode, `reference_resize` the
-spec's resize, the core's `resize_image`, and `spec_resize` that resize, Pillow's bicubic
-filter, written out in numpy, without Pillow, as an oracle for both.
+tests/fixtures/core/image_pixels.json holds the pixel goldens: for each test image, the
+sha256 of its RGB bytes as v1 decodes it and after the bicubic resize to (W, H), made with
+PIXELS_PILLOW; STRANDS_DECIDER_REGEN_PIXELS=1 rewrites it (Pillow only). `reference_pixels`
+is v1's decode, `reference_resize` the core's `resize_image`, and `numpy_resize` that
+resize, Pillow's bicubic filter, written out in numpy, without Pillow, as an oracle for both.
 """
 
 from __future__ import annotations
@@ -247,7 +246,7 @@ def _offset_first_frame(gif: bytes, *, screen: tuple[int, int], offset: tuple[in
 
 # Aspect ratios w:h = 280:m^2, in lowest terms, where 280 h / w = m^2 is a perfect square, so
 # that f h / 48 = m in exact arithmetic and the floor is decided by the double's last bit
-# (docs/spec.md, section 3.3); where m divides 280, f w / 48 = 280 / m is an integer too.
+# (`resized_size`); where m divides 280, f w / 48 = 280 / m is an integer too.
 # m = 1 to 24, each at KNIFE_EDGE_SCALES, both ways round.
 KNIFE_EDGE_RATIOS = tuple(
     (280 // math.gcd(280, m * m), m * m // math.gcd(280, m * m)) for m in range(1, 25)
@@ -365,7 +364,7 @@ def _write_soft_token_table() -> None:
     SOFT_TOKENS.write_text(body + ',"rows":[\n' + lines + "\n]}\n", encoding="utf-8")
 
 
-# ---- pixels: v1's decode and the spec's resize -------------------------------------------
+# ---- pixels: v1's decode and the core's resize -------------------------------------------
 
 
 def reference_pixels(data: bytes):
@@ -386,16 +385,15 @@ def reference_pixels(data: bytes):
 
 
 def reference_resize(img, width: int, height: int):
-    """docs/spec.md's resize with Pillow: the core's `resize_image`, the width first and then
-    the height, in two single-axis calls. Pillow 10 to 12 do the same in one call; Pillow 13
-    does the height first when it shrinks by more than twice as much as the width, which
-    changes the pixels."""
+    """The core's `resize_image`: the width first and then the height, in two single-axis
+    Pillow calls. Pillow 10 to 12 do the same in one call; Pillow 13 does the height first
+    when it shrinks by more than twice as much as the width, which changes the pixels."""
     from strands_decider.core import resize_image
 
     return resize_image(img, width, height)
 
 
-# ---- the spec's resize rule in numpy, without Pillow: a test oracle --------------------
+# ---- the resize in numpy, without Pillow: a test oracle --------------------------------
 
 
 def _bicubic(x: float) -> float:
@@ -447,17 +445,17 @@ def _resample(pixels: Any, out_size: int, axis: int) -> Any:
     return np.moveaxis(out, 0, axis)
 
 
-def spec_resize(pixels: Any, width: int, height: int) -> Any:
-    """docs/spec.md's bicubic resize (section 3.3) of RGB pixels, an array [h, w, 3] of
-    uint8, to [height, width, 3], written with numpy alone: Pillow's bicubic filter, the
-    horizontal pass, its 8-bit result, then the vertical pass; a pass whose size does not
-    change is left out. A test oracle, which holds `resize_image` and Pillow to the rule the
-    spec names, byte for byte, and lets the pixel goldens be checked without Pillow."""
+def numpy_resize(pixels: Any, width: int, height: int) -> Any:
+    """`resize_image`'s bicubic resize of RGB pixels, an array [h, w, 3] of uint8, to
+    [height, width, 3], written with numpy alone: Pillow's bicubic filter, the horizontal
+    pass, its 8-bit result, then the vertical pass; a pass whose size does not change is left
+    out. A test oracle, which holds `resize_image` to the same bytes on every Pillow version,
+    and lets the pixel goldens be checked without Pillow."""
     import numpy as np
 
     pixels = np.ascontiguousarray(pixels, dtype=np.uint8)
     if pixels.ndim != 3 or pixels.shape[2] != 3:
-        raise ValueError(f"spec_resize takes RGB pixels [h, w, 3], not {pixels.shape}")
+        raise ValueError(f"numpy_resize takes RGB pixels [h, w, 3], not {pixels.shape}")
     if not (isinstance(width, int) and isinstance(height, int)) or width < 1 or height < 1:
         raise ValueError(f"a resized image is at least 1 x 1 pixels, not {width!r} x {height!r}")
     out = pixels
@@ -537,7 +535,7 @@ def _write_pixel_goldens() -> None:
         "note": (
             "For each test image: its size and the sha256 of its RGB bytes (row by row, 3 per "
             "pixel) as v1 decodes it, which tests/fixtures/core/pixels/<name>.png holds, then "
-            "resized to (W, H) from the decoded size by the spec's bicubic resize, width first. "
+            "resized to (W, H) from the decoded size by the core's resize_image, width first. "
             "Generated by tests/core_support.py with Pillow " + PIXELS_PILLOW + "."
         ),
     }
@@ -612,7 +610,7 @@ def _write_readout_goldens() -> None:
         )
     head = {
         "note": (
-            "The readout of docs/spec.md section 7.1 on a synthetic bf16 weight: for each "
+            "The core's readout on a synthetic bf16 weight: for each "
             "hidden state, z = bf16(W bf16(h)) and the probabilities of the first k codes "
             "after the soft-cap and the temperature. weight_bf16 is the weight's bf16 bits, "
             "little-endian, row by row. Generated by tests/core_support.py."

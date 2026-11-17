@@ -1,10 +1,10 @@
-"""A checkpoint's tokenizer, checked against the interface (docs/spec.md, section 3.2).
+"""A checkpoint's tokenizer, checked against the interface.
 
 The tokenizer that is normative for a checkpoint is its own: its base's `tokenizer.json` at
 `provenance.base_revision`. Gemma 4's sizes ship slightly different files (tests/core_support.py
 lists them), so a runtime checks, when it loads a checkpoint, the ids the prompt and the readout
-depend on: each control token at the id the spec gives, each code one token whose id is the
-checkpoint's `token_ids` entry, and every added token special, so that request text, which
+depend on: each control token at its id (`CONTROL_TOKEN_IDS`), each code one token whose id is
+the checkpoint's `token_ids` entry, and every added token special, so that request text, which
 is encoded with special-token matching off, can never produce one.
 """
 
@@ -31,8 +31,8 @@ if TYPE_CHECKING:
 
 TOKENIZER_FILE = "tokenizer.json"
 
-# The control tokens' ids in Gemma 4's tokenizer (docs/spec.md, section 3.2). The
-# image tokens' ids are also config.json's boi_token_id, image_token_id and eoi_token_id.
+# The control tokens' ids in Gemma 4's tokenizer. The image tokens' ids are also
+# config.json's boi_token_id, image_token_id and eoi_token_id.
 CONTROL_TOKEN_IDS: dict[str, int] = {
     BOS: 2,
     TURN_OPEN: 105,
@@ -43,8 +43,8 @@ CONTROL_TOKEN_IDS: dict[str, int] = {
 }
 
 
-# Each code's token id in Gemma 4's tokenizer, in code order (docs/spec.md, section 2): the same
-# in all four of its known tokenizer.json files.
+# Each code's token id in Gemma 4's tokenizer, in code order: the same in all four of its known
+# tokenizer.json files.
 # fmt: off
 CODE_TOKEN_IDS: tuple[int, ...] = (
     236776, 236799, 236780, 236796, 236788, 236811, 236823, 236814, 236777, 236863, 236855,
@@ -78,7 +78,7 @@ def check_tokenizer(
 ) -> None:
     """That `tokenizer` gives the ids the checkpoint `config` describes was trained with:
     each control token at its id (`CONTROL_TOKEN_IDS`), each code exactly one token whose
-    id is `config.token_ids`' entry for it, which must be section 2's (`CODE_TOKEN_IDS`),
+    id is `config.token_ids`' entry for it, which must be its `CODE_TOKEN_IDS` entry,
     and no added token that is not special. ValueError otherwise. A runtime calls it once,
     when it loads the checkpoint (`load_tokenizer` does); `render` does not call it.
 
@@ -104,10 +104,7 @@ def check_tokenizer(
             for c, i, want in zip(CODES, config.token_ids, CODE_TOKEN_IDS, strict=True)
             if i != want
         ]
-        raise ValueError(
-            f"decision_config.json's token_ids are not Gemma 4's for codes {bad[:5]} "
-            "(docs/spec.md, section 2)"
-        )
+        raise ValueError(f"decision_config.json's token_ids are not Gemma 4's for codes {bad[:5]}")
     # Encoded as request text is: plain text, special-token matching off, by a fresh copy,
     # which also refuses a tokenizer with added tokens that are not special.
     if hand_over:

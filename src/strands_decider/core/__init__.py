@@ -1,7 +1,8 @@
 """The Strands Decider core: the decision interface without torch.
 
-docs/spec.md defines the interface; this package implements its torch-free half with
-`tokenizers`, numpy, pydantic and the standard library, and Pillow for images:
+Every runtime imports this package, so its code and the goldens in tests/fixtures/core define
+the interface. It needs only `tokenizers`, numpy, pydantic and the standard library, and
+Pillow for images:
 
     render(request, tokenizer, variant)    -> RenderedRequest: ids, S, codes per question,
                                               and each image's span, N and sha256
@@ -17,10 +18,10 @@ docs/spec.md defines the interface; this package implements its torch-free half 
 A runtime supplies the decoder (`Backend`, whose `forward` takes the state's images), and for
 images the vision encoder and the pixel preprocessing; `evaluate` joins the pieces. Images are
 checked and counted from their file headers, which Pillow reads (`decode_image`,
-`soft_tokens`), never decoded here; `resize_image` is the spec's resize for a runtime's
-decoded pixels. Pillow is imported only for an image, so the core imports without it.
-`agreement` measures a runtime's probabilities against the reference's (docs/spec.md,
-section 10). v1's engines are untouched: the core sits beside them.
+`soft_tokens`), never decoded here; `resize_image` resizes a runtime's decoded pixels.
+Pillow is imported only for an image, so the core imports without it. `agreement` measures
+a runtime's probabilities against the reference's. v1's engines are untouched: the core sits
+beside them.
 """
 
 from __future__ import annotations

@@ -1,4 +1,4 @@
-"""From the hidden state at a question's last token to its answer (docs/spec.md, section 7).
+"""From the hidden state at a question's last token to its answer.
 
     z = bf16(W bf16(h))        W: readout.safetensors `weight` in bf16; a bf16 GEMM
     z = tanh(z / c) * c        float32; c: decision_config.json `final_logit_softcapping`
@@ -444,10 +444,10 @@ def question_probabilities(
     *,
     stage: str,
 ) -> dict[str, np.ndarray]:
-    """Each question's code probabilities: section 7 of docs/spec.md from the stage `stage`
-    on. The soft-cap is the checkpoint's (`config.final_logit_softcapping`) and the
-    temperature `config.temperature`; `stage` says which of them the rows already hold, so
-    that neither is applied twice.
+    """Each question's code probabilities: the readout from the stage `stage` on. The
+    soft-cap is the checkpoint's (`config.final_logit_softcapping`) and the temperature
+    `config.temperature`; `stage` says which of them the rows already hold, so that neither
+    is applied twice.
 
     Args:
         values: One row per question, of the stage `stage`: an array [questions, width], a

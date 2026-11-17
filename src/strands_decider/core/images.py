@@ -1,4 +1,4 @@
-"""Image input (docs/spec.md, sections 1.1 and 3.3): the checks, the size and N.
+"""Image input: the checks, the size and N.
 
 A request's image is a base64 file: PNG, JPEG, WebP or GIF. The core checks it and reads its
 format, width and height from its header with Pillow, never decoding its pixels, and from the
@@ -83,8 +83,8 @@ def resized_size(
     Gemma4UnifiedImageProcessor, which size alike).
 
     A runtime resizes to it (`resize_image`) before the processor, with the processor's own
-    resize off (docs/spec.md, section 3.3), and calls it with the decoded image's width and
-    height, after its EXIF orientation, not the header's: swapping them swaps W and H.
+    resize off, and calls it with the decoded image's width and height, after its EXIF
+    orientation, not the header's: swapping them swaps W and H.
     `check_decoded_size` checks the decoded size against the header and calls it so;
     `soft_tokens` counts its soft tokens, which do not swap."""
     if not (isinstance(width, int) and isinstance(height, int)) or width < 1 or height < 1:
@@ -130,9 +130,9 @@ def soft_tokens(
 
 
 def resize_image(image: Any, width: int, height: int) -> Any:
-    """`image`, a decoded PIL RGB image, resized to `width` x `height` by docs/spec.md's
-    bicubic resize: the width's pass first, then the height's, each a single-axis
-    `Image.Resampling.BICUBIC` call, so that the result is the spec's on every Pillow version.
+    """`image`, a decoded PIL RGB image, resized to `width` x `height` by Pillow's bicubic
+    filter: the width's pass first, then the height's, each a single-axis
+    `Image.Resampling.BICUBIC` call, so that the result is the same on every Pillow version.
     (One call, `image.resize((W, H), BICUBIC)`, is the same before Pillow 13; from 13 it does
     the height first when the height shrinks by more than twice as much as the width, and
     its pixels differ.) A pass whose size does not change is left out. A runtime may use this
@@ -171,8 +171,7 @@ def check_image_processor(processor_config: Mapping[str, Any] | str | os.PathLik
     `processor_config.json` (a mapping, the file, or the checkpoint directory) gives
     `patch_size` 16, `pooling_kernel_size` 3 and `max_soft_tokens` 280, under
     `image_processor` or at its top level, and `image_seq_length`, wherever it is given,
-    280. ValueError otherwise: a runtime refuses image requests for such a checkpoint
-    (docs/spec.md, section 9)."""
+    280. ValueError otherwise: a runtime refuses image requests for such a checkpoint."""
     if not isinstance(processor_config, Mapping):
         path = os.fspath(processor_config)
         if os.path.isdir(path):
@@ -224,7 +223,7 @@ _B64_OTHER = re.compile(r"[^A-Za-z0-9+/=]")
 
 
 def _strict_b64decode(payload: str) -> bytes:
-    """Standard base64 and nothing else, by the spec's rule rather than Python's: what
+    """Standard base64 and nothing else, by RFC 4648's rule rather than Python's: what
     `base64.b64decode(validate=True)` accepts, and the messages it gives, change between Python
     3.11, 3.12 and 3.13. Non-zero bits before the padding are accepted. RFC 4648 section 4:
     groups of four, the last padded with one or two "=" when short. In linear time and constant

@@ -1,5 +1,5 @@
-"""Conformance on answers (docs/spec.md, section 10): the two measures and
-their bounds, computed one way for every runtime.
+"""Conformance on answers: the two measures and their bounds, computed one way for every
+runtime.
 
 A runtime's code probabilities are compared with the reference's, question by question:
 
@@ -30,9 +30,9 @@ MIN_QUESTIONS = 1000
 TOP1 = 0.98
 MEAN_ABS_DP = 0.02
 BF16 = "bf16"
-# The bounds docs/spec.md records, (top-1 agreement at least, mean |dp| at most), by weight
-# format and size. bf16's hold at every size, and are keyed (BF16, None). A quantized format's
-# hold only at the sizes it was measured at: MLX 8-bit (group size 64) and GGUF Q8_0 at E2B.
+# The recorded bounds, (top-1 agreement at least, mean |dp| at most), by weight format and
+# size. bf16's hold at every size, and are keyed (BF16, None). A quantized format's hold only
+# at the sizes it was measured at: MLX 8-bit (group size 64) and GGUF Q8_0 at E2B.
 BOUNDS: dict[tuple[str, str | None], tuple[float, float]] = {
     (BF16, None): (TOP1, MEAN_ABS_DP),
     ("mlx-8bit", "E2B"): (TOP1, MEAN_ABS_DP),
@@ -43,8 +43,8 @@ K = TypeVar("K", bound=Hashable)
 
 
 class NoRecordedBound(ValueError):
-    """A weight format, at a size, for which docs/spec.md records no bound: a runtime with it
-    makes no conformance claim."""
+    """A weight format, at a size, with no bound in BOUNDS: a runtime with it makes no
+    conformance claim."""
 
 
 def bounds(weight_format: str = BF16, size: str | None = None) -> tuple[float, float]:
@@ -62,7 +62,7 @@ def bounds(weight_format: str = BF16, size: str | None = None) -> tuple[float, f
     except KeyError:
         recorded = sorted(f"{f} at {z}" for f, z in BOUNDS if z is not None)
         raise NoRecordedBound(
-            f"docs/spec.md records no bound for {weight_format!r} at {size!r}, so it makes no "
+            f"no bound is recorded for {weight_format!r} at {size!r}, so it makes no "
             f"conformance claim; recorded: {recorded}"
         ) from None
 
@@ -129,8 +129,10 @@ def agreement(
 
 
 def read_golden_vectors(path: str | os.PathLike[str]) -> dict[tuple[int, str], list[float]]:
-    """The reference probabilities of a `golden_vectors.jsonl` (docs/spec.md, section 10),
-    keyed by (line number from 0, question name), for `agreement`."""
+    """The reference probabilities of a checkpoint's `golden_vectors.jsonl`, keyed by (line
+    number from 0, question name), for `agreement`. Each line holds one request (`request`,
+    `variant`, `state_ids`, `images`) and, under `questions`, each question's
+    `question_ids`, `codes` and reference `probabilities`."""
     out: dict[tuple[int, str], list[float]] = {}
     with open(path, encoding="utf-8") as f:
         for line_number, line in enumerate(f):
