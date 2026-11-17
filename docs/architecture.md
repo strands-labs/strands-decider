@@ -198,23 +198,64 @@ readout (`docs/spec.md`) read at the last prompt token. Two keys select it:
   linear-attention layers of Qwen3.5 stay causal. Other layer types are refused. It needs SDPA
   or eager attention.
 
-`lr_floor` sets where the cosine learning-rate schedule ends (the v2 recipe uses 0.1), and
-`adam_betas` the AdamW betas (default `[0.9, 0.95]`; the v2 recipe uses `[0.9, 0.999]`).
-With `save_every`, each save also writes `resume-<step>.pt` (the last two are kept): set
-`resume_from` to one to continue a stopped run, on the same config and number of GPUs, as the
-unbroken run would have.
+A token readout starts from the LM head's rows, not at random, so it has its own defaults
+for four keys: no dropout before the readout (`head_dropout: 0.0`), the adapters' learning
+rate for the readout (`head_lr` equal to `lr`), no weight decay, and AdamW betas
+`[0.9, 0.999]`. A pointer run keeps `head_dropout: 0.05`, `head_lr: 1e-3`,
+`weight_decay: 0.01` and betas `[0.9, 0.95]`. A key that the config sets wins.
+
+The v2 recipes also use these keys. Each one keeps the earlier behaviour unless a config
+sets it.
+
+- `lr_floor` sets where the cosine learning-rate schedule ends, as a fraction of the peak
+  (the v2 recipes use 0.1). `adam_betas` sets the AdamW betas.
+- `expert_lora: true` adds one LoRA adapter of rank `expert_lora_r` to every routed expert of
+  a mixture-of-experts torso (Gemma 4 26B-A4B), on its gate, up and down projections. The
+  router stays frozen. Token readout only.
+- `attn_split: N` runs `prefix_bidir` on a micro-batch of N padded tokens or more as two
+  attention calls without a mask for each row. The attention is the same up to rounding, and
+  the kernel is faster.
+- `bf16_autocast: true` runs the forward pass under bf16 autocast, so the products of the
+  adapters and of the readout run in bf16. The trained weights and the optimizer state stay
+  in fp32, and the readout's cap is computed in float32.
+- `slice_char_budget: N` caps the padded size of one forward (rows times the longest row, in
+  prompt characters). A micro-batch over the cap is cut into more forwards, on one GPU or
+  across the ranks of `torchrun`. The rows of a step and the summed gradient do not change.
+- With `save_every`, each save also writes `resume-<step>.pt` (the last two are kept). Set
+  `resume_from` to one to continue a stopped run, on the same config and number of GPUs, as
+  the unbroken run would have.
+
+`configs/v2/` has one config for each Gemma 4 size, and `python -m training.data.strands_v2`
+converts v2 rows into training rows
+([training/README.md](../training/README.md#the-v2-recipes)).
+
 `python -m training.train`, `training.soup` and `training.evaluate calibrate` work with a token
 readout checkpoint. The engines in this repository refuse one. To serve it, export it to the
-checkpoint layout of docs/spec.md section 9, `python -m training.export_v2 <checkpoint> <out>
---base-model <hub id>`: the base's own multimodal shards with the adapters merged in float32
-and saved in bf16, the encoders unchanged, `readout.safetensors`, `decision_config.json` and a
-`training.json` record without local paths (strands-chat with `prefix_bidir` only). The export
-checks the base on disk against the `base.json` digest the run wrote (`--unrecorded-base` for a
-run without one), reads its output back with `strands_decider.core`, and deletes it if a check
-fails. Several checkpoints of one recipe (other seeds) before `<out>` export their soup:
-each merged, every tensor and the readout averaged with equal weights, temperature 1.
-Serve it with the vLLM runtime, `strands-decider-vllm`. Set `base_revision` in the
-training config when the base is a local directory.
+checkpoint layout of docs/spec.md section 9 (a token readout under `prefix_bidir` only):
+
+    python -m training.export_v2 <checkpoint> <out> --base-model <hub id>
+
+The export writes these files and no others:
+
+- the base's own multimodal shards, with the adapters merged in float32 and saved in bf16,
+  and the encoders unchanged;
+- `readout.safetensors` and `decision_config.json`;
+- the base's `config.json` and `tokenizer.json`, byte for byte, and its
+  `processor_config.json` and `tokenizer_config.json` without a chat template;
+- `LICENSE`, a `NOTICE` that names the base and what changed, and `README.md`, the model
+  card. The card is the file given as `--model-card`. Without one, the export writes a card
+  from the runs' records: the LoRA settings, and each run's seed, data file names and steps.
+
+`decision_config.json` holds one temperature: the checkpoint's global one, or the value of
+`--temperature`. The per-type temperatures that `calibrate` fits are not carried over. The
+export checks the base on disk against the `base.json` digest the run wrote
+(`--unrecorded-base` for a run without one), reads its output back with
+`strands_decider.core`, and deletes it if a check fails. Several checkpoints of one recipe
+before `<out>` export their soup: each merged, every tensor and the readout averaged with
+equal weights, temperature 1. The runs may differ in seed, data, learning rate or steps. The
+export does not write `golden_vectors.jsonl`. Serve the checkpoint with the vLLM runtime,
+`strands-decider-vllm`. Set `base_revision` in the training config when the base is a local
+directory.
 
 ## Design decisions worth knowing
 

@@ -35,7 +35,7 @@ def _expert_mm(x: torch.Tensor, weight: torch.Tensor, counts: torch.Tensor) -> t
     if x.is_cuda:
         offsets = torch.cumsum(counts, 0, dtype=torch.int32)
         return torch.nn.functional.grouped_mm(x, weight.to(x.dtype), offs=offsets)
-    # ponytail: CPU (tests) loops over the experts; torch 2.15's CPU grouped_mm has no backward.
+    # On the CPU (tests), loop over the experts: torch 2.15's CPU grouped_mm has no backward.
     # Every expert is in the graph, empty or not, so each one gets a gradient (DDP needs that).
     segments = x.split(counts.tolist())
     return torch.cat([seg @ weight[e].to(x.dtype) for e, seg in enumerate(segments)])

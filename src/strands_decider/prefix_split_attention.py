@@ -19,8 +19,7 @@ question `[prefix_end, valid)`, padding `[valid, L)`.
     set_rows(prefix_end, attention_mask)     # before every forward
 
 Micro-batches under `min_length` padded tokens keep the masked call: for short
-rows one batched call beats 2B small ones. This is the same scheme, and the same default, as the
-v2 trainer's `--attn-split 1024`.
+rows one batched call beats 2B small ones. The v2 recipes (configs/v2/) use 1024.
 """
 
 from __future__ import annotations

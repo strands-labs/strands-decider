@@ -4,10 +4,25 @@
 
 - Training can use an opt-in token readout, the spec's 255-code readout read at the last
   prompt token: `head_type: token_readout`, with the strands-chat prompt of
-  `strands_decider.core` and `attention_mode: causal` or `prefix_bidir`, plus `lr_floor` for the end of the cosine
-  schedule ([docs/architecture.md](docs/architecture.md#opt-in-the-token-readout)). The serving
+  `strands_decider.core` and `attention_mode: causal` or `prefix_bidir`
+  ([docs/architecture.md](docs/architecture.md#opt-in-the-token-readout)). The serving
   engines refuse a token readout checkpoint. The pointer readout stays the default, and its
   outputs do not change.
+- The v2 training recipes: `configs/v2/` has one config for each Gemma 4 size,
+  `python -m training.data.strands_v2` converts v2 rows into training rows, and
+  `expert_lora` adds LoRA adapters to the experts of the 26B-A4B
+  ([training/README.md](training/README.md#the-v2-recipes)).
+- `python -m training.export_v2` writes a token readout checkpoint, or several runs as one
+  averaged model, in the checkpoint layout of [docs/spec.md](docs/spec.md), section 9. It
+  exports a token readout under `prefix_bidir` only.
+- New training keys: `lr_floor`, `adam_betas`, `resume_from`, `attn_split`, `bf16_autocast`,
+  `slice_char_budget` and `base_revision`.
+- These changes also apply to a pointer run. The learning-rate schedule counts optimizer
+  steps from 1: the first update runs at 1/warmup of the peak, not at 0, and the last one
+  runs at the end of the schedule. Training turns off cuDNN attention, and it stops at a
+  gradient that is not finite, before the update. `training.evaluate` drops the rows longer
+  than `max_length` and prints their count; before, it truncated them. Under `torchrun`, the
+  timeout for collectives is 2 h.
 
 ## Model names (2026-10)
 

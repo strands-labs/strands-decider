@@ -1,17 +1,15 @@
-# strands-decider-31B-gemma4-v2-2611: Strands Decider v2 31B, the released v2 models' one-stage recipe, for training/train.py.
-# Source: the training record of the released v2 model of this size.
+# strands-decider-31B-gemma4-v2-2611: the Strands Decider v2 training recipe for Gemma 4 31B, for
+# training/train.py. One stage, one epoch.
 #   base google/gemma-4-31B-it, revision 842da3794eaa0b77d5f08bae87a17459d91ff475.
 # Data: v2 rows (train.jsonl / dev.jsonl) converted with
-#   `python -m training.data.strands_v2`.
-# Step math: 8 x 335 = 2,680 rows per optimizer step, independent of the GPU count
-#   -> 6,522 steps on the released models' training set (their own run: 6,523 steps, with a budget of 8,192
-#   padded tokens per micro-batch).
-# Sort window 8 x 384 = 3,072 rows (the released models' run sorted within windows of 3,072 rows).
-# slice_char_budget 14000 stands for a budget of 8,192 padded tokens per forward (56,000 characters per
-#   32,768 tokens).
-# Not mapped: lora.dropout 0.05 (no key; the model's
-#   lora_dropout default is 0.05); brier_weight 0.0 (no key); pooling "last" / readout_mode "trained"
-#   (what token_readout does); augment true -> shuffle_options.
+#   `python -m training.data.strands_v2`. The data is not in this repository.
+# Head: a token readout with the strands-chat prompt and prefix_bidir attention.
+# Step: 8 x 335 = 2,680 rows per optimizer step, whatever the GPU count.
+#   group_by_length sorts the rows by length within windows of 8 x 384 = 3,072 rows.
+# slice_char_budget 14000 caps one forward at about 8,192 padded tokens (56,000 prompt
+#   characters for 32,768 tokens).
+# Optimizer: one AdamW group at lr 1e-4 for the adapters and the readout, no weight decay,
+#   5% linear warmup, then a cosine to 0.1 x the peak.
 train_files: ["data/train_examples.jsonl"]
 val_files: ["data/dev_examples.jsonl"]
 base_model: "google/gemma-4-31B-it"
@@ -19,7 +17,7 @@ base_revision: "842da3794eaa0b77d5f08bae87a17459d91ff475"
 head_type: "token_readout"
 attention_mode: "prefix_bidir"
 attn_split: 1024        # speed only
-bf16_autocast: true    # the v2 trainer computes the LoRA and readout matmuls in bf16
+bf16_autocast: true    # the LoRA and readout products run in bf16 on fp32 master weights
 max_length: 16384
 use_lora: true
 lora_r: 64
@@ -47,4 +45,4 @@ seed: 20260920
 log_every: 1
 eval_every: 100
 save_every: 100
-output_dir: "checkpoints/strands-decider-31B-gemma4-v2-2611-run1"
+output_dir: "checkpoints/strands-decider-31B-gemma4-v2-2611"
