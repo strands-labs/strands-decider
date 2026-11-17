@@ -1,26 +1,11 @@
 """Shared by the torch-free core's tests (tests/test_core_*.py).
 
-The render goldens and properties run against Gemma 4's real tokenizer. It is 32 MB, so it is
-not committed: point STRANDS_DECIDER_GEMMA4_TOKENIZER at a copy of `tokenizer.json`, and the
-tests check its sha256 before they trust it. It may be any of the four known Gemma 4 files
-(GEMMA4_TOKENIZERS, which docs/spec.md refers to), since the E2B, E4B and 12B repositories now
-ship slightly different ones: the goldens were made with the pinned file
-(google/gemma-4-E2B-it at GEMMA4_REVISION, which 26B-A4B and 31B also ship), which
-regenerating them needs, and every golden gives the same ids with all four. Without a
-tokenizer those tests skip; the tests that need only text, numbers or a toy tokenizer always
-run.
-
-    STRANDS_DECIDER_GEMMA4_TOKENIZER=/path/to/tokenizer.json pytest tests/test_core_*.py
-
-CI's `core tokenizer (gemma 4)` job (.github/workflows/tests.yml) fetches the pinned file and the
-E2B chat template at GEMMA4_REVISION, checks both sha256s, and runs these tests without torch;
-then it fetches the other three listed files and runs tests/test_core_prompt.py and
-tests/test_core_images.py with each.
-
-STRANDS_DECIDER_GEMMA4_TEMPLATES lists the Gemma 4 base models' chat_template.jinja files
-(os.pathsep between them) for the tests that compare strands-chat with them, which also
-need jinja2 (and transformers, for the apply_chat_template comparison). A decision checkpoint
-ships no chat template, and its prompts are never rendered with one.
+The render goldens and properties run against Gemma 4's real tokenizer: `tokenizer.json` from
+GEMMA4_REPO at GEMMA4_REVISION, the file the goldens were made with. It is 32 MB, so it is not
+committed: `gemma4_file` downloads it, and the tokenizer config and chat template beside it,
+into Hugging Face's cache the first time a test needs them, so those tests need the network
+once. Without it they fail; the tests that need only text, numbers or a toy tokenizer always
+run. A decision checkpoint ships no chat template, and its prompts are never rendered with one.
 
 The test images are small synthetic files in tests/fixtures/core/images, checked in.
 `make_image` draws each one deterministically with Pillow; with
@@ -46,7 +31,7 @@ import json
 import math
 import os
 import random
-from functools import lru_cache
+from functools import cache, lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -55,27 +40,12 @@ import pytest
 FIXTURES = Path(__file__).parent / "fixtures" / "core"
 GEMMA4_REPO = "google/gemma-4-E2B-it"
 GEMMA4_REVISION = "3e22461f65e89153144f8adb70e3b8c2cc9845a7"
-GEMMA4_TOKENIZER_SHA256 = "cc8d3a0ce36466ccc1278bf987df5f71db1719b9ca6b4118264f45cb627bfe0f"
-# Every known Gemma 4 tokenizer.json, by sha256: where each is shipped. docs/spec.md refers to
-# this list, and every golden gives the same ids with all four.
-GEMMA4_TOKENIZERS = {
-    GEMMA4_TOKENIZER_SHA256: (
-        "google/gemma-4-E2B-it@3e22461f65e89153144f8adb70e3b8c2cc9845a7, "
-        "google/gemma-4-26B-A4B-it@4d7ae4984b7db7de8f8457170b3f1a419ee76d52, "
-        "google/gemma-4-31B-it@842da3794eaa0b77d5f08bae87a17459d91ff475"
-    ),
-    "ab26b2add729e6f645bd869f228f14190a06615538f3be6f7786f33d13d78ad2": (
-        "google/gemma-4-E2B-it@4adf15748de9e1a0097b6274cee9c15836c41c37"
-    ),
-    "91d9cf86906f78e197021fda88214d448e5c120665d0243a8e776e046986c6bc": (
-        "google/gemma-4-E4B-it@4ecc2ba63bcac23ba4a767fc87025b1450f84c9c"
-    ),
-    "9788bdb6a021b3170357cd3587b5d622b1177561ad3c5bf43d73728fd71aeacb": (
-        "google/gemma-4-12B-it@43c9d014b231474fa7212dbb48a762566c2b255d"
-    ),
-}
-TOKENIZER_ENV = "STRANDS_DECIDER_GEMMA4_TOKENIZER"
-TEMPLATES_ENV = "STRANDS_DECIDER_GEMMA4_TEMPLATES"
+# google/gemma-4-26B-A4B-it@4d7ae4984b7db7de8f8457170b3f1a419ee76d52 and
+# google/gemma-4-31B-it@842da3794eaa0b77d5f08bae87a17459d91ff475 ship the same tokenizer.json.
+# The E2B, E4B and 12B repositories now ship slightly different ones, with which every golden
+# was measured to give the same ids: google/gemma-4-E2B-it@4adf15748de9e1a0097b6274cee9c15836c41c37,
+# google/gemma-4-E4B-it@4ecc2ba63bcac23ba4a767fc87025b1450f84c9c and
+# google/gemma-4-12B-it@43c9d014b231474fa7212dbb48a762566c2b255d.
 REGEN_IMAGES_ENV = "STRANDS_DECIDER_REGEN_IMAGES"
 REGEN_PIXELS_ENV = "STRANDS_DECIDER_REGEN_PIXELS"
 REGEN_SOFT_TOKENS_ENV = "STRANDS_DECIDER_REGEN_SOFT_TOKENS"
@@ -87,69 +57,37 @@ PIXELS = FIXTURES / "image_pixels.json"
 PIXELS_PILLOW = "12.2.0"
 
 
-@lru_cache(maxsize=1)
-def _gemma4_path() -> tuple[str, str] | None:
-    """The tokenizer's path and sha256, if it is one of the Gemma 4 files in GEMMA4_TOKENIZERS."""
-    p = os.environ.get(TOKENIZER_ENV)
-    if not p:
-        return None
-    if os.path.isdir(p):
-        p = os.path.join(p, "tokenizer.json")
-    with open(p, "rb") as f:
-        digest = hashlib.sha256(f.read()).hexdigest()
-    if digest not in GEMMA4_TOKENIZERS:
-        raise AssertionError(
-            f"{p} has sha256 {digest}, which is not one of the known Gemma 4 tokenizer.json "
-            f"files: {sorted(GEMMA4_TOKENIZERS)}"
+@cache
+def _download() -> dict[str, str] | Exception:
+    from huggingface_hub import hf_hub_download
+
+    names = ("tokenizer.json", "tokenizer_config.json", "chat_template.jinja")
+    try:
+        return {n: hf_hub_download(GEMMA4_REPO, n, revision=GEMMA4_REVISION) for n in names}
+    except Exception as e:  # kept, so that without the network only the first test waits
+        return e
+
+
+def gemma4_file(name: str) -> str:
+    """The path of `name` (tokenizer.json, tokenizer_config.json or chat_template.jinja) from
+    GEMMA4_REPO at GEMMA4_REVISION. The first call downloads all three into Hugging Face's
+    cache, in one directory."""
+    got = _download()
+    if isinstance(got, Exception):
+        pytest.fail(
+            f"could not download Gemma 4's tokenizer files ({GEMMA4_REPO}@{GEMMA4_REVISION}) "
+            f"from Hugging Face: {got!r}",
+            pytrace=False,
         )
-    return p, digest
-
-
-def gemma4_tokenizer_path() -> str:
-    found = _gemma4_path()
-    if found is None:
-        pytest.skip(f"set {TOKENIZER_ENV} to Gemma 4's tokenizer.json ({GEMMA4_REPO})")
-    return found[0]
-
-
-def pinned_gemma4_tokenizer_path() -> str:
-    """The pinned tokenizer.json, the one the render goldens were made with, or a skip."""
-    p = gemma4_tokenizer_path()
-    found = _gemma4_path()
-    assert found is not None
-    if found[1] != GEMMA4_TOKENIZER_SHA256:
-        pytest.skip(
-            f"the render goldens are for {GEMMA4_REPO}@{GEMMA4_REVISION}'s tokenizer.json "
-            f"({GEMMA4_TOKENIZER_SHA256}); {TOKENIZER_ENV} is {GEMMA4_TOKENIZERS[found[1]]}'s"
-        )
-    return p
+    return got[name]
 
 
 @lru_cache(maxsize=1)
-def _load_gemma4(path: str):
+def gemma4_tokenizer():
+    """Gemma 4's tokenizer. One instance per session: it is 262k tokens."""
     from tokenizers import Tokenizer
 
-    return Tokenizer.from_file(path)
-
-
-def gemma4_tokenizer():
-    """Gemma 4's tokenizer, any listed file, or a skip. One instance per session: it is 262k
-    tokens."""
-    return _load_gemma4(gemma4_tokenizer_path())
-
-
-def pinned_gemma4_tokenizer():
-    """The pinned Gemma 4 tokenizer, the render goldens', or a skip."""
-    return _load_gemma4(pinned_gemma4_tokenizer_path())
-
-
-def gemma4_tokenizer_dir() -> str:
-    """The directory of Gemma 4's tokenizer.json, if it also holds the base's
-    tokenizer_config.json (Hugging Face's processors need its named tokens), or a skip."""
-    d = os.path.dirname(gemma4_tokenizer_path())
-    if not os.path.exists(os.path.join(d, "tokenizer_config.json")):
-        pytest.skip(f"no tokenizer_config.json beside {TOKENIZER_ENV}'s tokenizer.json")
-    return d
+    return Tokenizer.from_file(gemma4_file("tokenizer.json"))
 
 
 def decision_config_fixture() -> dict:

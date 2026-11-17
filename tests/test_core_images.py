@@ -17,6 +17,7 @@ import hashlib
 import io
 import json
 import math
+import os
 import random
 import struct
 import zlib
@@ -32,8 +33,8 @@ from core_support import (
     PROCESSOR_SETTINGS,
     SOFT_TOKENS,
     UNIFIED_PROCESSOR,
+    gemma4_file,
     gemma4_tokenizer,
-    gemma4_tokenizer_dir,
     image_b64,
     image_bytes,
     knife_edge_sizes,
@@ -939,7 +940,7 @@ def _hf_processor(which: str):
     pytest.importorskip("PIL")
     pytest.importorskip("torchvision", reason="transformers builds Gemma 4's processors with it")
     transformers.logging.set_verbosity_error()
-    tok = transformers.AutoTokenizer.from_pretrained(gemma4_tokenizer_dir())
+    tok = transformers.AutoTokenizer.from_pretrained(os.path.dirname(gemma4_file("tokenizer.json")))
     if which == "Gemma4Processor":
         return transformers.Gemma4Processor(
             feature_extractor=transformers.Gemma4AudioFeatureExtractor(),
