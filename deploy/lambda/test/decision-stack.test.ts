@@ -104,7 +104,17 @@ test("checkpoints of one name in different places get different stacks", () => {
 });
 
 test("v1's stack keeps its defaults", () => {
-  const app = new App({ context: { model: "StrandsAgents/strands-decider-2B-qwen3.5-v1-2610", model_revision: "main", snapstart: false } });
+  // cdk.json's v1 settings, which App does not read.
+  const v1 = {
+    model: "StrandsAgents/strands-decider-2B-qwen3.5-v1-2610",
+    model_revision: "main",
+    snapstart: false,
+    vision: false,
+    image_long_side: 448,
+    decoder_precision: "q8_0",
+    vision_precision: "f16",
+  };
+  const app = new App({ context: v1 });
   const t = Template.fromStack(new DeciderFunctionStack(app, "v1-test", { env: ENV }));
   t.hasResourceProperties("AWS::Lambda::Function", { Environment: { Variables: { DECIDER_MAX_REQUEST_TOKENS: "24576" } } });
   t.hasResourceProperties("AWS::Lambda::Url", { AuthType: "AWS_IAM" });
