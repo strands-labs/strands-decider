@@ -19,6 +19,8 @@ Reading order of this file, top to bottom:
     settle()          step 3: accept links strongest first and chain them into recipes
     run(), main()     wire the steps together, and score the result against the labels
 
+walkthrough.ipynb, next to this file, runs these steps one at a time and shows each result.
+
 `--question` picks the question shape. `auto` (the default) uses a `noul` to decide whether a
 link exists, and, when a box has several candidates, first a `choice` to rank them. `noul` and
 `choice` force one shape everywhere, to compare the two; `choice` then adds a "none" option.
