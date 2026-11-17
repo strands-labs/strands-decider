@@ -1,5 +1,5 @@
 """decision_config.json at startup: the interface, the inputs, the provenance, the code token ids, the temperature and
-the soft-cap, for the multimodal layout and for intermediate decoder checkpoints (specification, sections 8 and 9). No
+the soft-cap, for the multimodal layout and for intermediate decoder checkpoints (the core's DecisionConfig). No
 vLLM or torch needed."""
 
 from __future__ import annotations
@@ -46,7 +46,7 @@ PROVENANCE = {
 
 
 def released(**overrides):
-    """A multimodal-layout checkpoint's decision_config.json (the specification's schema), plus overrides."""
+    """A multimodal-layout checkpoint's decision_config.json (the core's schema), plus overrides."""
     return dc(
         **{
             "interface": "strands-decider",

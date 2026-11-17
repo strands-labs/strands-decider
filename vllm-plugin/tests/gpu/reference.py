@@ -1,12 +1,12 @@
-"""The transformers reference for a Strands Decider checkpoint, text and images, written from the specification alone.
+"""The transformers reference for a Strands Decider checkpoint, text and images, written apart from the plugin.
 
     python reference.py CKPT --requests REQUESTS.jsonl --out OUT.jsonl [--resize pil|torchvision] [--pixels PIX.jsonl]
     python reference.py CKPT --rows ROWS.jsonl --out OUT.jsonl [--n 60]
 
 ``--requests``: JSON Lines of System One requests (``state``, ``questions``, optional ``images`` as base64). Each is
 rendered with the core library (``strands_decider.core.render``) and the checkpoint's prompt template. Each image is
-decoded as v1 decodes it, resized to the specification's W x H with Pillow's bicubic resampling and prepared by the
-checkpoint's image processor with its resize off (section 3.3): ``Gemma4ImageProcessorPil``, or the 12B's
+decoded as v1 decodes it, resized to the core's W x H with Pillow's bicubic resampling and prepared by the
+checkpoint's image processor with its resize off: ``Gemma4ImageProcessorPil``, or the 12B's
 ``Gemma4UnifiedImageProcessor``. ``--resize torchvision`` instead lets transformers' torchvision backend resize the
 decoded image itself, as stock vLLM would; it measures that difference and is not the reference.
 
@@ -18,7 +18,7 @@ The model is transformers' own class for the checkpoint's layout (``Gemma4ForCon
 ``Gemma4UnifiedForConditionalGeneration``, or ``Gemma4TextModel`` for a bare decoder), in bf16 with SDPA, one prompt
 per forward pass. The prefix_bidir mask goes to every layer as a dict keyed by layer type, which replaces Gemma 4's own
 masks (causal, windowed, and the "vision" image mask) on every layer: token i sees j when j < S, or when i >= S. The
-readout is the specification's: a bf16 GEMM of the final-norm hidden state at the last token, then in float32 the
+readout is the core's: a bf16 GEMM of the final-norm hidden state at the last token, then in float32 the
 soft-cap and the temperature, then a softmax over the question's own codes. Every output line carries the prompt's ids
 digest, so a runtime's answers can be matched to it question by question.
 """
@@ -38,8 +38,8 @@ import torch
 IMAGE_FORMATS = ("PNG", "JPEG", "WEBP", "GIF")
 
 
-def spec_size(w: int, h: int) -> tuple[int, int]:
-    """Section 3.3's W and H."""
+def reference_size(w: int, h: int) -> tuple[int, int]:
+    """W and H, as the core's ``resized_size`` gives them, written out apart from it."""
     f = math.sqrt(645120 / (h * w))
     H = math.floor((f * h) / 48) * 48
     W = math.floor((f * w) / 48) * 48
@@ -51,7 +51,7 @@ def spec_size(w: int, h: int) -> tuple[int, int]:
 
 
 def bicubic(im, width, height):
-    """Section 3.3's resize, for a core library without ``resize_image`` (which is the same): Pillow's bicubic
+    """The core's resize, for a core library without ``resize_image`` (which is the same): Pillow's bicubic
     resampling, the width's pass and then the height's, each left out when its size does not change. Two calls,
     because Pillow 13 does the height's pass first in some downscales."""
     if im.size[0] != width:
@@ -62,7 +62,7 @@ def bicubic(im, width, height):
 
 
 def decode(data: bytes):
-    """v1's decode: first frame, EXIF orientation, transparency onto white, RGB (specification, section 3.3)."""
+    """v1's decode: first frame, EXIF orientation, transparency onto white, RGB."""
     from PIL import Image, ImageOps
 
     img = Image.open(io.BytesIO(data), formats=IMAGE_FORMATS)
@@ -142,11 +142,11 @@ class Reference:
         if not images:
             return None
         if resize == "pil":
-            try:  # the specification's resize, from the core library
+            try:  # the reference resize, from the core library
                 from strands_decider.core import resize_image
             except ImportError:
                 resize_image = bicubic
-            prepared = [resize_image(im, *spec_size(*im.size)) for im in images]
+            prepared = [resize_image(im, *reference_size(*im.size)) for im in images]
             out = self.processor(images=prepared, do_resize=False, return_tensors="pt")
         else:
             out = self.torchvision(images=images, return_tensors="pt")

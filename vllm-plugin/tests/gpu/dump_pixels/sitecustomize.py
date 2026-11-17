@@ -1,7 +1,7 @@
 """Test only, never for serving: on PYTHONPATH, every vLLM worker appends a digest of each image's pixel values, as the
 Gemma 4 encoder receives them, to ``$STRANDS_DECIDER_PIXEL_DUMP``.<pid>.jsonl. ``tests/gpu/client.py pixels`` compares
 them with the transformers reference's (``reference.py --pixels``), so that the pixels vLLM encodes are checked to be
-the specification's, bit for bit."""
+the reference's, bit for bit."""
 
 import hashlib
 import json

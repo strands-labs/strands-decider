@@ -4,15 +4,15 @@ A checkpoint is the base Gemma 4 model's own multimodal layout (``Gemma4ForCondi
 ``Gemma4UnifiedForConditionalGeneration`` for the 12B) with its language model fine-tuned and merged in and no LM head,
 plus a trained readout ``readout.safetensors`` ([255, hidden]) and ``decision_config.json`` (``attention_mode:
 prefix_bidir``, ``pooling: last``, ``inputs``, the 255 code token ids, the temperature, the soft-cap). Intermediate
-checkpoints with a bare ``Gemma4TextModel`` decoder are served too, as text-only. The decision specification
-(``docs/spec.md``) reads a decision at the last prompt token: the readout applied to the final-norm hidden state,
-soft-capped, divided by the temperature, then a softmax over the question's own codes, with the prefix_bidir attention
-mask described below on every layer of the language model.
+checkpoints with a bare ``Gemma4TextModel`` decoder are served too, as text-only. The core library
+(``strands_decider.core``) reads a decision at the last prompt token: the readout applied to the final-norm hidden
+state, soft-capped, divided by the temperature, then a softmax over the question's own codes, with the prefix_bidir
+attention mask described below on every layer of the language model.
 
 What this plugin adds to vLLM, and nothing else:
 
 - Three architectures over vLLM's Gemma 4 classes, one per layout (:mod:`strands_decider_vllm.model`), whose logits
-  are the readout's 255 values (soft-capped as the specification defines, divided by the temperature) at the codes'
+  are the readout's 255 values (soft-capped as the core's readout does, divided by the temperature) at the codes'
   token ids and -inf elsewhere, so a completion's logprobs are exactly the codes' log-softmax. The client
   renormalizes over a question's own codes.
 - ``prefix_bidir`` attention on every layer of the language model: a request sends its state boundary S as

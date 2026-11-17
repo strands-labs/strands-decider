@@ -30,7 +30,7 @@ def test_more_than_the_processors_tokens_is_refused():
         processing.soft_tokens_of_resized(48 * 17, 48 * 17, 48, 280)
 
 
-def test_the_spec_resize_is_not_a_fixed_point_of_vllms_formula():
+def test_the_cores_resize_is_not_a_fixed_point_of_vllms_formula():
     """Why the plugin counts placeholders itself: vLLM's formula, applied to an image already at W x H, is not N."""
     resized_size = pytest.importorskip("strands_decider.core").resized_size
 

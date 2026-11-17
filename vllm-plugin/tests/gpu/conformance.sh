@@ -8,7 +8,7 @@
 #
 # The 31B runs on two GPUs (TP=2) so that contexts up to 32K fit; the others on one each. Each server is the plugin's
 # own (strands-decider-vllm serve) at the checkpoint's max_length_validated, bound to 127.0.0.1. tests/gpu/
-# conformance.py checks section 10's criteria per size: the rendering (exact), then the core's agreement against
+# conformance.py checks the core's criteria per size: the rendering (exact), then the core's agreement against
 # the reference, at least 98% top-1 and a mean |dp| of at most 0.02 (bf16) on at least 1,000 questions. Until the
 # checkpoints publish golden_vectors.jsonl, conformance.py exits 3 (STUB) for every size and this script reports
 # STUB, not PASS.

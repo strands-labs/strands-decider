@@ -1,9 +1,9 @@
-"""Image preprocessing for the plugin's multimodal architectures: the specification's pixels, and placeholder counts
-that match them.
+"""Image preprocessing for the plugin's multimodal architectures: the core's pixels, and placeholder counts that
+match them.
 
-The specification (section 3.3) resizes a decoded image to its W x H with Pillow's bicubic resampling, then runs the
-checkpoint's image processor with its own resize off (``do_resize=False``). The plugin's server does the resize and
-passes ``do_resize=False`` with each image request. Two things in vLLM 0.33 would not follow:
+The core resizes a decoded image to its W x H with Pillow's bicubic resampling (``resize_image``), and the
+checkpoint's image processor then runs with its own resize off (``do_resize=False``). The plugin's server does the
+resize and passes ``do_resize=False`` with each image request. Two things in vLLM 0.33 would not follow:
 
 - **The placeholder count.** vLLM expands each ``<|image|>`` into N placeholders by its own formula on the image's
   size (``Gemma4ProcessingInfo._compute_num_soft_tokens``), which assumes the processor will resize. On an image
@@ -14,7 +14,7 @@ passes ``do_resize=False`` with each image request. Two things in vLLM 0.33 woul
   profiling), vLLM's count is kept.
 - **The image processor's backend.** ``processor_config.json`` names ``Gemma4ImageProcessor``, which transformers 5.20
   resolves to its torchvision backend whenever torchvision is installed. With the resize off it still converts the
-  pixels to floating point differently from ``Gemma4ImageProcessorPil``, the backend the specification's reference uses
+  pixels to floating point differently from ``Gemma4ImageProcessorPil``, the backend the reference uses
   for E2B, E4B, 26B-A4B and 31B. :class:`DeciderProcessingInfo` gives vLLM's processor the PIL image processor, loaded
   from the same checkpoint. The 12B's ``Gemma4UnifiedImageProcessor`` has a torchvision backend only, which the
   reference uses too. (vLLM's ``--mm-processor-kwargs '{"backend": "pil"}'`` cannot select it: the processor passes the
@@ -52,7 +52,7 @@ def pin_pil(processor: Any, model_config: Any) -> Any:
         model_config.model, revision=model_config.revision
     )
     logger.info(
-        "strands-decider: preparing images with %s (the specification's reference) in place of %s",
+        "strands-decider: preparing images with %s (the reference's) in place of %s",
         type(pil).__name__,
         type(processor.image_processor).__name__,
     )
@@ -71,7 +71,7 @@ def soft_tokens_of_resized(width: int, height: int, unit: int, max_soft_tokens: 
     """The soft tokens of an image already resized to W x H: one per ``unit`` x ``unit`` pixels."""
     if width % unit or height % unit:
         raise ValueError(
-            f"strands-decider: an image sent with do_resize=False must be resized to the specification's W x H, "
+            f"strands-decider: an image sent with do_resize=False must be resized to the core's W x H, "
             f"whose sides are multiples of {unit} pixels; got {width} x {height}"
         )
     n = (width // unit) * (height // unit)

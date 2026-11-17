@@ -22,7 +22,7 @@ hook) and elsewhere a backend the plugin refuses; without it both head sizes are
 
 The weights are transformers' own random initialization (seeded) with the attention's q/k norms scaled so that bf16
 rounding does not decide the answers (:func:`condition_attention`), saved by transformers, plus a random readout of
-standard deviation 0.25 and a decision_config.json in the specification's schema with prompt strands-chat.
+standard deviation 0.25 and a decision_config.json in the core's schema with prompt strands-chat.
 """
 
 from __future__ import annotations
@@ -50,7 +50,7 @@ SMALL_TEXT = dict(
 
 
 def codes() -> list[str]:
-    """The 255 answer codes: A to Z, AA to IV without GZ (specification, section 2)."""
+    """The 255 answer codes: A to Z, AA to IV without GZ (the core's ``CODES``)."""
     letters = [chr(c) for c in range(ord("A"), ord("Z") + 1)]
     out = list(letters)
     for a in letters:

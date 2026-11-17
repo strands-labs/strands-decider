@@ -100,7 +100,7 @@ def checkpoint(tmp_path):
 
 class FakeEngine:
     """vLLM's AsyncLLM as the server uses it: it expands each <|image|> as Gemma 4's processor does (N from the
-    image's size, by the specification's rule, or ``wrong_n``), and returns logprobs for the allowed ids."""
+    image's size, by the core's rule, or ``wrong_n``), and returns logprobs for the allowed ids."""
 
     def __init__(self, tok, logits=None, wrong_n=None, refuse=None):
         self.tok, self.logits, self.wrong_n, self.refuse = tok, logits or {}, wrong_n, refuse
@@ -208,7 +208,7 @@ def test_probabilities_renormalize_over_the_questions_codes():
         ({"patch_size": 16, "pooling_kernel_size": 3, "max_soft_tokens": 560}, False),
     ],
 )
-def test_the_image_processor_must_have_the_specifications_settings(settings, ok):
+def test_the_image_processor_must_have_the_settings_the_core_checks(settings, ok):
     check = core.check_image_processor  # the core's check: the server keeps no copy of it
     assert (server.processor_problem({"image_processor": settings}, check) is None) is ok
     assert server.processor_problem(None, check) is not None
@@ -342,7 +342,7 @@ def test_an_image_request_sends_the_collapsed_prompt_the_images_and_their_sha256
             "one <|image|> per image"
         )
         assert tok.token_to_id(IMAGE_OPEN) not in prompt["prompt_token_ids"]
-        # Resized with Pillow to the specification's W x H: 266 = 19 x 14 and 270 = 45 x 6 tokens of 48 pixels.
+        # Resized with Pillow to the core's W x H: 266 = 19 x 14 and 270 = 45 x 6 tokens of 48 pixels.
         assert [im.size for im in prompt["multi_modal_data"]["image"]] == [(912, 672), (2160, 288)]
         assert prompt["multi_modal_uuids"] == {"image": [im.sha256 for im in rendered.images]}
         assert sp.extra_args == {PREFIX_END_KEY: s}, "S counts the expanded image tokens"

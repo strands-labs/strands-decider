@@ -1,11 +1,11 @@
-"""Conformance of a running server against a checkpoint's model goldens (specification, section 10).
+"""Conformance of a running server against a checkpoint's model goldens (the core's ``agreement`` and bounds).
 
     python conformance.py CKPT --url http://127.0.0.1:8000 [--min-questions N] [--out result.json]
 
-``CKPT/golden_vectors.jsonl`` holds one JSON object per line, with the fields section 10 names: the ``request``
-(images as base64), its prompt ``variant``, its ``state_ids``, each image's ``sha256`` and ``span`` (``images``), and
-under ``questions``, for each question by name, its ``question_ids``, its ``codes`` and the reference's
-``probabilities`` (one per code, in code order).
+``CKPT/golden_vectors.jsonl`` holds one JSON object per line, with the fields the core's ``read_golden_vectors``
+reads: the ``request`` (images as base64), its prompt ``variant``, its ``state_ids``, each image's ``sha256`` and
+``span`` (``images``), and under ``questions``, for each question by name, its ``question_ids``, its ``codes`` and the
+reference's ``probabilities`` (one per code, in code order).
 
 1. Each request is rendered with the core library and the checkpoint's own tokenizer (``load_tokenizer``). Its
    variant, which must be the checkpoint's prompt, its state ids, its images and each question's ids and codes must
@@ -30,7 +30,7 @@ from pathlib import Path
 
 
 def read_golden(line: dict) -> dict:
-    """Section 10's fields of one golden line, checked for presence and type, or ValueError."""
+    """The fields of one golden line, checked for presence and type, or ValueError."""
     try:
         request, variant = line["request"], line["variant"]
         state_ids = [int(t) for t in line["state_ids"]]
@@ -50,7 +50,7 @@ def read_golden(line: dict) -> dict:
             raise TypeError("request must be an object, variant a string and questions not empty")
     except (KeyError, TypeError, ValueError, IndexError, AttributeError) as e:
         raise ValueError(
-            f"unreadable golden line ({type(e).__name__}: {e}); section 10 names its fields"
+            f"unreadable golden line ({type(e).__name__}: {e}); read_golden_vectors names its fields"
         ) from e
     for name, q in questions.items():
         if len(q["codes"]) != len(q["probabilities"]):
@@ -132,9 +132,7 @@ def main() -> None:
 
     path = a.ckpt / "golden_vectors.jsonl"
     if not path.exists():
-        print(
-            f"STUB: {path} does not exist; the checkpoint's release publishes it (specification, section 10)"
-        )
+        print(f"STUB: {path} does not exist; the checkpoint's release publishes it")
         sys.exit(3)
     config = core.DecisionConfig.load(a.ckpt / "decision_config.json")
     tok = core.load_tokenizer(a.ckpt, config)

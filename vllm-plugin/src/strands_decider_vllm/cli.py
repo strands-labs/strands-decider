@@ -67,7 +67,7 @@ def parser() -> argparse.ArgumentParser:
         "--dtype",
         choices=("bfloat16", "float32"),
         default="bfloat16",
-        help="bfloat16, the checkpoints' and the specification's precision; float32 on a CPU build of vLLM only, "
+        help="bfloat16, the checkpoints' and the reference's precision; float32 on a CPU build of vLLM only, "
         "for tests",
     )
     s.add_argument(

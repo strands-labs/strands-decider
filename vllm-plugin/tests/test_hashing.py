@@ -40,7 +40,7 @@ def sha(domain, tokens):
 
 
 def state_sha(tokens, images=()):
-    """The specification of d_state, written out independently of the module."""
+    """d_state's definition, written out independently of the module."""
     b = STATE_DOMAIN + array("Q", tokens).tobytes()
     for identifier, offset, length in images:
         key = identifier.encode()

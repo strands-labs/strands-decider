@@ -19,10 +19,10 @@ of the language model is built without a sliding window (see :func:`build_withou
 applies the prefix_bidir mask on all of them (:mod:`strands_decider_vllm.model_state`).
 
 ``compute_logits`` returns, for each sampled position (the last prompt token), the readout's 255 values at the codes'
-token ids and -inf at every other id, as the decision specification defines them: a bf16 linear on the final-norm
+token ids and -inf at every other id, as the core's readout defines them: a bf16 linear on the final-norm
 hidden state, then in float32 ``cap * tanh(z / cap)`` with the checkpoint's ``final_logit_softcapping``, divided by the
 checkpoint temperature. A completion with ``logprobs: 255`` therefore returns the log-softmax over the 255 codes;
-renormalizing over a question's first ``n`` codes gives the specification's probabilities, a softmax in which the codes
+renormalizing over a question's first ``n`` codes gives the core's probabilities, a softmax in which the codes
 past the question's options take no part.
 """
 
@@ -127,7 +127,7 @@ def check_config(vllm_config: VllmConfig) -> None:
             f"--logprobs-mode {mc.logprobs_mode}: the codes' probabilities are the processed logprobs, taken "
             "after allowed_token_ids; pass --logprobs-mode processed_logprobs"
         )
-    # The readout is defined in bf16 (specification, section 7.1); the checkpoints are bf16. A CPU build of vLLM also
+    # The readout is defined in bf16 (the core's ``Readout``); the checkpoints are bf16. A CPU build of vLLM also
     # takes float32, for the tests' CPU tier on CPUs without bf16 arithmetic (CI's hosted runners).
     from vllm.platforms import current_platform
 
@@ -203,7 +203,7 @@ def build_without_windows(
 ) -> None:
     """Run ``build`` (the parent class's ``__init__``) with every Gemma 4 attention layer built without a window cut.
 
-    The specification applies the prefix_bidir mask on the sliding-window layers too, with no window cut (the reference
+    The prefix_bidir mask applies on the sliding-window layers too, with no window cut (the reference
     implementation gives both layer types the same mask). Each sliding layer is built with a window of max_model_len
     tokens, which cuts nothing: its KV cache group keeps every token of a request (a sliding-window group whose window
     covers the whole context), and vLLM's hybrid KV-cache manager keeps one group per layer shape, as for stock Gemma 4.
@@ -260,7 +260,7 @@ class _Decider:
         self.register_buffer(
             "code_ids", torch.tensor(spec.token_ids, dtype=torch.long), persistent=False
         )
-        # The readout is a bf16 GEMM whatever the decoder runs in (specification, 7.1): a float32 test model on a
+        # The readout is a bf16 GEMM whatever the decoder runs in (the core's ``Readout``): a float32 test model on a
         # CPU build of vLLM keeps the readout's bf16 rounding too.
         self.readout = nn.Linear(
             mc.hf_text_config.hidden_size, N_CODES, bias=False, dtype=torch.bfloat16
@@ -289,7 +289,7 @@ class _Decider:
         return PrefixBidirModelState
 
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        # The bf16 GEMM, rounded to bf16, then the soft-cap and the temperature in float32 (specification, 7.1).
+        # The bf16 GEMM, rounded to bf16, then the soft-cap and the temperature in float32 (the core's ``Readout``).
         codes = self.readout(hidden_states.to(torch.bfloat16)).float()
         codes = torch.tanh(codes / self.softcap) * self.softcap
         codes = codes / self.temperature
@@ -333,11 +333,10 @@ class _Decider:
             )
         if self.readout.weight.dtype != torch.bfloat16:
             raise ValueError(
-                f"strands-decider: the readout is {self.readout.weight.dtype}; it must stay a bf16 GEMM "
-                "(specification, 7.1)"
+                f"strands-decider: the readout is {self.readout.weight.dtype}; it must stay a bf16 GEMM"
             )
         with torch.no_grad():
-            # A float32 or float16 readout is rounded to bf16 here (specification, 7.1).
+            # A float32 or float16 readout is rounded to bf16 here, as the core's ``Readout`` rounds it.
             self.readout.weight.copy_(w.to(device=self.readout.weight.device, dtype=torch.bfloat16))
         loaded.add(READOUT_WEIGHT)
         return loaded

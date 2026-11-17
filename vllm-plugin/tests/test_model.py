@@ -71,7 +71,7 @@ def test_the_gemm_is_rounded_to_bf16_before_the_cap():
     h = torch.tensor([[16.0, 0.0625]], dtype=torch.bfloat16)
     out = readout_model(w).compute_logits(h)
 
-    def capped(z):  # in float32, as the specification computes it
+    def capped(z):  # in float32, as the core's readout computes it
         z = torch.tensor([z], dtype=torch.float32)
         return (torch.tanh(z / 30.0) * 30.0).item()
 

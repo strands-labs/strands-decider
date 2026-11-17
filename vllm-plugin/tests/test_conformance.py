@@ -1,4 +1,4 @@
-"""The conformance tier's reading of a golden line (tests/gpu/conformance.py), without a server: section 10's fields,
+"""The conformance tier's reading of a golden line (tests/gpu/conformance.py), without a server: its fields,
 a refusal of any other form, and the core's measures and bounds."""
 
 from __future__ import annotations

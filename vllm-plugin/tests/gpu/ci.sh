@@ -160,7 +160,7 @@ if serve mm $((P + 1)) "$C/mm"; then
     --block-size $BLOCK "${SAME[@]}" --out "$OUT/mm/images.json" > "$OUT/mm/images.txt" 2>&1
   result $? "multimodal: text, images, refusals, the image-content cache test (exact cached tokens)"
   answers mm $((P + 1)) "$OUT/ref-mm.jsonl"
-  # The conformance tier's check (section 10's fields and bounds) on goldens written from the tiny checkpoint's
+  # The conformance tier's check (the goldens' fields and the core's bounds) on goldens written from the tiny checkpoint's
   # reference: 90 questions, so the core's 1,000-question minimum is lowered for this wiring check only.
   python "$HERE/goldens.py" "$C/mm" "$OUT/requests.jsonl" "$OUT/ref-mm.jsonl" > "$OUT/mm/goldens.txt" 2>&1 &&
     python "$HERE/conformance.py" "$C/mm" --url http://127.0.0.1:$((P + 1)) --min-questions 90 \

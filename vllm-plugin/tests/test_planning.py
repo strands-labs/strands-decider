@@ -32,7 +32,7 @@ def test_invalid_boundary_is_none_not_an_exception(value):
 # --- plan_segments against the mask ---------------------------------------------------------------------------------
 
 
-def spec_keys(p: int, s: int, length: int) -> range:
+def mask_keys(p: int, s: int, length: int) -> range:
     """Keys the mask lets prompt position p see: the state [0, S) for a state token, the prompt [0, L) otherwise.
     A position at or after L is an output token, causal: [0, p]."""
     if p >= length:
@@ -77,7 +77,7 @@ def test_plan_reproduces_the_mask_for_every_boundary_and_cache_hit(length):
             keys = planned_keys(plan, scheduled, cached)
             assert sorted(keys) == list(range(cached, length)), (s, cached)
             for p in range(cached, length):
-                assert keys[p] == spec_keys(p, s, length), (s, cached, p)
+                assert keys[p] == mask_keys(p, s, length), (s, cached, p)
 
 
 @pytest.mark.parametrize("length", range(2, 9))
@@ -94,7 +94,7 @@ def test_resumed_request_masks_the_prompt_and_runs_its_outputs_causally(length):
                 keys = planned_keys(plan, scheduled, computed)
                 assert sorted(keys) == list(range(computed, end))
                 for p in range(computed, end):
-                    assert keys[p] == spec_keys(p, s, length), (s, k, computed, p)
+                    assert keys[p] == mask_keys(p, s, length), (s, k, computed, p)
 
 
 @pytest.mark.parametrize("length", range(3, 10))

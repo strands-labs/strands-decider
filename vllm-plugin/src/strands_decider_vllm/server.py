@@ -1,19 +1,19 @@
 """``strands-decider-vllm serve``: the System One request, images included, on vLLM's engine in process.
 
-vLLM 0.33's ``/v1/completions`` takes token ids but no images, its chat endpoints render a chat template (which the
-specification forbids for these prompts), and its token-in-token-out endpoint lets a client name an image by an id of
+vLLM 0.33's ``/v1/completions`` takes token ids but no images, its chat endpoints render a chat template (which these
+prompts never take: the core renders them), and its token-in-token-out endpoint lets a client name an image by an id of
 its choosing, which vLLM then uses as the image's cache key. This server takes v1's request instead and does the rest:
 
 1. It renders the request with the core library (``strands_decider.core.render``) and the checkpoint's prompt
    template. Each image becomes ``<|image>``, N ``<|image|>`` and ``<image|>`` first in the state, and S counts them.
 2. It decodes each image as v1 does (first frame, EXIF orientation, transparency onto white, RGB) and resizes it to
-   the specification's W x H, computed from the decoded size, with the core's ``resize_image``: Pillow's bicubic
-   resampling, the width's pass and then the height's, the reference resize for every size (section 3.3).
+   the core's W x H, computed from the decoded size, with the core's ``resize_image``: Pillow's bicubic
+   resampling, the width's pass and then the height's, the reference resize for every size.
    vLLM's processor then runs with its own resize off (``do_resize=False``), so the pixels the encoder gets are the
    reference's; W and H are multiples of 48, and the processor's count of soft tokens is N.
 3. For each question it sends vLLM the prompt with each image's line collapsed to the single ``<|image|>`` that vLLM's
    Gemma 4 processor expands, the images as multimodal data, the image file's sha256 as each image's id (so vLLM's
-   multimodal hash, and the plugin's cache digest, is the specification's key: the file's content), and S in
+   multimodal hash, and the plugin's cache digest, is the core's key: the file's content), and S in
    ``vllm_xargs.prefix_end``. The first question runs alone and the others then together, so that they reuse the
    state's cached blocks.
 4. It checks that vLLM's expanded prompt is the rendered one, token for token, so that N and S are the core's.
@@ -62,7 +62,7 @@ from . import ARCH_FOR_BASE, PREFIX_END_KEY, SERVER_CONFIG_KEY, __version__, log
 
 #: Gemma 4's image placeholder, which vLLM's processor expands.
 IMAGE_SOFT = "<|image|>"
-#: The side, in pixels, of one soft token's patch group (pooling_kernel_size x patch_size, specification 3.3).
+#: The side, in pixels, of one soft token's patch group (pooling_kernel_size x patch_size, the core's soft_tokens).
 SOFT_TOKEN_SIDE = 48
 IMAGE_FORMATS = ("PNG", "JPEG", "WEBP", "GIF")
 LOOPBACK = ("127.0.0.1", "::1", "localhost")
@@ -256,7 +256,7 @@ def decode_image(data: bytes) -> Any:
 
 
 def prepare_image(data: bytes, tokens: int, target: Any, resize: Any) -> Any:
-    """The decoded image, resized to W x H (specification, section 3.3). ``target(width, height)`` gives W and H
+    """The decoded image, resized to W x H (the core's ``resize_image``). ``target(width, height)`` gives W and H
     from the decoded size, after the orientation: the core's ``check_decoded_size`` for this image, which refuses a
     decoded size that is neither the header's nor its transpose. ``resize`` is the core's ``resize_image``: Pillow's
     bicubic resampling, the width's pass and then the height's, the same pixels on every Pillow version."""
@@ -835,7 +835,7 @@ def settings(a: Any) -> Settings:
     except ValueError as e:
         raise SystemExit(
             f"strands-decider-vllm serve: decision_config.json: {e}. The server renders requests with the core "
-            "library and needs the specification's schema (section 8). Serve an intermediate checkpoint with "
+            "library and needs its schema (DecisionConfig). Serve an intermediate checkpoint with "
             "`vllm serve` and pre-rendered token ids instead (README, Serving)."
         ) from e
     tokenizer = checkpoint.tokenizer()

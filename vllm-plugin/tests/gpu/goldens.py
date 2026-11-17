@@ -1,5 +1,5 @@
 """Model goldens for a tiny checkpoint, so that the end-to-end tiers run the conformance check (conformance.py) on a
-server: section 10's lines, written from requests and a reference's probabilities for them.
+server: golden_vectors.jsonl's lines, written from requests and a reference's probabilities for them.
 
     python goldens.py CKPT REQUESTS.jsonl REFERENCE.jsonl   writes CKPT/golden_vectors.jsonl
 

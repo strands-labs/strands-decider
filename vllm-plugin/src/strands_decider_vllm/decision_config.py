@@ -1,4 +1,4 @@
-"""What the plugin reads from a checkpoint's ``decision_config.json``, validated (specification, section 8).
+"""What the plugin reads from a checkpoint's ``decision_config.json``, validated (the core's ``DecisionConfig``).
 
 :func:`read_decision_config` takes the parsed file, the checkpoint's layout and the decoder config's
 ``final_logit_softcapping``, and returns the readout's code token ids, temperature and soft-cap and the inputs the
@@ -169,7 +169,7 @@ def read_decision_config(
     - ``temperature``: finite and above 0.
     - the soft-cap: ``final_logit_softcapping``, finite and above 0. Required in this file for the multimodal layout;
       a decoder checkpoint without it takes the decoder config's (``text_softcap``). It is never skipped: a checkpoint
-      with neither is refused, and one whose two values differ is refused (specification, section 9).
+      with neither is refused, and one whose two values differ is refused.
     """
     if layout not in LAYOUTS:
         raise ValueError(f"layout must be one of {LAYOUTS}, got {layout!r}")
