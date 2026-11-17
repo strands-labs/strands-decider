@@ -147,7 +147,7 @@ def tokenizer_json() -> dict:
 
 
 def make_checkpoint(d: Path) -> Path:
-    """The tiny checkpoint in the decision layout (docs/spec.md, section 9)."""
+    """The tiny checkpoint in a decision checkpoint's layout."""
     import torch
     import transformers
     from safetensors.torch import save_file

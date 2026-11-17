@@ -4,8 +4,8 @@ A Function URL request gets GET /health and POST /v1/systemone, with `strands-de
 request and response bodies. A direct invocation passes a System One request as the event and
 returns the response; an invalid request fails the invocation.
 
-The request is rendered, checked and answered by the torch-free core (`strands_decider.core`,
-docs/spec.md), and the decoder runs in llama.cpp (`strands_decider.backends.llama_cpp`): the
+The request is rendered, checked and answered by the torch-free core (`strands_decider.core`),
+and the decoder runs in llama.cpp (`strands_decider.backends.llama_cpp`): the
 GGUF, and for images the vision tower's mmproj, that the image build converted from the
 checkpoint. The readout and the soft-cap come from the checkpoint's readout.safetensors and
 decision_config.json, which the load validates.

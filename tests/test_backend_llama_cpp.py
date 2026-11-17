@@ -51,9 +51,9 @@ def _request_image(data: bytes) -> RenderedImage:
 
 @pytest.mark.parametrize("name", sorted(IMAGE_FILES))
 def test_prepared_pixels_are_the_goldens(name):
-    """Decoded and resized to the bytes of tests/fixtures/core/image_pixels.json (docs/spec.md,
-    sections 3.3 and 10): the decode, the orientation, and Pillow's bicubic resize to
-    resized_size's size."""
+    """Decoded and resized to the bytes of tests/fixtures/core/image_pixels.json, the core's
+    pixel goldens: the decode, the orientation, and Pillow's bicubic resize to resized_size's
+    size."""
     golden = json.loads((FIXTURES / "image_pixels.json").read_text(encoding="utf-8"))["images"][
         name
     ]
@@ -71,8 +71,9 @@ def test_prepared_pixels_are_the_goldens(name):
 
 @pytest.mark.parametrize("size", [(1080, 2400), (2400, 1080), (3000, 2000), (640, 40)])
 def test_the_resize_is_the_width_then_the_height(size):
-    """Each pass its own call, as the spec's rule says: Pillow 13 does the height's pass first,
-    in one call, when the height shrinks by more than twice as much as the width."""
+    """Each pass its own call, as the core's resize_image makes them: Pillow 13 does the
+    height's pass first, in one call, when the height shrinks by more than twice as much as the
+    width."""
     img = Image.new("RGB", size)
     img.putdata(
         [

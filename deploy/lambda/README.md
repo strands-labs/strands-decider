@@ -18,8 +18,8 @@ or documents as they arrive, moderation and routing queues, batch scoring, a che
 agent's consequential action. For a guard on every tool call of an agent loop, serve on a GPU
 ([deploy/README.md](../README.md)).
 
-The same CDK app deploys a decision checkpoint, the format of the Strands Decider v2 models
-([docs/spec.md](../../docs/spec.md)), with text and images: `-c decision=true`. See
+The same CDK app deploys a decision checkpoint, the format of the Strands Decider v2 models,
+with text and images: `-c decision=true`. See
 [Decision checkpoints](#decision-checkpoints).
 
 To follow it you need:
@@ -276,9 +276,9 @@ text answers to within 0.004. An `f32` vision tower with the Q8_0 decoder is slo
 
 ## Decision checkpoints
 
-`-c decision=true` deploys a decision checkpoint instead: the Strands Decider v2 format
-([docs/spec.md](../../docs/spec.md)), a Gemma 4 model in its base's multimodal layout with a
-trained readout beside it. The function answers the same `POST /v1/systemone`, with images, and
+`-c decision=true` deploys a decision checkpoint instead: the Strands Decider v2 format, a
+Gemma 4 model in its base's multimodal layout with a trained readout beside it, which the
+torch-free core ([src/strands_decider/core](../../src/strands_decider/core)) defines. The function answers the same `POST /v1/systemone`, with images, and
 `GET /health`, behind the same IAM-authenticated Function URL, and takes the request as a direct
 invocation too.
 
@@ -294,14 +294,14 @@ The request is rendered, checked and read by the torch-free core
 ([src/strands_decider/core](../../src/strands_decider/core)), and the decoder and the vision tower
 run in llama.cpp through `strands_decider.backends.llama_cpp`: the state, its text tokens and image
 rows together, is decoded once as one non-causal batch, and each question on top of it, under the
-`prefix_bidir` mask with no sliding window. An image is decoded as v1 decodes it, resized with
-Pillow's bicubic resampling to the size the image processor gives it, and run through the base
+`prefix_bidir` mask with no sliding window. An image is decoded as v1 decodes it, resized by the
+core's `resize_image` (Pillow's bicubic resampling) to the size the image processor gives it, and run through the base
 model's own vision tower. The readout and its soft-cap come from the checkpoint's
 `readout.safetensors` and `decision_config.json`; a checkpoint without the soft-cap there, or with
 another value under `config.json`'s `text_config`, is refused.
 
-The GGUF Q8_0 decoder meets the conformance bound docs/spec.md section 10 records for that format,
-at least 98% top-1 agreement and a mean |Δp| of at most 0.02: at E2B, through this runtime on x86,
+The GGUF Q8_0 decoder meets the conformance bound the core records for that format (`BOUNDS` in
+`core/conformance.py`), at least 98% top-1 agreement and a mean |Δp| of at most 0.02: at E2B, through this runtime on x86,
 99.08% and 0.0104 on 1,200 prompts.
 
 ### What the build does

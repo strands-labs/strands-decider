@@ -81,7 +81,7 @@ function flag(value: unknown, key: string): boolean {
 }
 
 /**
- * A decision checkpoint (docs/spec.md) as a Lambda function (README.md, Decision checkpoints): the
+ * A decision checkpoint as a Lambda function (README.md, Decision checkpoints): the
  * image, built from the checkpoint with its decoder and vision tower converted for llama.cpp, the
  * function, its `live` alias and that alias's IAM-authenticated Function URL. Settings are CDK
  * context values (cdk.json, or -c key=value): `checkpoint`, a Hugging Face Hub id or an s3:// URI
