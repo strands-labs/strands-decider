@@ -18,6 +18,7 @@ if not hasattr(transformers, "Gemma4Config"):
 
 from core_support import gemma4_tokenizer_path  # noqa: E402
 from safetensors import safe_open  # noqa: E402
+from safetensors.torch import load_file, save_file  # noqa: E402
 from test_gemma4_train import GEMMA_TARGETS, LAYERS  # noqa: E402
 
 import training.train as T  # noqa: E402
@@ -30,6 +31,27 @@ from training.soup import soup  # noqa: E402
 
 HUB_ID = "google/gemma-4-E2B-it"
 REVISION = "3e22461f65e89153144f8adb70e3b8c2cc9845a7"
+# The E2B and E4B configs' targets: the fixture has per-layer inputs, as those sizes do.
+E2B_TARGETS = [*GEMMA_TARGETS, "per_layer_input_gate", "per_layer_projection"]
+# The image settings that the core counts soft tokens for, and a template the export drops.
+PROCESSOR = {
+    "chat_template": "x",
+    "image_processor": {"patch_size": 16, "pooling_kernel_size": 3, "max_soft_tokens": 280},
+    "image_seq_length": 280,
+}
+# docs/spec.md, section 9, without golden_vectors.jsonl, which the export does not write.
+LAYOUT = {
+    "config.json",
+    "model.safetensors",
+    "processor_config.json",
+    "tokenizer.json",
+    "tokenizer_config.json",
+    "readout.safetensors",
+    "decision_config.json",
+    "LICENSE",
+    "NOTICE",
+    "README.md",
+}
 
 
 def _base(path, tokenizer_json, moe=False):
@@ -76,7 +98,17 @@ def _base(path, tokenizer_json, moe=False):
     )
     cfg = transformers.Gemma4Config(text_config=text, vision_config=vision, audio_config=None)
     transformers.Gemma4ForConditionalGeneration(cfg).to(torch.bfloat16).save_pretrained(path)
-    (path / "processor_config.json").write_text(json.dumps({"chat_template": "x", "p": 1}))
+    if not moe:
+        # Like the E2B and E4B files on the Hub: the base carries k_proj, v_proj and k_norm for
+        # its KV-shared layers too, which transformers does not load.
+        file = str(path / "model.safetensors")
+        tensors, last = load_file(file), len(LAYERS) - 1
+        for part in ("k_proj", "v_proj", "k_norm"):
+            name = f"{DECODER}layers.{{}}.self_attn.{part}.weight"
+            assert name.format(last) not in tensors
+            tensors[name.format(last)] = torch.randn_like(tensors[name.format(last - 1)])
+        save_file(tensors, file, metadata={"format": "pt"})
+    (path / "processor_config.json").write_text(json.dumps(PROCESSOR))
     return tok
 
 
@@ -125,7 +157,7 @@ def _train(tmp_path, base, data, seed):
             base_revision=REVISION,
             head_type="token_readout",
             attention_mode="prefix_bidir",
-            lora_targets=GEMMA_TARGETS,
+            lora_targets=E2B_TARGETS,
             lora_r=4,
             lora_alpha=8,
             lr=1e-2,
@@ -170,8 +202,12 @@ def test_train_two_seeds_soup_export_and_load_with_the_core(tmp_path):
     assert json.loads((out / "config.json").read_text())["architectures"] == [
         "Gemma4ForConditionalGeneration"
     ]
-    assert "chat_template" not in json.loads((out / "processor_config.json").read_text())
-    assert not (out / "chat_template.jinja").exists()
+    assert cfg.inputs == ("text", "image")  # the base's vision encoder, unchanged
+    kept = {k: v for k, v in PROCESSOR.items() if k != "chat_template"}
+    assert json.loads((out / "processor_config.json").read_text()) == kept  # no template
+    for name in ("config.json", "tokenizer.json", "tokenizer_config.json"):  # the base's bytes
+        assert (out / name).read_bytes() == (base / name).read_bytes(), name
+    assert set(os.listdir(out)) == LAYOUT  # the layout's files, and no others
 
     # (b) the base's names and shards; every tensor outside the decoder is the base's
     mine, theirs = _tensors(out), _tensors(base)
@@ -187,6 +223,13 @@ def test_train_two_seeds_soup_export_and_load_with_the_core(tmp_path):
     model = StrandsDeciderModel.load(souped).float().eval()
     deltas = {k: d() for k, d in adapter_deltas(souped, model.config).items()}
     assert deltas and max(float(d.abs().max()) for d in deltas.values()) > 0
+    for part in ("per_layer_input_gate", "per_layer_projection"):  # merged like the others
+        assert any(f".{part}." in k and float(d.abs().max()) > 0 for k, d in deltas.items()), part
+    shared = f"{DECODER}layers.{len(LAYERS) - 1}.self_attn."  # the fixture's KV-shared layer
+    assert any(k.startswith(shared) for k in deltas)  # its q_proj and o_proj train
+    for part in ("k_proj", "v_proj", "k_norm"):  # no adapter there: the base's, as they are
+        assert f"{shared}{part}.weight" not in deltas
+        assert torch.equal(mine[f"{shared}{part}.weight"], theirs[f"{shared}{part}.weight"])
     for k, d in deltas.items():
         assert torch.equal(mine[k], (theirs[k].float() + d).bfloat16()), k
     batch = T.SystemOneCollator(
@@ -209,8 +252,14 @@ def test_train_two_seeds_soup_export_and_load_with_the_core(tmp_path):
         for p in (tmp_path, os.path.expanduser("~")):
             assert str(p).encode() not in data_, name
         assert not name.endswith(".py")
-    record = json.loads((out / "training.json").read_text())
-    assert record["soup_of"] == 2 and record["lora"]["rank"] == 4
+    card = (out / "README.md").read_text()
+    assert "rank 4, alpha 8" in card and "of 2 runs" in card
+    for seed in (1, 2):  # every run of the soup: seed, data file name, steps, learning rate
+        assert f"| {seed} | {seed} | train.jsonl | 3 | 0.01 |" in card
+    notice = (out / "NOTICE").read_text()
+    assert HUB_ID in notice and REVISION in notice and "average of 2" in notice
+    assert "The vision encoder, the vision projection and every other tensor" in notice
+    assert (out / "LICENSE").read_text().lstrip().startswith("Apache License")
 
     # (e) a wrong base is refused, and no output is left behind
     (base / "config.json").write_text(
@@ -247,7 +296,7 @@ def _seed_run(tmp_path, base, name, seed, **over):
         lora_r=4,
         lora_alpha=8,
         lora_dropout=0.0,
-        lora_targets=GEMMA_TARGETS,
+        lora_targets=E2B_TARGETS,
     )
     cfg = StrandsDeciderConfig(**{**kw, **over})
     model = StrandsDeciderModel.from_pretrained_base(cfg)
@@ -298,7 +347,8 @@ def test_a_soup_averages_every_merged_tensor_and_the_readout(tmp_path):
     heads = [load_head_state(str(r))["proj.weight"].float() for r in runs]
     assert torch.equal(_readout(out), ((heads[0] + heads[1]) / 2).bfloat16())
     assert not torch.equal(_readout(out), heads[0].bfloat16())  # the seeds differ
-    assert json.loads((out / "training.json").read_text())["soup_of"] == 2
+    assert "of 2 runs" in (out / "README.md").read_text()
+    assert set(os.listdir(out)) == LAYOUT
 
 
 def test_a_soup_of_one_run_twice_is_that_run(tmp_path):
@@ -324,8 +374,64 @@ def test_a_soup_of_one_run_twice_is_that_run(tmp_path):
 def test_a_soup_refuses_two_recipes(tmp_path):
     base = tmp_path / "base"
     _base(base, gemma4_tokenizer_path())
+    from training.soup import check_one_recipe
+
     a = _seed_run(tmp_path, base, "a", 1)
     b = _seed_run(tmp_path, base, "b", 2, lora_r=2, lora_alpha=4)
+    c = _seed_run(tmp_path, base, "c", 3, attn_split=1024, head_dropout=0.05)
+    check_one_recipe([str(a), str(c)])  # run settings: they do not change the average
     with pytest.raises(ValueError, match="not one recipe"):
         export_v2([str(a), str(b)], str(tmp_path / "soup"), base_model=HUB_ID)
     assert not (tmp_path / "soup").exists()
+
+
+# ---- temperature, the model card, and what the export refuses ------------------------------
+
+
+def test_the_temperature_the_model_card_and_the_refusals(tmp_path, capsys):
+    from strands_decider.modeling import config_path
+    from training.export_v2 import drop_kv_shared_updates
+
+    base = tmp_path / "base"
+    _base(base, gemma4_tokenizer_path())
+    run = _seed_run(tmp_path, base, "run", 1)
+
+    # A calibrated checkpoint exports its global temperature, and says what it leaves out.
+    path = config_path(str(run))
+    cfg = json.loads(open(path, encoding="utf-8").read())
+    cfg.update(temperature=0.8, temperature_by_kind={"choice": 0.9})
+    open(path, "w", encoding="utf-8").write(json.dumps(cfg))
+    assert _loads(export_v2(str(run), str(tmp_path / "a"), base_model=HUB_ID)).temperature == 0.8
+    assert "are not carried over" in capsys.readouterr().out
+    card = tmp_path / "card.md"
+    card.write_text("# My model\n", encoding="utf-8")
+    out = tmp_path / "b"
+    export_v2(str(run), str(out), base_model=HUB_ID, temperature=1.3, model_card_path=str(card))
+    assert _loads(out).temperature == 1.3
+    assert (out / "README.md").read_bytes() == card.read_bytes()
+
+    # A cap that is not the base config's: config.json is copied, so it must agree.
+    other = _seed_run(tmp_path, base, "other", 2, readout_softcap=25.0)
+    with pytest.raises(ValueError, match="caps its logits"):
+        export_v2(str(other), str(tmp_path / "c"), base_model=HUB_ID)
+
+    # A KV-shared layer's own keys and values: a zero update is dropped, another is refused.
+    config = json.loads((base / "config.json").read_text())
+    name = f"{DECODER}layers.{len(LAYERS) - 1}.self_attn.k_proj.weight"
+    deltas = [{name: lambda: torch.zeros(2, 2), f"{DECODER}layers.0.self_attn.k_proj.weight": None}]
+    drop_kv_shared_updates(config, deltas)
+    assert list(deltas[0]) == [f"{DECODER}layers.0.self_attn.k_proj.weight"]
+    with pytest.raises(ValueError, match="shares an earlier layer's keys and values"):
+        drop_kv_shared_updates(config, [{name: lambda: torch.ones(2, 2)}])
+
+    # An image processor that sizes images another way than the core counts them.
+    wrong = {**PROCESSOR, "image_processor": {**PROCESSOR["image_processor"], "patch_size": 14}}
+    (base / "processor_config.json").write_text(json.dumps(wrong))
+    with pytest.raises(ValueError, match="cannot take images"):
+        export_v2(str(run), str(tmp_path / "e"), base_model=HUB_ID)
+
+    # A base without one of its own files.
+    (base / "processor_config.json").unlink()
+    with pytest.raises(ValueError, match="has no processor_config"):
+        export_v2(str(run), str(tmp_path / "d"), base_model=HUB_ID)
+    assert not (tmp_path / "c").exists() and not (tmp_path / "d").exists()

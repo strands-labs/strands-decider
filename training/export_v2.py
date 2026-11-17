@@ -2,10 +2,11 @@
 
     python -m training.export_v2 <checkpoint> [<checkpoint> ...] <out> [--base-model ...]
 
-Several checkpoints of one recipe (other seeds) give their soup: each one merged into the
-base, then every merged tensor, the readout included, averaged with equal weights in float32
-and written in bf16. A soup of one is the single export. (A soup checkpoint written by
-training.soup, whose stacked adapters average the seeds' updates, exports as one checkpoint.)
+Several checkpoints of one recipe (runs that may differ in seed, data, learning rate or
+steps) give their soup: each one merged into the base, then every merged tensor, the readout
+included, averaged with equal weights in float32 and written in bf16. A soup of one is the
+single export. (A soup checkpoint written by training.soup, whose stacked adapters average
+the runs' updates, exports as one checkpoint.)
 
 The output is docs/spec.md's checkpoint layout (section 9): the base model's own multimodal
 checkpoint with the fine-tuning merged in, and this interface's files beside it.
@@ -14,13 +15,21 @@ checkpoint with the fine-tuning merged in, and this interface's files beside it.
   (`model.language_model.*`) that the LoRA adapter or the expert adapters (expert_lora.py)
   change gets `W + s * B @ A`, summed in float32 and written in bf16. Every other tensor,
   the encoders' included, is the base's, byte for byte.
-- The base's `config.json` (its soft-cap set to the checkpoint's `readout_softcap`),
-  `processor_config.json`, `tokenizer.json` and `tokenizer_config.json`, without any chat
-  template.
+- The base's `config.json` and `tokenizer.json`, byte for byte, and its
+  `processor_config.json` and `tokenizer_config.json`, without any chat template. The export
+  refuses a base whose `config.json` caps its logits at another value than the checkpoint's
+  `readout_softcap`.
 - `readout.safetensors` (`weight`, [255, hidden], bf16) and `decision_config.json`, with the
-  spec's keys only (section 8).
-- `training.json`: the training record (recipe, LoRA settings, steps, soup size). It holds
-  no local paths.
+  spec's keys only (section 8). `inputs` is text, and also image when the base has a vision
+  encoder and its projection. The export then refuses a base whose `processor_config.json`
+  does not size images as the core counts them (`core.check_image_processor`).
+- `LICENSE` (the Apache License 2.0), a `NOTICE` that names the base and its revision, what
+  changed and which parts are the base's, and `README.md`, the model card: the file given
+  as `--model-card`, else one written from the runs' records (LoRA settings, and each run's
+  seed, data file names and steps).
+
+The output holds these files and no others. `golden_vectors.jsonl` (section 10) is not
+written here.
 
 Before the merge, the base on disk must be the one the run trained on: the digest of its
 config, tokenizer and tensor headers is compared with the `base.json` that training wrote.
@@ -37,6 +46,7 @@ import os
 import re
 import shutil
 import struct
+import textwrap
 from collections.abc import Callable
 from functools import partial, reduce
 from typing import Any
@@ -49,13 +59,22 @@ from safetensors.torch import load_file, save_file
 
 from strands_decider import core, expert_lora
 from strands_decider.modeling import StrandsDeciderConfig, config_path, load_head_state
-from training.soup import check_one_recipe
+from training.soup import check_one_recipe, member_records
 
 DECODER = "model.language_model."
 PEFT_PREFIX = "base_model.model."
 BASE_RECORD = "base.json"  # written by training beside train_config.json
 TOKENIZER_FILES = ("tokenizer.json", "tokenizer_config.json")
 BASE_FILES = ("config.json", "processor_config.json", *TOKENIZER_FILES)
+LICENSE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir, "LICENSE")
+# The parts of a base beside its decoder (docs/spec.md, section 9), by tensor name prefix.
+ENCODERS = {
+    "model.vision_tower.": "vision encoder",
+    "model.vision_embedder.": "vision encoder",
+    "model.embed_vision.": "vision projection",
+    "model.audio_tower.": "audio encoder",
+    "model.embed_audio.": "audio projection",
+}
 _HUB_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9_.-]+")
 
 
@@ -81,6 +100,15 @@ def _header(path: str) -> bytes:
     with open(path, "rb") as f:
         (n,) = struct.unpack("<Q", f.read(8))
         return f.read(n)
+
+
+def tensor_names(d: str) -> set[str]:
+    """The names of a base's tensors, from its shards' headers."""
+    names: set[str] = set()
+    for shard in _shards(d):
+        with safe_open(os.path.join(d, shard), "pt") as f:
+            names.update(f.keys())
+    return names
 
 
 def base_digest(d: str) -> str:
@@ -166,6 +194,31 @@ def adapter_deltas(
     return out
 
 
+def drop_kv_shared_updates(
+    base_config: dict[str, Any], deltas: list[dict[str, Callable[[], torch.Tensor]]]
+) -> None:
+    """Take the updates of the KV-shared layers' own k_proj, v_proj and k_norm out of `deltas`,
+    so that the export writes the base's tensors for them; refuse one that is not zero.
+
+    The last `num_kv_shared_layers` layers of a Gemma 4 E2B or E4B decoder attend with an
+    earlier layer's keys and values, so no runtime reads their own. transformers builds no
+    such modules for those layers, and an adapter has nothing to train there. An update that
+    is not zero means the run trained weights that a runtime never uses."""
+    text = base_config.get("text_config")
+    text = text if isinstance(text, dict) else base_config
+    layers, shared = text.get("num_hidden_layers") or 0, text.get("num_kv_shared_layers") or 0
+    for i in range(layers - shared, layers):
+        for part in ("k_proj", "v_proj", "k_norm"):
+            name = f"{DECODER}layers.{i}.self_attn.{part}.weight"
+            for run in deltas:
+                update = run.pop(name, None)
+                if update is not None and bool(update().any()):
+                    raise ValueError(
+                        f"{name}: layer {i} shares an earlier layer's keys and values, so a "
+                        "runtime never reads this tensor, but the adapter changes it"
+                    )
+
+
 def merge_shards(base: str, out: str, deltas: list[dict[str, Callable[[], torch.Tensor]]]) -> None:
     """Write the base's shards to `out`, each decoder tensor that `deltas` (one dict per seed)
     change being the float32 mean of the seeds' merged tensors W + delta_i.
@@ -204,75 +257,133 @@ def merge_shards(base: str, out: str, deltas: list[dict[str, Callable[[], torch.
 # ---- the files beside the weights -------------------------------------------------------
 
 
-def _no_chat_template(src: str, dst: str) -> None:
+def _without_chat_template(src: str, dst: str) -> None:
+    """Copy a JSON file of the base: byte for byte, or rewritten without its `chat_template`."""
     d = _json(src)
-    d.pop("chat_template", None)
+    if "chat_template" not in d:
+        shutil.copyfile(src, dst)
+        return
+    del d["chat_template"]
     with open(dst, "w", encoding="utf-8") as fh:
         json.dump(d, fh, indent=2, ensure_ascii=False)
 
 
-def _model_config(src: str, dst: str, softcap: float) -> None:
-    d = _json(src)
-    for c in (d.get("text_config"), d):
-        if isinstance(c, dict) and "final_logit_softcapping" in c:
-            c["final_logit_softcapping"] = softcap
-    with open(dst, "w", encoding="utf-8") as fh:
-        json.dump(d, fh, indent=2)
-
-
-def _no_paths(v: Any) -> Any:
-    """`v` with every string that is an absolute path cut to its last component."""
-    if isinstance(v, dict):
-        return {k: _no_paths(x) for k, x in v.items()}
-    if isinstance(v, list):
-        return [_no_paths(x) for x in v]
-    if isinstance(v, str) and os.path.isabs(v):
-        return os.path.basename(v.rstrip("/"))
-    return v
-
-
-def training_record(checkpoint: str, cfg: StrandsDeciderConfig, soup_of: int = 1) -> dict[str, Any]:
-    """The run's recipe; a soup's (whose adapters are the runs' stacked, or `soup_of` seeds
-    averaged by the export) gives one run's."""
-    history = _optional_json(os.path.join(checkpoint, "history.json")) or []
-    soup = _optional_json(os.path.join(checkpoint, "soup.json"))
-    run = _optional_json(os.path.join(checkpoint, "train_config.json")) or {}
-
-    n = soup_of * (len(soup["checkpoints"]) if soup else 1)
-
-    def per_run(key: str) -> Any:
-        return run.get(key, getattr(cfg, key))
-
-    record: dict[str, Any] = _no_paths(
-        {
-            "trainer": "strands-decider training.train",
-            "lora": {
-                "rank": per_run("lora_r"),
-                "alpha": per_run("lora_alpha"),
-                "dropout": cfg.lora_dropout,
-                "targets": sorted(cfg.lora_targets),
-            }
-            if cfg.use_lora
-            else None,
-            "expert_lora": {
-                "rank": per_run("expert_lora_r"),
-                "alpha": per_run("expert_lora_alpha"),
-                "targets": ["experts.gate_up_proj", "experts.down_proj"],
-                "router": "frozen",
-            }
-            if cfg.expert_lora
-            else None,
-            "merge": "float32 sum, saved bfloat16",
-            "soup_of": n if soup or n > 1 else None,
-            "optimizer_steps": max((h["step"] for h in history if "step" in h), default=None),
-            "train_config": run or None,
-        }
-    )
-    return record
+def _base_softcaps(config: dict[str, Any]) -> set[float]:
+    """Every `final_logit_softcapping` a base's config.json gives (text_config, top level)."""
+    return {
+        float(c["final_logit_softcapping"])
+        for c in (config.get("text_config"), config)
+        if isinstance(c, dict) and c.get("final_logit_softcapping") is not None
+    }
 
 
 def _optional_json(path: str) -> Any:
     return _json(path) if os.path.exists(path) else None
+
+
+def training_record(paths: list[str], cfg: StrandsDeciderConfig) -> dict[str, Any]:
+    """What trained the checkpoints, for the model card: the LoRA settings of one run and
+    every run's record (training.soup.member_records). `runs` counts the averaged runs: those
+    of a soup checkpoint, whose adapters are its runs' stacked, times the checkpoints here."""
+    run = _optional_json(os.path.join(paths[0], "train_config.json")) or {}
+
+    def per_run(key: str) -> Any:  # a stacked soup's config holds N times the rank and alpha
+        return run.get(key, getattr(cfg, key))
+
+    soups = [_optional_json(os.path.join(p, "soup.json")) for p in paths]
+    return {
+        "lora": {
+            "rank": per_run("lora_r"),
+            "alpha": per_run("lora_alpha"),
+            "dropout": cfg.lora_dropout,
+            "targets": sorted(cfg.lora_targets),
+        }
+        if cfg.use_lora
+        else None,
+        "expert_lora": {"rank": per_run("expert_lora_r"), "alpha": per_run("expert_lora_alpha")}
+        if cfg.expert_lora
+        else None,
+        "runs": sum(len(s["checkpoints"]) if s else 1 for s in soups),
+        "members": [m for p in paths for m in member_records(p)],
+    }
+
+
+def notice(hub_id: str, revision: str, runs: int, names: set[str]) -> str:
+    """The NOTICE: the base and its revision, what changed, and which parts are the base's."""
+    parts = list(dict.fromkeys(part for prefix, part in ENCODERS.items() if _any(names, prefix)))
+    kept = (
+        f"The {', the '.join(parts)} and every other tensor outside the text decoder are "
+        "those of the base model, unchanged."
+        if parts
+        else "Every tensor outside the text decoder is that of the base model, unchanged."
+    )
+    kept = textwrap.fill(kept, 92)
+    averaged = f"\n  The weights are the average of {runs} such merged models." if runs > 1 else ""
+    return f"""Strands Decider decision checkpoint
+
+This checkpoint is a modified copy of {hub_id}, revision
+{revision}.
+
+What changed:
+- Low-rank adapters (LoRA), trained by supervised fine-tuning, are merged into the weights
+  of the text decoder ({DECODER}*).{averaged}
+- A decision readout of 255 codes (readout.safetensors) is in the place of the output layer.
+- The decoder attends prefix-bidirectionally on every layer, with no window.
+
+{kept}
+"""
+
+
+def _any(names: set[str], prefix: str) -> bool:
+    return any(n.startswith(prefix) for n in names)
+
+
+def model_card(hub_id: str, revision: str, temperature: float, record: dict[str, Any]) -> str:
+    """The default README.md: what was trained, from the runs' records."""
+    lines = [
+        "# Strands Decider decision checkpoint",
+        "",
+        f"Base model: `{hub_id}`, revision `{revision}`.",
+        "",
+        "A decision model: it reads a state and a question, and gives one probability for each "
+        "option. Written by `python -m training.export_v2` of strands-decider, in the "
+        "checkpoint layout of its specification (`docs/spec.md`, section 9).",
+        "",
+        "## What was trained",
+        "",
+        "- A token readout of 255 codes, read at the last prompt token, with the `strands-chat` "
+        "prompt and prefix-bidirectional attention.",
+    ]
+    lora, experts = record["lora"], record["expert_lora"]
+    if lora:
+        lines.append(
+            f"- LoRA adapters of rank {lora['rank']}, alpha {lora['alpha']} and dropout "
+            f"{lora['dropout']} on {', '.join(f'`{t}`' for t in lora['targets'])}."
+        )
+    if experts:
+        lines.append(
+            f"- LoRA adapters of rank {experts['rank']}, alpha {experts['alpha']} on the "
+            "gate, up and down projections of every expert. The router was not trained."
+        )
+    lines.append(
+        "- The adapters are added to the base weights in float32 and saved in bfloat16."
+        + (
+            f" The checkpoint is the average, with equal weights, of {record['runs']} runs."
+            if record["runs"] > 1
+            else ""
+        )
+    )
+    lines.append(f"- Temperature: {temperature}.")
+    lines += [
+        "",
+        "| run | seed | training files | optimizer steps | learning rate |",
+        "| --- | --- | --- | --- | --- |",
+    ]
+    for i, m in enumerate(record["members"], 1):
+        files = ", ".join(m.get("train_files") or []) or "-"
+        cells = [m.get("seed"), files, m.get("optimizer_steps"), m.get("lr")]
+        lines.append(f"| {i} | " + " | ".join("-" if c is None else str(c) for c in cells) + " |")
+    return "\n".join(lines) + "\n"
 
 
 def check_no_local_paths(out: str, paths: list[str]) -> None:
@@ -299,15 +410,21 @@ def export_v2(
     base_model: str | None = None,
     max_length_validated: int | None = None,
     unrecorded_base: bool = False,
+    temperature: float | None = None,
+    model_card_path: str | None = None,
 ) -> str:
     """Write `checkpoint`'s decision checkpoint to `out` (absent or empty); returns `out`.
 
-    A list of checkpoints of one recipe (other seeds) writes their soup: each merged, every
-    tensor and the readout averaged with equal weights. Its temperature is 1: calibrate it.
+    A list of checkpoints of one recipe writes their soup: each merged, every tensor and the
+    readout averaged with equal weights.
 
     `base_model` is the base's Hub id for `provenance` (default: the checkpoint's base_model,
     which must then be a Hub id). `max_length_validated` defaults to the run's max_length.
-    `unrecorded_base` skips the base digest check for a run that wrote no base.json."""
+    `unrecorded_base` skips the base digest check for a run that wrote no base.json.
+    `temperature` is the one that decision_config.json holds, for a value fitted on the
+    exported model. The default is the checkpoint's global temperature (its per-type ones are
+    not carried over), and 1 for several checkpoints. `model_card_path` is the README.md to
+    write; the default is `model_card`."""
     paths = [checkpoint] if isinstance(checkpoint, str) else list(checkpoint)
     if not paths:
         raise ValueError("no checkpoints")
@@ -322,15 +439,35 @@ def export_v2(
             "a decision checkpoint is a token_readout checkpoint under prefix_bidir, "
             f"not {cfg.head_type} / {cfg.attention_mode}"
         )
-    if len(paths) == 1 and cfg.temperature_by_kind:
-        raise ValueError(
-            "decision_config.json holds one temperature; this checkpoint has per-kind ones"
-        )
+    if temperature is None:
+        temperature = cfg.temperature if len(paths) == 1 else 1.0
+        if len(paths) == 1 and cfg.temperature_by_kind:
+            print(
+                f"[strands-decider] export: decision_config.json holds one temperature, the "
+                f"checkpoint's global one ({cfg.temperature}). Its per-type temperatures "
+                f"{cfg.temperature_by_kind} are not carried over; pass --temperature for a "
+                "value fitted on the exported model."
+            )
     hub_id = base_model or cfg.base_model
     if not _HUB_ID.fullmatch(hub_id) or os.path.isdir(hub_id):
         raise ValueError(f"{hub_id}: provenance needs the base's Hub id; pass --base-model")
     base = base_dir(cfg.base_model, cfg.base_revision)
+    missing = [n for n in BASE_FILES if not os.path.exists(os.path.join(base, n))]
+    if missing:
+        raise ValueError(
+            f"{base} has no {', '.join(missing)}: a decision checkpoint carries the base's; "
+            "download all of the base's files at this revision"
+        )
     revision = cfg.base_revision or os.path.basename(os.path.normpath(base))
+    # A base with a vision encoder and its projection takes images through them: they are the
+    # base's, unchanged. Its image processor must then size images as the core counts them.
+    names = tensor_names(base)
+    inputs = ["text"]
+    if (_any(names, "model.vision_tower.") or _any(names, "model.vision_embedder.")) and _any(
+        names, "model.embed_vision."
+    ):
+        core.check_image_processor(os.path.join(base, "processor_config.json"))
+        inputs.append("image")
     record = _optional_json(os.path.join(checkpoint, BASE_RECORD))
     if record is not None:
         if record["digest"] != base_digest(base):
@@ -347,10 +484,10 @@ def export_v2(
         "interface": core.INTERFACE,
         "format_version": core.FORMAT_VERSION,
         "prompt": core.CHAT,
-        "inputs": ["text"],
+        "inputs": inputs,
         "codes": list(core.CODES),
         "token_ids": list(core.CODE_TOKEN_IDS),
-        "temperature": cfg.temperature if len(paths) == 1 else 1.0,
+        "temperature": temperature,
         "final_logit_softcapping": cfg.readout_softcap,
         "attention_mode": cfg.attention_mode,
         "pooling": "last",
@@ -358,9 +495,17 @@ def export_v2(
         "provenance": {"base_model": hub_id, "base_revision": revision},
     }
     softcap = core.DecisionConfig.from_dict(decision).final_logit_softcapping  # before any write
+    base_config = _json(os.path.join(base, "config.json"))
+    if _base_softcaps(base_config) - {softcap}:  # config.json is copied as it is
+        raise ValueError(
+            f"{cfg.base_model}'s config.json caps its logits at "
+            f"{sorted(_base_softcaps(base_config))}; the checkpoint's readout_softcap is {softcap}"
+        )
     heads = [load_head_state(p)["proj.weight"].float() for p in paths]
     weight = reduce(torch.add, heads) / len(paths)
     deltas = [adapter_deltas(p, cfg) for p in paths]  # one recipe: the first's settings
+    drop_kv_shared_updates(base_config, deltas)
+    trained = training_record(paths, cfg)
 
     os.makedirs(out, exist_ok=True)
     try:
@@ -370,14 +515,20 @@ def export_v2(
             os.path.join(out, core.readout.READOUT_FILE),
             metadata={"format": "pt"},
         )
-        _model_config(os.path.join(base, "config.json"), os.path.join(out, "config.json"), softcap)
-        for name in BASE_FILES[1:]:
-            if os.path.exists(os.path.join(base, name)):
-                _no_chat_template(os.path.join(base, name), os.path.join(out, name))
+        for name in ("config.json", "tokenizer.json"):  # byte for byte: their sha256 is pinned
+            shutil.copyfile(os.path.join(base, name), os.path.join(out, name))
+        for name in ("processor_config.json", "tokenizer_config.json"):
+            _without_chat_template(os.path.join(base, name), os.path.join(out, name))
         with open(os.path.join(out, core.config.FILENAME), "w", encoding="utf-8") as fh:
             fh.write(json.dumps(decision, indent=2) + "\n")
-        with open(os.path.join(out, "training.json"), "w", encoding="utf-8") as fh:
-            fh.write(json.dumps(training_record(checkpoint, cfg, len(paths)), indent=2) + "\n")
+        shutil.copyfile(LICENSE_FILE, os.path.join(out, "LICENSE"))
+        with open(os.path.join(out, "NOTICE"), "w", encoding="utf-8") as fh:
+            fh.write(notice(hub_id, revision, trained["runs"], names))
+        if model_card_path:
+            shutil.copyfile(model_card_path, os.path.join(out, "README.md"))
+        else:
+            with open(os.path.join(out, "README.md"), "w", encoding="utf-8") as fh:
+                fh.write(model_card(hub_id, revision, temperature, trained))
 
         loaded = core.DecisionConfig.load(out)
         core.Readout.load(out, loaded)  # also: config.json's soft-cap equals decision_config's
@@ -397,6 +548,12 @@ def _cli(
     base_model: str = typer.Option(None, help="The base's Hub id, for provenance."),
     max_length_validated: int = typer.Option(None, help="Default: the run's max_length."),
     unrecorded_base: bool = typer.Option(False, help="Skip the base digest check (no base.json)."),
+    temperature: float = typer.Option(
+        None, help="Default: the checkpoint's global temperature; 1 for several checkpoints."
+    ),
+    model_card: str = typer.Option(
+        None, help="The README.md to write. Default: a card written from the runs' records."
+    ),
 ) -> None:
     """Merge the adapters into the base (or average several merged seeds) and write the
     decision checkpoint layout."""
@@ -406,6 +563,8 @@ def _cli(
         base_model=base_model,
         max_length_validated=max_length_validated,
         unrecorded_base=unrecorded_base,
+        temperature=temperature,
+        model_card_path=model_card,
     )
     print(f"decision checkpoint -> {path}")
 

@@ -1,5 +1,8 @@
 """A soup of N same-recipe checkpoints: one checkpoint whose weights average theirs.
 
+One recipe here means one base, head and adapter layout. The members may differ in what
+trained them: the seed, the data, the learning rate or the steps. `soup.json` records each.
+
 Averaging A and B separately would average nothing meaningful: each seed's adapter is
 only defined up to an invertible r x r mixing (B M^-1, M A), and the seeds start from
 different random A. What is comparable across seeds is each layer's update
@@ -26,6 +29,7 @@ import math
 import os
 import shutil
 from dataclasses import asdict
+from typing import Any
 
 import torch
 import typer
@@ -44,6 +48,8 @@ ADAPTER = "lora/adapter_model.safetensors"
 ADAPTER_CONFIG = "lora/adapter_config.json"
 EXPERTS = expert_lora.FILE
 FITTED = {"temperature", "temperature_by_kind"}  # calibration: may differ between the inputs
+# Run settings that do not change what a checkpoint's weights compute: they may differ too.
+RUN_ONLY = {"attn_split", "head_dropout", "host_embeddings"}
 
 
 def _json(path: str) -> dict:
@@ -115,17 +121,44 @@ def _check_paths(checkpoints: list[str], out: str, replace: bool) -> None:
         raise ValueError(f"--out {out} is not empty; pass --replace to replace its contents")
 
 
+def member_records(checkpoint: str) -> list[dict]:
+    """What trained `checkpoint`, one record per run: a soup's members as its soup.json lists
+    them, else the run's own seed, training files (names only), steps and learning rate."""
+
+    def read(name: str) -> Any:
+        path = os.path.join(checkpoint, name)
+        if not os.path.exists(path):
+            return None
+        with open(path, encoding="utf-8") as fh:
+            return json.load(fh)
+
+    members: list[dict] | None = (read("soup.json") or {}).get("members")
+    if members is not None:
+        return members
+    run, history = read("train_config.json") or {}, read("history.json") or []
+    return [
+        {
+            "seed": run.get("seed"),
+            "train_files": [os.path.basename(f) for f in run.get("train_files") or []],
+            "optimizer_steps": max((h["step"] for h in history if "step" in h), default=None),
+            "lr": run.get("lr"),
+        }
+    ]
+
+
 def check_one_recipe(checkpoints: list[str]) -> tuple[dict, dict | None]:
-    """Refuse checkpoints that are not seeds of one recipe (same config beyond the fitted
-    temperatures, base revision, base files and plain-LoRA adapter config); return the first
-    one's config (its base revision pinned) and adapter config (None without LoRA)."""
+    """Refuse checkpoints whose weights cannot be averaged: the same config beyond the fitted
+    temperatures and the run settings (RUN_ONLY), the same base revision and base files, and
+    the same plain-LoRA adapter config. Return the first one's config (its base revision
+    pinned) and adapter config (None without LoRA)."""
     # from_json drops stale slot-era keys (num_slots, head_type="pointer", head_hidden,
     # head_init, kl_frozen_weight) that pre-PR and v1-2610 pointer checkpoints still carry,
     # and rejects head_type="slot" cleanly so a slot-era input stops here rather than
     # halfway through, after soup has written an adapter file.
     typed = [StrandsDeciderConfig.from_json(config_path(c)) for c in checkpoints]
     cfgs = [asdict(c) for c in typed]
-    recipe = [{k: v for k, v in c.items() if k not in FITTED | {"base_revision"}} for c in cfgs]
+    free = FITTED | RUN_ONLY | {"base_revision"}
+    recipe = [{k: v for k, v in c.items() if k not in free} for c in cfgs]
     if any(r != recipe[0] for r in recipe):
         raise ValueError(
             "the checkpoints' configs differ beyond their temperatures: not one recipe"
@@ -233,7 +266,12 @@ def soup(checkpoints: list[str], out: str, replace: bool = False) -> str:
         }:
             shutil.copy2(src, os.path.join(out, f))
     with open(os.path.join(out, "soup.json"), "w", encoding="utf-8") as fh:
-        json.dump({"checkpoints": [os.path.abspath(c) for c in checkpoints]}, fh, indent=2)
+        members = [m for c in checkpoints for m in member_records(c)]
+        json.dump(
+            {"checkpoints": [os.path.abspath(c) for c in checkpoints], "members": members},
+            fh,
+            indent=2,
+        )
     return out
 
 
@@ -244,7 +282,7 @@ console = Console()
 
 
 def _cli(
-    checkpoints: list[str] = typer.Argument(..., help="Checkpoints of one recipe (other seeds)."),
+    checkpoints: list[str] = typer.Argument(..., help="Checkpoints of one recipe."),
     out: str = typer.Option(
         ..., "--out", help="Directory for the souped checkpoint: absent or empty."
     ),
