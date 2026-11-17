@@ -68,7 +68,7 @@ The server passes each image file's sha256 as vLLM's per-item id, so vLLM's mult
 - sampling that would change the answer: `temperature` other than 1.0, `top_k` between 1 and 254, `top_p` below 1, `min_p` above 0, any repetition, presence or frequency penalty, a `logit_bias`, `bad_words` or structured outputs;
 - a request without `allowed_token_ids` whose `logprobs` is below 255: its top-n would rank all 255 codes and could leave out some of the question's own;
 - images for a checkpoint whose `inputs` lack `"image"`;
-- more than 4 images, media other than images, and an image whose tokens do not lie inside the state `[1, S)`;
+- media other than images, and an image whose tokens do not lie inside the state `[1, S)` (the number of images is not checked: the prompt's length bounds it);
 - images on an engine that `strands-decider-vllm serve` did not start. vLLM's own endpoints let a client name an image by an id of its choosing (`multi_modal_uuids`, or the pre-hashed `features` of `/inference/v1/generate`), which vLLM then uses as the image's cache key. With it, two different images could share cached state. The server marks its engines in vLLM's `additional_config` under `strands_decider_server`. The mark is trust at the operator's level, not a security boundary: it says that every request reaching the engine names each image by its file's sha256. An operator who sets it for `vllm serve` (`--additional-config`) lets that server's clients make two images share cached state.
 
 **Refused at startup.** The plugin refuses to start with settings under which it would serve the mask incorrectly, or under which one request could stop the engine, and names each setting:
@@ -121,7 +121,7 @@ CUDA_VISIBLE_DEVICES=0 strands-decider-vllm serve /path/to/checkpoint --port 800
 
 `python -m strands_decider_vllm serve ...` does the same. Run it with the vLLM environment's `bin` directory on `PATH`, because vLLM's JIT kernel builds need its `ninja`. The server binds 127.0.0.1 by default. vLLM's internal sockets stay on loopback whatever `--host` is: it sets `VLLM_HOST_IP`, `GLOO_SOCKET_IFNAME` and `NCCL_SOCKET_IFNAME` unless they are set. It has no authentication. Reach it from another machine through an SSH port forward. To expose it beyond the machine, put the deployment's own authentication in front of it: SageMaker's IAM-signed endpoint (the server answers SageMaker's `/invocations` and `/ping`), or an authenticating proxy. A `--host` other than loopback starts with a warning that says so. Behind SageMaker, keep `--limit-concurrency` above the most invocations an instance receives at once, with room for `/ping`: past the cap uvicorn answers every new connection with 503, `/ping` included, and SageMaker takes an instance whose `/ping` fails as unhealthy. Set it to at least twice the instance's expected peak of concurrent invocations, and not below the default 128. A higher cap costs little memory, because each connection buffers at most 1 MiB of body outside the `--max-buffered-mb` budget.
 
-It starts vLLM with the flags of the next section for the checkpoint's layout: the plugin's architecture, the override that turns the base's "vision" mode off, at most 4 images and no video or audio per prompt (no images for an `inputs: ["text"]` checkpoint), `sha256` prefix-cache hashes, and a step budget of `--max-model-len` tokens. For a Hub repo it resolves the revision to a commit once and reads every file, and the weights, at that commit. Its flags:
+It starts vLLM with the flags of the next section for the checkpoint's layout: the plugin's architecture, the override that turns the base's "vision" mode off, an image limit of `--max-model-len`, which the prompt's length reaches first, and no video or audio per prompt (no images for an `inputs: ["text"]` checkpoint), `sha256` prefix-cache hashes, and a step budget of `--max-model-len` tokens. For a Hub repo it resolves the revision to a commit once and reads every file, and the weights, at that commit. Its flags:
 
 | Flag | Default | |
 |---|---|---|
@@ -137,7 +137,7 @@ It starts vLLM with the flags of the next section for the checkpoint's layout: t
 | `--block-size` | vLLM's | the KV-cache block size |
 | `--dtype` | `bfloat16` | `float32` is accepted on a CPU build of vLLM only, for tests |
 | `--enforce-eager` | off | no CUDA graphs |
-| `--max-body-mb` | 93 (8 for a text-only checkpoint) | larger request bodies get HTTP 413, by `Content-Length` before reading and by size while reading. The default holds four 16 MiB image files in base64 (more than a 4,096 × 4,096 photo takes as JPEG or WebP) and 8 MiB of text |
+| `--max-body-mb` | 93 (8 for a text-only checkpoint) | larger request bodies get HTTP 413, by `Content-Length` before reading and by size while reading. The default holds four 16 MiB image files in base64 (more than a 4,096 × 4,096 photo takes as JPEG or WebP) and 8 MiB of text; it limits bytes, not images, so more images fit when they are smaller |
 | `--max-buffered-mb` | 256, or `--max-body-mb` if larger | the most body bytes that requests over 1 MiB hold at once. Such a request reserves its size before its body is read, waiting in arrival order until it fits, and gives it back once its images are decoded and its files dropped, before the engine runs. So buffered bodies take at most this much plus 1 MiB per connection. A client that stalls or disconnects gives it back (next row) |
 | `--body-read-timeout` | 30 s | a body that goes this long without a chunk arriving gets HTTP 408, and one that waits this long for `--max-buffered-mb` gets HTTP 503 with `Retry-After`; either way it holds no budget afterwards, so stalled connections cannot hold the budget. A client that disconnects mid-body gives its reservation back at once. A client that keeps sending a chunk within each timeout keeps its reservation: the deployment's authentication bounds who can do that |
 | `--limit-concurrency` | 128 | uvicorn's limit on open connections and requests; past it uvicorn answers HTTP 503, to `/ping` and `/health` too (behind SageMaker, see above) |
@@ -165,7 +165,7 @@ Parsing and rendering run on one lane of `--preprocess-workers` threads and imag
 }
 ```
 
-`images` is optional: at most 4 base64 PNG, JPEG, WebP or GIF files (a `data:image/...;base64,` prefix is allowed), each a file of at most 16 MiB and 4096 × 4096 pixels (the core library's limits). The response is v1's, plus `latency_ms` and, in `usage`, `cached_tokens`, the prompt tokens served from vLLM's prefix cache over all questions. Its shape (the numbers are illustrative):
+`images` is optional: base64 PNG, JPEG, WebP or GIF files (a `data:image/...;base64,` prefix is allowed), each a file of at most 16 MiB and 4096 × 4096 pixels (the core library's limits). Their number is not limited: the prompt's length (`--max-length`) bounds how many fit, and the body limit how many bytes they take. The response is v1's, plus `latency_ms` and, in `usage`, `cached_tokens`, the prompt tokens served from vLLM's prefix cache over all questions. Its shape (the numbers are illustrative):
 
 ```json
 {"model": "strands-decider",
@@ -180,7 +180,6 @@ These are refused with HTTP 422 and `{"detail": "..."}`, as v1's server refuses 
 
 - a body that is not a JSON object;
 - a malformed request or question, and any `audio` but null;
-- more than 4 images;
 - an image that is not base64, not one of the four formats, too large, or not decodable, or whose decoded size is neither its header's nor its transpose;
 - images for a text-only checkpoint (`this checkpoint does not take images: its decision_config.json inputs are ["text"]`), before any image is decoded;
 - a prompt longer than `--max-length`;
@@ -341,7 +340,7 @@ It fetches the four base files it needs (`config.json`, `processor_config.json`,
 - concurrent requests succeed on a small KV cache;
 - requests that are preempted and resumed mid-generation, with the `max_tokens` check bypassed, do not stop the engine;
 - each refused setting stops the server at startup with the plugin's message;
-- with `MM_MODEL` (the checkpoint in the multimodal layout) and `MM_TEXT_MODEL` (one with `inputs: ["text"]`), a second phase: `strands-decider-vllm serve` with text, one, two and four images, the refusals, and the image-content cache test; the text-only server's refusal of images; and `vllm serve` on the multimodal layout answering `MODEL_DIR`'s text rows alike.
+- with `MM_MODEL` (the checkpoint in the multimodal layout) and `MM_TEXT_MODEL` (one with `inputs: ["text"]`), a second phase: `strands-decider-vllm serve` with text, one, two, four and five images, the refusals, and the image-content cache test; the text-only server's refusal of images; and `vllm serve` on the multimodal layout answering `MODEL_DIR`'s text rows alike.
 
 On one 8-GPU H100 node, with E2B as the decoder checkpoint and in both multimodal checkpoints, `run.sh` passed every check in 20.5 minutes.
 

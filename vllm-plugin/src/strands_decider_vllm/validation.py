@@ -16,8 +16,6 @@ from . import PREFIX_END_KEY
 
 #: The number of answer codes of every checkpoint: the readout's rows.
 N_CODES = 255
-#: At most this many images in one request, as v1's image engine and the core library allow.
-MAX_IMAGES = 4
 
 
 class RequestRefused(ValueError):
@@ -134,9 +132,9 @@ def check_images(
     ``identifier`` and ``mm_position``), after vLLM has expanded each image's placeholder. Refused: images for a
     checkpoint whose ``inputs`` lack "image" (``takes_images``); images on an engine that the plugin's server did not
     start (``accepts_images``), because vLLM's own endpoints let a client name an image by an id of its choosing, which
-    vLLM then uses as the image's cache key; any modality other than an image; more than :data:`MAX_IMAGES` images;
-    and an image whose tokens do not lie inside the state ``[1, S)``. Image tokens are state tokens: the mask makes
-    them bidirectional with the rest of the state, and every question sees them.
+    vLLM then uses as the image's cache key; any modality other than an image; and an image whose tokens do not lie
+    inside the state ``[1, S)``. Their number is not checked: the prompt's length bounds it. Image tokens are state
+    tokens: the mask makes them bidirectional with the rest of the state, and every question sees them.
     """
     if not features:
         return ()
@@ -154,10 +152,6 @@ def check_images(
     other = sorted({str(f.modality) for f in features if f.modality != "image"})
     if other:
         raise _refuse(f"only image input is supported, not {', '.join(other)}", "multi_modal_data")
-    if len(features) > MAX_IMAGES:
-        raise _refuse(
-            f"{len(features)} images; a request takes at most {MAX_IMAGES}", "images", len(features)
-        )
     spans = []
     for i, f in enumerate(features):
         offset, length = int(f.mm_position.offset), int(f.mm_position.length)

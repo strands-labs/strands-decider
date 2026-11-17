@@ -395,6 +395,9 @@ def test_http_text_and_image_requests_and_health(client):
             assert r.status_code == 200 and r.json()["inputs"] == ["text", "image"]
         st, out = post(c, {"state": "x", "questions": QUESTIONS})
         assert st == 200 and "latency_ms" in out
+        # Five images are answered: their number is not checked, the prompt's length bounds it.
+        st, out = post(c, {"state": "x", "images": [b64(png(8, 8))] * 5, "questions": QUESTIONS})
+        assert st == 200, out
         st, out = post(c, {"state": "x", "images": [b64(png(50, 50))], "questions": QUESTIONS})
         assert st == 200 and out["answers"]["square"]["noul"] == pytest.approx(
             math.exp(-1) / (1 + math.exp(-1)), abs=1e-4
@@ -410,10 +413,6 @@ def test_http_text_and_image_requests_and_health(client):
 @pytest.mark.parametrize(
     "body, match",
     [
-        (
-            {"state": "x", "images": [b64(png(8, 8))] * 5, "questions": QUESTIONS},
-            "5 images; this server takes at most 4",
-        ),
         ({"state": "x", "images": ["@@@"], "questions": QUESTIONS}, "image is not valid base64"),
         (
             {"state": "x", "images": [b64(b"GIF89a" + b"\x00" * 4)], "questions": QUESTIONS},
@@ -537,7 +536,7 @@ def test_a_body_over_the_limit_is_413_whether_or_not_it_declares_its_length(clie
 
 
 def test_the_default_body_limit_holds_four_images_and_the_text():
-    four = server.MAX_IMAGES * server.base64_size(server.IMAGE_FILE_BYTES)
+    four = server.BODY_IMAGE_FILES * server.base64_size(server.IMAGE_FILE_BYTES)
     assert server.default_max_body(True) == server.TEXT_BYTES + four
     assert round(server.default_max_body(True) / 2**20) == 93
     assert server.default_max_body(False) == server.TEXT_BYTES
@@ -925,7 +924,8 @@ def args(**over):
     return SimpleNamespace(**a)
 
 
-@pytest.mark.parametrize("inputs, image_limit", [(("text", "image"), 4), (("text",), 0)])
+# No count of images: max_model_len, which the prompt's length reaches first.
+@pytest.mark.parametrize("inputs, image_limit", [(("text", "image"), 8193), (("text",), 0)])
 def test_engine_args_carry_the_plugins_flags(checkpoint, inputs, image_limit):
     ckpt, _ = checkpoint(inputs=inputs)
     e = server.engine_args(ckpt, args(), 8193)

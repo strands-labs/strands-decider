@@ -224,7 +224,6 @@ def test_an_image_request_gets_digests_over_its_images(wrapped, arch):
         (Policy(False, True), [image("a")], 'lacks "image"'),
         (Policy(True, False), [image("a")], "strands-decider-vllm serve"),
         (SERVER, [image("a", offset=5, length=6)], "inside the state"),  # ends at 11 > S = 9
-        (SERVER, [image(str(i), offset=1 + i, length=1) for i in range(5)], "at most 4"),
         (SERVER, [SimpleNamespace(**{**vars(image("a")), "modality": "audio"})], "not audio"),
     ],
 )
@@ -236,6 +235,13 @@ def test_bad_image_requests_are_refused_before_vllm_builds_them(
         wrapped(core, engine_request(prefix_end=9, mm_features=features))
     assert core.calls == 0 and not hashing._PENDING
     assert err.value.parameter in ("images", "multi_modal_data")
+
+
+def test_any_number_of_images_inside_the_state_is_taken(wrapped):
+    core = FakeEngineCore([ARCH_MULTIMODAL], policy=SERVER)
+    five = [image(str(i), offset=1 + i, length=1) for i in range(5)]
+    wrapped(core, engine_request(prefix_end=9, mm_features=five))
+    assert core.calls == 1
 
 
 def test_the_boundary_is_checked_before_the_images(wrapped):

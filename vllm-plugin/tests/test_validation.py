@@ -10,7 +10,6 @@ from types import SimpleNamespace
 import pytest
 
 from strands_decider_vllm.validation import (
-    MAX_IMAGES,
     N_CODES,
     RequestRefused,
     check_images,
@@ -247,9 +246,6 @@ def test_other_media_are_refused(modality):
         images([feature(4), feature(300, modality=modality)], s=900)
 
 
-def test_more_than_four_images_are_refused():
-    fs = [feature(4 + 260 * i) for i in range(MAX_IMAGES + 1)]
-    with pytest.raises(RequestRefused, match="5 images; a request takes at most 4") as err:
-        images(fs, s=2000)
-    assert err.value.value == 5
-    assert len(images(fs[:MAX_IMAGES], s=2000)) == MAX_IMAGES
+def test_any_number_of_images_inside_the_state_is_taken():
+    fs = [feature(4 + 260 * i) for i in range(8)]
+    assert len(images(fs, s=2200)) == 8

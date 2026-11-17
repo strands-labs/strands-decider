@@ -1,8 +1,8 @@
 """GPU checks of the plugin's server (``strands-decider-vllm serve``) against a running instance. Needs Pillow.
 
-- ``images``: text and image requests are answered in v1's format; one image, two images and four images; refusals
-  (five images, bad base64, a file that is not an image, a body that is not JSON) get HTTP 422 and the server keeps
-  serving; the image-content cache test, on exact counts of cached tokens: after a request with one photo, a request
+- ``images``: text and image requests are answered in v1's format; one, two, four and five images (their number is
+  not checked); refusals (bad base64, a file that is not an image, a body that is not JSON) get HTTP 422 and the server
+  keeps serving; the image-content cache test, on exact counts of cached tokens: after a request with one photo, a request
   with a different photo of the same size, the same text and the same question reuses no cached token, a further
   question on the first photo reuses its state's full blocks, and repeats reuse all but their last token's;
   ``--text-only URL`` checks that a server of a text-only checkpoint refuses images with the
@@ -126,7 +126,7 @@ def scenario_images(a):
         st == 200 and set(r["answers"]) == set(QUESTIONS),
         f"text request on the image checkpoint: HTTP {st}",
     )
-    for n in (1, 2, 4):
+    for n in (1, 2, 4, 5):
         body = {
             "state": f"{n} photos.",
             "images": [photo(100 + i, 320 + 48 * i, 240) for i in range(n)],
@@ -143,11 +143,6 @@ def scenario_images(a):
         )
     good = {"state": "x", "images": [photo(1)], "questions": {"busy": QUESTIONS["busy"]}}
     for name, body, want in [
-        (
-            "five images",
-            {"state": "x", "images": [photo(i, 96, 96) for i in range(5)], "questions": QUESTIONS},
-            "5 images; this server takes at most 4",
-        ),
         (
             "bad base64",
             {"state": "x", "images": ["@@@"], "questions": QUESTIONS},

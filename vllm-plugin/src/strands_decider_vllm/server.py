@@ -65,7 +65,6 @@ IMAGE_SOFT = "<|image|>"
 #: The side, in pixels, of one soft token's patch group (pooling_kernel_size x patch_size, specification 3.3).
 SOFT_TOKEN_SIDE = 48
 IMAGE_FORMATS = ("PNG", "JPEG", "WEBP", "GIF")
-MAX_IMAGES = 4
 LOOPBACK = ("127.0.0.1", "::1", "localhost")
 #: The core library this server is written against, as pip writes it (pyproject.toml's ``serve`` extra).
 CORE_REQUIREMENT = "strands-decider>=0.3.1.dev0,<0.5"
@@ -81,10 +80,12 @@ CORE_NAMES = (
     "resize_image",
 )
 
-#: The default body limit is four image files of IMAGE_FILE_BYTES each, base64-encoded, plus TEXT_BYTES of text and
-#: JSON (93 MiB). 16 MiB, the core's cap on an image file (MAX_IMAGE_BYTES), holds a photo of its largest size
-#: (4,096 x 4,096 pixels) as JPEG or WebP.
+#: The default body limit has room for BODY_IMAGE_FILES image files of IMAGE_FILE_BYTES each, base64-encoded, plus
+#: TEXT_BYTES of text and JSON (93 MiB). 16 MiB, the core's cap on an image file (MAX_IMAGE_BYTES), holds a photo of
+#: its largest size (4,096 x 4,096 pixels) as JPEG or WebP. It limits bytes, not images: the number of images is not
+#: checked, the prompt's length bounds it, and smaller files fit more of them under the same limit.
 IMAGE_FILE_BYTES = 16 * 2**20
+BODY_IMAGE_FILES = 4
 TEXT_BYTES = 8 * 2**20
 #: Bodies up to this size are read at once. A larger one first reserves its size from the server's budget of
 #: buffered body bytes (``--max-buffered-mb``), and holds it until its images are decoded and its files dropped.
@@ -102,8 +103,9 @@ def base64_size(n: int) -> int:
 
 
 def default_max_body(takes_images: bool) -> int:
-    """The body limit for a checkpoint: the text budget, plus four image files when it takes images (93 MiB)."""
-    return TEXT_BYTES + (MAX_IMAGES * base64_size(IMAGE_FILE_BYTES) if takes_images else 0)
+    """The body limit for a checkpoint: the text budget, plus room for four of the largest image files when it takes
+    images (93 MiB)."""
+    return TEXT_BYTES + (BODY_IMAGE_FILES * base64_size(IMAGE_FILE_BYTES) if takes_images else 0)
 
 
 class Refused(ValueError):
@@ -756,7 +758,9 @@ def engine_args(checkpoint: Checkpoint, a: Any, max_model_len: int) -> Any:
             "architectures": [arch],
             "text_config": {"use_bidirectional_attention": None},
         }
-        limits = {"image": MAX_IMAGES if takes_images else 0, "video": 0, "audio": 0}
+        # No count of images: each takes at least one of the prompt's tokens, so max_model_len never binds before the
+        # prompt's length does. vLLM's profiling caps the images per prompt at max_model_len over an image's most tokens.
+        limits = {"image": max_model_len if takes_images else 0, "video": 0, "audio": 0}
     else:
         overrides = {"architectures": [arch], "use_bidirectional_attention": None}
         limits = None
