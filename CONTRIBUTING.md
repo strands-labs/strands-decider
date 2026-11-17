@@ -59,7 +59,7 @@ GitHub provides additional document on [forking a repository](https://help.githu
 
 ## Development
 
-The package needs Python 3.10 or later. Install it with the `dev` extra, which adds pytest, ruff, pre-commit and commitizen. Training and the data build need the `train` extra as well ([training/README.md](training/README.md#setup)):
+The package needs Python 3.11 or later. Install it with the `dev` extra, which adds pytest, ruff, pre-commit and commitizen. Training and the data build need the `train` extra as well ([training/README.md](training/README.md#setup)):
 
 ```bash
 python3 -m venv .venv
@@ -72,7 +72,7 @@ ruff check .               # the whole tree, as CI does
 mypy ./src                 # the published package only, as CI does
 ```
 
-On an Apple-silicon Mac, `pip install -e ".[dev,mlx]"` also runs `tests/test_mlx_engine.py`, which skips elsewhere, CI included. On Linux without an NVIDIA GPU, install the CPU build of torch first: `pip install torch --index-url https://download.pytorch.org/whl/cpu`. The suite downloads nothing from Hugging Face. CI runs `pytest -q` with `HF_HUB_OFFLINE=1` on Python 3.10 and 3.12; it does not run the distributed tests, so run those yourself. A separate CI job runs `ruff check .` over the whole tree and `mypy ./src`, with the latest ruff that `pyproject.toml` admits; both must pass.
+On an Apple-silicon Mac, `pip install -e ".[dev,mlx]"` also runs `tests/test_mlx_engine.py`, which skips elsewhere, CI included. On Linux without an NVIDIA GPU, install the CPU build of torch first: `pip install torch --index-url https://download.pytorch.org/whl/cpu`. The suite downloads nothing from Hugging Face. CI runs `pytest -q` with `HF_HUB_OFFLINE=1` on Python 3.11 and 3.12; it does not run the distributed tests, so run those yourself. A separate CI job runs `ruff check .` over the whole tree and `mypy ./src`, with the latest ruff that `pyproject.toml` admits; both must pass.
 
 No test checks the documents. If you move a file or rename a heading, search the markdown files and the code comments for the old path or heading and fix every reference.
 
