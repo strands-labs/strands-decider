@@ -435,3 +435,86 @@ def test_the_temperature_the_model_card_and_the_refusals(tmp_path, capsys):
     with pytest.raises(ValueError, match="has no processor_config"):
         export_v2(str(run), str(tmp_path / "d"), base_model=HUB_ID)
     assert not (tmp_path / "c").exists() and not (tmp_path / "d").exists()
+
+
+# ---- a decoder that is already merged ------------------------------------------------------
+
+
+def test_a_merged_decoder_exports_as_the_checkpoint_of_its_adapters(tmp_path, monkeypatch):
+    """`--merged-decoder` takes the decoder's tensors under their own names, without the
+    KV-shared layers' k_proj, v_proj and k_norm, and the readout. From the weights that the
+    adapter export wrote, it writes the same checkpoint."""
+    from typer.testing import CliRunner
+
+    import training.export_v2 as X
+
+    base = tmp_path / "base"
+    _base(base, gemma4_tokenizer_path())
+    run = _seed_run(tmp_path, base, "run", 1)
+    one = tmp_path / "one"
+    export_v2(str(run), str(one), base_model=HUB_ID, max_length_validated=512)
+
+    shared = X.kv_shared_names(json.loads((base / "config.json").read_text()))
+    decoder = {
+        k[len(DECODER) :]: v
+        for k, v in _tensors(one).items()
+        if k.startswith(DECODER) and k not in shared
+    }
+    assert shared and len(decoder) < sum(k.startswith(DECODER) for k in _tensors(one))
+    card = tmp_path / "card.md"
+    card.write_text("# A model\n", encoding="utf-8")
+    monkeypatch.setattr(X, "base_dir", lambda model, revision: str(base))  # the Hub cache
+    kw = dict(
+        base_model=HUB_ID,
+        base_revision=REVISION,
+        max_length_validated=512,
+        model_card_path=str(card),
+    )
+
+    def merged(name, tensors, readout=None):
+        d = tmp_path / name
+        d.mkdir()
+        save_file(tensors, str(d / "model.safetensors"))
+        save_file(
+            {"weight": _readout(one) if readout is None else readout},
+            str(d / "readout.safetensors"),
+        )
+        return str(d)
+
+    two = tmp_path / "two"
+    X.export_merged(merged("m", decoder), str(two), **kw)
+    assert set(os.listdir(two)) == LAYOUT
+    a, b = _tensors(one), _tensors(two)
+    assert a.keys() == b.keys() and all(torch.equal(a[k], b[k]) for k in a)
+    assert torch.equal(_readout(one), _readout(two))
+    config = lambda d: json.loads((d / "decision_config.json").read_text())  # noqa: E731
+    assert config(one) == config(two)
+    assert "fine-tuned" in (two / "NOTICE").read_text()
+    assert (two / "README.md").read_bytes() == card.read_bytes()
+
+    # The command line: the same export, and a refusal without the flags it needs.
+    app = typer.Typer()
+    app.command()(X._cli)
+    flags = ["--base-model", HUB_ID, "--base-revision", REVISION, "--model-card", str(card)]
+    args = [str(tmp_path / "cli"), "--merged-decoder", str(tmp_path / "m"), *flags]
+    assert CliRunner().invoke(app, args).exit_code != 0  # no --max-length-validated
+    res = CliRunner().invoke(app, [*args, "--max-length-validated", "512", "--temperature", "1.5"])
+    assert res.exit_code == 0, res.output
+    assert _loads(tmp_path / "cli").temperature == 1.5
+
+    # Every name and shape is checked against the base, and no output is left behind.
+    name = next(k for k in decoder if k.endswith("q_proj.weight"))
+    cases = {
+        "missing": ({k: v for k, v in decoder.items() if k != name}, None, "1 tensors missing"),
+        "extra": (
+            {**decoder, "layers.99.x": decoder[name].clone()},
+            None,
+            "1 that the base does not have",
+        ),
+        "shape": ({**decoder, name: decoder[name][:1]}, None, "the merged decoder has"),
+        "readout": (decoder, _readout(one)[:3], "the readout's `weight` must be"),
+    }
+    for case, (tensors, readout, message) in cases.items():
+        with pytest.raises(ValueError, match=message):
+            X.export_merged(merged(case, tensors, readout), str(tmp_path / f"out-{case}"), **kw)
+        assert not (tmp_path / f"out-{case}").exists()

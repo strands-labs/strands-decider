@@ -252,7 +252,11 @@ export checks the base on disk against the `base.json` digest the run wrote
 (`--unrecorded-base` for a run without one), reads its output back with
 `strands_decider.core`, and deletes it if a check fails. Several checkpoints of one recipe
 before `<out>` export their soup: each merged, every tensor and the readout averaged with
-equal weights, temperature 1. The runs may differ in seed, data, learning rate or steps. The
+equal weights, temperature 1. The runs may differ in seed, data, learning rate or steps.
+A checkpoint that another trainer wrote with its fine-tuning already merged exports with
+`--merged-decoder <dir>` in place of the checkpoints: the directory holds the text decoder's
+tensors under the base's names without `model.language_model.`, and `readout.safetensors`.
+It needs `--base-model`, `--base-revision`, `--max-length-validated` and `--model-card`. The
 export does not write `golden_vectors.jsonl`. Serve the checkpoint with the vLLM runtime,
 `strands-decider-vllm`. Set `base_revision` in the training config when the base is a local
 directory.

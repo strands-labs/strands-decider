@@ -8,6 +8,16 @@ included, averaged with equal weights in float32 and written in bf16. A soup of 
 single export. (A soup checkpoint written by training.soup, whose stacked adapters average
 the runs' updates, exports as one checkpoint.)
 
+A checkpoint that another trainer wrote with its fine-tuning already merged has no adapters
+to merge. `--merged-decoder DIR` exports one (`export_merged`):
+
+    python -m training.export_v2 <out> --merged-decoder DIR --base-model <hub id> \
+        --base-revision <commit> --max-length-validated N --model-card card.md
+
+DIR holds the text decoder's tensors as safetensors, under the base's names without
+`model.language_model.`, and `readout.safetensors` (`weight`, [255, hidden]). Every name and
+shape is checked against the base. The encoders and the other files are the base's.
+
 The output is docs/spec.md's checkpoint layout (section 9): the base model's own multimodal
 checkpoint with the fine-tuning merged in, and this interface's files beside it.
 
@@ -204,28 +214,44 @@ def drop_kv_shared_updates(
     earlier layer's keys and values, so no runtime reads their own. transformers builds no
     such modules for those layers, and an adapter has nothing to train there. An update that
     is not zero means the run trained weights that a runtime never uses."""
+    for name in sorted(kv_shared_names(base_config)):
+        for run in deltas:
+            update = run.pop(name, None)
+            if update is not None and bool(update().any()):
+                raise ValueError(
+                    f"{name}: this layer shares an earlier layer's keys and values, so a "
+                    "runtime never reads this tensor, but the adapter changes it"
+                )
+
+
+def kv_shared_names(base_config: dict[str, Any]) -> set[str]:
+    """The base's names for the KV-shared layers' own k_proj, v_proj and k_norm."""
     text = base_config.get("text_config")
     text = text if isinstance(text, dict) else base_config
     layers, shared = text.get("num_hidden_layers") or 0, text.get("num_kv_shared_layers") or 0
-    for i in range(layers - shared, layers):
-        for part in ("k_proj", "v_proj", "k_norm"):
-            name = f"{DECODER}layers.{i}.self_attn.{part}.weight"
-            for run in deltas:
-                update = run.pop(name, None)
-                if update is not None and bool(update().any()):
-                    raise ValueError(
-                        f"{name}: layer {i} shares an earlier layer's keys and values, so a "
-                        "runtime never reads this tensor, but the adapter changes it"
-                    )
+    return {
+        f"{DECODER}layers.{i}.self_attn.{part}.weight"
+        for i in range(layers - shared, layers)
+        for part in ("k_proj", "v_proj", "k_norm")
+    }
 
 
-def merge_shards(base: str, out: str, deltas: list[dict[str, Callable[[], torch.Tensor]]]) -> None:
+def merge_shards(
+    base: str,
+    out: str,
+    deltas: list[dict[str, Callable[[], torch.Tensor]]],
+    replace: dict[str, Callable[[], torch.Tensor]] | None = None,
+) -> None:
     """Write the base's shards to `out`, each decoder tensor that `deltas` (one dict per seed)
     change being the float32 mean of the seeds' merged tensors W + delta_i.
 
     That mean is W + mean(delta_i); it is summed here as merged tensors, one tensor and one
     seed's update at a time, so that it is exactly the float32 average of the merged models
-    (and one seed's export is W + delta, as before)."""
+    (and one seed's export is W + delta, as before).
+
+    A tensor that `replace` names is written as `replace` gives it (a decoder merged
+    elsewhere), after a check of its shape against the base's."""
+    replace = dict(replace or {})
     left = {name for d in deltas for name in d}
     for shard in _shards(base):
         tensors = {}
@@ -233,6 +259,14 @@ def merge_shards(base: str, out: str, deltas: list[dict[str, Callable[[], torch.
             metadata = f.metadata()
             for name in f.keys():
                 t = f.get_tensor(name)
+                if name in replace:
+                    new = replace.pop(name)()
+                    if new.shape != t.shape:
+                        raise ValueError(
+                            f"{name}: the merged decoder has {tuple(new.shape)}, "
+                            f"the base {tuple(t.shape)}"
+                        )
+                    t = new
                 if name in left:
                     left.discard(name)
                     w = t.float()
@@ -247,8 +281,9 @@ def merge_shards(base: str, out: str, deltas: list[dict[str, Callable[[], torch.
                     t = t.to(torch.bfloat16)
                 tensors[name] = t.contiguous()
         save_file(tensors, os.path.join(out, shard), metadata=metadata)
-    if left:
-        raise ValueError(f"adapter updates for tensors the base does not have: {sorted(left)[:3]}")
+    if left or replace:
+        extra = sorted(left | set(replace))[:3]
+        raise ValueError(f"updates for tensors the base does not have: {extra}")
     index = os.path.join(base, "model.safetensors.index.json")
     if os.path.exists(index):
         shutil.copy2(index, out)
@@ -308,7 +343,16 @@ def training_record(paths: list[str], cfg: StrandsDeciderConfig) -> dict[str, An
     }
 
 
-def notice(hub_id: str, revision: str, runs: int, names: set[str]) -> str:
+ADAPTERS_MERGED = (
+    "Low-rank adapters (LoRA), trained by supervised fine-tuning, are merged into the weights\n"
+    f"  of the text decoder ({DECODER}*)."
+)
+DECODER_FINE_TUNED = f"The weights of the text decoder ({DECODER}*) are fine-tuned."
+
+
+def notice(
+    hub_id: str, revision: str, runs: int, names: set[str], changed: str = ADAPTERS_MERGED
+) -> str:
     """The NOTICE: the base and its revision, what changed, and which parts are the base's."""
     parts = list(dict.fromkeys(part for prefix, part in ENCODERS.items() if _any(names, prefix)))
     kept = (
@@ -325,8 +369,7 @@ This checkpoint is a modified copy of {hub_id}, revision
 {revision}.
 
 What changed:
-- Low-rank adapters (LoRA), trained by supervised fine-tuning, are merged into the weights
-  of the text decoder ({DECODER}*).{averaged}
+- {changed}{averaged}
 - A decision readout of 255 codes (readout.safetensors) is in the place of the output layer.
 - The decoder attends prefix-bidirectionally on every layer, with no window.
 
@@ -452,22 +495,8 @@ def export_v2(
     if not _HUB_ID.fullmatch(hub_id) or os.path.isdir(hub_id):
         raise ValueError(f"{hub_id}: provenance needs the base's Hub id; pass --base-model")
     base = base_dir(cfg.base_model, cfg.base_revision)
-    missing = [n for n in BASE_FILES if not os.path.exists(os.path.join(base, n))]
-    if missing:
-        raise ValueError(
-            f"{base} has no {', '.join(missing)}: a decision checkpoint carries the base's; "
-            "download all of the base's files at this revision"
-        )
+    names, inputs = _base_inputs(base)
     revision = cfg.base_revision or os.path.basename(os.path.normpath(base))
-    # A base with a vision encoder and its projection takes images through them: they are the
-    # base's, unchanged. Its image processor must then size images as the core counts them.
-    names = tensor_names(base)
-    inputs = ["text"]
-    if (_any(names, "model.vision_tower.") or _any(names, "model.vision_embedder.")) and _any(
-        names, "model.embed_vision."
-    ):
-        core.check_image_processor(os.path.join(base, "processor_config.json"))
-        inputs.append("image")
     record = _optional_json(os.path.join(checkpoint, BASE_RECORD))
     if record is not None:
         if record["digest"] != base_digest(base):
@@ -480,20 +509,14 @@ def export_v2(
             f"{checkpoint}: no {BASE_RECORD}; pass --unrecorded-base to skip the check"
         )
 
-    decision = {
-        "interface": core.INTERFACE,
-        "format_version": core.FORMAT_VERSION,
-        "prompt": core.CHAT,
-        "inputs": inputs,
-        "codes": list(core.CODES),
-        "token_ids": list(core.CODE_TOKEN_IDS),
-        "temperature": temperature,
-        "final_logit_softcapping": cfg.readout_softcap,
-        "attention_mode": cfg.attention_mode,
-        "pooling": "last",
-        "max_length_validated": max_length_validated or cfg.max_length,
-        "provenance": {"base_model": hub_id, "base_revision": revision},
-    }
+    decision = _decision(
+        inputs,
+        temperature,
+        cfg.readout_softcap,
+        max_length_validated or cfg.max_length,
+        hub_id,
+        revision,
+    )
     softcap = core.DecisionConfig.from_dict(decision).final_logit_softcapping  # before any write
     base_config = _json(os.path.join(base, "config.json"))
     if _base_softcaps(base_config) - {softcap}:  # config.json is copied as it is
@@ -507,9 +530,155 @@ def export_v2(
     drop_kv_shared_updates(base_config, deltas)
     trained = training_record(paths, cfg)
 
+    card = None if model_card_path else model_card(hub_id, revision, temperature, trained)
+    return _write(
+        out,
+        base,
+        decision,
+        weight,
+        lambda: merge_shards(base, out, deltas),
+        notice(hub_id, revision, trained["runs"], names),
+        model_card_path,
+        card,
+        paths,
+    )
+
+
+def export_merged(
+    merged_decoder: str,
+    out: str,
+    *,
+    base_model: str,
+    base_revision: str,
+    max_length_validated: int,
+    model_card_path: str,
+    temperature: float = 1.0,
+) -> str:
+    """Write the decision checkpoint of a decoder that is already merged; returns `out`.
+
+    `merged_decoder` is a directory with the text decoder's tensors (safetensors, the base's
+    names without `model.language_model.`) and `readout.safetensors`. The base is
+    `base_model` at `base_revision`, in the local Hub cache. Every tensor of the base's
+    decoder must be there with the base's shape, and no other. The exception is the
+    KV-shared layers' own k_proj, v_proj and k_norm, which no runtime reads: when they are
+    absent, the base's are written. The soft-cap is the base's, and the checkpoint is
+    declared as strands-chat under prefix_bidir: the caller answers for that."""
+    if os.path.isdir(out) and os.listdir(out):
+        raise FileExistsError(f"{out}: not empty")
+    if not _HUB_ID.fullmatch(base_model) or os.path.isdir(base_model):
+        raise ValueError(f"{base_model}: provenance needs the base's Hub id")
+    base = base_dir(base_model, base_revision)
+    names, inputs = _base_inputs(base)
+    base_config = _json(os.path.join(base, "config.json"))
+    caps = _base_softcaps(base_config)
+    if len(caps) != 1:
+        raise ValueError(f"{base_model}'s config.json gives {sorted(caps)} as its soft-cap")
+    decision = _decision(
+        inputs, temperature, caps.pop(), max_length_validated, base_model, base_revision
+    )
+    core.DecisionConfig.from_dict(decision)  # before any write
+
+    replace: dict[str, Callable[[], torch.Tensor]] = {}
+    for shard in _shards(merged_decoder):
+        path = os.path.join(merged_decoder, shard)
+        with safe_open(path, "pt") as f:
+            replace.update({DECODER + name: partial(_tensor, path, name) for name in f.keys()})
+    decoder = {n for n in names if n.startswith(DECODER)}
+    missing = sorted(decoder - set(replace) - kv_shared_names(base_config))
+    extra = sorted(set(replace) - decoder)
+    if missing or extra:
+        raise ValueError(
+            f"{merged_decoder} is not {base_model}'s decoder: {len(missing)} tensors missing "
+            f"({missing[:3]}), {len(extra)} that the base does not have ({extra[:3]})"
+        )
+    readout = load_file(os.path.join(merged_decoder, core.readout.READOUT_FILE))
+    weight = readout.get("weight")
+    hidden = (base_config.get("text_config") or base_config).get("hidden_size")
+    if weight is None or tuple(weight.shape) != (core.MAX_CODES, hidden):
+        shape = None if weight is None else tuple(weight.shape)
+        raise ValueError(
+            f"the readout's `weight` must be [{core.MAX_CODES}, {hidden}], not {shape}"
+        )
+    return _write(
+        out,
+        base,
+        decision,
+        weight,
+        lambda: merge_shards(base, out, [], replace),
+        notice(base_model, base_revision, 1, names, DECODER_FINE_TUNED),
+        model_card_path,
+        None,
+        [merged_decoder],
+    )
+
+
+def _tensor(path: str, name: str) -> torch.Tensor:
+    with safe_open(path, "pt") as f:
+        tensor: torch.Tensor = f.get_tensor(name)
+    return tensor
+
+
+def _base_inputs(base: str) -> tuple[set[str], list[str]]:
+    """The base's tensor names and the inputs its checkpoints take, after a check that the
+    base has all of its own files."""
+    missing = [n for n in BASE_FILES if not os.path.exists(os.path.join(base, n))]
+    if missing:
+        raise ValueError(
+            f"{base} has no {', '.join(missing)}: a decision checkpoint carries the base's; "
+            "download all of the base's files at this revision"
+        )
+    # A base with a vision encoder and its projection takes images through them: they are the
+    # base's, unchanged. Its image processor must then size images as the core counts them.
+    names = tensor_names(base)
+    inputs = ["text"]
+    if (_any(names, "model.vision_tower.") or _any(names, "model.vision_embedder.")) and _any(
+        names, "model.embed_vision."
+    ):
+        core.check_image_processor(os.path.join(base, "processor_config.json"))
+        inputs.append("image")
+    return names, inputs
+
+
+def _decision(
+    inputs: list[str],
+    temperature: float,
+    softcap: float | None,
+    max_length_validated: int,
+    hub_id: str,
+    revision: str,
+) -> dict[str, Any]:
+    return {
+        "interface": core.INTERFACE,
+        "format_version": core.FORMAT_VERSION,
+        "prompt": core.CHAT,
+        "inputs": inputs,
+        "codes": list(core.CODES),
+        "token_ids": list(core.CODE_TOKEN_IDS),
+        "temperature": temperature,
+        "final_logit_softcapping": softcap,
+        "attention_mode": "prefix_bidir",
+        "pooling": "last",
+        "max_length_validated": max_length_validated,
+        "provenance": {"base_model": hub_id, "base_revision": revision},
+    }
+
+
+def _write(
+    out: str,
+    base: str,
+    decision: dict[str, Any],
+    weight: torch.Tensor,
+    write_shards: Callable[[], None],
+    notice_text: str,
+    card_path: str | None,
+    card_text: str | None,
+    inputs_on_disk: list[str],
+) -> str:
+    """Write the layout's files to `out`, read them back with the core and look for local
+    paths. If a check fails, delete `out` and raise."""
     os.makedirs(out, exist_ok=True)
     try:
-        merge_shards(base, out, deltas)
+        write_shards()
         save_file(
             {"weight": weight.to(torch.bfloat16).contiguous()},
             os.path.join(out, core.readout.READOUT_FILE),
@@ -523,17 +692,18 @@ def export_v2(
             fh.write(json.dumps(decision, indent=2) + "\n")
         shutil.copyfile(LICENSE_FILE, os.path.join(out, "LICENSE"))
         with open(os.path.join(out, "NOTICE"), "w", encoding="utf-8") as fh:
-            fh.write(notice(hub_id, revision, trained["runs"], names))
-        if model_card_path:
-            shutil.copyfile(model_card_path, os.path.join(out, "README.md"))
+            fh.write(notice_text)
+        if card_path:
+            shutil.copyfile(card_path, os.path.join(out, "README.md"))
         else:
+            assert card_text is not None
             with open(os.path.join(out, "README.md"), "w", encoding="utf-8") as fh:
-                fh.write(model_card(hub_id, revision, temperature, trained))
+                fh.write(card_text)
 
         loaded = core.DecisionConfig.load(out)
         core.Readout.load(out, loaded)  # also: config.json's soft-cap equals decision_config's
         core.load_tokenizer(out, loaded)
-        check_no_local_paths(out, [*paths, base, out, os.path.expanduser("~")])
+        check_no_local_paths(out, [*inputs_on_disk, base, out, os.path.expanduser("~")])
     except BaseException:
         shutil.rmtree(out, ignore_errors=True)
         raise
@@ -542,7 +712,7 @@ def export_v2(
 
 def _cli(
     checkpoints: list[str] = typer.Argument(
-        ..., help="A token_readout checkpoint or soup; several of one recipe: their soup."
+        None, help="A token_readout checkpoint or soup; several of one recipe: their soup."
     ),
     out: str = typer.Argument(..., help="Directory for the decision checkpoint: absent or empty."),
     base_model: str = typer.Option(None, help="The base's Hub id, for provenance."),
@@ -554,9 +724,39 @@ def _cli(
     model_card: str = typer.Option(
         None, help="The README.md to write. Default: a card written from the runs' records."
     ),
+    merged_decoder: str = typer.Option(
+        None,
+        help="In place of checkpoints: a directory with a text decoder that is already merged "
+        "and its readout.safetensors. Needs --base-model, --base-revision, "
+        "--max-length-validated and --model-card.",
+    ),
+    base_revision: str = typer.Option(None, help="With --merged-decoder: the base's commit."),
 ) -> None:
     """Merge the adapters into the base (or average several merged seeds) and write the
     decision checkpoint layout."""
+    if merged_decoder:
+        needs = {
+            "--base-model": base_model,
+            "--base-revision": base_revision,
+            "--max-length-validated": max_length_validated,
+            "--model-card": model_card,
+        }
+        absent = [flag for flag, value in needs.items() if not value]
+        if checkpoints or absent:
+            raise typer.BadParameter(
+                f"--merged-decoder takes no checkpoints and needs {', '.join(needs)}"
+            )
+        path = export_merged(
+            merged_decoder,
+            out,
+            base_model=base_model,
+            base_revision=base_revision,
+            max_length_validated=max_length_validated,
+            model_card_path=model_card,
+            temperature=1.0 if temperature is None else temperature,
+        )
+        print(f"decision checkpoint -> {path}")
+        return
     path = export_v2(
         checkpoints,
         out,
