@@ -1,4 +1,4 @@
-"""Build what the Lambda image serves from a decision checkpoint (docs/spec.md, section 9).
+"""Build what the Lambda image serves from a decision checkpoint.
 
     python build_artifact.py CHECKPOINT OUT_DIR --llama-cpp DIR --quantize PATH [--revision REV]
         [--expect-digest SHA256] [--name NAME] [--mmproj-type q8_0|f16] [--max-bytes N]
@@ -28,7 +28,7 @@ checked against the sha256 the Hub records. The manifest digest is the sha256 of
 The checkpoint is checked before anything is converted, as a runtime checks it: decision_config.json
 must validate (`"interface": "strands-decider"`, the soft-cap among its required fields),
 config.json's `text_config.final_logit_softcapping` must equal it, and an image checkpoint's image
-processor must have the settings docs/spec.md counts soft tokens for. The llama.cpp tree must carry
+processor must have the settings the core counts soft tokens for (`check_image_processor`). The llama.cpp tree must carry
 deploy/lambda/decision/patches: without the second, the converter takes the checkpoint for a
 pplx-decider one.
 """
@@ -146,9 +146,7 @@ def check(ckpt: Path) -> DecisionConfig:
         check_image_processor(ckpt / "processor_config.json")
     with open(ckpt / "tokenizer_config.json", encoding="utf-8") as f:
         if "chat_template" in json.load(f) or (ckpt / "chat_template.jinja").exists():
-            raise SystemExit(
-                "a decision checkpoint carries no chat template (docs/spec.md, section 9)"
-            )
+            raise SystemExit("a decision checkpoint carries no chat template")
     return config
 
 

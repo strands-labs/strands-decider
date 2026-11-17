@@ -15,14 +15,14 @@ each question's last token. The core's readout does the rest:
                               processor_config="processor_config.json")
     evaluate(request, tokenizer, readout, config, backend)
 
-Images are prepared as docs/spec.md section 3.3 says: decoded as v1 decodes them (first frame, EXIF
-orientation, transparency onto white, RGB), resized with Pillow's bicubic resampling, width then
-height, to the size the image processor gives the decoded image, and handed to the vision tower at
-that size, which mtmd then copies unchanged and scales to [0, 1]. The vision tower's grid of soft
+Images are decoded as v1 decodes them (first frame, EXIF orientation, transparency onto white,
+RGB), resized by the core's `resize_image` (Pillow's bicubic resampling, width then height) to
+the size the image processor gives the decoded image, and handed to the vision tower at that
+size, which mtmd then copies unchanged and scales to [0, 1]. The vision tower's grid of soft
 tokens is checked against the image's W x H, and its normalisation against the processor's.
 
-A GGUF Q8_0 decoder conforms by docs/spec.md section 10's bound for that format, measured at E2B
-with this runtime: 99.08% top-1 agreement and a mean |dp| of 0.0104 on 1,200 prompts.
+A GGUF Q8_0 decoder conforms by the bound the core records for that format (`BOUNDS`), measured
+at E2B with this runtime: 99.08% top-1 agreement and a mean |dp| of 0.0104 on 1,200 prompts.
 
 Torch-free: the core's dependencies (numpy, tokenizers and pydantic), the standard library and,
 for images only, Pillow.
@@ -61,7 +61,7 @@ if TYPE_CHECKING:
 
     from ..core.prompt import RenderedImage
 
-# The three image control tokens by id (docs/spec.md, section 3.2).
+# The three image control tokens by id, as the core's CONTROL_TOKEN_IDS gives them.
 CONTROL_IDS = {IMAGE_OPEN: 255999, IMAGE_SOFT: 258880, IMAGE_CLOSE: 258882}
 
 
@@ -127,9 +127,9 @@ def decode_pixels(data: bytes) -> Image.Image:
 
 def prepare_pixels(image: RenderedImage) -> Image.Image:
     """A request image's file, decoded (`decode_pixels`), its decoded size checked against its
-    header (`strands_decider.core.check_decoded_size`), and resized by the spec's bicubic resize
+    header (`strands_decider.core.check_decoded_size`), and resized by the core's bicubic resize
     (`strands_decider.core.resize_image`, width then height) to the W x H the image processor
-    gives the decoded size: what the vision tower reads (docs/spec.md, section 3.3)."""
+    gives the decoded size: what the vision tower reads."""
     img = decode_pixels(image.data)
     try:
         w, h = check_decoded_size(image, *img.size)
