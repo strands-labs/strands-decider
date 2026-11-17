@@ -35,7 +35,7 @@ jobs:
       matrix:
         include:
           # The tested floor versions and the lowest supported Python.
-          - python: "3.10"
+          - python: "3.11"
             torch: torch==2.7.1
             pins: transformers==5.15.0 peft==0.21.0 huggingface_hub==1.5.0
           # The newest versions that pyproject.toml admits.
