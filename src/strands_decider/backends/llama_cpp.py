@@ -4,7 +4,7 @@ interface).
 `LlamaCppBackend` is a `strands_decider.core.Backend` over a converted decision checkpoint: the
 decoder as a GGUF and, for images, the vision tower and its projection as an mmproj GGUF. It runs
 llama.cpp through a small C library, `deploy/lambda/decision/shim.c`, built against llama.cpp
-at the commit and with the patches that `deploy/lambda/decision/` pins. The shim decodes the state
+at the commit and with the patch that `deploy/lambda/decision/` pins. The shim decodes the state
 once, its text tokens and image rows as one non-causal batch, then each question on top of it,
 under the prefix_bidir mask with no sliding window, and returns the final-norm hidden state at
 each question's last token. The core's readout does the rest:

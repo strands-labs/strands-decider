@@ -18,8 +18,9 @@ convert_hf_to_gguf.py (the decoder in f32; --mmproj, then vision_only_mmproj.py)
 LlamaCppBackend, and runs the same prompts in transformers' Gemma4ForConditionalGeneration in
 float32 with the masks passed per layer type. It checks:
 
-  convert   the converter's pplx-decider loader leaves a Strands Decider directory, and one whose
-            decision_config.json is not an object, and still claims its own (patches/0002); the
+  convert   the converter's pplx-decider loader leaves a Strands Decider directory, and a Gemma 4
+            one whose decision_config.json is not an object, and still claims its own, a Qwen3.5
+            backbone without a format_id (ggml-org/llama.cpp#32156); the
             vision-only mmproj has no audio tensor or key left and the vision tower's tensors
             unchanged; and lazy_ranges finds the per-layer embedding table;
   mask      the shim matches the prefix_bidir reference, and for each question is several times
@@ -216,21 +217,23 @@ def convert(llama_cpp: Path, ckpt: Path, out: Path) -> tuple[Path, Path]:
     return gguf, mmproj
 
 
-# Which directories the converter's pplx-decider loader claims: decision_config.json in each, beside
-# a config.json and a readout. Run in llama.cpp's tree, as its own tests import it.
+# Which directories the converter's pplx-decider loader claims: a config.json naming the backbone
+# and a decision_config.json in each, beside a readout. The loader claims a Qwen3.5 backbone only.
+# Run in llama.cpp's tree, as its own tests import it.
 MATCHER = """
 import json, sys, tempfile
 from pathlib import Path
 from conversion.pplx_decider import _is_pplx_decider_checkpoint
-cases = {"pplx-decider": {"format_version": 1, "temperature": 1.0},
-         "vllm-d3": {"format_id": "d3-code-readout-v1", "format_version": 1},
-         "strands-decider": {"interface": "strands-decider", "format_version": 1},
-         "not an object": [1, 2]}
+qwen, gemma = {"model_type": "qwen3_5"}, {"model_type": "gemma4"}
+cases = {"pplx-decider": (qwen, {"format_version": 1, "temperature": 1.0}),
+         "vllm-d3": (qwen, {"format_id": "d3-code-readout-v1", "format_version": 1}),
+         "strands-decider": (gemma, {"interface": "strands-decider", "format_version": 1}),
+         "not an object": (gemma, [1, 2])}
 out = {}
-for name, decision in cases.items():
+for name, (config, decision) in cases.items():
     with tempfile.TemporaryDirectory() as d:
-        for f, text in (("config.json", "{}"), ("decision_config.json", json.dumps(decision)),
-                        ("readout.safetensors", "")):
+        for f, text in (("config.json", json.dumps(config)),
+                        ("decision_config.json", json.dumps(decision)), ("readout.safetensors", "")):
             (Path(d) / f).write_text(text)
         try:
             out[name] = _is_pplx_decider_checkpoint(Path(d))
