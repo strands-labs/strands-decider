@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import re
 import shlex
@@ -10,6 +11,7 @@ import tarfile
 import tempfile
 import time
 import uuid
+from collections.abc import Iterator
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -20,6 +22,23 @@ from botocore.exceptions import ClientError, WaiterError
 SSM_POLICY_ARN = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
 TERMINAL_COMMAND_STATES = {"Success", "Cancelled", "TimedOut", "Failed", "Cancelling"}
 ANSI_ESCAPE = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))")
+
+
+def split_lambda_arn(function_arn: str) -> tuple[str, str | None]:
+    """(unqualified_arn, qualifier) for a function or function-alias ARN."""
+    if function_arn.count(":") >= 7:
+        unqualified, qualifier = function_arn.rsplit(":", 1)
+        return unqualified, qualifier
+    return function_arn, None
+
+
+@contextlib.contextmanager
+def warn_on_fail(label: str) -> Iterator[None]:
+    """Log but do not re-raise AWS errors; for best-effort cleanup steps."""
+    try:
+        yield
+    except (ClientError, WaiterError) as error:
+        print(f"{label} cleanup warning: {error}", file=sys.stderr, flush=True)
 
 
 def parse_args() -> argparse.Namespace:
@@ -50,22 +69,11 @@ def parse_args() -> argparse.Namespace:
         default="HEAD",
         help="committed Git revision copied to EC2 (default: HEAD)",
     )
-    parser.add_argument("--smoke", action="store_true", help="run the benchmark smoke preset")
     parser.add_argument(
         "--command-timeout-seconds",
         type=int,
         default=7200,
         help="SSM benchmark timeout (default: 7200)",
-    )
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="validate and print the resource plan without creating AWS resources",
-    )
-    parser.add_argument(
-        "--yes",
-        action="store_true",
-        help="confirm creation of temporary paid AWS resources",
     )
     parser.add_argument(
         "--debug-hold",
@@ -329,13 +337,10 @@ def build_remote_script(
     environment_path: str,
     model: str | None,
     region: str,
-    smoke: bool,
 ) -> str:
     benchmark_arguments = [environment_path]
     if model:
         benchmark_arguments.append(model)
-    if smoke:
-        benchmark_arguments.append("--smoke")
     command = " ".join(shlex.quote(argument) for argument in benchmark_arguments)
     environment_dir = str(Path(environment_path).parent)
     environment_object = f"s3://{bucket_name}/{object_prefix}/environment.yaml"
@@ -415,10 +420,6 @@ def extract_results(archive_path: Path, destination: Path) -> None:
 
 def main() -> int:
     args = parse_args()
-    if not args.dry_run and not args.yes:
-        raise ValueError("pass --yes to confirm creation of temporary paid AWS resources")
-    if args.smoke and args.model is None:
-        raise ValueError("smoke runs require a model")
     if args.command_timeout_seconds < 60:
         raise ValueError("--command-timeout-seconds must be at least 60")
 
@@ -442,13 +443,10 @@ def main() -> int:
         "target": target,
         "git_ref": args.ref,
         "environment_transfer": "local environment.yaml copied separately from the Git archive",
-        "smoke": args.smoke,
         "network": "default VPC, public egress, no inbound rules",
         "cleanup": "terminate instance and delete temporary IAM, S3, and security group",
     }
     print(json.dumps(plan, indent=2), flush=True)
-    if args.dry_run:
-        return 0
 
     session = boto3.Session(region_name=region)
     identity = session.client("sts").get_caller_identity()
@@ -553,9 +551,7 @@ def main() -> int:
                 # even when the URL is attached to an alias; the alias ARN here 403s. AWS
                 # also requires lambda:InvokeFunction alongside lambda:InvokeFunctionUrl for
                 # AWS_IAM-authed Function URLs.
-                lambda_arn = target["function_arn"]
-                if lambda_arn.count(":") >= 7:
-                    lambda_arn = lambda_arn.rsplit(":", 1)[0]
+                lambda_arn, _ = split_lambda_arn(target["function_arn"])
                 target_statements = [
                     {
                         "Sid": "InvokeConfiguredFunctionUrl",
@@ -595,8 +591,7 @@ def main() -> int:
             if target["kind"] == "lambda":
                 role_arn = f"arn:aws:iam::{args.account}:role/{role_name}"
                 function_arn = target["function_arn"]
-                qualifier = function_arn.split(":")[-1] if function_arn.count(":") >= 7 else None
-                unqualified = function_arn.rsplit(":", 1)[0] if qualifier else function_arn
+                unqualified, qualifier = split_lambda_arn(function_arn)
                 add_permission_kwargs: dict[str, Any] = {
                     "FunctionName": unqualified,
                     "StatementId": lambda_statement_id,
@@ -724,7 +719,6 @@ def main() -> int:
                 environment_path=environment_path,
                 model=args.model,
                 region=region,
-                smoke=args.smoke,
             )
             command_id = ssm.send_command(
                 InstanceIds=[instance_id],
@@ -803,7 +797,7 @@ def main() -> int:
             return 0
         finally:
             if instance_id:
-                try:
+                with warn_on_fail("instance"):
                     ec2.terminate_instances(InstanceIds=[instance_id])
                     print(f"termination requested for {instance_id}", flush=True)
                     ec2.get_waiter("instance_terminated").wait(
@@ -811,68 +805,47 @@ def main() -> int:
                         WaiterConfig={"Delay": 5, "MaxAttempts": 120},
                     )
                     print(f"{instance_id} terminated", flush=True)
-                except (ClientError, WaiterError) as error:
-                    print(f"instance cleanup warning: {error}", file=sys.stderr, flush=True)
 
             if group_id:
-                for _ in range(30):
-                    try:
-                        ec2.delete_security_group(GroupId=group_id)
-                        print(f"deleted security group {group_id}", flush=True)
-                        break
-                    except ClientError as error:
-                        if error.response["Error"]["Code"] != "DependencyViolation":
-                            print(
-                                f"security-group cleanup warning: {error}",
-                                file=sys.stderr,
-                                flush=True,
-                            )
+                with warn_on_fail("security-group"):
+                    for _ in range(30):
+                        try:
+                            ec2.delete_security_group(GroupId=group_id)
+                            print(f"deleted security group {group_id}", flush=True)
                             break
-                        time.sleep(5)
+                        except ClientError as error:
+                            if error.response["Error"]["Code"] != "DependencyViolation":
+                                raise
+                            time.sleep(5)
 
             if profile_created:
-                try:
+                with contextlib.suppress(ClientError):
                     iam.remove_role_from_instance_profile(
                         InstanceProfileName=profile_name,
                         RoleName=role_name,
                     )
-                except ClientError:
-                    pass
-                try:
+                with warn_on_fail("profile"):
                     iam.delete_instance_profile(InstanceProfileName=profile_name)
                     print(f"deleted instance profile {profile_name}", flush=True)
-                except ClientError as error:
-                    print(f"profile cleanup warning: {error}", file=sys.stderr, flush=True)
 
             if role_created:
-                try:
+                with contextlib.suppress(ClientError):
                     iam.delete_role_policy(RoleName=role_name, PolicyName=policy_name)
-                except ClientError:
-                    pass
-                try:
+                with contextlib.suppress(ClientError):
                     iam.detach_role_policy(RoleName=role_name, PolicyArn=SSM_POLICY_ARN)
-                except ClientError:
-                    pass
-                try:
+                with warn_on_fail("role"):
                     iam.delete_role(RoleName=role_name)
                     print(f"deleted role {role_name}", flush=True)
-                except ClientError as error:
-                    print(f"role cleanup warning: {error}", file=sys.stderr, flush=True)
 
             if bucket_created:
-                try:
+                with warn_on_fail("bucket"):
                     empty_and_delete_bucket(s3, bucket_name)
                     print(f"deleted transfer bucket {bucket_name}", flush=True)
-                except ClientError as error:
-                    print(f"bucket cleanup warning: {error}", file=sys.stderr, flush=True)
 
             if lambda_permission_added:
-                try:
+                with warn_on_fail("lambda permission"):
                     function_arn = target["function_arn"]
-                    qualifier = (
-                        function_arn.split(":")[-1] if function_arn.count(":") >= 7 else None
-                    )
-                    unqualified = function_arn.rsplit(":", 1)[0] if qualifier else function_arn
+                    unqualified, qualifier = split_lambda_arn(function_arn)
                     remove_kwargs: dict[str, Any] = {
                         "FunctionName": unqualified,
                         "StatementId": lambda_statement_id,
@@ -882,12 +855,6 @@ def main() -> int:
                     lambda_client.remove_permission(**remove_kwargs)
                     print(
                         f"revoked lambda permission {lambda_statement_id} on {function_arn}",
-                        flush=True,
-                    )
-                except ClientError as error:
-                    print(
-                        f"lambda permission cleanup warning: {error}",
-                        file=sys.stderr,
                         flush=True,
                     )
 

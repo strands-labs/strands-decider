@@ -83,33 +83,20 @@ default-VPC instance receives a public IP for outbound package and tokenizer dow
 security group has no inbound rules. Use an existing private-network client instead when public
 egress is not acceptable.
 
-Validate the plan without creating resources:
+After the user confirms the endpoint scope and temporary EC2 cost in the plan the script
+prints, run:
 
 ```bash
 uv run --project benchmark python skills/benchmark-decider/scripts/run_on_ec2.py \
   ENVIRONMENT MODEL \
   --account ACCOUNT_ID \
-  --region us-west-2 \
-  --smoke \
-  --dry-run
+  --region us-west-2
 ```
 
-After the user confirms the endpoint scope and temporary EC2 cost, run the smoke test:
-
-```bash
-uv run --project benchmark python skills/benchmark-decider/scripts/run_on_ec2.py \
-  ENVIRONMENT MODEL \
-  --account ACCOUNT_ID \
-  --region us-west-2 \
-  --smoke \
-  --yes
-```
-
-Remove `MODEL` and `--smoke` to run every configured model with the standard preset. `--ref`
-selects the committed revision copied to EC2; uncommitted source changes are intentionally
-excluded. The selected local environment file is transferred separately because
-`benchmark/environments/` is gitignored. A failed remote run saves its retrieved log as
-`benchmark-ec2-failure.log` before cleanup.
+Remove `MODEL` to run every configured model. `--ref` selects the committed revision copied to
+EC2; uncommitted source changes are intentionally excluded. The selected local environment file
+is transferred separately because `benchmark/environments/` is gitignored. A failed remote run
+saves its retrieved log as `benchmark-ec2-failure.log` before cleanup.
 
 ## Interpret latency correctly
 

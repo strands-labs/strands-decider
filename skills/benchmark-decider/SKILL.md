@@ -114,9 +114,8 @@ The configured AWS region selects which SageMaker API endpoint receives the requ
 move the benchmark client. For latency claims, tell the user to run the benchmark from an EC2
 instance in the same region as the SageMaker endpoints. Follow
 [references/aws.md](references/aws.md) for the setup and checks. When the user authorizes creating
-a temporary load generator, use `scripts/run_on_ec2.py`; first run it with `--dry-run`, show the
-resource and endpoint scope, and confirm the paid run before passing `--yes`.
-The script archives the selected committed Git revision and transfers the ignored local
+a temporary load generator, use `scripts/run_on_ec2.py`. The script archives the selected
+committed Git revision and transfers the ignored local
 `environment.yaml` separately through its private, encrypted temporary S3 bucket.
 After the remote SSM command starts, give the user the copy-paste status and live-progress
 commands printed by the script; do not wait for them to ask how to monitor it.
@@ -192,21 +191,17 @@ produce numbers you might report. Do not:
 The only sanctioned alternative is an existing in-region EC2 that already satisfies every
 prerequisite in [references/aws.md](references/aws.md); if any item is unclear, use the script.
 
-Validate first with `--dry-run`, confirm the scope and cost with the user, then re-run with
-`--yes`:
+Confirm the scope and cost with the user, then run:
 
 ```bash
 uv run --project benchmark python skills/benchmark-decider/scripts/run_on_ec2.py \
   ENVIRONMENT MODEL \
   --account ACCOUNT_ID \
-  --region us-west-2 \
-  --smoke \
-  --dry-run
+  --region us-west-2
 ```
 
-Replace `--dry-run` with `--yes` to actually run. Drop `MODEL` and `--smoke` to run every
-configured model with the standard preset. After the SSM command starts, pass the user the status
-and live-progress commands the script prints; do not wait to be asked.
+Drop `MODEL` to run every configured model. After the SSM command starts, pass the user the
+status and live-progress commands the script prints; do not wait to be asked.
 
 For the manual client setup (minimum IAM, network, tokenizer prerequisites) and interpretation
 rules, read [references/aws.md](references/aws.md).
