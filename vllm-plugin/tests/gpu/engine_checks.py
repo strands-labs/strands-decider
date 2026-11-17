@@ -1,6 +1,6 @@
 """The server's request path on a real engine, in process: the context's boundary, and what an engine refusal raises.
 
-    python engine_checks.py serve CKPT --max-length L [any other strands-decider-vllm serve flags]
+    python engine_checks.py [--repeat-tol T] serve CKPT --max-length L [any other strands-decider-vllm serve flags]
 
 The engine is built as ``strands-decider-vllm serve`` builds it, from the same flags (``server.settings``), and no
 socket is opened. Each check is a PASS/FAIL line:
@@ -11,7 +11,8 @@ socket is opened. Each check is a PASS/FAIL line:
 4. vLLM itself refuses a prompt of exactly ``max_model_len`` tokens with ``VLLMValidationError``: the reason the
    default context is one token longer than the longest prompt;
 5. a request the engine core refuses (no ``prefix_end``) makes ``AsyncLLM.generate`` raise ``VLLMValidationError``,
-   which the server answers with HTTP 422 (``server.refusal``); the engine keeps serving;
+   which the server answers with HTTP 422 (``server.refusal``); the engine keeps serving, and the first request asked
+   again gets its answer within ``REPEAT_TOL``;
 6. with a checkpoint that takes images, a burst of image requests through the server's HTTP app (in process, on
    httpx's ASGI transport): vLLM's own image preprocessing (every call of the plugin's multimodal processor, which
    vLLM's renderer makes) runs on a thread other than the event loop's, and ``GET /ping`` keeps answering, timed
@@ -25,6 +26,9 @@ import sys
 import uuid
 
 FAILURES: list[str] = []
+# Max |dp| of the first request asked again, from the prefix cache, against its cold answer: client.py's repeat tolerance,
+# which tests/gpu/ci.sh sets per device (--repeat-tol). The default is ci.sh's for bf16 on a GPU.
+REPEAT_TOL = 0.02
 
 
 def check(ok, what):
@@ -115,8 +119,13 @@ async def run(d, length: int, max_model_len: int) -> None:
             and server.refusal(e),
             f"a request the engine core refuses raises {type(e).__name__} (HTTP 422): {str(e)[:100]}",
         )
+    # Asked again, the state comes from the prefix cache and runs other attention kernels than the cold request.
     again = await d.decide(body)
-    check(again["answers"] == out["answers"], "the engine serves on, with the same answer")
+    dp = abs(again["answers"]["q"]["noul"] - out["answers"]["q"]["noul"])
+    check(
+        dp <= REPEAT_TOL,
+        f"the engine serves on, with the same answer: |dp| {dp:.4f} (bound {REPEAT_TOL})",
+    )
 
 
 def photo(seed: int, w: int = 1600, h: int = 1200) -> str:
@@ -216,9 +225,15 @@ def main() -> None:
     from strands_decider_vllm import server
     from strands_decider_vllm.cli import parser
 
-    a = parser().parse_args(sys.argv[1:])
+    global REPEAT_TOL
+    argv = sys.argv[1:]
+    if argv[:1] == ["--repeat-tol"]:
+        REPEAT_TOL, argv = float(argv[1]), argv[2:]
+    a = parser().parse_args(argv)
     if a.command != "serve" or not a.max_length:
-        raise SystemExit("usage: engine_checks.py serve CKPT --max-length L [flags]")
+        raise SystemExit(
+            "usage: engine_checks.py [--repeat-tol T] serve CKPT --max-length L [flags]"
+        )
     server.prepare_environment()
     s = server.settings(a)
     max_model_len = s.engine_args.max_model_len

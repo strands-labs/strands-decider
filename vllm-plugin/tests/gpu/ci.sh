@@ -58,7 +58,7 @@ if [ "$DEVICE" = cpu ]; then
   # A cached, batched or repeated answer is the cold one exactly: CPU attention computes the same bits whatever the
   # cache and the batch (measured: |dp| 0 for every repeat, cached, further-question and mixed-batch check, and
   # 7e-8 for logprobs 255 against allowed_token_ids, a renormalization in float32).
-  TOLS=(--repeat-tol 1e-6 --same-server-tol 1e-6); SAME=(--same-tol 1e-6)
+  REPEAT=1e-6; TOLS=(--repeat-tol $REPEAT --same-server-tol 1e-6); SAME=(--same-tol 1e-6)
   export VLLM_CPU_KVCACHE_SPACE=${VLLM_CPU_KVCACHE_SPACE:-2} CUDA_VISIBLE_DEVICES=
 else
   # bf16 on the GPU, against transformers in bf16 (both as the plugin serves). A tiny random model's own bf16 and
@@ -74,7 +74,7 @@ else
   # The tolerances: 0.02 on one server, 0.01 for the image repeat, 0.035 across servers, each about 1.3 to 1.6 times
   # the largest measured; a cross-server flip counts as a near-tie only where the first server's top two are within
   # 0.07, twice the cross-server tolerance, the most two such answers can move apart.
-  TOLS=(--repeat-tol 0.02 --same-server-tol 0.02 --cross-server-tol 0.035 --tie-gap 0.07); SAME=(--same-tol 0.01)
+  REPEAT=0.02; TOLS=(--repeat-tol $REPEAT --same-server-tol 0.02 --cross-server-tol 0.035 --tie-gap 0.07); SAME=(--same-tol 0.01)
   export CUDA_VISIBLE_DEVICES=${GPU:-${CUDA_VISIBLE_DEVICES:-0}}
 fi
 FAILED=(); PIDS=()
@@ -181,7 +181,7 @@ cleanup
 
 step "4. the server's request path on a real engine, in process"
 mkdir -p "$OUT/engine"
-python "$HERE/engine_checks.py" serve "$C/mm" --max-length 1024 --dtype $DTYPE --block-size $BLOCK --enforce-eager \
+python "$HERE/engine_checks.py" --repeat-tol $REPEAT serve "$C/mm" --max-length 1024 --dtype $DTYPE --block-size $BLOCK --enforce-eager \
   ${MEM[@]+"${MEM[@]}"} > "$OUT/engine/server.log" 2>&1
 rc=$?  # the multimodal checkpoint takes images, so the image check must have run, not been skipped
 grep -q "image preprocessing ran off the event loop" "$OUT/engine/server.log" || rc=1
