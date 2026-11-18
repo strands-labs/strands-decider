@@ -12,7 +12,7 @@ import numpy as np
 
 from .config import IMAGE, DecisionConfig
 from .prompt import RenderedImage, render
-from .readout import Readout, check_stage, read
+from .readout import read
 from .request import Request
 
 if TYPE_CHECKING:
@@ -23,10 +23,8 @@ NO_VISION = "this engine has no vision tower; images are not supported"
 
 
 class Backend(Protocol):
-    """A decoder. `outputs` is the stage `forward` returns (`readout.STAGES`): "hidden", the
-    final-norm hidden state at each question's last token, or "probabilities" over the codes."""
-
-    outputs: str
+    """A decoder. `forward` returns the final-norm hidden state at each question's last token, or,
+    for a backend that applies the readout itself (the vLLM plugin), the codes' probabilities."""
 
     def forward(
         self, state: list[int], questions: list[list[int]], images: tuple[RenderedImage, ...] = ()
@@ -49,7 +47,7 @@ def attention_mask(state_len: int, total_len: int) -> np.ndarray:
 def evaluate(
     request: Request,
     tokenizer: Tokenizer,
-    readout: Readout | None,
+    weight: np.ndarray | None,
     config: DecisionConfig,
     backend: Backend,
     *,
@@ -58,16 +56,14 @@ def evaluate(
     ordinal_smoothing: float = 0.0,
 ) -> dict[str, Any]:
     """One `POST /v1/systemone` request, answered as its response JSON. Prompts longer than
-    `config.max_length_validated` are refused unless `max_length` raises the limit."""
-    check_stage(backend.outputs, readout)
+    `config.max_length_validated` are refused unless `max_length` raises the limit. `weight` is the
+    readout weight, or None for a backend whose rows are already probabilities."""
     if request.images and IMAGE not in config.inputs:
         raise ValueError("this checkpoint does not take images")
     rendered = render(request, tokenizer, max_length=max_length or config.max_length_validated)
     questions = [list(q.question_ids) for q in rendered.questions.values()]
     rows = backend.forward(list(rendered.state_ids), questions, images=rendered.images)
-    answers = read(
-        rows, readout, config, rendered, stage=backend.outputs, ordinal_smoothing=ordinal_smoothing
-    )
+    answers = read(rows, config, rendered, weight=weight, ordinal_smoothing=ordinal_smoothing)
     return {
         "model": model_name,
         "answers": answers,

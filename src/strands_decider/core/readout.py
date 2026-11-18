@@ -8,22 +8,16 @@ p = softmax(z[:k])       float32, over the question's own k codes
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
 
 from ..confidence import derive_confidence, derive_score_confidence
+from .codes import CODES
 from .config import DecisionConfig
 from .prompt import RenderedQuestion, RenderedRequest
 
 READOUT_FILE = "readout.safetensors"
-
-# What a backend's `forward` returns: the hidden state at the last token, or (a runtime that
-# applies the readout itself, like the vLLM plugin) the codes' probabilities.
-HIDDEN = "hidden"
-PROBABILITIES = "probabilities"
-STAGES = (HIDDEN, PROBABILITIES)
 
 _DTYPES = {"F32": "<f4", "F16": "<f2"}
 
@@ -73,32 +67,12 @@ def code_probabilities(z: np.ndarray, softcap: float, temperature: float) -> np.
     return out
 
 
-@dataclass(frozen=True, eq=False)
-class Readout:
-    """The readout's `weight` [255, hidden] (None for a runtime that applies it itself) and the
-    soft-cap c."""
-
-    weight: np.ndarray | None
-    softcap: float
-
-    @classmethod
-    def load(
-        cls, checkpoint: str | os.PathLike[str], config: DecisionConfig | None = None
-    ) -> Readout:
-        d = os.fspath(checkpoint)
-        cfg = config if config is not None else DecisionConfig.load(d)
-        w = load_safetensors(os.path.join(d, READOUT_FILE))["weight"]
-        if w.shape[0] != len(cfg.codes):
-            raise ValueError(f"readout weight must be [{len(cfg.codes)}, hidden], not {w.shape}")
-        return cls(weight=w, softcap=cfg.final_logit_softcapping)
-
-
-def check_stage(stage: str, readout: Readout | None) -> None:
-    """That rows of `stage` can be read: hidden states need the readout weight."""
-    if stage not in STAGES:
-        raise ValueError(f"stage must be one of {STAGES}, not {stage!r}")
-    if stage == HIDDEN and (readout is None or readout.weight is None):
-        raise ValueError("hidden states need the readout weight")
+def load_readout(checkpoint: str | os.PathLike[str]) -> np.ndarray:
+    """The readout weight [255 codes, hidden] from a checkpoint's readout.safetensors."""
+    w = load_safetensors(os.path.join(os.fspath(checkpoint), READOUT_FILE))["weight"]
+    if w.ndim != 2 or w.shape[0] != len(CODES):
+        raise ValueError(f"readout weight must be [{len(CODES)}, hidden], not {list(w.shape)}")
+    return w
 
 
 def answer(
@@ -134,25 +108,26 @@ def answer(
 
 def question_probabilities(
     rows: np.ndarray | list[np.ndarray],
-    readout: Readout | None,
     config: DecisionConfig,
     rendered: RenderedRequest,
     *,
-    stage: str,
+    weight: np.ndarray | None = None,
 ) -> dict[str, np.ndarray]:
-    """Each question's k code probabilities, from one row per question in `rendered` order: its
-    hidden state, or its probabilities over all 255 codes or its own k."""
-    check_stage(stage, readout)
+    """Each question's k code probabilities, from one row per question in `rendered` order. With
+    the readout `weight`, the rows are hidden states. Without it, they are probabilities over all
+    255 codes or the question's own k, from a runtime that applies the readout itself."""
     names = list(rendered.questions)
     if len(rows) != len(names):
         raise ValueError(f"expected {len(names)} rows, one per question, not {len(rows)}")
-    if stage == HIDDEN:
-        assert readout is not None and readout.weight is not None
-        rows = list(readout_logits(readout.weight, np.stack(rows)))
+    if weight is not None:
+        rows = list(readout_logits(weight, np.stack(rows)))
     out = {}
     for name, row in zip(names, rows, strict=True):
-        v = np.asarray(row)[: len(rendered.questions[name].codes)]
-        if stage == PROBABILITIES:
+        v = np.asarray(row)
+        if weight is None and v.shape[-1] > len(CODES):
+            raise ValueError("rows wider than 255 are hidden states: pass the readout weight")
+        v = v[: len(rendered.questions[name].codes)]
+        if weight is None:
             v = v.astype(np.float64)
             out[name] = v / v.sum()
         else:
@@ -162,15 +137,14 @@ def question_probabilities(
 
 def read(
     rows: np.ndarray | list[np.ndarray],
-    readout: Readout | None,
     config: DecisionConfig,
     rendered: RenderedRequest,
     *,
-    stage: str,
+    weight: np.ndarray | None = None,
     ordinal_smoothing: float = 0.0,
 ) -> dict[str, dict[str, Any]]:
     """Every question's answer, from the rows `question_probabilities` takes."""
-    probs = question_probabilities(rows, readout, config, rendered, stage=stage)
+    probs = question_probabilities(rows, config, rendered, weight=weight)
     return {
         n: answer(rendered.questions[n], p.tolist(), ordinal_smoothing=ordinal_smoothing)
         for n, p in probs.items()

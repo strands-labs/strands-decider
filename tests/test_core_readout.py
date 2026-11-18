@@ -13,13 +13,11 @@ from core_support import decision_config_fixture, readout_goldens
 from strands_decider.core import (
     CODE_TOKEN_IDS,
     CODES,
-    HIDDEN,
-    PROBABILITIES,
     DecisionConfig,
-    Readout,
     RenderedQuestion,
     RenderedRequest,
     attention_mask,
+    load_readout,
     question_probabilities,
     read,
     readout_logits,
@@ -162,18 +160,16 @@ def test_load_safetensors(tmp_path, dtype):
     assert got["weight"].dtype == np.float32 and np.array_equal(got["weight"], w)
 
 
-def test_readout_load(tmp_path):
+def test_load_readout(tmp_path):
     _write_safetensors(
         tmp_path / "readout.safetensors", {"weight": ("BF16", np.ones((255, 8), np.float32))}
     )
-    (tmp_path / "decision_config.json").write_text(json.dumps(decision_config_fixture()))
-    r = Readout.load(tmp_path)
-    assert r.softcap == 30.0 and r.weight.shape == (255, 8)
+    assert load_readout(tmp_path).shape == (255, 8)
     _write_safetensors(
         tmp_path / "readout.safetensors", {"weight": ("BF16", np.ones((254, 8), np.float32))}
     )
     with pytest.raises(ValueError, match="255"):
-        Readout.load(tmp_path)
+        load_readout(tmp_path)
 
 
 def _rq(kind, options, *, order=None, descriptions=None, name="q") -> RenderedQuestion:
@@ -231,17 +227,17 @@ def test_hidden_and_probabilities_give_the_same_answers():
         },
     )
     cfg = DecisionConfig.model_validate({**decision_config_fixture(), "temperature": 1.3})
-    by_hidden = question_probabilities(h, Readout(w, C), cfg, rendered, stage=HIDDEN)
+    by_hidden = question_probabilities(h, cfg, rendered, weight=w)
     z = readout_logits(w, h)
     rows = [code_probabilities(z[0], C, 1.3), code_probabilities(z[1], C, 1.3)]
-    by_p = question_probabilities(rows, None, cfg, rendered, stage=PROBABILITIES)
+    by_p = question_probabilities(rows, cfg, rendered)
     for n in by_hidden:
         assert np.allclose(by_p[n], by_hidden[n], atol=1e-6), n
-    assert read(h, Readout(w, C), cfg, rendered, stage=HIDDEN)["c"]["type"] == "choice"
+    assert read(h, cfg, rendered, weight=w)["c"]["type"] == "choice"
     with pytest.raises(ValueError, match="readout weight"):
-        read(h, None, cfg, rendered, stage=HIDDEN)
+        read(np.ones((2, 300)), cfg, rendered)  # hidden states with no weight
     with pytest.raises(ValueError, match="one per question"):
-        read(h[:1], Readout(w, C), cfg, rendered, stage=HIDDEN)
+        read(h[:1], cfg, rendered, weight=w)
 
 
 def test_attention_mask():

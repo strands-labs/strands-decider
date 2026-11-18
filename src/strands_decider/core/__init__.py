@@ -1,7 +1,7 @@
 """The Strands Decider core: what every runtime shares, without torch.
 
 It renders a request as token ids (`render`), checks a checkpoint's files at load
-(`DecisionConfig.load`, `load_tokenizer`, `Readout.load`, `check_image_processor`), and reads the
+(`DecisionConfig.load`, `load_tokenizer`, `load_readout`, `check_image_processor`), and reads the
 answers from a backend's rows (`read`). The backend runs the model (`Backend`); `evaluate` joins them.
 """
 
@@ -27,10 +27,7 @@ from .prompt import (
     render_text,
 )
 from .readout import (
-    HIDDEN,
-    PROBABILITIES,
-    STAGES,
-    Readout,
+    load_readout,
     question_probabilities,
     read,
     readout_logits,
@@ -46,15 +43,11 @@ __all__ = [
     "CODE_TOKEN_IDS",
     "CONTROL_TOKEN_IDS",
     "FORMAT_VERSION",
-    "HIDDEN",
     "INTERFACE",
     "MAX_CODES",
     "NO_VISION",
-    "PROBABILITIES",
-    "STAGES",
     "Backend",
     "DecisionConfig",
-    "Readout",
     "RenderedImage",
     "RenderedQuestion",
     "RenderedRequest",
@@ -64,6 +57,7 @@ __all__ = [
     "check_image_processor",
     "decode_image",
     "evaluate",
+    "load_readout",
     "load_tokenizer",
     "prepare_tokenizer",
     "question_probabilities",
