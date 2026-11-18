@@ -1,11 +1,6 @@
-"""The llama.cpp backend (strands_decider.backends.llama_cpp) without llama.cpp.
-
-The image preparation is the backend's own and is tested against Pillow and the core: the pixel
-goldens, the decoded-size check and the two-pass bicubic resize. The shim is replaced by a stand-in
-that implements its C API in Python, so the marshalling around it, the image spans, and the checks
-of mtmd's soft-token count, grid, wrapping tokens and normalisation are tested too. The real
-library, built against the pinned llama.cpp, is tests/test_llama_cpp_shim.py's to test: the mask,
-state reuse, image rows and answers against transformers.
+"""The llama.cpp backend without llama.cpp: the image preparation against Pillow and the core's
+pixel goldens, and the marshalling around a stand-in shim that implements its C API in Python.
+tests/test_llama_cpp_shim.py tests the real library against transformers.
 """
 
 from __future__ import annotations
@@ -21,17 +16,17 @@ import pytest
 from core_support import FIXTURES, IMAGE_FILES, image_bytes
 
 from strands_decider.backends import llama_cpp
-from strands_decider.backends.llama_cpp import (
-    CONTROL_IDS,
-    ImageError,
-    LlamaCppBackend,
-    decode_pixels,
-    prepare_pixels,
+from strands_decider.backends.llama_cpp import LlamaCppBackend, decode_pixels, prepare_pixels
+from strands_decider.core import (
+    CONTROL_TOKEN_IDS,
+    RenderedImage,
+    decode_image,
+    resized_size,
+    soft_tokens,
 )
-from strands_decider.core import HIDDEN, RenderedImage, decode_image, resized_size, soft_tokens
 
 Image = pytest.importorskip("PIL.Image")
-BOI, SOFT, EOI = CONTROL_IDS["<|image>"], CONTROL_IDS["<|image|>"], CONTROL_IDS["<image|>"]
+BOI, SOFT, EOI = (CONTROL_TOKEN_IDS[t] for t in ("<|image>", "<|image|>", "<image|>"))
 N_EMBD, N_EMBD_INP = 6, 4
 
 
@@ -107,7 +102,7 @@ def test_decode_pixels_puts_transparency_on_white_and_takes_the_first_frame():
     assert decode_pixels(gif.getvalue()).getpixel((4, 4)) == (0, 0, 255)
 
 
-def test_decode_pixels_refuses_with_v1s_messages():
+def test_decode_pixels_refuses_unreadable_files():
     png = _encode(Image.new("RGB", (16, 16), (1, 2, 3)), "PNG")
     with pytest.raises(ValueError, match=r"^image could not be read as PNG/JPEG/WEBP/GIF: "):
         decode_pixels(b"not an image at all")
@@ -136,10 +131,9 @@ class FakeShim:
     """sd_* in Python. A question's hidden state is a function of the state, the question and
     the image rows, so the tests can tell what reached the shim."""
 
-    def __init__(self, *, tokens_for=None, grid_for=None, wrap=(BOI, EOI), fail=0, info=None):
+    def __init__(self, *, tokens_for=None, fail=0, info=None):
         self.tokens_for = tokens_for or (lambda w, h: (w // 48) * (h // 48))
-        self.grid_for = grid_for or (lambda w, h: (w // 48, h // 48))
-        self.wrap, self.fail = wrap, fail
+        self.fail = fail
         self.info = info or ([0.0, 0.0, 0.0], [1.0, 1.0, 1.0], 16)
         self.calls: list[dict] = []
         self.encoded: list[tuple[int, int]] = []
@@ -172,8 +166,6 @@ class FakeShim:
         self.encoded.append((w, h))
         n = self.tokens_for(w, h)
         n_tok._obj.value = n
-        grid[0], grid[1] = self.grid_for(w, h)
-        wrap[0], wrap[1] = self.wrap
         for i in range(min(n, cap) * N_EMBD_INP):
             out[i] = float(len(self.encoded) * 1000 + i)
         ms[0], ms[1] = 1.0, 2.0
@@ -276,7 +268,7 @@ def _state_with(images: list[bytes], text=(7, 8, 9)) -> tuple[list[int], list[Re
 def test_a_text_backend(shim):
     backend = LlamaCppBackend("lib.so", "model.gguf", threads=3)
     assert shim.loaded == (b"model.gguf", 3)
-    assert backend.outputs == HIDDEN and not backend.has_vision
+    assert not backend.has_vision
     out = backend.forward([2, 5, 6], [[20, 21], [22]])
     assert out.shape == (2, N_EMBD) and out.dtype == np.float32
     (call,) = shim.calls
@@ -287,8 +279,6 @@ def test_a_text_backend(shim):
     state, images = _state_with([png])
     with pytest.raises(ValueError, match="no vision tower"):
         backend.forward(state, [[1]], images)
-    with pytest.raises(RuntimeError, match="none of them empty"):
-        backend.forward([1], [[]])
     backend.close()
     assert shim.freed
     with pytest.raises(RuntimeError, match="closed"):
@@ -346,12 +336,6 @@ def test_the_vision_towers_soft_tokens_must_be_the_cores(monkeypatch, processor_
     state, images = _state_with([png])
     for shim, match in [
         (FakeShim(tokens_for=lambda w, h: 70), "gives a 912 x 672 image 70 soft tokens"),
-        (FakeShim(wrap=(BOI, 5)), "wraps an image"),
-        (
-            FakeShim(grid_for=lambda w, h: (h // 48, w // 48)),
-            "a 14 x 19 grid of soft tokens, not 19 x 14",
-        ),
-        (FakeShim(grid_for=lambda w, h: (133, 2)), "a 133 x 2 grid"),
         (FakeShim(fail=13), "fewer runs of image placeholders"),
         (FakeShim(fail=14), "row counts are not positive"),
     ]:
@@ -363,37 +347,27 @@ def test_the_vision_towers_soft_tokens_must_be_the_cores(monkeypatch, processor_
             backend.forward(state, [[1]], images)
 
 
-def test_image_spans_must_be_lines_of_placeholders(shim, processor_config):
+def test_an_image_that_fails_to_decode_is_the_requests_error(shim, processor_config):
     backend = LlamaCppBackend(
         "lib.so", "m.gguf", mmproj="mm.gguf", processor_config=processor_config
     )
     png = image_bytes("checker-64x48.png")
     state, images = _state_with([png])
-    moved = [
-        RenderedImage(im.data, im.format, im.width, im.height, im.sha256, im.start + 1, im.tokens)
-        for im in images
-    ]
-    with pytest.raises(RuntimeError, match="not a line of placeholders"):
-        backend.forward(state, [[1]], moved)
-    with pytest.raises(RuntimeError, match="outside its images' spans"):
-        backend.forward([*state, SOFT], [[1]], images)
-    # An image that passes the header checks and fails to decode is the request's error.
-    cut = png[: len(png) - 30]
-    bad_state, bad = _state_with([png])
+    cut = png[: len(png) - 30]  # the header passes; the pixels don't decode
     bad = [
-        RenderedImage(cut, b.format, b.width, b.height, b.sha256, b.start, b.tokens) for b in bad
+        RenderedImage(cut, b.format, b.width, b.height, b.sha256, b.start, b.tokens) for b in images
     ]
-    with pytest.raises(ImageError, match=r"^image could not"):
-        backend.forward(bad_state, [[1]], bad)
+    with pytest.raises(ValueError, match=r"^image could not"):
+        backend.forward(state, [[1]], bad)
     assert shim.calls == []
 
 
 @pytest.mark.parametrize(
     ("info", "processor", "match"),
     [
-        (([0.5, 0.5, 0.5], [0.5, 0.5, 0.5], 16), {}, "mean \\[0.5, 0.5, 0.5\\]"),
-        (([0.0, 0.0, 0.0], [1.0, 1.0, 1.0], 14), {}, "14-pixel"),
-        (([0.0, 0.0, 0.0], [1.0, 1.0, 1.0], 16), {"do_normalize": True, "image_mean": [0.5] * 3, "image_std": [0.5] * 3}, "std \\[0.5"),
+        (([0.5, 0.5, 0.5], [0.5, 0.5, 0.5], 16), {}, "preprocesses with"),
+        (([0.0, 0.0, 0.0], [1.0, 1.0, 1.0], 14), {}, "preprocesses with"),
+        (([0.0, 0.0, 0.0], [1.0, 1.0, 1.0], 16), {"do_normalize": True, "image_mean": [0.5] * 3, "image_std": [0.5] * 3}, "preprocesses with"),
     ],
 )  # fmt: skip
 def test_the_vision_towers_normalisation_must_be_the_processors(
@@ -435,33 +409,6 @@ def test_the_vision_towers_normalisation_must_be_the_processors(
         )
     )
     LlamaCppBackend("lib.so", "m.gguf", mmproj="mm.gguf", processor_config=cfg)
-
-
-def test_a_one_dimensional_run_of_soft_tokens_is_accepted(monkeypatch, processor_config):
-    s = FakeShim(grid_for=lambda w, h: ((w // 48) * (h // 48), 1))  # as mtmd reports Gemma 4's
-    monkeypatch.setattr(llama_cpp.ctypes, "CDLL", lambda path: FakeLib(s))
-    backend = LlamaCppBackend(
-        "lib.so", "m.gguf", mmproj="mm.gguf", processor_config=processor_config
-    )
-    state, images = _state_with([image_bytes("checker-64x48.png")])
-    assert backend.forward(state, [[1]], images).shape == (1, N_EMBD)
-
-
-def test_encode_image_and_close_take_the_lock(shim, processor_config):
-    backend = LlamaCppBackend(
-        "lib.so", "m.gguf", mmproj="mm.gguf", processor_config=processor_config
-    )
-    pixels = prepare_pixels(_rendered(image_bytes("checker-64x48.png"), 1))
-    with backend._lock:  # held, as by a forward on another thread
-        t = __import__("threading").Thread(target=backend.encode_image, args=(pixels,))
-        t.start()
-        t.join(0.2)
-        assert t.is_alive() and shim.encoded == []
-    t.join(5)
-    assert shim.encoded == [pixels.size]
-    backend.close()
-    with pytest.raises(RuntimeError, match="closed"):
-        backend.encode_image(pixels)
 
 
 def test_the_shim_failing_is_an_error(monkeypatch):

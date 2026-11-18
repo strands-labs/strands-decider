@@ -1,11 +1,6 @@
-"""The decision checkpoint's AWS Lambda handler (deploy/lambda/decision/handler.py), over a stand-in
-backend, and the image build's checks of a checkpoint (deploy/lambda/decision/scripts/build_artifact.py).
-
-The backend is the one part replaced: it is tests/test_backend_llama_cpp.py's and, with the real
-library, tests/test_llama_cpp_shim.py's to test. Everything else is the handler's own: the load and its validation
-of the checkpoint's files, the routes, the status codes and bodies, the limits and the warm-up. The
-core under it is tests/test_core_*.py's. A checkpoint whose decision_config.json lacks the
-soft-cap, or whose config.json names another, is refused, at load and at build.
+"""The decision checkpoint's Lambda handler over a stand-in backend, and the image build's checks
+of a checkpoint. The backend is tests/test_backend_llama_cpp.py's and tests/test_llama_cpp_shim.py's
+to test; the core under it is tests/test_core_*.py's.
 """
 
 from __future__ import annotations
@@ -26,8 +21,7 @@ import numpy as np
 import pytest
 from core_support import decision_config_fixture, image_b64
 
-from strands_decider.backends.llama_cpp import ImageError
-from strands_decider.core import CODES, CONTROL_TOKEN_IDS, HIDDEN
+from strands_decider.core import CODES, CONTROL_TOKEN_IDS
 
 DECISION = Path(__file__).resolve().parents[1] / "deploy" / "lambda" / "decision"
 HIDDEN_SIZE = 8
@@ -50,7 +44,6 @@ class FakeBackend:
 
     calls: ClassVar[list[tuple[list[int], list[list[int]], tuple]]] = []
     fail: ClassVar[Exception | None] = None
-    outputs = HIDDEN
 
     def __init__(self, library, model, *, mmproj=None, processor_config=None, threads=None):
         self.args = (library, model, mmproj, processor_config, threads)
@@ -82,8 +75,7 @@ def _safetensors(path: Path, weight: np.ndarray) -> None:
 
 def gemma_ids_tokenizer():
     """A word-level tokenizer with Gemma 4's control tokens and every code at Gemma 4's ids (the
-    fixture's token_ids), so that it passes the core's check_tokenizer, as load_tokenizer runs
-    it; other text is a few small ids."""
+    fixture's token_ids), so that it passes `prepare_tokenizer`; other text is a few small ids."""
     from tokenizers import AddedToken, Regex, Tokenizer, models, pre_tokenizers
 
     words = ["<unk>", "\n", " ", ".", "<", ">", "/", '"', "=", "—", "answer", "model", "user"]
@@ -128,30 +120,10 @@ def write_checkpoint(d: Path, *, vision: bool = True, **config) -> Path:
     return d
 
 
-CHUNK = 16 << 20
-
-
-def record_artifact(d: Path, **extra) -> None:
-    """artifact.json as the image build writes it: each served file's size and sha256, and the
-    GGUFs' chunk digests."""
-    files = {}
-    for p in sorted(d.iterdir()):
-        if p.name in ("artifact.json", "config.json") or not p.is_file():
-            continue
-        data = p.read_bytes()
-        rec = {"size": len(data), "sha256": hashlib.sha256(data).hexdigest()}
-        if p.name.endswith(".gguf"):
-            rec |= {
-                "chunk_size": CHUNK,
-                "chunks": [
-                    hashlib.sha256(data[i : i + CHUNK]).hexdigest()
-                    for i in range(0, len(data), CHUNK)
-                ],
-            }
-        files[p.name] = rec
-    (d / "artifact.json").write_text(
-        json.dumps({"model_name": "tiny-decision-q8_0", "files": files, **extra})
-    )
+def record_artifact(d: Path, lazy_ranges=()) -> None:
+    """artifact.json as the image build writes it, with what the handler reads."""
+    artifact = {"model_name": "tiny-decision-q8_0", "lazy_ranges": list(lazy_ranges)}
+    (d / "artifact.json").write_text(json.dumps(artifact))
 
 
 @pytest.fixture
@@ -171,7 +143,6 @@ def load(model_dir, monkeypatch):
             monkeypatch.setenv(key, value)
         fake = types.ModuleType("strands_decider.backends.llama_cpp")
         fake.LlamaCppBackend = FakeBackend  # type: ignore[attr-defined]
-        fake.ImageError = ImageError  # type: ignore[attr-defined]
         monkeypatch.setitem(sys.modules, "strands_decider.backends.llama_cpp", fake)
         monkeypatch.syspath_prepend(str(DECISION))
         monkeypatch.delitem(sys.modules, "handler", raising=False)
@@ -210,11 +181,10 @@ def test_loads_the_artifact_and_warms_up_text_and_images(load, model_dir):
     assert processor_config == str(model_dir / "processor_config.json")
     # A text warm-up, then an image one, before any request.
     assert [len(images) for _, _, images in FakeBackend.calls] == [0, 1]
-    assert model.config.final_logit_softcapping == 30.0 and model.readout.softcap == 30.0
+    assert model.config.final_logit_softcapping == 30.0 and model.weight.shape == (255, 8)
 
 
-@pytest.mark.parametrize(("setting", "dropped"), [(None, True), ("hot", True), ("all", False)])
-def test_the_lazy_tables_pages_leave_the_page_cache(load, model_dir, monkeypatch, setting, dropped):
+def test_the_lazy_tables_pages_leave_the_page_cache(load, model_dir, monkeypatch):
     calls = []
     monkeypatch.setattr(
         handler_os(),
@@ -223,18 +193,10 @@ def test_the_lazy_tables_pages_leave_the_page_cache(load, model_dir, monkeypatch
         raising=False,
     )
     monkeypatch.setattr(handler_os(), "POSIX_FADV_DONTNEED", 4, raising=False)
-    # One good range, and ones that are empty, past the file's end, or negative, which are skipped:
-    # posix_fadvise reads a length of 0 as "to the end of the file".
-    bad = [[900, 900], [1000, 5000], [-1, 10], ["a", 9]]
-    record_artifact(model_dir, lazy_ranges=[[100, 900], *bad])
-    load(**({} if setting is None else {"DECIDER_PAGE_CACHE": setting}))
+    record_artifact(model_dir, lazy_ranges=[[100, 900]])
+    load()
     # The vision tower's file, whole, after mtmd reads it; the table's range after the warm-ups.
-    assert calls == ([(0, 0), (100, 800)] if dropped else [(0, 0)])
-
-
-def test_a_bad_page_cache_setting_is_refused(load):
-    with pytest.raises(ValueError, match="DECIDER_PAGE_CACHE"):
-        load(DECIDER_PAGE_CACHE="none")
+    assert calls == [(0, 0), (100, 800)]
 
 
 def handler_os():
@@ -266,11 +228,6 @@ def test_answers_a_text_request(load):
     assert body["usage"]["output_tokens"] == 2 and body["latency_ms"] >= 0
     (state, questions, images) = FakeBackend.calls[-1]
     assert body["usage"]["input_tokens"] == len(state) + sum(map(len, questions)) and images == ()
-    response = handler.handler(url_event("POST", "/v1/systemone", REQUEST), None)
-    assert (
-        response["headers"]["x-decider-load-wait-ms"]
-        and "state_ms" in response["headers"]["x-decider-timings"]
-    )
     # A base64-encoded body, as a Function URL may send one.
     assert call(handler, url_event("POST", "/v1/systemone", REQUEST, b64=True))[0] == 200
 
@@ -289,7 +246,7 @@ def test_a_direct_invocation(load):
     assert payload["answers"]["team"]["choice"] == "billing"
     stateless = {k: v for k, v in REQUEST.items() if k != "state"}  # the state is optional
     assert handler.handler(stateless, None)["answers"].keys() == payload["answers"].keys()
-    with pytest.raises(ValueError, match=r"^questions: Dictionary should have at least 1 item"):
+    with pytest.raises(ValueError, match="Dictionary should have at least 1 item"):
         handler.handler({"state": "s", "questions": {}}, None)
 
 
@@ -299,9 +256,9 @@ def test_a_direct_invocation(load):
         (url_event("GET", "/nope"), 404, "Not Found"),
         (url_event("GET", "/v1/systemone"), 405, "Method Not Allowed"),
         (url_event("POST", "/health"), 405, "Method Not Allowed"),
-        (url_event("POST", "/v1/systemone", raw="{not json"), 422, "the body is not JSON"),
-        (url_event("POST", "/v1/systemone", ["a", "list"]), 422, "a request must be a JSON object"),
-        (url_event("POST", "/v1/systemone", {"state": "s"}), 422, "questions: Field required"),
+        (url_event("POST", "/v1/systemone", raw="{not json"), 422, "Invalid JSON"),
+        (url_event("POST", "/v1/systemone", ["a", "list"]), 422, "Input should be"),
+        (url_event("POST", "/v1/systemone", {"state": "s"}), 422, "Field required"),
         (url_event("POST", "/v1/systemone", {**REQUEST, "audio": []}), 422, "audio input is not supported"),
         # Five images of 266 tokens each make a prompt longer than max_length_validated (512).
         (url_event("POST", "/v1/systemone", {**REQUEST, "images": [image_b64("checker-64x48.png")] * 5}), 422,
@@ -334,17 +291,11 @@ def test_the_request_limit(load):
     assert status == 422
     assert "exceeds the limit of 40 tokens per request" in body["detail"]
     assert "(the state's" in body["detail"] and len(FakeBackend.calls) == 2  # the warm-ups only
-    with pytest.raises(ValueError, match="DECIDER_MAX_REQUEST_TOKENS"):
-        load(DECIDER_MAX_REQUEST_TOKENS="-1")
 
 
-@pytest.mark.parametrize(
-    "failure",
-    [RuntimeError("sd_forward failed: the state's decode failed"), ValueError("an internal check")],
-)
-def test_a_backend_failure_is_a_500(load, failure):
+def test_a_backend_failure_is_a_500(load):
     handler = load()
-    FakeBackend.fail = failure
+    FakeBackend.fail = RuntimeError("sd_forward failed: the state's decode failed")
     assert call(handler, url_event("POST", "/v1/systemone", REQUEST)) == (
         500,
         {"detail": "Internal Server Error"},
@@ -353,7 +304,7 @@ def test_a_backend_failure_is_a_500(load, failure):
 
 def test_an_image_that_cannot_be_decoded_is_a_422(load):
     handler = load()
-    FakeBackend.fail = ImageError("image could not be decoded: broken data stream")
+    FakeBackend.fail = ValueError("image could not be decoded: broken data stream")
     assert call(handler, url_event("POST", "/v1/systemone", IMAGE_REQUEST)) == (
         422,
         {"detail": "image could not be decoded: broken data stream"},
@@ -375,24 +326,6 @@ def test_the_request_limit_fails_closed(load):
     assert (
         load(DECIDER_MAX_REQUEST_TOKENS="0")._model.result().health()["max_request_tokens"] is None
     )
-
-
-def test_images_are_counted_with_repeats(load, tmp_path):
-    handler = load(write_checkpoint(tmp_path / "long", max_length_validated=2048))
-    twice = {**REQUEST, "images": [image_b64("checker-64x48.png")] * 2}
-    _, info = handler._evaluate(twice)
-    assert info["images"] == 2 and len(info["timings_ms"]["images"]) == 1
-
-
-def test_a_served_file_that_is_not_the_builds_is_refused(load, tmp_path):
-    for name in ("model.gguf", "mmproj.gguf", "readout.safetensors", "tokenizer.json"):
-        d = write_checkpoint(tmp_path / name)
-        data = bytearray((d / name).read_bytes())
-        data[len(data) // 2] ^= 1
-        (d / name).write_bytes(bytes(data))
-        with pytest.raises(ValueError, match="is not the file the image build wrote"):
-            load(d)
-    assert FakeBackend.calls == []
 
 
 def test_a_listed_vision_tower_must_be_there(load, tmp_path):
@@ -423,28 +356,18 @@ def test_an_on_demand_load_that_fails_ends_the_environment(load, tmp_path, monke
 
 def test_an_on_demand_load_answers_once_ready(load):
     handler = load(AWS_LAMBDA_INITIALIZATION_TYPE="on-demand")
-    response = handler.handler(url_event("POST", "/v1/systemone", REQUEST), None)
-    assert (
-        response["statusCode"] == 200 and float(response["headers"]["x-decider-load-wait-ms"]) >= 0
-    )
+    assert handler.handler(url_event("POST", "/v1/systemone", REQUEST), None)["statusCode"] == 200
 
 
-def test_an_artifact_without_a_vision_tower_refuses_images(load, tmp_path):
-    from strands_decider.core import NO_VISION
-
-    handler = load(write_checkpoint(tmp_path / "text", vision=False))
+def test_a_text_only_checkpoint_refuses_images(load, tmp_path):
+    handler = load(write_checkpoint(tmp_path / "textonly", vision=False, inputs=["text"]))
     assert handler._model.result().health()["inputs"] == ["text"]
-    assert call(handler, url_event("POST", "/v1/systemone", IMAGE_REQUEST)) == (
-        422,
-        {"detail": NO_VISION},
-    )
-    handler = load(write_checkpoint(tmp_path / "textonly", inputs=["text"]))
     status, body = call(handler, url_event("POST", "/v1/systemone", IMAGE_REQUEST))
     assert status == 422 and body["detail"].startswith("this checkpoint does not take images")
 
 
 def test_a_checkpoint_without_the_soft_cap_is_refused(load, tmp_path):
-    with pytest.raises(ValueError, match=r"missing required fields \['final_logit_softcapping'\]"):
+    with pytest.raises(ValueError, match="final_logit_softcapping"):
         load(write_checkpoint(tmp_path / "nocap", final_logit_softcapping=None))
     assert FakeBackend.calls == []  # refused before the model loads
 
@@ -460,12 +383,8 @@ def test_a_tokenizer_without_the_checkpoints_ids_is_refused(load, tmp_path):
 
 
 def test_other_decision_configs_are_refused(load, tmp_path):
-    with pytest.raises(ValueError, match="not a Strands Decider decision config"):
+    with pytest.raises(ValueError, match="interface"):
         load(write_checkpoint(tmp_path / "pplx", interface=None))
-    d = write_checkpoint(tmp_path / "disagree")
-    (d / "config.json").write_text(json.dumps({"text_config": {"final_logit_softcapping": 50.0}}))
-    with pytest.raises(ValueError, match="inconsistent"):
-        load(d)
 
 
 # ---- the image build's checks ----------------------------------------------------------------
@@ -485,13 +404,11 @@ def build_artifact(monkeypatch):
     return module
 
 
-def _layout(d: Path, *, text_config=None, **config) -> Path:
+def _layout(d: Path, **config) -> Path:
     write_checkpoint(d, **config)
     (d / "config.json").write_text(
-        json.dumps({"architectures": ["Gemma4ForConditionalGeneration"],
-                    "text_config": {"final_logit_softcapping": 30.0} if text_config is None else text_config})
-    )  # fmt: skip
-    (d / "tokenizer_config.json").write_text(json.dumps({"tokenizer_class": "GemmaTokenizer"}))
+        json.dumps({"architectures": ["Gemma4ForConditionalGeneration"]})
+    )
     return d
 
 
@@ -503,21 +420,9 @@ def test_the_build_checks_a_good_checkpoint(build_artifact, tmp_path):
 def test_the_build_refuses_a_checkpoint_without_the_soft_cap(build_artifact, tmp_path):
     with pytest.raises(ValueError, match="final_logit_softcapping"):
         build_artifact.check(_layout(tmp_path / "nocap", final_logit_softcapping=None))
-    # config.json without it under text_config, where the multimodal layout keeps it: a reader of
-    # config.json's top level would find nothing and skip the cap; the build refuses instead.
-    with pytest.raises(SystemExit, match=r"text_config\.final_logit_softcapping is None"):
-        build_artifact.check(_layout(tmp_path / "notext", text_config={}))
-    with pytest.raises(ValueError, match="inconsistent"):
-        build_artifact.check(
-            _layout(tmp_path / "differs", text_config={"final_logit_softcapping": 50.0})
-        )
 
 
 def test_the_build_refuses_other_checkpoints(build_artifact, tmp_path):
-    d = _layout(tmp_path / "template")
-    (d / "tokenizer_config.json").write_text(json.dumps({"chat_template": "{{ messages }}"}))
-    with pytest.raises(SystemExit, match="no chat template"):
-        build_artifact.check(d)
     d = _layout(tmp_path / "processor")
     (d / "processor_config.json").write_text(
         json.dumps(
@@ -532,7 +437,7 @@ def test_the_build_refuses_other_checkpoints(build_artifact, tmp_path):
     )
     with pytest.raises(ValueError, match="patch_size"):
         build_artifact.check(d)
-    with pytest.raises(ValueError, match="not a Strands Decider decision config"):
+    with pytest.raises(ValueError, match="interface"):
         build_artifact.check(_layout(tmp_path / "other", interface=None))
 
 

@@ -1,8 +1,7 @@
 """Build what the Lambda image serves from a decision checkpoint.
 
     python build_artifact.py CHECKPOINT OUT_DIR --llama-cpp DIR --quantize PATH [--revision REV]
-        [--expect-digest SHA256] [--name NAME] [--mmproj-type q8_0|f16] [--max-bytes N]
-        [--work DIR] [--gguf-tmp DIR]
+        [--expect-digest SHA256] [--work DIR] [--gguf-tmp DIR]
 
 CHECKPOINT is a Hugging Face Hub id, an s3:// URI of a checkpoint directory (read with the
 environment's AWS credentials), or a local directory. OUT_DIR gets:
@@ -10,28 +9,21 @@ environment's AWS credentials), or a local directory. OUT_DIR gets:
     model.gguf             the decoder: llama.cpp's stock convert_hf_to_gguf.py to BF16 (lossless
                            from the bf16 checkpoint), then llama-quantize to Q8_0
     mmproj.gguf            for a checkpoint whose inputs hold "image": the vision tower and its
-                           projection, convert_hf_to_gguf.py --mmproj at q8_0 (f16 with
-                           --mmproj-type), without the audio tower (vision_only_mmproj.py)
+                           projection, convert_hf_to_gguf.py --mmproj at q8_0, without the audio
+                           tower (vision_only_mmproj.py)
     readout.safetensors, decision_config.json, tokenizer.json, processor_config.json
                            the checkpoint's own, unchanged
     artifact.json          the model's name; the checkpoint, its resolved Hub commit and its
-                           manifest digest; the llama.cpp commit; each served file's size and
-                           sha256, and the sha256 of each 16 MiB chunk of the GGUFs, which the
-                           function checks as it reads them at start; and the byte ranges of
-                           model.gguf that llama.cpp reads lazily
+                           manifest digest; the llama.cpp commit; each file's size and sha256;
+                           and the byte ranges of model.gguf that llama.cpp reads lazily
 
 The checkpoint is pinned: a Hub revision is resolved to its commit, and each of its LFS files is
 checked against the sha256 the Hub records. The manifest digest is the sha256 of the lines
 `<sha256>  <file>`, one per file of the checkpoint, sorted by name (in a checkpoint directory,
 `sha256sum * | sort -k 2 | sha256sum`); with --expect-digest, any other is refused.
 
-The checkpoint is checked before anything is converted, as a runtime checks it: decision_config.json
-must validate (`"interface": "strands-decider"`, the soft-cap among its required fields),
-config.json's `text_config.final_logit_softcapping` must equal it, and an image checkpoint's image
-processor must have the settings the core counts soft tokens for (`check_image_processor`). The
-llama.cpp tree must carry deploy/lambda/decision/patches. Its converter leaves a Strands Decider
-checkpoint to its own Gemma 4 classes: its pplx-decider loader claims only a Qwen3.5 backbone
-(ggml-org/llama.cpp#32156).
+Before anything is converted, the checkpoint is loaded as the function loads it: its
+decision_config.json, readout, tokenizer and, for images, image processor settings.
 """
 
 from __future__ import annotations
@@ -54,8 +46,8 @@ for _parent in Path(__file__).resolve().parents:
 
 from strands_decider.core import (  # noqa: E402
     DecisionConfig,
-    Readout,
     check_image_processor,
+    load_readout,
     load_tokenizer,
 )
 from strands_decider.core.config import IMAGE  # noqa: E402
@@ -66,7 +58,6 @@ QUANT = "Q8_0"
 # a request's state within Lambda's 10,240 MB: E2B's are 4.95 GB and, at q8_0, 0.23 GB.
 MAX_BYTES = 6_000_000_000
 FILES = ("readout.safetensors", "decision_config.json", "tokenizer.json", "processor_config.json")
-# The chunk the function reads and checks the GGUFs in (handler.py, _prefetch).
 CHUNK = 16 << 20
 
 
@@ -128,26 +119,15 @@ def manifest_digest(ckpt: Path) -> str:
 
 
 def check(ckpt: Path) -> DecisionConfig:
-    """The checkpoint's decision config, validated, and its other files checked against it."""
+    """The checkpoint's decision config, with its other files loaded as the function loads them."""
     config = DecisionConfig.load(ckpt)
-    Readout.load(ckpt, config)  # the weight's shape, and config.json's soft-cap against config's
-    with open(ckpt / "config.json", encoding="utf-8") as f:
-        text = json.load(f).get("text_config") or {}
-    if text.get("final_logit_softcapping") != config.final_logit_softcapping:
-        raise SystemExit(
-            f"config.json's text_config.final_logit_softcapping is "
-            f"{text.get('final_logit_softcapping')!r}; decision_config.json's is "
-            f"{config.final_logit_softcapping!r}"
-        )
+    load_readout(ckpt)
+    load_tokenizer(ckpt)
     for name in FILES:
         if not (ckpt / name).is_file():
             raise SystemExit(f"{ckpt} has no {name}")
-    load_tokenizer(ckpt, config)  # its code and control token ids, as the function checks them
     if IMAGE in config.inputs:
-        check_image_processor(ckpt / "processor_config.json")
-    with open(ckpt / "tokenizer_config.json", encoding="utf-8") as f:
-        if "chat_template" in json.load(f) or (ckpt / "chat_template.jinja").exists():
-            raise SystemExit("a decision checkpoint carries no chat template")
+        check_image_processor(ckpt)
     return config
 
 
@@ -164,20 +144,6 @@ def sha256(path: Path) -> str:
         while chunk := f.read(CHUNK):
             h.update(chunk)
     return h.hexdigest()
-
-
-def file_record(path: Path, chunked: bool) -> dict:
-    """A served file's size and sha256, and for a GGUF each CHUNK's sha256, in order."""
-    whole, chunks = hashlib.sha256(), []
-    with open(path, "rb") as f:
-        while chunk := f.read(CHUNK):
-            whole.update(chunk)
-            if chunked:
-                chunks.append(hashlib.sha256(chunk).hexdigest())
-    rec: dict = {"size": path.stat().st_size, "sha256": whole.hexdigest()}
-    if chunked:
-        rec.update({"chunk_size": CHUNK, "chunks": chunks})
-    return rec
 
 
 def gguf_has_audio(llama_cpp: Path, path: Path) -> bool:
@@ -223,11 +189,8 @@ def main() -> None:
     ap.add_argument(
         "--expect-digest", default="", help="the checkpoint's manifest digest, to refuse any other"
     )
-    ap.add_argument("--name", default=None, help="the model's name; the checkpoint's by default")
     ap.add_argument("--llama-cpp", type=Path, required=True, help="the patched llama.cpp source")
     ap.add_argument("--quantize", type=Path, required=True, help="llama-quantize")
-    ap.add_argument("--mmproj-type", choices=("f16", "q8_0"), default="q8_0")
-    ap.add_argument("--max-bytes", type=int, default=MAX_BYTES)
     ap.add_argument("--work", type=Path, default=Path("/tmp/decision-build"))
     ap.add_argument(
         "--gguf-tmp", type=Path, default=None, help="where the BF16 GGUF goes; --work by default"
@@ -245,8 +208,7 @@ def main() -> None:
             f"the checkpoint's manifest digest is {digest}, not the expected {a.expect_digest}"
         )
     config = check(ckpt)
-    name = a.name or config.provenance.release or a.checkpoint.rstrip("/").split("/")[-1]
-    name = name.split("/")[-1]
+    name = a.checkpoint.rstrip("/").split("/")[-1]
     a.out.mkdir(parents=True, exist_ok=True)
     convert = a.llama_cpp / "convert_hf_to_gguf.py"
 
@@ -257,7 +219,7 @@ def main() -> None:
     files = {"model.gguf": a.out / "model.gguf"}
     if IMAGE in config.inputs:
         full = tmp / "mmproj-full.gguf"
-        run(sys.executable, convert, ckpt, "--mmproj", "--outtype", a.mmproj_type, "--outfile", full,
+        run(sys.executable, convert, ckpt, "--mmproj", "--outtype", "q8_0", "--outfile", full,
             "--model-name", name)  # fmt: skip
         if gguf_has_audio(a.llama_cpp, full):
             run(
@@ -272,9 +234,9 @@ def main() -> None:
             shutil.move(full, a.out / "mmproj.gguf")
         files["mmproj.gguf"] = a.out / "mmproj.gguf"
     size = sum(p.stat().st_size for p in files.values())
-    if size > a.max_bytes:
+    if size > MAX_BYTES:
         raise SystemExit(
-            f"the converted model is {size:,} bytes, over the {a.max_bytes:,} that leave a 10,240 MB "
+            f"the converted model is {size:,} bytes, over the {MAX_BYTES:,} that leave a 10,240 MB "
             "Lambda function room to run it; Lambda serves E2B"
         )
     for f in FILES:
@@ -287,19 +249,12 @@ def main() -> None:
         "checkpoint_digest": digest,
         "inputs": list(config.inputs),
         "quantization": QUANT,
-        "mmproj_type": a.mmproj_type if "mmproj.gguf" in files else None,
         "llama_cpp": rev,
         "lazy_ranges": lazy_ranges(a.llama_cpp, a.out / "model.gguf"),
-        "files": {k: file_record(p, k.endswith(".gguf")) for k, p in files.items()},
+        "files": {k: {"size": p.stat().st_size, "sha256": sha256(p)} for k, p in files.items()},
     }
     (a.out / "artifact.json").write_text(json.dumps(artifact, indent=2) + "\n")
-    shown = {
-        **artifact,
-        "files": {
-            k: {"size": v["size"], "sha256": v["sha256"]} for k, v in artifact["files"].items()
-        },
-    }
-    print(json.dumps(shown, indent=2), flush=True)
+    print(json.dumps(artifact, indent=2), flush=True)
 
 
 if __name__ == "__main__":

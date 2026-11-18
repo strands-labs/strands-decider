@@ -297,12 +297,11 @@ rows together, is decoded once as one non-causal batch, and each question on top
 `prefix_bidir` mask with no sliding window. An image is decoded as v1 decodes it, resized by the
 core's `resize_image` (Pillow's bicubic resampling) to the size the image processor gives it, and run through the base
 model's own vision tower. The readout and its soft-cap come from the checkpoint's
-`readout.safetensors` and `decision_config.json`; a checkpoint without the soft-cap there, or with
-another value under `config.json`'s `text_config`, is refused.
+`readout.safetensors` and `decision_config.json`; a checkpoint without the soft-cap there is
+refused.
 
-The GGUF Q8_0 decoder meets the conformance bound the core records for that format (`BOUNDS` in
-`core/conformance.py`), at least 98% top-1 agreement and a mean |Δp| of at most 0.02: at E2B, through this runtime on x86,
-99.08% and 0.0104 on 1,200 prompts.
+The GGUF Q8_0 decoder meets the parity bar of at least 98% top-1 agreement and a mean |Δp| of at
+most 0.02: at E2B, through this runtime on x86, 99.08% and 0.0104 on 1,200 prompts.
 
 ### What the build does
 
@@ -331,14 +330,13 @@ the function will, then converts it with llama.cpp's own `convert_hf_to_gguf.py`
   reference.
 
 The arm64 build's files are byte-identical to an x86 build's. The build takes about 10 minutes.
-`artifact.json` in the image records every file it serves with its sha256, and the GGUFs' 16 MiB
-chunks too; the function checks them when it loads, as it reads the files, and does not start on a
-mismatch.
+`artifact.json` in the image records each file's size and sha256, the checkpoint and its manifest
+digest, and the llama.cpp commit.
 
 ### After each deploy, warm the function
 
 A new image's files reach a new execution environment lazily, and the function reads its 5.2 GB
-of model files, checking them, before it answers. Right after a deploy that read is slow: in three
+of model files before it answers. Right after a deploy that read is slow: in three
 deploys, the first request ran 826 s once and past the 15-minute timeout twice, which the Function
 URL returns as a 502; the next environments took 4 to 10 minutes. Later ones read the files in 20
 to 40 s and answer their first request in 30 to 80 s, though an environment on a host that has
@@ -389,9 +387,9 @@ Max Memory Used, which counts the page cache, was 8,388 MB on every one of 75 re
 16,384-token ones and those with four images included: 1.8 GB under the 10,240 MB limit. That
 figure is the environment's peak while it loads, when it reads the whole model file. Afterwards
 the handler drops the per-layer embedding table, 2.5 GB of the decoder's file of which a request
-reads a few rows, from the page cache (`DECIDER_PAGE_CACHE=hot`, the default); `all` keeps it. With it kept, and the f16
-vision tower, a prompt of 8,131 tokens with four images reached 10,077 MB. Warm latency is the
-same either way: 2.3 s against 2.9 s at 250 tokens on Graviton2.
+reads a few rows, from the page cache. With it kept, and the f16 vision tower, a prompt of 8,131
+tokens with four images reached 10,077 MB, at the same warm latency: 2.3 s against 2.9 s at 250
+tokens on Graviton2.
 
 The answers agree with the reference runtime (transformers, bf16, the same rendered prompts and
 pixels) and with the same files on x86:
@@ -405,13 +403,12 @@ Both differences from the reference are near-ties, a gap of at most 0.007 betwee
 answers. The text rows include the f16 tower's deploy; the decoder, and so the text answers, are
 the same.
 
-A later deploy, whose function checks its files as it loads, agreed as closely: 53 of 53 text
+A later deploy agreed as closely: 53 of 53 text
 questions and 104 of 104 image questions gave the reference's top answer, with mean largest
 probability differences of 0.008 and 0.008.
 
-Each response carries `x-decider-cpu-part`, `x-decider-load-wait-ms` (above 0 on a new
-environment) and `x-decider-timings` (the images', the state's and each question's milliseconds),
-and the log has a line per request with the same.
+The log has a line per request with the host CPU, the wait for the load (above 0 on a new
+environment), and the images', the state's and each question's milliseconds.
 
 ## Deleting it
 
