@@ -1,5 +1,5 @@
-"""The opt-in token readout: TokenReadoutHead, the spec's 255-code readout read at the last
-prompt token of a strands-chat prompt (strands_decider.core.render), and attention_mode
+"""The opt-in token readout: TokenReadoutHead, the 255-code readout of strands_decider.core,
+read at the last prompt token of a strands-chat prompt (core.render), and attention_mode
 prefix_bidir."""
 
 from __future__ import annotations
@@ -7,13 +7,13 @@ from __future__ import annotations
 import json
 import math
 import os
-import re
 import shutil
+from functools import cache
 from types import SimpleNamespace
 
 import pytest
 import torch
-from core_support import toy_tokenizer
+from core_support import gemma4_file, gemma4_tokenizer
 from test_ddp import _examples, _qwen3_config, _tiny_model_factory, _tokenizer_file
 from transformers import PreTrainedTokenizerFast
 
@@ -51,16 +51,14 @@ def corpus(tmp_path_factory):
     return d
 
 
-def _tok(corpus):
-    """A tokenizer core.render takes (Gemma 4's control tokens, every code one token) that
-    knows the corpus's words."""
-    text = (corpus / "a.jsonl").read_text() + (corpus / "val.jsonl").read_text()
-    words = re.findall(r"\w+", text + " pay outs fail work now")
-    return PreTrainedTokenizerFast(tokenizer_object=toy_tokenizer(words), pad_token="<eos>")
+@cache
+def _tok():
+    """Gemma 4's tokenizer, as training loads it: a strands-chat prompt is made of its ids."""
+    return PreTrainedTokenizerFast(tokenizer_file=gemma4_file("tokenizer.json"), pad_token="<pad>")
 
 
-def _chat(tok, request):
-    return core.render(request, tok.backend_tokenizer, core.CHAT).questions["q"]
+def _chat(request):
+    return core.render(request, gemma4_tokenizer()).questions["q"]
 
 
 def _readout_factory(corpus):
@@ -68,7 +66,7 @@ def _readout_factory(corpus):
     from transformers import Qwen3Model
 
     def build(config, *, device_map=None, attn_implementation=None):
-        tok = _tok(corpus)
+        tok = _tok()
         config.lora_dropout = 0.0
         model = StrandsDeciderModel(config, Qwen3Model(_qwen3_config(len(tok))), tok)
         if config.use_lora:
@@ -87,13 +85,13 @@ def _readout(corpus, **kw):
 
 def test_the_collator_shuffles_only_choices_and_refuses_a_long_prompt(corpus):
     rows = load_examples([str(corpus / "a.jsonl")])
-    coll = SystemOneCollator(_tok(corpus), CollatorConfig(render=core.CHAT), train=True)
+    coll = SystemOneCollator(_tok(), CollatorConfig(render=core.CHAT), train=True)
     orders = [coll._option_order(ex) for ex in rows[:40]]
     assert all(o is None for o, ex in zip(orders, rows, strict=False) if ex.kind != "choice")
     assert any(o is not None for o in orders)
     assert "opt_idx" not in coll(rows[:8])
     with pytest.raises(ValueError, match="longer than max_length"):
-        SystemOneCollator(_tok(corpus), CollatorConfig(render=core.CHAT, max_length=20))(rows[:2])
+        SystemOneCollator(_tok(), CollatorConfig(render=core.CHAT, max_length=20))(rows[:2])
 
 
 # ---------------------------------------------------------------- the head
@@ -118,7 +116,7 @@ def test_the_head_is_255_rows_capped_and_masked_to_the_options(corpus):
 
 def test_under_bf16_autocast_the_cap_runs_in_float32():
     """The product comes back in bf16 under autocast; the cap is then computed in float32, as
-    the runtimes compute it (docs/spec.md, section 7.1), not in bf16."""
+    the runtimes compute it (core/readout.py), not in bf16."""
     torch.manual_seed(0)
     head = TokenReadoutHead(32, softcap=30.0)
     x = torch.randn(64, 32) * 4
@@ -172,7 +170,7 @@ def test_under_prefix_bidir_the_state_never_sees_the_question(corpus):
     model = _readout(corpus, attention_mode="prefix_bidir", use_lora=False).eval()
 
     def hidden(state, question):
-        q = _chat(model.tokenizer, {"state": state, "questions": {"q": question}})
+        q = _chat(core.Request.model_validate({"state": state, "questions": {"q": question}}))
         ids = torch.tensor([q.ids])
         end = q.state_len
         masks = prefix_bidir_masks(
@@ -384,7 +382,7 @@ def test_eval_drops_an_over_long_row_instead_of_stopping(corpus, monkeypatch, ca
     long = Example("noul", "x " * 4000, "Is it long?", [["false", None], ["true", None]], 1)
 
     def longest(e):  # as training/data/multistep.fits measures a strands-chat row
-        return max(len(_chat(model.tokenizer, e.to_request(i)).ids) for i in e.all_instructions())
+        return max(len(_chat(e.to_request(i)).ids) for i in e.all_instructions())
 
     cap = max(longest(e) for e in rows)
     logits, labels, _slots, kept = E.collect_logits(

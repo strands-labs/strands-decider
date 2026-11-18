@@ -16,6 +16,7 @@ from collections.abc import Iterable, Iterator
 from dataclasses import asdict, dataclass, field
 from typing import IO, Any, cast
 
+from strands_decider import core
 from strands_decider.schema import ChoiceQuestion, Content, NoulQuestion, Question, ScoreQuestion
 
 
@@ -82,12 +83,13 @@ class Example:
             return ChoiceQuestion(instructions=instr, criteria=crit)
         return ScoreQuestion(instructions=instr, criteria=[desc for _, desc in self.options])
 
-    def to_request(self, instructions: str | None = None) -> dict[str, Any]:
-        """The question as a one-question request JSON, for `strands_decider.core.render`."""
+    def to_request(self, instructions: str | None = None) -> core.Request:
+        """The question as a one-question request, for `strands_decider.core.render`. A row
+        the core does not take (a choice of one option, say) raises ValueError."""
         instr = self.instructions if instructions is None else instructions
         crit: Any = dict(self.options) if self.kind != "score" else [d for _, d in self.options]
         q = {"type": self.kind, "instructions": instr, "criteria": crit}
-        return {"state": self.state, "questions": {"q": q}}
+        return core.Request.model_validate({"state": self.state, "questions": {"q": q}})
 
     def to_json(self) -> str:
         d = asdict(self)

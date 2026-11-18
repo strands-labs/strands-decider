@@ -344,8 +344,8 @@ v2 training data is not in this repository. The steps are:
      --config configs/v2/strands-decider-E2B-gemma4-v2-2611.yaml
    ```
 
-3. Export the checkpoint to the checkpoint layout of [docs/spec.md](../docs/spec.md),
-   section 9. Several checkpoints before the output directory export as one averaged model.
+3. Export the checkpoint as the directory that `strands_decider.core` loads. Several
+   checkpoints before the output directory export as one averaged model.
 
    ```bash
    python -m training.export_v2 checkpoints/strands-decider-E2B-gemma4-v2-2611 exports/E2B

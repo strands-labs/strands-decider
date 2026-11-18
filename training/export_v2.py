@@ -18,8 +18,8 @@ DIR holds the text decoder's tensors as safetensors, under the base's names with
 `model.language_model.`, and `readout.safetensors` (`weight`, [255, hidden]). Every name and
 shape is checked against the base. The encoders and the other files are the base's.
 
-The output is docs/spec.md's checkpoint layout (section 9): the base model's own multimodal
-checkpoint with the fine-tuning merged in, and this interface's files beside it.
+The output is a decision checkpoint, the directory that `strands_decider.core` loads: the base
+model's own multimodal checkpoint with the fine-tuning merged in, and the core's files beside it.
 
 - The base's safetensors shards, under the base's names and file names. Each decoder tensor
   (`model.language_model.*`) that the LoRA adapter or the expert adapters (expert_lora.py)
@@ -30,7 +30,7 @@ checkpoint with the fine-tuning merged in, and this interface's files beside it.
   refuses a base whose `config.json` caps its logits at another value than the checkpoint's
   `readout_softcap`.
 - `readout.safetensors` (`weight`, [255, hidden], bf16) and `decision_config.json`, with the
-  spec's keys only (section 8). `inputs` is text, and also image when the base has a vision
+  keys of `core.DecisionConfig` only. `inputs` is text, and also image when the base has a vision
   encoder and its projection. The export then refuses a base whose `processor_config.json`
   does not size images as the core counts them (`core.check_image_processor`).
 - `LICENSE` (the Apache License 2.0), a `NOTICE` that names the base and its revision, what
@@ -38,8 +38,8 @@ checkpoint with the fine-tuning merged in, and this interface's files beside it.
   as `--model-card`, else one written from the runs' records (LoRA settings, and each run's
   seed, data file names and steps).
 
-The output holds these files and no others. `golden_vectors.jsonl` (section 10) is not
-written here.
+The output holds these files and no others. `golden_vectors.jsonl`, a checkpoint's reference
+probabilities, is not written here.
 
 Before the merge, the base on disk must be the one the run trained on: the digest of its
 config, tokenizer and tensor headers is compared with the `base.json` that training wrote.
@@ -77,7 +77,7 @@ BASE_RECORD = "base.json"  # written by training beside train_config.json
 TOKENIZER_FILES = ("tokenizer.json", "tokenizer_config.json")
 BASE_FILES = ("config.json", "processor_config.json", *TOKENIZER_FILES)
 LICENSE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir, "LICENSE")
-# The parts of a base beside its decoder (docs/spec.md, section 9), by tensor name prefix.
+# The parts of a base beside its decoder, by tensor name prefix.
 ENCODERS = {
     "model.vision_tower.": "vision encoder",
     "model.vision_embedder.": "vision encoder",
@@ -389,8 +389,8 @@ def model_card(hub_id: str, revision: str, temperature: float, record: dict[str,
         f"Base model: `{hub_id}`, revision `{revision}`.",
         "",
         "A decision model: it reads a state and a question, and gives one probability for each "
-        "option. Written by `python -m training.export_v2` of strands-decider, in the "
-        "checkpoint layout of its specification (`docs/spec.md`, section 9).",
+        "option. Written by `python -m training.export_v2` of strands-decider, as the "
+        "checkpoint directory that `strands_decider.core` loads.",
         "",
         "## What was trained",
         "",
@@ -517,7 +517,8 @@ def export_v2(
         hub_id,
         revision,
     )
-    softcap = core.DecisionConfig.from_dict(decision).final_logit_softcapping  # before any write
+    # Validated before any write.
+    softcap = core.DecisionConfig.model_validate(decision).final_logit_softcapping
     base_config = _json(os.path.join(base, "config.json"))
     if _base_softcaps(base_config) - {softcap}:  # config.json is copied as it is
         raise ValueError(
@@ -576,7 +577,7 @@ def export_merged(
     decision = _decision(
         inputs, temperature, caps.pop(), max_length_validated, base_model, base_revision
     )
-    core.DecisionConfig.from_dict(decision)  # before any write
+    core.DecisionConfig.model_validate(decision)  # before any write
 
     replace: dict[str, Callable[[], torch.Tensor]] = {}
     for shard in _shards(merged_decoder):
@@ -700,9 +701,11 @@ def _write(
             with open(os.path.join(out, "README.md"), "w", encoding="utf-8") as fh:
                 fh.write(card_text)
 
-        loaded = core.DecisionConfig.load(out)
-        core.Readout.load(out, loaded)  # also: config.json's soft-cap equals decision_config's
-        core.load_tokenizer(out, loaded)
+        # As a runtime loads it.
+        if "image" in core.DecisionConfig.load(out).inputs:
+            core.check_image_processor(out)
+        core.load_readout(out)
+        core.load_tokenizer(out)
         check_no_local_paths(out, [*inputs_on_disk, base, out, os.path.expanduser("~")])
     except BaseException:
         shutil.rmtree(out, ignore_errors=True)

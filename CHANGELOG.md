@@ -2,9 +2,9 @@
 
 ## Unreleased
 
-- Training can use an opt-in token readout, the spec's 255-code readout read at the last
-  prompt token: `head_type: token_readout`, with the strands-chat prompt of
-  `strands_decider.core` and `attention_mode: causal` or `prefix_bidir`
+- Training can use an opt-in token readout, the 255-code readout of `strands_decider.core`
+  read at the last prompt token: `head_type: token_readout`, with the core's strands-chat
+  prompt and `attention_mode: causal` or `prefix_bidir`
   ([docs/architecture.md](docs/architecture.md#opt-in-the-token-readout)). The serving
   engines refuse a token readout checkpoint. The pointer readout stays the default, and its
   outputs do not change.
@@ -13,8 +13,8 @@
   `expert_lora` adds LoRA adapters to the experts of the 26B-A4B
   ([training/README.md](training/README.md#the-v2-recipes)).
 - `python -m training.export_v2` writes a token readout checkpoint, or several runs as one
-  averaged model, in the checkpoint layout of [docs/spec.md](docs/spec.md), section 9. It
-  exports a token readout under `prefix_bidir` only.
+  averaged model, as the checkpoint directory that `strands_decider.core` loads. It exports
+  a token readout under `prefix_bidir` only.
 - New training keys: `lr_floor`, `adam_betas`, `resume_from`, `attn_split`, `bf16_autocast`,
   `slice_char_budget` and `base_revision`.
 - These changes also apply to a pointer run. The learning-rate schedule counts optimizer

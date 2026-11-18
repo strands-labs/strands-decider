@@ -176,13 +176,14 @@ ordinal, so they are only ever *reversed* (rubric and label together), never per
 
 ### Opt-in: the token readout
 
-A training config can replace the pointer head with a token readout, the spec's 255-code
-readout (`docs/spec.md`) read at the last prompt token. Two keys select it:
+A training config can replace the pointer head with a token readout, the 255-code readout
+of `strands_decider.core` read at the last prompt token. Two keys select it:
 
 - `head_type: token_readout`. The head is one linear map, 255 outputs and no bias, on the
   hidden state of the last prompt token. Output k scores the option listed under code k of
   `strands_decider.core` (`A` to `IV`). The prompt is always `strands-chat`, rendered by
-  `strands_decider.core.render` as `docs/spec.md` defines it. Training shuffles the options of
+  `strands_decider.core.render`. Its control tokens and codes are Gemma 4's token ids, so
+  training refuses a base whose tokenizer is not Gemma 4's. Training shuffles the options of
   a choice question only; a yes/no or score question keeps its order. Each
   output starts as the base model's LM head row of that code's token, so before training the
   head gives the base model's own preference among the codes. On Gemma 4 its logits get the
@@ -230,8 +231,9 @@ converts v2 rows into training rows
 ([training/README.md](../training/README.md#the-v2-recipes)).
 
 `python -m training.train`, `training.soup` and `training.evaluate calibrate` work with a token
-readout checkpoint. The engines in this repository refuse one. To serve it, export it to the
-checkpoint layout of docs/spec.md section 9 (a token readout under `prefix_bidir` only):
+readout checkpoint. The engines in this repository refuse one. To serve it, export it as the
+checkpoint directory that `strands_decider.core` loads (a token readout under `prefix_bidir`
+only):
 
     python -m training.export_v2 <checkpoint> <out> --base-model <hub id>
 

@@ -90,7 +90,9 @@ def convert_line(line: str) -> tuple[str, str | None]:
     if q.get("type") == "score" and isinstance(q.get("criteria"), list):
         q["criteria"] = [c if isinstance(c, str) else core.render_content(c) for c in q["criteria"]]
     try:  # the core's refusals; they need no tokenizer
-        core.render_text({"state": row["state"], "questions": {"q": q}}, core.CHAT)
+        core.render_text(
+            core.Request.model_validate({"state": row["state"], "questions": {"q": q}})
+        )
     except ValueError:
         return "not_renderable", None
     return "kept", convert(row).to_json()

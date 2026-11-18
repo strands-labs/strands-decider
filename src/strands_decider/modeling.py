@@ -277,8 +277,8 @@ class PointerHead(nn.Module):
 
 
 class TokenReadoutHead(nn.Module):
-    """The spec's 255-code readout (docs/spec.md): Linear(hidden, 255), no bias, read at the
-    last prompt token.
+    """The 255-code readout of strands_decider.core: Linear(hidden, 255), no bias, read at
+    the last prompt token.
 
     Row k scores the option listed under code k (core.CODES); the row is seeded from the LM
     head's row of that code's token (lm_head_rows), so the untrained readout gives
@@ -298,7 +298,7 @@ class TokenReadoutHead(nn.Module):
     def forward(self, decide: torch.Tensor, n_options: int) -> torch.Tensor:
         """decide [B, d] -> logits [B, n_options]; masked_log_softmax masks each row's rest."""
         # float32 from here on: under bf16 autocast the product comes back in bf16, and the
-        # runtimes cap, scale and normalise in float32 (docs/spec.md, section 7.1).
+        # runtimes cap, scale and normalise in float32 (core/readout.py).
         logits: torch.Tensor = self.proj(self.dropout(decide)).float()
         if self.softcap:
             logits = self.softcap * torch.tanh(logits / self.softcap)
@@ -330,16 +330,6 @@ def logit_softcap(torso: nn.Module) -> float | None:
     """The cap a torso's LM head puts on its logits (Gemma: final_logit_softcapping), or None."""
     cap = getattr(getattr(torso, "config", None), "final_logit_softcapping", None)
     return float(cap) if cap else None
-
-
-def code_token_ids(tok: Any) -> tuple[int, ...]:
-    """The token id of each of core.CODES, as core.render encodes them for `tok`."""
-    from .core import CHAT, MAX_CODES, render
-
-    criteria = {f"o{k}": None for k in range(MAX_CODES)}
-    question = {"type": "choice", "instructions": "", "criteria": criteria}
-    request = {"state": "", "questions": {"q": question}}
-    return render(request, tok.backend_tokenizer, CHAT).questions["q"].code_token_ids
 
 
 def lm_head_rows(config: StrandsDeciderConfig, torso: nn.Module, ids: list[int]) -> torch.Tensor:
@@ -519,8 +509,9 @@ class StrandsDeciderModel(nn.Module):
         model = cls(config, torso, tok)
         if config.head_type == "token_readout":
             assert isinstance(model.head, TokenReadoutHead)
-            ids = list(code_token_ids(tok))
-            model.head.proj.weight.data.copy_(lm_head_rows(config, torso, ids))
+            from .core import CODE_TOKEN_IDS  # Gemma 4's: the prompt's codes are its tokens
+
+            model.head.proj.weight.data.copy_(lm_head_rows(config, torso, list(CODE_TOKEN_IDS)))
         if config.use_lora:
             model.attach_lora()
         return model

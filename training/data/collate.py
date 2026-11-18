@@ -10,11 +10,14 @@ position k out of the prompt.
 from __future__ import annotations
 
 import random
+import threading
 from collections.abc import Sequence
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Any
 
 import torch
+from tokenizers import Tokenizer
 
 from strands_decider import core
 from strands_decider.prompting import build_prompt
@@ -40,6 +43,23 @@ class CollatorConfig:
     seed: int = 0
 
 
+_CHAT_TOKENIZER_LOCK = threading.Lock()
+
+
+@lru_cache(maxsize=2)
+def _chat_tokenizer(tokenizer: Any) -> Tokenizer:
+    return core.prepare_tokenizer(Tokenizer.from_str(tokenizer.backend_tokenizer.to_str()))
+
+
+def chat_tokenizer(tokenizer: Any) -> Tokenizer:
+    """The tokenizer `core.render` takes, for a Hugging Face `tokenizer`: a copy of its backend
+    that encodes request text as plain text, checked to be Gemma 4's (`core.prepare_tokenizer`).
+    A copy, so that `tokenizer` itself keeps its own settings. Made once for each tokenizer; the
+    lock stops the threads of the start-up length check from making one each."""
+    with _CHAT_TOKENIZER_LOCK:
+        return _chat_tokenizer(tokenizer)
+
+
 class SystemOneCollator:
     """Turns a list of Examples into a padded, tokenised training batch."""
 
@@ -51,6 +71,7 @@ class SystemOneCollator:
         if config.render not in ("numbered", core.CHAT):
             raise ValueError(f"render {config.render!r}: numbered or {core.CHAT} only")
         self.chat = config.render == core.CHAT
+        self.chat_tok = chat_tokenizer(tokenizer) if self.chat else None
 
     # ---- option ordering -------------------------------------------------
 
@@ -184,12 +205,8 @@ class SystemOneCollator:
             instr = self._instruction(ex)
             if self.chat:
                 orders = None if order is None else {"q": order}
-                req = core.render(
-                    ex.to_request(instr),
-                    self.tok.backend_tokenizer,
-                    core.CHAT,
-                    option_orders=orders,
-                )
+                assert self.chat_tok is not None
+                req = core.render(ex.to_request(instr), self.chat_tok, option_orders=orders)
                 rendered.append(req.questions["q"])
             else:
                 prompt, rq = build_prompt(ex.state, ex.to_question(instr), option_order=order)

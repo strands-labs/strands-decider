@@ -254,6 +254,8 @@ def fits(
     from strands_decider import core
     from strands_decider.prompting import build_prompt
 
+    from .collate import chat_tokenizer
+
     if render is None:
         return [
             e
@@ -263,15 +265,15 @@ def fits(
 
     if render != core.CHAT:
         raise ValueError(f"render {render!r}: None or {core.CHAT} only")
-    tok = tokenizer.backend_tokenizer
+    tok = chat_tokenizer(tokenizer)
 
     def chat_len(e: Example) -> float:
         try:
             return max(
-                len(core.render(e.to_request(i), tok, core.CHAT).questions["q"].ids)
+                len(core.render(e.to_request(i), tok).questions["q"].ids)
                 for i in e.all_instructions()
             )
-        except ValueError:  # core.render refuses the row
+        except ValueError:  # the core refuses the row
             return float("inf")
 
     return [e for e in examples if chat_len(e) <= max_tokens]

@@ -16,7 +16,7 @@ transformers = pytest.importorskip("transformers")
 if not hasattr(transformers, "Gemma4Config"):
     pytest.skip("this transformers has no Gemma 4", allow_module_level=True)
 
-from core_support import gemma4_tokenizer_path  # noqa: E402
+from core_support import gemma4_file  # noqa: E402
 from safetensors import safe_open  # noqa: E402
 from safetensors.torch import load_file, save_file  # noqa: E402
 from test_gemma4_train import GEMMA_TARGETS, LAYERS  # noqa: E402
@@ -39,7 +39,7 @@ PROCESSOR = {
     "image_processor": {"patch_size": 16, "pooling_kernel_size": 3, "max_soft_tokens": 280},
     "image_seq_length": 280,
 }
-# docs/spec.md, section 9, without golden_vectors.jsonl, which the export does not write.
+# A decision checkpoint's files, without golden_vectors.jsonl, which the export does not write.
 LAYOUT = {
     "config.json",
     "model.safetensors",
@@ -184,7 +184,7 @@ def _tensors(d):
 
 def test_train_two_seeds_soup_export_and_load_with_the_core(tmp_path):
     base = tmp_path / "base"
-    _base(base, gemma4_tokenizer_path())
+    _base(base, gemma4_file("tokenizer.json"))
     src, data = tmp_path / "v2.jsonl", tmp_path / "train.jsonl"
     src.write_text("".join(json.dumps(r) + "\n" for r in _v2_rows(24)), encoding="utf-8")
     assert strands_v2.main([str(src), str(data)])["kept"] == 24
@@ -195,9 +195,10 @@ def test_train_two_seeds_soup_export_and_load_with_the_core(tmp_path):
 
     # (a) the core's loaders take it
     cfg = core.DecisionConfig.load(out)
-    core.Readout.load(out, cfg)
-    core.load_tokenizer(out, cfg)
-    assert cfg.provenance.to_dict() == {"base_model": HUB_ID, "base_revision": REVISION}
+    assert core.load_readout(out).shape == (core.MAX_CODES, 32)
+    core.load_tokenizer(out)
+    core.check_image_processor(out)
+    assert cfg.provenance.model_dump() == {"base_model": HUB_ID, "base_revision": REVISION}
     assert cfg.max_length_validated == 512
     assert json.loads((out / "config.json").read_text())["architectures"] == [
         "Gemma4ForConditionalGeneration"
@@ -319,7 +320,7 @@ def _readout(d):
 
 def _loads(out):
     cfg = core.DecisionConfig.load(out)
-    core.Readout.load(out, cfg)
+    core.load_readout(out)
     return cfg
 
 
@@ -327,7 +328,7 @@ def test_a_soup_averages_every_merged_tensor_and_the_readout(tmp_path):
     from strands_decider.modeling import StrandsDeciderConfig, config_path, load_head_state
 
     base = tmp_path / "base"
-    _base(base, gemma4_tokenizer_path())
+    _base(base, gemma4_file("tokenizer.json"))
     runs = [_seed_run(tmp_path, base, f"run{s}", s) for s in (1, 2)]
     out = tmp_path / "soup"
     export_v2([str(r) for r in runs], str(out), base_model=HUB_ID)
@@ -357,7 +358,7 @@ def test_a_soup_of_one_run_twice_is_that_run(tmp_path):
     from training.export_v2 import _cli
 
     base = tmp_path / "base"
-    _base(base, gemma4_tokenizer_path())
+    _base(base, gemma4_file("tokenizer.json"))
     run = _seed_run(tmp_path, base, "run", 1)
     one, two = tmp_path / "one", tmp_path / "two"
     export_v2(str(run), str(one), base_model=HUB_ID)
@@ -373,7 +374,7 @@ def test_a_soup_of_one_run_twice_is_that_run(tmp_path):
 
 def test_a_soup_refuses_two_recipes(tmp_path):
     base = tmp_path / "base"
-    _base(base, gemma4_tokenizer_path())
+    _base(base, gemma4_file("tokenizer.json"))
     from training.soup import check_one_recipe
 
     a = _seed_run(tmp_path, base, "a", 1)
@@ -393,7 +394,7 @@ def test_the_temperature_the_model_card_and_the_refusals(tmp_path, capsys):
     from training.export_v2 import drop_kv_shared_updates
 
     base = tmp_path / "base"
-    _base(base, gemma4_tokenizer_path())
+    _base(base, gemma4_file("tokenizer.json"))
     run = _seed_run(tmp_path, base, "run", 1)
 
     # A calibrated checkpoint exports its global temperature, and says what it leaves out.
@@ -427,7 +428,7 @@ def test_the_temperature_the_model_card_and_the_refusals(tmp_path, capsys):
     # An image processor that sizes images another way than the core counts them.
     wrong = {**PROCESSOR, "image_processor": {**PROCESSOR["image_processor"], "patch_size": 14}}
     (base / "processor_config.json").write_text(json.dumps(wrong))
-    with pytest.raises(ValueError, match="cannot take images"):
+    with pytest.raises(ValueError, match="image processor can't take images"):
         export_v2(str(run), str(tmp_path / "e"), base_model=HUB_ID)
 
     # A base without one of its own files.
@@ -449,7 +450,7 @@ def test_a_merged_decoder_exports_as_the_checkpoint_of_its_adapters(tmp_path, mo
     import training.export_v2 as X
 
     base = tmp_path / "base"
-    _base(base, gemma4_tokenizer_path())
+    _base(base, gemma4_file("tokenizer.json"))
     run = _seed_run(tmp_path, base, "run", 1)
     one = tmp_path / "one"
     export_v2(str(run), str(one), base_model=HUB_ID, max_length_validated=512)

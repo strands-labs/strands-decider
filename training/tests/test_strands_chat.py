@@ -8,11 +8,10 @@ import json
 import pytest
 import torch
 import torch.nn.functional as F
-from core_support import gemma4_tokenizer, toy_tokenizer
+from core_support import gemma4_file, gemma4_tokenizer
 from transformers import PreTrainedTokenizerFast
 
 from strands_decider import core
-from strands_decider.modeling import code_token_ids
 from training.data.collate import CollatorConfig, SystemOneCollator
 from training.data.format import Example, load_examples
 from training.data.multistep import fits
@@ -47,10 +46,10 @@ ROWS = [
 ]
 
 
-@pytest.fixture(params=["toy", "gemma4"])
-def tok(request):
-    raw = toy_tokenizer() if request.param == "toy" else gemma4_tokenizer()
-    return PreTrainedTokenizerFast(tokenizer_object=raw, pad_token="<eos>")
+@pytest.fixture(scope="module")
+def tok():
+    """Gemma 4's tokenizer as training loads it: core.render's prompt is made of its ids."""
+    return PreTrainedTokenizerFast(tokenizer_file=gemma4_file("tokenizer.json"), pad_token="<pad>")
 
 
 def _collate(tok, train, rows=ROWS):
@@ -61,16 +60,17 @@ def _collate(tok, train, rows=ROWS):
     return coll(rows), orders
 
 
-def _core(tok, ex, order=None):
+def _core(ex, order=None):
+    """The core's own render, with the tokenizer the core's tests prepare."""
     orders = None if order is None else {"q": order}
-    return core.render(ex.to_request(), tok.backend_tokenizer, core.CHAT, option_orders=orders)
+    return core.render(ex.to_request(), gemma4_tokenizer(), option_orders=orders)
 
 
 @pytest.mark.parametrize("train", [False, True])
 def test_the_batch_is_core_render_and_the_shuffle_is_its_option_orders(tok, train):
     batch, orders = _collate(tok, train)
     for i, (ex, order) in enumerate(zip(ROWS, orders, strict=True)):
-        q = _core(tok, ex, order).questions["q"]
+        q = _core(ex, order).questions["q"]
         n = int(batch["attention_mask"][i].sum())
         assert batch["input_ids"][i, :n].tolist() == list(q.ids)
         assert int(batch["prefix_end"][i]) == q.state_len
@@ -104,13 +104,13 @@ def test_one_hot_rows_train_as_before(tok):
 
 
 def test_fits_measures_the_strands_chat_prompt(tok):
-    n = [len(_core(tok, ex).questions["q"].ids) for ex in ROWS]
+    n = [len(_core(ex).questions["q"].ids) for ex in ROWS]
     assert fits(ROWS, tok, max(n), core.CHAT) == ROWS
     assert fits(ROWS, tok, max(n) - 1, core.CHAT) == [
         e for e, k in zip(ROWS, n, strict=True) if k < max(n)
     ]
     one = Example("choice", "s", "q", [["only", None], ["two", None]], 0)
-    one.options = [["only", None]]  # core.render refuses a choice of one option
+    one.options = [["only", None]]  # the core refuses a choice of one option
     assert fits([one], tok, 10_000, core.CHAT) == []
 
 
@@ -122,12 +122,20 @@ def test_a_training_config_has_no_render_key(tmp_path):
         TrainConfig.from_yaml(str(tmp_path / "c.yaml"))
 
 
-def test_the_readout_is_seeded_with_core_code_ids(tok, request):
-    ids = code_token_ids(tok)
-    many = Example("choice", "s", "q", [[f"o{k}", None] for k in range(core.MAX_CODES)], 0)
-    assert ids == _core(tok, many).questions["q"].code_token_ids
-    if request.node.callspec.params["tok"] == "gemma4":
-        assert ids == core.CODE_TOKEN_IDS
+def test_a_tokenizer_that_is_not_gemma_4s_is_refused(tok):
+    """The prompt's control tokens and codes are Gemma 4's ids, so the collator checks the
+    tokenizer (core.prepare_tokenizer), and it leaves the caller's own tokenizer as it was."""
+    from tokenizers import Tokenizer, models
+
+    other = PreTrainedTokenizerFast(
+        tokenizer_object=Tokenizer(models.WordLevel({"<unk>": 0, "<bos>": 1}, unk_token="<unk>")),
+        pad_token="<unk>",
+    )
+    with pytest.raises(ValueError, match="control tokens are not Gemma 4's"):
+        SystemOneCollator(other, CollatorConfig(render=core.CHAT))
+    SystemOneCollator(tok, CollatorConfig(render=core.CHAT))([ROWS[0]])
+    assert not tok.backend_tokenizer.encode_special_tokens
+    assert tok("<bos>", add_special_tokens=False)["input_ids"] == [2]
 
 
 def test_the_v2_converter_keeps_targets_and_fixed_order_and_drops_refusals(tmp_path):
@@ -179,7 +187,7 @@ def test_a_converted_row_renders_as_its_own_request_and_a_score_keeps_its_distri
         return {"state": "the queue is full", "question": q, "target": target, "label": label}
 
     def text(request):
-        return core.render_text(request, core.CHAT)
+        return core.render_text(core.Request.model_validate(request))
 
     for crit in (
         "absent",
@@ -193,7 +201,7 @@ def test_a_converted_row_renders_as_its_own_request_and_a_score_keeps_its_distri
         )
         r = row(q, 0.25, False)
         own = {"state": r["state"], "questions": {"q": q}}
-        assert text(strands_v2.convert(r).to_request()) == text(own), crit
+        assert core.render_text(strands_v2.convert(r).to_request()) == text(own), crit
     default = strands_v2.convert(row({"type": "noul", "instructions": "Is it?"}, 1.0, True))
     assert default.options[1][1] == "the statement holds for this state"
 
@@ -201,7 +209,7 @@ def test_a_converted_row_renders_as_its_own_request_and_a_score_keeps_its_distri
     soft, hard = strands_v2.convert(row(q, [0.1, 0.2, 0.7])), strands_v2.convert(row(q, 1))
     assert (soft.label, soft.target) == (2, [0.1, 0.2, 0.7])
     assert (hard.label, hard.target) == (1, None)
-    assert text(soft.to_request()) == text({"state": soft.state, "questions": {"q": q}})
+    assert core.render_text(soft.to_request()) == text({"state": soft.state, "questions": {"q": q}})
     coll = SystemOneCollator(
         tok, CollatorConfig(render=core.CHAT, ordinal_smoothing=0.1), train=True
     )
@@ -209,7 +217,7 @@ def test_a_converted_row_renders_as_its_own_request_and_a_score_keeps_its_distri
 
 
 def test_a_state_holding_control_token_text_stays_plain_text(tok):
-    """`<bos>`/`<|turn>` in a request are text, never control tokens (docs/spec.md).
+    """`<bos>`/`<|turn>` in a request are text, never control tokens.
 
     The full v2 corpus holds such rows: 2 with `<bos>`, 1 `<eos>`, 3 `<pad>`, 1 `<|image`.
     """

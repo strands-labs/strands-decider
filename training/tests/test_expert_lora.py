@@ -9,7 +9,7 @@ transformers = pytest.importorskip("transformers")
 if not hasattr(transformers, "Gemma4Config"):
     pytest.skip("this transformers has no Gemma 4", allow_module_level=True)
 
-from core_support import toy_tokenizer  # noqa: E402
+from core_support import gemma4_file  # noqa: E402
 from test_gemma4_train import GEMMA_TARGETS, LAYERS, _checkpoint  # noqa: E402
 
 from strands_decider import expert_lora  # noqa: E402
@@ -22,7 +22,9 @@ E, H, INTER, R = 4, 32, 16, 8  # _checkpoint's "moe" layout: experts, hidden, mo
 @pytest.fixture
 def base(tmp_path):
     path = tmp_path / "base"
-    tok = transformers.PreTrainedTokenizerFast(tokenizer_object=toy_tokenizer(), pad_token="<eos>")
+    tok = transformers.PreTrainedTokenizerFast(
+        tokenizer_file=gemma4_file("tokenizer.json"), pad_token="<pad>"
+    )  # Gemma 4's: the readout is seeded at its code ids
     tok.save_pretrained(path)
     _checkpoint(path, "moe", len(tok))
     return path
@@ -163,13 +165,12 @@ def test_the_cuda_grouped_path_matches_the_cpu_loop():
 
 
 def test_the_export_folds_the_expert_adapters_as_the_module_merge_does(tmp_path):
-    from core_support import gemma4_tokenizer_path
     from test_export_v2 import HUB_ID, REVISION, _base, _tensors
 
     from training.export_v2 import export_v2, write_base_record
 
     base = tmp_path / "base"
-    _base(base, gemma4_tokenizer_path(), moe=True)
+    _base(base, gemma4_file("tokenizer.json"), moe=True)
     model = _model(base, expert_lora=True, base_revision=REVISION)
     _perturb(model)
     ckpt, out = tmp_path / "ckpt", tmp_path / "out"
@@ -187,13 +188,12 @@ def test_the_export_folds_the_expert_adapters_as_the_module_merge_does(tmp_path)
 
 
 def test_a_two_seed_soup_export_averages_the_merged_experts(tmp_path):
-    from core_support import gemma4_tokenizer_path
     from test_export_v2 import HUB_ID, _base, _loads, _seed_run, _tensors
 
     from training.export_v2 import export_v2
 
     base = tmp_path / "base"
-    _base(base, gemma4_tokenizer_path(), moe=True)
+    _base(base, gemma4_file("tokenizer.json"), moe=True)
     runs = [_seed_run(tmp_path, base, f"run{s}", s, expert_lora=True) for s in (1, 2)]
     out = tmp_path / "out"
     export_v2([str(r) for r in runs], str(out), base_model=HUB_ID)
