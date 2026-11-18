@@ -484,6 +484,13 @@ def main() -> int:
                 f"arn:aws:sagemaker:{region}:{args.account}:endpoint/{endpoint}"
                 for endpoint in endpoints
             ]
+            inference_components = environment["sagemaker"].get("inference_components") or {}
+            components = [inference_components.get(model) for model in selected_models]
+            endpoint_arns += [
+                f"arn:aws:sagemaker:{region}:{args.account}:inference-component/{component}"
+                for component in components
+                if component
+            ]
             inline_policy = {
                 "Version": "2012-10-17",
                 "Statement": [
@@ -493,6 +500,7 @@ def main() -> int:
                         "Action": [
                             "sagemaker:DescribeEndpoint",
                             "sagemaker:DescribeEndpointConfig",
+                            "sagemaker:DescribeInferenceComponent",
                         ],
                         "Resource": "*",
                     },

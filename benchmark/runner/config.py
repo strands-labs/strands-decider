@@ -91,6 +91,25 @@ def load_environment(value: str) -> Environment:
                 )
         elif len(configured_models) > 1:
             raise ValueError(f"{path}: multiple SageMaker models require sagemaker.endpoints")
+        inference_components = sagemaker.get("inference_components")
+        if inference_components is not None and (
+            not isinstance(inference_components, dict)
+            or not all(
+                isinstance(model, str) and model and isinstance(name, str) and name
+                for model, name in inference_components.items()
+            )
+        ):
+            raise ValueError(
+                f"{path}: sagemaker.inference_components must map model identifiers to "
+                "inference component names"
+            )
+        if inference_components:
+            missing = [model for model in configured_models if model not in inference_components]
+            if missing:
+                raise ValueError(
+                    f"{path}: sagemaker.inference_components is missing configured models: "
+                    + ", ".join(missing)
+                )
         if not isinstance(endpoint, str) or not endpoint:
             endpoint = f"https://runtime.sagemaker.{region}.amazonaws.com"
     elif not isinstance(endpoint, str) or not endpoint:

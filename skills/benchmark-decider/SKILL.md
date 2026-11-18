@@ -104,7 +104,9 @@ The runner uses boto3's credential chain and SigV4, describes each endpoint, and
 its live instance type differs from `instance_type`. A single-model environment may use
 `endpoint_name` instead of `endpoints`. Keep different instance types in separate environment
 directories and baselines even when the models use different endpoints. `profile` is optional for
-a named local AWS profile; omit it when the benchmark client uses an EC2 instance role.
+a named local AWS profile; omit it when the benchmark client uses an EC2 instance role. For an
+endpoint that hosts models as inference components, add `inference_components`, a map from model
+to component; requests then carry `InferenceComponentName`.
 
 Invoking remote endpoints can incur cost. Do not create, update, resize, or delete cloud resources
 without the user's explicit approval. Confirm scope and expected cost before a full paid run.

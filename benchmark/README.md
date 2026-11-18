@@ -119,6 +119,20 @@ The single-model `sagemaker.endpoint_name` form remains supported. Before invoki
 runner verifies that its endpoint uses the configured `instance_type`. Different instance types
 need separate environment directories and baselines.
 
+For an endpoint that hosts models as inference components, map each model to the component that
+serves it with `inference_components`. Requests then carry `InferenceComponentName`, and the run
+records the component's model, compute resource requirements, and copy count. The client also
+needs `sagemaker:DescribeInferenceComponent`.
+
+```yaml
+sagemaker:
+  region: us-east-2
+  instance_type: ml.g7.2xlarge
+  endpoint_name: SHARED_ENDPOINT
+  inference_components:
+    StrandsAgents/strands-decider-2B-qwen3.5-v1-2610: DECIDER_COMPONENT
+```
+
 Keep ordinary local HTTP targets on loopback, and use external targets only when their existing
 network and authentication controls already permit benchmark access.
 

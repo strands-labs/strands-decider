@@ -22,7 +22,8 @@ requires confirming the expected scope and cost.
 2. Attach an EC2 instance role that permits:
    - `sagemaker:InvokeEndpoint` for the configured endpoints;
    - `sagemaker:DescribeEndpoint`;
-   - `sagemaker:DescribeEndpointConfig`.
+   - `sagemaker:DescribeEndpointConfig`;
+   - `sagemaker:DescribeInferenceComponent`, when the environment names inference components.
 3. Omit `sagemaker.profile` from `environment.yaml` so boto3 uses the instance role. A named
    `profile` is for a workstation that has that profile configured.
 4. Ensure the instance can reach the SageMaker API and Runtime services. A private subnet needs
