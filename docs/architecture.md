@@ -235,7 +235,9 @@ readout checkpoint. The engines in this repository refuse one. To serve it, expo
 checkpoint directory that `strands_decider.core` loads (a token readout under `prefix_bidir`
 only):
 
-    python -m training.export_v2 <checkpoint> <out> --base-model <hub id>
+```bash
+python -m training.export_v2 <checkpoint> <out> --base-model <hub id>
+```
 
 The export writes these files and no others:
 
