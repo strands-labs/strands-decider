@@ -40,12 +40,21 @@ dependencies = [
 # is here for `pip install -e ".[train]"` from a checkout rather than for Hub consumers.
 train = ["datasets>=2.20"]
 # `--device mlx`: the torso on Apple silicon's GPU through mlx-lm
-# (src/strands_decider/mlx_engine.py).
-# mlx-lm is capped at the minor version tested: the backend uses its Qwen3.5 module layout and
-# prompt-cache classes, which are internals.
+# (src/strands_decider/mlx_engine.py), and decision checkpoints through mlx-vlm
+# (src/strands_decider/backends/mlx.py).
+# mlx-lm is capped at the minor version tested: v1's engine uses its Qwen3.5 module layout and
+# prompt-cache classes, which are internals. mlx-vlm is pinned to the release tested: the
+# backend relies on behaviour no release promises (a passed mask reaches every layer as it is,
+# `logits_to_keep` through the KV-shared layers, its caches and image processors), and a patch
+# release that changed it would change answers without an error; the backend also refuses
+# another mlx-vlm at load. mlx is capped at the minor version tested, for the same reason:
+# mlx-vlm 0.7.12 needs mlx 0.32.4, and needs no mlx-lm. Pillow decodes and resizes images; its
+# bicubic filter is the reference resize (the core's resize_image).
 mlx = [
-    "mlx>=0.32.2; sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "mlx>=0.32.4,<0.33; sys_platform == 'darwin' and platform_machine == 'arm64'",
     "mlx-lm>=0.32,<0.33; sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "mlx-vlm==0.7.12; sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "pillow>=13; sys_platform == 'darwin' and platform_machine == 'arm64'",
 ]
 # `--device cuda`: flash-linear-attention's Triton kernels for the Gated DeltaNet layers. The conv
 # layer's kernel, causal-conv1d, compiles against the local CUDA toolkit and is not listed; on a
@@ -139,6 +148,7 @@ module = [
     "yaml",
     "mlx.*",
     "mlx_lm.*",
+    "mlx_vlm.*",
     "PIL.*",
     "tokenizers",
 ]

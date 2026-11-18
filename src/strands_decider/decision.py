@@ -26,7 +26,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_DEVICES = ("cpu", "cuda", "mps")
+_DEVICES = ("cpu", "cuda", "mps", "mlx")
 _DTYPES = ("float32", "bfloat16")
 # Told to clients when the backend couldn't build the image processor; the reason, which may
 # name local paths, is only warned at load.
@@ -127,6 +127,12 @@ class DecisionEngine:
             }
         )
 
+    def close(self) -> None:
+        """Release the backend's resources, if it holds any (the MLX backend's worker thread)."""
+        close = getattr(self.backend, "close", None)
+        if callable(close):
+            close()
+
     def describe(self) -> dict[str, Any]:
         """What `serve`'s health check reports."""
         return {
@@ -165,6 +171,12 @@ def load_decision_engine(
     if dtype is not None and dtype not in _DTYPES:
         raise ValueError(f"--dtype is one of {', '.join(_DTYPES)}, not {dtype!r}")
     path = checkpoint_dir(checkpoint, revision)
+    if device != "mlx":
+        from .backends.mlx_format import is_mlx_artifact
+
+        with open(os.path.join(path, "config.json"), encoding="utf-8") as f:
+            if is_mlx_artifact(json.load(f)):  # in mlx-vlm's layout, which only mlx reads
+                raise ValueError(f"{checkpoint} is an MLX artifact: serve it with --device mlx")
     config = DecisionConfig.load(path)
     if max_length is not None and max_length > config.max_length_validated:
         warnings.warn(
@@ -174,8 +186,10 @@ def load_decision_engine(
             stacklevel=2,
         )
     tokenizer, weight = load_tokenizer(path), load_readout(path)
-    from .backends.transformers import load_backend
-
+    if device == "mlx":
+        from .backends.mlx import load_backend
+    else:
+        from .backends.transformers import load_backend
     backend = load_backend(
         path,
         device=device,

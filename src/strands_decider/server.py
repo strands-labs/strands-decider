@@ -295,10 +295,19 @@ def _decision_app(engine: DecisionEngine, checkpoint: str) -> FastAPI:
     """A model checkpoint on v1's paths, with v1's responses. The engine bounds its own
     concurrency, after its refusals and with a timeout (503), and its backend takes turns on MPS,
     so the app adds no limiter and no lock."""
+
+    @contextlib.asynccontextmanager
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        try:
+            yield
+        finally:
+            engine.close()
+
     app = FastAPI(
         title="strands-decider System One",
         version=__version__,
         description="Typed, calibrated answers. Choice, Score and Noul over one state.",
+        lifespan=lifespan,
     )
     app.state.engine = engine
 
