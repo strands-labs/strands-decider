@@ -1,0 +1,220 @@
+name: 'Docs: Deploy Preview'
+
+# Build the strands-agents/harness-sdk docs site with this PR's docs/ substituted
+# for the published strands-decider product, deploy the result to S3, invalidate
+# the CloudFront distribution, and post a comment on the PR. Mirrors the
+# pattern in strands-agents/harness-sdk/.github/workflows/docs-deploy-preview.yml.
+
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize]
+    paths:
+      - 'docs/**'
+      - '.github/workflows/docs-deploy-preview.yml'
+
+concurrency:
+  group: preview-decider-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  authorization-check:
+    name: Authorization Check
+    permissions: read-all
+    runs-on: ubuntu-latest
+    outputs:
+      approval-env: ${{ steps.auth.outputs.approval-env }}
+    steps:
+      - name: Check Authorization
+        id: auth
+        uses: strands-agents/devtools/authorization-check@main
+        with:
+          username: ${{ github.event.pull_request.user.login }}
+          allowed-roles: 'write,maintain,admin'
+
+  build-and-deploy:
+    name: Build and Deploy Preview
+    runs-on: ubuntu-latest
+    needs: authorization-check
+    environment: ${{ needs.authorization-check.outputs.approval-env }}
+
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+      id-token: write # For OIDC authentication
+
+    env:
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+      PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      RUN_ID: ${{ github.run_id }}
+      AWS_DEPLOY_ROLE: ${{ secrets.STRANDS_DOCS_DEPLOY_ROLE }}
+      S3_BUCKET: ${{ secrets.STRANDS_DOCS_BUCKET }}
+      CLOUDFRONT_DISTRIBUTION_ID: ${{ secrets.CLOUDFRONT_DISTRIBUTION_ID }}
+      CLOUDFRONT_DOMAIN: ${{ secrets.CLOUDFRONT_DOMAIN }}
+      BUILD_OUTPUT_DIR: harness-sdk/site/dist
+      S3_PATH: pr-strands-decider-${{ github.event.pull_request.number }}
+      PREVIEW_URL: https://${{ secrets.CLOUDFRONT_DOMAIN }}/pr-strands-decider-${{ github.event.pull_request.number }}/
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+    steps:
+      - name: Checkout strands-decider PR head
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ env.PR_HEAD_SHA }}
+          path: strands-decider
+          fetch-depth: 0
+          persist-credentials: false
+          allow-unsafe-pr-checkout: true
+
+      - name: Checkout harness-sdk
+        uses: actions/checkout@v7
+        with:
+          repository: strands-agents/harness-sdk
+          path: harness-sdk
+          persist-credentials: false
+
+      - name: Checkout samples
+        uses: actions/checkout@v7
+        with:
+          repository: strands-agents/samples
+          path: samples-source
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          check-latest: true
+
+      - name: Install site dependencies
+        working-directory: harness-sdk/site
+        run: npm ci
+
+      - name: Build CMS with this PR's Decider docs
+        working-directory: harness-sdk/site
+        env:
+          ASTRO_BASE_PATH: /${{ env.S3_PATH }}/
+          EXTERNAL_DOCS_STRANDS_DECIDER_SOURCE: ${{ github.workspace }}/strands-decider
+          SAMPLES_SOURCE_DIR: ${{ github.workspace }}/samples-source
+          SAMPLES_REQUIRE_SOURCE: '1'
+        run: npm run cms:build
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ env.AWS_DEPLOY_ROLE }}
+          role-session-name: GitHubActions-DeciderDocs-${{ env.RUN_ID }}
+          aws-region: us-east-1
+          mask-aws-account-id: true
+
+      - name: Deploy to S3
+        run: |
+          aws s3 sync ${{ env.BUILD_OUTPUT_DIR }}/ s3://${{ env.S3_BUCKET }}/${{ env.S3_PATH }}/ \
+            --delete \
+            --cache-control "public, max-age=3600"
+
+      - name: Invalidate CloudFront cache for PR preview
+        run: |
+          aws cloudfront create-invalidation \
+            --distribution-id ${{ env.CLOUDFRONT_DISTRIBUTION_ID }} \
+            --invalidation-batch '{"Paths":{"Quantity":1,"Items":["/${{ env.S3_PATH }}/*"]},"CallerReference":"'$(date +%s)'"}'
+
+      - name: Output deployment info
+        run: |
+          echo "Deployment complete!"
+          echo "Deployed to: ${{ env.PREVIEW_URL }}"
+          echo "This is a preview deployment for PR #${{ env.PR_NUMBER }}"
+
+      - name: Comment on PR (success)
+        if: success()
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const prNumber = context.payload.pull_request.number;
+            const baseUrl = 'https://${{ env.CLOUDFRONT_DOMAIN }}/${{ env.S3_PATH }}';
+            const productRoot = '/docs/labs/strands-decider';
+
+            const manifest = JSON.parse(
+              require('fs').readFileSync(
+                `${process.env.GITHUB_WORKSPACE}/strands-decider/docs/site-manifest.json`,
+                'utf-8'
+              )
+            );
+            const slugBySource = new Map(manifest.pages.map(p => [p.source, p.slug]));
+
+            const files = await github.paginate(github.rest.pulls.listFiles, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: prNumber,
+            });
+
+            const urlPaths = [...new Set(
+              files
+                .filter(f => f.status !== 'removed')
+                .map(f => slugBySource.get(f.filename))
+                .filter(Boolean)
+                .map(slug => `${productRoot}/${slug}/`)
+            )].sort();
+
+            const previewLinks = urlPaths.map(urlPath => {
+              const label = urlPath.replace(`${productRoot}/`, '').replace(/\/$/, '') || 'home';
+              return `- [${label}](${baseUrl}${urlPath})`;
+            });
+
+            const fallbackUrl = `${baseUrl}${productRoot}/`;
+
+            const comments = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: prNumber,
+            });
+            const botComment = comments.data.find(c =>
+              c.user.type === 'Bot' && c.body.includes('Documentation Preview')
+            );
+
+            const lines = [
+              '## Documentation Preview Ready',
+              '',
+              'Your documentation preview has been successfully deployed!',
+              '',
+            ];
+            if (previewLinks.length > 0) {
+              lines.push('**Changed pages:**', '', ...previewLinks, '');
+            }
+            lines.push(`**Full preview**: ${fallbackUrl}`, '', `_Updated at: ${new Date().toISOString()}_`);
+            const body = lines.join('\n');
+
+            if (botComment) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: botComment.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: prNumber,
+                body,
+              });
+            }
+
+      - name: Comment on PR (failure)
+        if: failure()
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const prNumber = context.payload.pull_request.number;
+            const runUrl = '${{ env.RUN_URL }}';
+            const body = [
+              '## Documentation Preview Failed',
+              '',
+              `The documentation deployment encountered an error. Check the [deployment logs](${runUrl}) for details.`,
+            ].join('\n');
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: prNumber,
+              body,
+            });
