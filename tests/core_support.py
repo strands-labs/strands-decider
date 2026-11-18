@@ -83,10 +83,12 @@ def gemma4_file(name: str) -> str:
 
 @lru_cache(maxsize=1)
 def gemma4_tokenizer():
-    """Gemma 4's tokenizer. One instance per session: it is 262k tokens."""
+    """Gemma 4's tokenizer, prepared for render. One instance per session: it is 262k tokens."""
     from tokenizers import Tokenizer
 
-    return Tokenizer.from_file(gemma4_file("tokenizer.json"))
+    from strands_decider.core import prepare_tokenizer
+
+    return prepare_tokenizer(Tokenizer.from_file(gemma4_file("tokenizer.json")))
 
 
 def decision_config_fixture() -> dict:
@@ -109,6 +111,7 @@ def toy_tokenizer():
     tok.pre_tokenizer = pre_tokenizers.Split(Regex(r"\w+|\s|[^\w\s]"), behavior="isolated")
     specials = ("<bos>", "<|turn>", "<turn|>", "<eos>", "<|image>", "<|image|>", "<image|>")
     tok.add_special_tokens([AddedToken(s, special=True) for s in specials])
+    tok.encode_special_tokens = True
     return tok
 
 
@@ -255,7 +258,7 @@ KNIFE_EDGE_SCALES = (*range(1, 41), 49, 50, 64, 77, 100, 128, 200, 300, 500, 100
 
 
 def knife_edge_sizes() -> set[tuple[int, int]]:
-    from strands_decider.core import MAX_IMAGE_PIXELS
+    from strands_decider.core.images import MAX_IMAGE_PIXELS
 
     out = set()
     for p, q in KNIFE_EDGE_RATIOS:
@@ -271,7 +274,7 @@ def soft_token_sizes() -> list[tuple[int, int]]:
     both sides of the 280:1 ratio where one resized side becomes 48 pixels, every size whose
     area makes the processor's scale factor exactly 1 and samples where it is 1/2, 1/3 and
     1/4, log-uniform random sizes, and the knife-edge ratios at many scales."""
-    from strands_decider.core import MAX_IMAGE_PIXELS
+    from strands_decider.core.images import MAX_IMAGE_PIXELS
 
     grid = [1, 2, 3, 4, 5, 7, 8, 15, 16, 17, 31, 32, 33, 47, 48, 49, 63, 64, 96, 100, 127, 128,
             200, 224, 256, 299, 300, 384, 448, 480, 512, 640, 720, 768, 803, 804, 1000, 1024,
@@ -567,12 +570,8 @@ def _write_readout_goldens() -> None:
 
     import numpy as np
 
-    from strands_decider.core import (
-        RAW_LOGITS,
-        code_probabilities,
-        readout_logits,
-        round_to_bf16,
-    )
+    from strands_decider.core import readout_logits, round_to_bf16
+    from strands_decider.core.readout import code_probabilities
 
     rng = np.random.default_rng(130)
     hidden, c = 32, 30.0
@@ -598,12 +597,7 @@ def _write_readout_goldens() -> None:
                 "hidden": [float(x) for x in h],
                 "z": [float(x) for x in z],
                 "probabilities": {
-                    str(k): [
-                        float(p)
-                        for p in code_probabilities(
-                            z, k, stage=RAW_LOGITS, softcap_c=c, temperature=t
-                        )
-                    ]
+                    str(k): [float(p) for p in code_probabilities(z[:k], c, t)]
                     for k in (2, 3, 7, 40, 255)
                 },
             }

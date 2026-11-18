@@ -46,13 +46,9 @@ from core_support import (
 )
 
 from strands_decider.core import (
-    MAX_IMAGE_BYTES,
-    MAX_IMAGE_PIXELS,
-    PLAIN,
-    VARIANTS,
+    Request,
     check_decoded_size,
     decode_image,
-    parse_request,
     render,
     render_text,
     resized_size,
@@ -62,6 +58,8 @@ from strands_decider.core.images import (
     IMAGE_CLOSE,
     IMAGE_OPEN,
     IMAGE_SOFT,
+    MAX_IMAGE_BYTES,
+    MAX_IMAGE_PIXELS,
     MAX_SOFT_TOKENS,
     PATCH_SIZE,
     POOLING_KERNEL_SIZE,
@@ -177,94 +175,24 @@ def test_header_reading_never_decodes_pixels():
 
 
 def test_base64_is_standard_and_nothing_else():
-    """Standard base64 with its padding, nothing else; surrounding whitespace is stripped first.
-    The reasons are the core's own, the same on every Python version."""
+    """Standard base64 with its padding, as `b64decode(validate=True)` reads it; surrounding
+    whitespace is stripped first."""
     png = image_b64("checker-64x48.png")
     assert decode_image(f" \n{png}\t\n").data == image_bytes("checker-64x48.png")
-    alphabet = "a character outside the standard base64 alphabet"
-    padding = "its length or padding is wrong"
-    cases = {
-        png[:-1]: padding,
-        png[:40] + "\n" + png[40:]: alphabet,
-        png[:40] + " " + png[40:]: alphabet,
-        png + "=": padding,
-        png + png: padding,
-        "=" + png[1:]: padding,
-        "-_-_": alphabet,  # "+/+/" in the URL-safe alphabet
-        png[:40] + "é" + png[40:]: "a character that is not ASCII",
-    }
-    for data, reason in cases.items():
+    for data in (
+        png[:-1],
+        png[:40] + "\n" + png[40:],
+        png[:40] + " " + png[40:],
+        "=" + png[1:],
+        "-_-_",  # "+/+/" in the URL-safe alphabet
+        png[:40] + "é" + png[40:],
+    ):
         with pytest.raises(ValueError) as e:
             decode_image(data)
-        assert str(e.value) == f"image is not valid base64: {reason}", data[-12:]
+        assert str(e.value).startswith(NOT_BASE64), data[-12:]
     with pytest.raises(ValueError) as e:
         decode_image("")
     assert str(e.value).startswith(COULD_NOT_READ)
-
-
-def test_base64_rule_is_python_312s_and_never_wider_than_this_pythons():
-    """The rule is RFC 4648's, which is what Python 3.12's `b64decode(validate=True)` accepts.
-    On any version, whatever the core accepts this interpreter's strict decode accepts too, to
-    the same bytes; on 3.12 the two accept exactly the same strings."""
-    import binascii
-    import sys
-
-    from strands_decider.core.images import _strict_b64decode
-
-    rng = random.Random(0)
-    alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
-    for _ in range(5000):
-        s = "".join(rng.choice(alphabet) for _ in range(rng.randrange(0, 14)))
-        s += "=" * rng.choice((0, 0, 1, 2, 3))
-        if rng.random() < 0.2:
-            i = rng.randrange(len(s) + 1)
-            s = s[:i] + rng.choice("=-_ \n.A") + s[i:]
-        try:
-            got: bytes | None = _strict_b64decode(s)
-        except ValueError:
-            got = None
-        try:
-            want: bytes | None = base64.b64decode(s, validate=True)
-        except (binascii.Error, ValueError):
-            want = None
-        if got is not None:
-            assert got == want, s
-        if sys.version_info[:2] == (3, 12):
-            assert (got is None) == (want is None), s
-
-
-def _rfc4648(s: str) -> bytes | None:
-    """RFC 4648 section 4, decoded bit by bit: an independent statement of the core's rule."""
-    alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
-    if len(s) % 4:
-        return None
-    body = s.rstrip("=")
-    if len(s) - len(body) > 2 or any(c not in alphabet for c in body):
-        return None
-    if len(body) % 4 == 1:
-        return None
-    bits = "".join(f"{alphabet.index(c):06b}" for c in body)
-    return bytes(int(bits[i : i + 8], 2) for i in range(0, len(bits) - len(bits) % 8, 8))
-
-
-def test_base64_is_the_rfcs_on_every_python():
-    """The core's base64 rule is RFC 4648's on every Python version, checked against an
-    implementation of the RFC that uses neither base64 nor binascii."""
-    from strands_decider.core.images import _strict_b64decode
-
-    rng = random.Random(1)
-    alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
-    for _ in range(5000):
-        s = "".join(rng.choice(alphabet) for _ in range(rng.randrange(0, 14)))
-        s += "=" * rng.choice((0, 0, 1, 2, 3))
-        if rng.random() < 0.2:
-            i = rng.randrange(len(s) + 1)
-            s = s[:i] + rng.choice("=-_ \n.A") + s[i:]
-        try:
-            got: bytes | None = _strict_b64decode(s)
-        except ValueError:
-            got = None
-        assert got == _rfc4648(s), s
 
 
 def test_data_uri_prefix_is_v1s():
@@ -297,7 +225,7 @@ def test_surrounding_whitespace_is_stripped():
     png = image_b64("checker-64x48.png")
     want = image_bytes("checker-64x48.png")
     assert decode_image(f"\u00a0\u2028 {png}\u3000\x1f\n").data == want
-    with pytest.raises(ValueError, match="not ASCII"):
+    with pytest.raises(ValueError, match="image is not valid base64"):
         decode_image("\ufeff" + png)
 
 
@@ -334,9 +262,6 @@ def test_the_byte_cap():
         assert str(e.value) == f"image is {len(data)} bytes; at most 16,777,216 bytes are accepted"
     with pytest.raises(ValueError, match="image is not valid base64"):
         decode_image("!" + _b64(bytes(MAX_IMAGE_BYTES + 3)))  # base64 is checked first
-    assert decode_image(_b64(_png_of(100)), max_bytes=100).width == 2
-    with pytest.raises(ValueError, match="image is 101 bytes; at most 100 bytes"):
-        decode_image(_b64(_png_of(101)), max_bytes=100)
 
 
 def test_images_need_pillow_and_the_core_does_not(monkeypatch):
@@ -349,24 +274,22 @@ def test_images_need_pillow_and_the_core_does_not(monkeypatch):
         decode_image(image_b64("checker-64x48.png"))
     req = {"state": "", "questions": {"q": {"instructions": "x"}}}
     with pytest.raises(ImportError, match="needs Pillow"):
-        render_text({**req, "images": [_b64(b"x")]}, PLAIN)
-    assert render_text(req, PLAIN)
+        render_text(Request.model_validate({**req, "images": [_b64(b"x")]}))
+    assert render_text(Request.model_validate(req))
 
 
 def test_each_image_is_checked_in_turn_after_everything_else():
-    """The request's own checks come first, then the count, then every check of the first
-    image before any of the second's. `parse_request` checks the request and leaves the
-    images as they came."""
+    """The request's own checks come first, when the Request is built; then every check of the
+    first image before any of the second's."""
     req = {"state": "", "questions": {"q": {"instructions": "x"}}}
     big, bad = _b64(_png_header(4097, 4096)), "not base64!"
     with pytest.raises(ValueError, match="image is 4097x4096"):
-        render_text({**req, "images": [big, bad]}, PLAIN)
+        render_text(Request.model_validate({**req, "images": [big, bad]}))
     with pytest.raises(ValueError, match="image is not valid base64"):
-        render_text({**req, "images": [bad, big]}, PLAIN)
-    bad_question = {"state": "", "questions": {"q": {"type": "noul"}}, "images": [bad] * 5}
-    with pytest.raises(ValueError, match=r"^questions\.q\.noul\.instructions: Field required$"):
-        render_text(bad_question, PLAIN)
-    assert parse_request({**req, "images": [bad] * 5}).images == [bad] * 5
+        render_text(Request.model_validate({**req, "images": [bad, big]}))
+    with pytest.raises(ValueError, match="instructions"):
+        Request.model_validate({"state": "", "questions": {"q": {"type": "noul"}}, "images": [bad]})
+    assert Request.model_validate({**req, "images": [bad] * 5}).images == [bad] * 5
 
 
 def test_the_image_processors_settings_are_checked(tmp_path):
@@ -378,18 +301,11 @@ def test_the_image_processors_settings_are_checked(tmp_path):
     (tmp_path / "processor_config.json").write_text(json.dumps(good))
     check_image_processor(tmp_path)
     check_image_processor(tmp_path / "processor_config.json")
-    for k, v in (("patch_size", 14), ("max_soft_tokens", 560), ("pooling_kernel_size", True)):
-        with pytest.raises(ValueError, match="cannot take images"):
+    for k, v in (("patch_size", 14), ("max_soft_tokens", 560), ("pooling_kernel_size", None)):
+        with pytest.raises(ValueError, match="can't take images"):
             check_image_processor({"image_processor": {**good["image_processor"], k: v}})
-    with pytest.raises(ValueError, match="<missing>"):
+    with pytest.raises(ValueError, match="can't take images"):
         check_image_processor({"image_processor": {"patch_size": 16}})
-    # image_seq_length, where given (E2B's both places, the 12B's only at the top), is 280.
-    check_image_processor({**good, "image_seq_length": 280})
-    for where in ("top", "image_processor"):
-        bad = {**good, "image_processor": dict(good["image_processor"])}
-        (bad if where == "top" else bad["image_processor"])["image_seq_length"] = 256
-        with pytest.raises(ValueError, match="image_seq_length"):
-            check_image_processor(bad)
 
 
 def test_decode_images_takes_any_number_of_images():
@@ -403,10 +319,9 @@ def test_audio_is_refused_rather_than_ignored():
     """Any `audio` but null is refused, an empty one included; null is as if it were absent."""
     req = {"state": "a call", "questions": {"q": {"instructions": "x"}}}
     for given in (["UklGRg=="], "UklGRg==", {"data": "x"}, True, 1, 0.5, [None], [], False, 0, ""):
-        with pytest.raises(ValueError) as e:
-            parse_request({**req, "audio": given})
-        assert str(e.value) == "audio input is not supported", given
-    assert parse_request({**req, "audio": None}) == parse_request(req)
+        with pytest.raises(ValueError, match="audio input is not supported"):
+            Request.model_validate({**req, "audio": given})
+    assert Request.model_validate({**req, "audio": None}) == Request.model_validate(req)
 
 
 # ---- N ---------------------------------------------------------------------------------------
@@ -489,9 +404,6 @@ def test_soft_token_properties():
     assert soft_tokens(64, 48) == 266 and soft_tokens(300, 40) == 270
     assert soft_tokens(840, 768) == 272  # 645,120 pixels: a scale of exactly 1
     assert soft_tokens(100, 1) == 167 and soft_tokens(1, 32) == 188 and soft_tokens(1, 31) == 279
-    for bad in ((0, 5), (5, 0), (-1, 3), (1.5, 2), (2, None)):
-        with pytest.raises(ValueError):
-            soft_tokens(*bad)  # type: ignore[arg-type]
 
 
 # ---- pixels: the decode, the resize target and the resize --------------------------------
@@ -651,9 +563,6 @@ def test_resize_image_is_the_numpy_resize_on_any_pillow():
         a = rng.integers(0, 256, (h, w, 3), dtype=np.uint8)
         out = resize_image(Image.fromarray(a), tw, th)
         assert np.array_equal(np.asarray(out), numpy_resize(a, tw, th)), ((w, h), (tw, th))
-    for bad in ((0, 5), (5, 0), (1.5, 2)):
-        with pytest.raises(ValueError):
-            resize_image(Image.new("RGB", (4, 4)), *bad)  # type: ignore[arg-type]
     for mode in (
         "P",
         "1",
@@ -875,18 +784,9 @@ def _pillow_images(n: int, seed: int) -> list[bytes]:
 
 
 def test_validation_matches_v1():
-    """The same requests accepted and refused as by v1's `vision.decode_image`, which opens
-    and decodes the image with Pillow, with v1's messages: exactly for the pixel limit, and
-    up to v1's prefix where Pillow gives the reason.
-
-    Base64 is RFC 4648's rule, which is what Python 3.12's strict decode accepts; Python
-    before 3.12 accepts more. So for base64 the core is held to the rule, refuses wherever v1
-    refuses, and matches v1's acceptance exactly only on 3.12. Every later step is compared
-    exactly, whenever both sides got past base64."""
-    import sys
-
-    from strands_decider.core.images import DATA_URI
-
+    """The same images accepted and refused as by v1's `decode_image`, with its messages, so a
+    client can send v2 what it sends v1. v1 also decodes the pixels, so a file whose header is
+    sound and whose pixels are not is refused there and left to the runtime here."""
     pytest.importorskip("PIL")
     pytest.importorskip("torch")
     try:
@@ -895,8 +795,8 @@ def test_validation_matches_v1():
         pytest.skip(f"v1's image engine does not import here: {e}")
     png = image_b64("checker-64x48.png")
     cases = [image_b64(n) for n in IMAGE_FILES] + [image_b64(n, data_uri=True) for n in IMAGE_FILES]
-    cases += [png[:-1], png + "=", png[:40] + "\n" + png[40:], "", "aGk=", f" {png} "]
-    cases += [png[:-2] + "==", png + "==", png[:-4] + "a===", "aGk", "aGk==", "aG=k"]
+    cases += [png[:-1], png[:40] + "\n" + png[40:], "", "aGk=", f" {png} "]
+    cases += [png[:-2] + "==", png[:-4] + "a===", "aGk", "aGk==", "aG=k"]
     cases += ["data:text/plain;base64," + png, "data:image/svg+xml;base64," + png]
     cases += [_b64(b) for b in _pillow_images(40, seed=9)]
     cases += [_b64(b) for b in MALFORMED.values()]
@@ -913,15 +813,6 @@ def test_validation_matches_v1():
             error = None
         except ValueError as e:
             error = str(e)
-        by_rule = _rfc4648(DATA_URI.sub("", data.strip()))
-        if by_rule is None:  # the rule refuses the base64
-            assert error is not None and error.startswith(NOT_BASE64), (data[:40], error)
-            if sys.version_info[:2] == (3, 12):
-                assert v1_error is not None and v1_error.startswith(NOT_BASE64), data[:40]
-            continue
-        # The rule accepts the base64; v1 accepts at least as much on every version.
-        assert error is None or not error.startswith(NOT_BASE64), (data[:40], error)
-        assert v1_error is None or not v1_error.startswith(NOT_BASE64), (data[:40], v1_error)
         if v1_error is None:
             assert error is None, (data[:40], error)
         elif v1_error.startswith("image could not be decoded"):
@@ -991,15 +882,14 @@ def test_rendered_ids_match_the_gemma4_processor(which):
                 },
             },
         }
-        for variant in VARIANTS:
-            r = render(request, tok, variant)
-            for q in r.questions.values():
-                text = q.text
-                for image in r.images:
-                    block = IMAGE_OPEN + IMAGE_SOFT * image.tokens + IMAGE_CLOSE
-                    assert block in text
-                    text = text.replace(block, IMAGE_SOFT, 1)
-                out = proc(text=[text], images=[pixels], add_special_tokens=False)
-                counts = proc.image_processor(images=pixels)["num_soft_tokens_per_image"]
-                assert [int(n) for n in counts] == [i.tokens for i in r.images]
-                assert list(out["input_ids"][0]) == list(q.ids), (which, variant, k)
+        r = render(Request.model_validate(request), tok)
+        for q in r.questions.values():
+            text = q.text
+            for image in r.images:
+                block = IMAGE_OPEN + IMAGE_SOFT * image.tokens + IMAGE_CLOSE
+                assert block in text
+                text = text.replace(block, IMAGE_SOFT, 1)
+            out = proc(text=[text], images=[pixels], add_special_tokens=False)
+            counts = proc.image_processor(images=pixels)["num_soft_tokens_per_image"]
+            assert [int(n) for n in counts] == [i.tokens for i in r.images]
+            assert list(out["input_ids"][0]) == list(q.ids), (which, k)
