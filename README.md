@@ -52,6 +52,7 @@ pip install strands-decider
 ```
 
 On an Apple-silicon Mac, `--device mlx` runs the model through MLX, 1.4 to 1.6x faster than MPS.
+For a model checkpoint, MLX is the default on a Mac once the `mlx` extra is installed.
 It needs the `mlx` extra, which ships with the next release; until then, install from a clone with
 `pip install -e ".[mlx]"`. The `cuda`, `mps` and `cpu` extras name the other devices
 ([docs/inference.md](docs/inference.md#environments-for-serving)).

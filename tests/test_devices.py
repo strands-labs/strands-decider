@@ -102,3 +102,54 @@ def test_the_server_builds_the_mlx_engine_for_device_mlx(monkeypatch):
     assert checkpoint == "org/hobson"
     assert (config.device, config.use_prefix_cache, config.model_name) == ("mlx", True, "hobson")
     assert config.max_batch == 7  # the shared config reaches MLX
+
+
+@pytest.mark.parametrize(
+    ("cuda", "mlx", "mps", "expected"),
+    [
+        (True, True, True, "cuda"),
+        (False, True, True, "mlx"),  # a model checkpoint on a Mac with the extra: MLX
+        (False, False, True, "mps"),  # without it: MPS, with a hint on stderr
+        (False, False, False, "cpu"),
+    ],
+)
+def test_model_checkpoints_default_to_mlx_on_a_mac_with_the_extra(
+    monkeypatch, capsys, cuda, mlx, mps, expected
+):
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: cuda)
+    monkeypatch.setattr(cli, "_decision_mlx_available", lambda: mlx)
+    monkeypatch.setattr(torch.backends.mps, "is_available", lambda: mps)
+    assert cli.resolve_device(None, decision=True) == expected
+    captured = capsys.readouterr()
+    assert ("strands-decider[mlx]" in captured.err) == (expected == "mps")
+    assert captured.out == ""
+
+
+def test_v1_checkpoints_keep_the_torch_default(monkeypatch):
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    monkeypatch.setattr(cli, "_decision_mlx_available", lambda: True)
+    monkeypatch.setattr(torch.backends.mps, "is_available", lambda: True)
+    assert cli.resolve_device(None) == "mps"
+
+
+def test_an_explicit_device_wins_for_model_checkpoints(monkeypatch):
+    monkeypatch.setattr(
+        cli, "_auto_decision_device", lambda: pytest.fail("explicit device ignored")
+    )
+    assert cli.resolve_device("mps", decision=True) == "mps"
+
+
+@pytest.mark.parametrize(
+    ("mlx", "vlm", "expected"), [(True, True, True), (True, False, False), (False, True, False)]
+)
+def test_the_decision_mlx_backend_also_needs_mlx_vlm(monkeypatch, mlx, vlm, expected):
+    import importlib.util
+
+    real = importlib.util.find_spec
+    monkeypatch.setattr(infer, "mlx_available", lambda: mlx)
+    monkeypatch.setattr(
+        importlib.util,
+        "find_spec",
+        lambda name, *a: (object() if vlm else None) if name == "mlx_vlm" else real(name, *a),
+    )
+    assert cli._decision_mlx_available() == expected
