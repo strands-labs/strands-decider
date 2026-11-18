@@ -370,8 +370,9 @@ def run(llama_cpp: Path, lib: Path, work: Path) -> dict:
     from strands_decider.backends.llama_cpp import LlamaCppBackend, prepare_pixels
     from strands_decider.core import (
         DecisionConfig,
-        Readout,
+        Request,
         evaluate,
+        load_readout,
         load_tokenizer,
         question_probabilities,
         render,
@@ -440,7 +441,7 @@ def run(llama_cpp: Path, lib: Path, work: Path) -> dict:
             }
         },
     }
-    rendered = render(request, tok, config.prompt)
+    rendered = render(Request.model_validate(request), tok)
     q = list(next(iter(rendered.questions.values())).question_ids)
     st = list(rendered.state_ids)
     h_img = backend.forward(st, [q], rendered.images)[0]
@@ -450,14 +451,14 @@ def run(llama_cpp: Path, lib: Path, work: Path) -> dict:
                      "rel_error": _rel(h_img, h_ref)}  # fmt: skip
     if res["images"]["rel_error"] > AGREE:
         fail(f"with images the shim misses the reference by {res['images']['rel_error']:.4f}")
-    swapped = render({**request, "images": request["images"][::-1]}, tok, config.prompt)
+    swapped = render(Request.model_validate({**request, "images": request["images"][::-1]}), tok)
     h_swap = backend.forward(list(swapped.state_ids), [q], swapped.images)[0]
     res["images"]["swap_rel_change"] = _rel(h_swap, h_img)
     if res["images"]["swap_rel_change"] < MISS_FACTOR * max(res["images"]["rel_error"], 1e-6):
         fail("swapping the two images barely changes the question's row")
 
     # golden: the whole runtime path against the reference's readout
-    readout = Readout.load(ckpt, config)
+    weight = load_readout(ckpt)
     golden_request = {
         "state": {"ticket": 4182, "text": "The checkout page fails after the payment step."},
         "images": [request["images"][0]],
@@ -468,14 +469,18 @@ def run(llama_cpp: Path, lib: Path, work: Path) -> dict:
             "severity": {"type": "score", "instructions": "How severe?", "criteria": ["low", "medium", "high"]},
         },
     }  # fmt: skip
-    got = evaluate(golden_request, tok, readout, config, backend)
-    rr = render(golden_request, tok, config.prompt)
-    ref_rows = {n: ref.hidden(rr.state_ids, rq.question_ids, pixels=[prepare_pixels(i) for i in rr.images])
-                for n, rq in rr.questions.items()}  # fmt: skip
-    ref_p = question_probabilities(ref_rows, readout, config, rr, stage="hidden")
-    shim_p = question_probabilities(dict(zip(rr.questions, backend.forward(
-        list(rr.state_ids), [list(x.question_ids) for x in rr.questions.values()], rr.images), strict=True)),
-        readout, config, rr, stage="hidden")  # fmt: skip
+    golden = Request.model_validate(golden_request)
+    got = evaluate(golden, tok, weight, config, backend)
+    rr = render(golden, tok)
+    pixels = [prepare_pixels(i) for i in rr.images]
+    ref_rows = [
+        ref.hidden(rr.state_ids, q.question_ids, pixels=pixels) for q in rr.questions.values()
+    ]
+    shim_rows = backend.forward(
+        list(rr.state_ids), [list(q.question_ids) for q in rr.questions.values()], rr.images
+    )
+    ref_p = question_probabilities(ref_rows, config, rr, weight=weight)
+    shim_p = question_probabilities(shim_rows, config, rr, weight=weight)
     res["golden"] = {n: {"reference": [round(float(x), 4) for x in ref_p[n]],
                          "shim": [round(float(x), 4) for x in shim_p[n]]} for n in rr.questions}  # fmt: skip
     for n in rr.questions:
