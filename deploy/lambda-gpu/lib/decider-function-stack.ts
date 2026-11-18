@@ -117,7 +117,11 @@ export class DeciderGpuFunctionStack extends Stack {
     if (ephemeralStorageMb > 32768) {
       throw new Error(`ephemeral_storage_mb must be <= 32768; got ${ephemeralStorageMb}`);
     }
-    const maxRequestTokens = wholeNumber(ctx("max_request_tokens"), "max_request_tokens", 0);
+    const serverMaxConcurrency = ctx("server_max_concurrency");
+    const serverMaxConcurrencyInt =
+      serverMaxConcurrency === undefined || serverMaxConcurrency === null || serverMaxConcurrency === ""
+        ? undefined
+        : wholeNumber(serverMaxConcurrency, "server_max_concurrency", 1);
 
     // VPC: the capacity provider launches EC2 instances into subnets you give it. A simple
     // two-AZ VPC with public subnets is enough for a scaffold — public instances reach ECR and
@@ -221,7 +225,11 @@ export class DeciderGpuFunctionStack extends Stack {
       role: executionRole,
       logGroup,
       environment: {
-        DECIDER_MAX_REQUEST_TOKENS: String(maxRequestTokens),
+        // `strands-decider serve --max-concurrency N` caps concurrent forwards on the model.
+        // Unset means no cap; the server queues on its GPU lock.
+        ...(serverMaxConcurrencyInt !== undefined
+          ? { DECIDER_MAX_CONCURRENCY: String(serverMaxConcurrencyInt) }
+          : {}),
       },
       currentVersionOptions: { removalPolicy: RemovalPolicy.DESTROY },
     });
@@ -257,7 +265,7 @@ export class DeciderGpuFunctionStack extends Stack {
     fn.invalidateVersionBasedOn(
       FileSystem.fingerprint(REPO_ROOT, { exclude: ASSET_EXCLUDE, ignoreMode: IgnoreMode.DOCKER }) +
         JSON.stringify(buildArgs) +
-        JSON.stringify({ acceleratorMemoryGb, perEnvMaxConcurrency, memorySizeMb, ephemeralStorageMb }),
+        JSON.stringify({ acceleratorMemoryGb, perEnvMaxConcurrency, memorySizeMb, ephemeralStorageMb, serverMaxConcurrencyInt }),
     );
     Annotations.of(fn).acknowledgeWarning(
       "@aws-cdk/aws-lambda:snapStartRequirePublish",

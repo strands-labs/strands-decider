@@ -16,6 +16,15 @@ does the forward pass. GPU-accelerated LMI functions are **Event Functions only*
 direct `Invoke` calls and event-source records (SQS, SNS, S3, EventBridge, ...). They have no
 Function URL and no synchronous HTTP path.
 
+**Concurrency.** The image follows the pattern the preview docs recommend
+([`lambda-managed-instances-gpu-inference.html`](https://docs.aws.amazon.com/lambda/latest/dg/lambda-managed-instances-gpu-inference.html#lambda-managed-instances-gpu-inference-custom-handler)):
+the bootstrap script starts `strands-decider serve` in the background during initialization,
+before Lambda forks worker processes. Each worker then imports `handler.py`, which is a thin
+HTTP forwarder to `http://127.0.0.1:8000/v1/systemone`. One copy of the model serves every
+concurrent invocation in the execution environment, so `PerExecutionEnvironmentMaxConcurrency`
+can go up to 48 without duplicating the model in GPU memory. The server queues on its own GPU
+lock and (optionally) on `--max-concurrency`.
+
 To follow this guide you need:
 
 - An AWS account with preview access to Lambda Managed Instances GPU, and credentials that can
@@ -92,10 +101,10 @@ Every setting is a CDK context value. Change it in `cdk.json`, or pass `-c key=v
 | `instance_types` | `g4dn.xlarge,g4dn.2xlarge,g4dn.4xlarge` | Comma list of GPU EC2 instance types Lambda may launch. Must be in `g4dn / g5 / g6 / gr6 / g6e / g6f / gr6f`. g4dn (T4) is the default because it has the widest availability; switch to g6 (L4, 24 GB) or g5 (A10G, 24 GB) with `-c instance_types=g6.xlarge,g6.2xlarge -c accelerator_memory_gb=24`. |
 | `accelerator_memory_gb` | `16` | GPU memory per execution environment. One of `3, 6, 12, 16, 24, 48`. Lambda picks the smallest qualifying instance from `instance_types`, and when several types have the same memory, the latest generation. |
 | `max_vcpus` | `32` | Cap on vCPUs the capacity provider may launch. `0` for no cap (still bounded by your EC2 quota). |
-| `per_env_max_concurrency` | `1` | Invocations in-flight per execution environment. Default 4, max 48 per the preview docs; we default to 1 because SystemOneEngine serializes on GPU anyway. |
+| `per_env_max_concurrency` | `4` | Invocations in-flight per execution environment (max 48). Safe to raise because the image uses one shared server per execution environment; workers only forward over `127.0.0.1`. |
+| `server_max_concurrency` | *unset* | Passed to `strands-decider serve --max-concurrency`, which caps simultaneous forwards on the GPU. Unset means no cap beyond the server's default thread pool. |
 | `memory_size_mb` | `4096` | Lambda host memory. LMI GPU allows 2048–32768 MB. |
 | `ephemeral_storage_mb` | `4096` | `/tmp` size. LMI GPU allows 512–32768 MB. |
-| `max_request_tokens` | `24576` | The most tokens one request may forward, the state once plus every question. `0` for no limit. |
 | `capacity_provider_service_role_arn` | *unset* | Pre-existing service role for the capacity provider. If unset, the stack creates one and attaches `AWSLambdaManagedInstanceServiceRolePolicy`. Override if the preview account uses a different managed policy name. |
 
 ## Known gaps

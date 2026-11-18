@@ -61,13 +61,49 @@ COPY deploy/lambda-gpu/function/handler.py ./
 
 ENV DECIDER_CHECKPOINT=/opt/model/checkpoint \
     DECIDER_DEVICE=cuda \
+    DECIDER_SERVER_PORT=8000 \
+    DECIDER_SERVER_READY_TIMEOUT=600 \
     HF_HUB_OFFLINE=1
 
-# Lambda Managed Instances GPU validates ImageConfig.EntryPoint[0] is an absolute path to an
-# executable regular file. The pytorch/pytorch base image's python is at /opt/conda/bin/python
-# (a symlink to python3.X), and Lambda rejects the symlink target chase. A tiny wrapper script
-# at a fixed absolute path gets around it.
-RUN printf '#!/bin/sh\nexec /opt/conda/bin/python -m awslambdaric "$@"\n' > /var/task/bootstrap \
-    && chmod 755 /var/task/bootstrap
+# One inference server per execution environment, started before Lambda forks workers so one
+# copy of the model serves every concurrent invocation (lambda-managed-instances-gpu-inference).
+# Each worker process runs handler.py, which forwards to the server over 127.0.0.1. Loading the
+# model once from the handler would fail at PerExecutionEnvironmentMaxConcurrency > 1, because
+# N workers would load N copies into GPU memory.
+#
+# Lambda Managed Instances GPU validates ImageConfig.EntryPoint[0] as an absolute path to a
+# regular executable file (no symlinks, no PATH), so the bootstrap script lives at a known path.
+RUN cat > /var/task/bootstrap <<'BOOT' && chmod 755 /var/task/bootstrap
+#!/bin/sh
+set -eu
+PY=/opt/conda/bin/python
+PORT="${DECIDER_SERVER_PORT:-8000}"
+# Start the strands-decider inference server. --no-warmup keeps the server startup under
+# control: handler.py runs the warm-up itself on first forward through the server.
+/opt/conda/bin/strands-decider serve \
+    "${DECIDER_CHECKPOINT}" \
+    --host 127.0.0.1 --port "$PORT" \
+    --device "${DECIDER_DEVICE:-cuda}" \
+    ${DECIDER_MAX_CONCURRENCY:+--max-concurrency "$DECIDER_MAX_CONCURRENCY"} &
+SERVER_PID=$!
+# Block until /health answers OK, or the init times out. Lambda marks the version Active only
+# when `python -m awslambdaric` is ready for events, so this wait is inside the init window.
+"$PY" - <<'PY' "$PORT" "${DECIDER_SERVER_READY_TIMEOUT:-600}" || { echo "server never became ready; strands-decider serve pid=$SERVER_PID still running? $(kill -0 "$SERVER_PID" 2>/dev/null && echo yes || echo no)"; exit 1; }
+import json, sys, time, urllib.error, urllib.request
+port, timeout = int(sys.argv[1]), int(sys.argv[2])
+deadline = time.monotonic() + timeout
+while time.monotonic() < deadline:
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=2) as r:
+            if r.status == 200:
+                print("decider server ready:", r.read(200).decode())
+                sys.exit(0)
+    except (urllib.error.URLError, ConnectionError, TimeoutError):
+        pass
+    time.sleep(1)
+sys.exit(1)
+PY
+exec "$PY" -m awslambdaric "$@"
+BOOT
 ENTRYPOINT ["/var/task/bootstrap"]
 CMD ["handler.handler"]

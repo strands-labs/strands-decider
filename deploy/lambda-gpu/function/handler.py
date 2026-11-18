@@ -1,88 +1,75 @@
 """strands-decider on GPU-accelerated Lambda Managed Instances (README.md).
 
-GPU-accelerated LMI is Event Functions only: this handler takes a direct Invoke payload, or an
-event-source record (SQS, SNS, EventBridge), and returns the System One response. No Function
-URL, no HTTP routes.
+GPU-accelerated LMI is Event Functions only. This handler accepts a direct Invoke payload or
+an event-source record (SQS, SNS, EventBridge) and forwards it to the strands-decider inference
+server that the image's bootstrap script started during initialization.
 
-The model loads lazily on the first invocation of each execution environment, not at module
-import. If the load fails at import, Lambda marks the version `Failed`/`RuntimeInitError` and
-CloudWatch Logs often has nothing, so it is better to let the first invocation carry the import
-and surface its traceback in the response.
-
-The engine serializes on a threading.Lock; SystemOneEngine is not thread-safe on the same
-device. `PerExecutionEnvironmentMaxConcurrency` > 1 then just queues on the lock, so keep it at
-1 unless you add batching upstream.
+One server per execution environment serves every concurrent invocation. Lambda forks
+PerExecutionEnvironmentMaxConcurrency worker processes per execution environment, and each
+process imports handler.py and connects to the same local server; the model is never loaded
+inside a worker. The server handles request-level concurrency in FastAPI, bounded by
+`DECIDER_MAX_CONCURRENCY` (`--max-concurrency` on `strands-decider serve`).
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import sys
-import threading
-import time
+import urllib.error
+import urllib.request
 from typing import Any
 
 log = logging.getLogger("decider")
 log.setLevel(logging.INFO)
 logging.basicConfig(level=logging.INFO, stream=sys.stdout)
 
-CHECKPOINT = os.environ.get("DECIDER_CHECKPOINT", "/opt/model/checkpoint")
-DEVICE = os.environ.get("DECIDER_DEVICE", "cuda")
-
-_engine: Any = None
-_lock = threading.Lock()
+PORT = os.environ.get("DECIDER_SERVER_PORT", "8000")
+BASE_URL = f"http://127.0.0.1:{PORT}"
 
 
-def _ensure_engine() -> Any:
-    global _engine
-    if _engine is not None:
-        return _engine
-    with _lock:
-        if _engine is not None:
-            return _engine
-        from strands_decider.infer import load_engine
-        from strands_decider.schema import SystemOneRequest
-
-        started = time.perf_counter()
-        engine = load_engine(CHECKPOINT, device=DEVICE)
-        engine.evaluate(
-            SystemOneRequest.model_validate(
-                {"state": "Warm up.", "questions": {"q": {"type": "noul", "instructions": "?"}}}
-            )
-        )
-        engine.cfg.max_request_tokens = (
-            int(os.environ.get("DECIDER_MAX_REQUEST_TOKENS") or 0) or None
-        )
-        log.info("engine ready in %.1f s on %s", time.perf_counter() - started, DEVICE)
-        _engine = engine
-        return _engine
-
-
-def _request_from(event: Any) -> Any:
-    """Accept either a System One request directly, or an event-source wrapper (SQS/SNS records,
-    EventBridge detail)."""
-    from strands_decider.schema import SystemOneRequest
-
+def _request_body(event: Any) -> bytes:
+    """A System One request as JSON bytes, for every event shape the function accepts."""
+    if isinstance(event, (bytes, bytearray)):
+        return bytes(event)
+    if isinstance(event, str):
+        return event.encode()
     if isinstance(event, dict):
         if event.get("Records"):
             record = event["Records"][0]
             body = record.get("body") or record.get("Sns", {}).get("Message")
             if isinstance(body, str):
-                return SystemOneRequest.model_validate_json(body)
+                return body.encode()
+            if isinstance(body, dict):
+                return json.dumps(body).encode()
         if "detail" in event and isinstance(event["detail"], dict):
-            return SystemOneRequest.model_validate(event["detail"])
-    return SystemOneRequest.model_validate(event)
+            return json.dumps(event["detail"]).encode()
+    return json.dumps(event).encode()
+
+
+def _forward(body: bytes, timeout: float) -> dict[str, Any]:
+    req = urllib.request.Request(
+        f"{BASE_URL}/v1/systemone",
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode())
+    except urllib.error.HTTPError as e:
+        # 4xx / 5xx: surface the server's error body (serve returns FastAPI's 422 for
+        # validation errors and 500 for unexpected faults).
+        body = e.read().decode(errors="replace")
+        raise RuntimeError(f"strands-decider serve returned {e.code}: {body}") from None
+    except urllib.error.URLError as e:
+        raise RuntimeError(f"strands-decider serve unreachable at {BASE_URL}: {e.reason}") from e
 
 
 def handler(event: Any, context: Any) -> dict[str, Any]:
-    engine = _ensure_engine()
-    request = _request_from(event)
-    started = time.perf_counter()
-    with _lock:
-        payload = engine.evaluate(request).model_dump()
-    payload["latency_ms"] = round((time.perf_counter() - started) * 1000, 2)
-    log.info(
-        "latency_ms=%s input_tokens=%s", payload["latency_ms"], payload["usage"]["input_tokens"]
-    )
-    return payload
+    # Give the server until just before the invocation deadline to answer; no point waiting
+    # past the point where Lambda will terminate the invocation anyway.
+    remaining = getattr(context, "get_remaining_time_in_millis", lambda: 900_000)() / 1000
+    timeout = max(1.0, remaining - 1.0)
+    return _forward(_request_body(event), timeout=timeout)
