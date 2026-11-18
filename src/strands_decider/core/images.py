@@ -16,7 +16,6 @@ import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from types import ModuleType
 from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, ValidationError
@@ -144,7 +143,7 @@ class EncodedImage:
         return soft_tokens(self.width, self.height)
 
 
-def _pillow() -> ModuleType:
+def _pillow() -> Any:  # PIL.Image, typed only where Pillow is installed
     try:
         from PIL import Image
     except ImportError as e:
