@@ -1,38 +1,17 @@
 """``strands-decider-vllm serve``: the System One request, images included, on vLLM's engine in process.
 
-vLLM 0.33's ``/v1/completions`` takes token ids but no images, its chat endpoints render a chat template (which these
-prompts never take: the core renders them), and its token-in-token-out endpoint lets a client name an image by an id of
-its choosing, which vLLM then uses as the image's cache key. This server takes v1's request instead and does the rest:
+vLLM 0.33's own endpoints don't fit: ``/v1/completions`` takes token ids but no images, its chat endpoints apply a
+chat template on top of the core's prompt, and its token-in endpoint lets a client pick an image's id, which vLLM
+uses as the image's cache key. This server renders each request with the core (``strands_decider.core``), decodes
+and resizes each image with the core's ``resize_image`` (vLLM's processor then runs with its own resize off), and
+sends vLLM one request per question: the prompt with each image collapsed to the one ``<|image|>`` vLLM's processor
+expands, each image's file sha256 as its id, and the state boundary S in ``vllm_xargs.prefix_end``. It checks that
+vLLM's expanded prompt is the rendered one, token for token, and reads the answers from the processed logprobs.
 
-1. It renders the request with the core library (``strands_decider.core.render``) and the checkpoint's prompt
-   template. Each image becomes ``<|image>``, N ``<|image|>`` and ``<image|>`` first in the state, and S counts them.
-2. It decodes each image as v1 does (first frame, EXIF orientation, transparency onto white, RGB) and resizes it to
-   the core's W x H, computed from the decoded size, with the core's ``resize_image``: Pillow's bicubic
-   resampling, the width's pass and then the height's, the reference resize for every size.
-   vLLM's processor then runs with its own resize off (``do_resize=False``), so the pixels the encoder gets are the
-   reference's; W and H are multiples of 48, and the processor's count of soft tokens is N.
-3. For each question it sends vLLM the prompt with each image's line collapsed to the single ``<|image|>`` that vLLM's
-   Gemma 4 processor expands, the images as multimodal data, the image file's sha256 as each image's id (so vLLM's
-   multimodal hash, and the plugin's cache digest, is the core's key: the file's content), and S in
-   ``vllm_xargs.prefix_end``. The first question runs alone and the others then together, so that they reuse the
-   state's cached blocks.
-4. It checks that vLLM's expanded prompt is the rendered one, token for token, so that N and S are the core's.
-5. It reads each question's code probabilities from the processed logprobs and answers in v1's response format
-   (``strands_decider.core.read``).
-
-Parsing and rendering run on one lane of threads and image decoding on another (``--preprocess-workers`` each), never
-on the event loop, so ``/ping`` and ``/health`` answer while images are decoded and a request without images never
-waits behind a decode. vLLM 0.33 runs its own image preprocessing on its renderer's threads (tests/gpu/engine_checks.py
-checks both on a real engine). A body over ``--max-body-mb`` gets HTTP 413. Bodies over 1 MiB share a budget of
-``--max-buffered-mb`` buffered bytes, granted in arrival order and held until the request's images are decoded and
-its files dropped, so buffered bodies are bounded in aggregate. uvicorn answers 503 past ``--limit-concurrency``
-connections.
-
-Endpoints: ``POST /v1/systemone`` and ``POST /invocations`` (the same handler, for SageMaker), ``GET /ping`` and
-``GET /health``. A request the server, the core library or the engine refuses gets HTTP 422 with
-``{"detail": "..."}``, as v1's server answers refusals; any other failure is logged and gets HTTP 500 with only an
-error id. The engine keeps serving either way. The server has no authentication and binds 127.0.0.1 unless told
-otherwise: expose it beyond the machine only behind the deployment's own authentication, such as SageMaker's IAM-signed
+Parsing, rendering and image decoding run on worker threads, never on the event loop. Large bodies share a byte
+budget (``--max-buffered-mb``), so buffered bodies are bounded in aggregate. A refused request gets HTTP 422 and a
+server fault 500 with only an error id; the engine keeps serving either way. The server has no authentication and
+binds 127.0.0.1 by default: expose it only behind the deployment's own authentication, such as SageMaker's IAM-signed
 endpoint or an authenticating proxy.
 """
 
@@ -40,7 +19,6 @@ from __future__ import annotations
 
 import asyncio
 import collections
-import inspect
 import io
 import json
 import math
@@ -49,63 +27,39 @@ import re
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
+from pydantic import ValidationError
 from starlette.requests import ClientDisconnect
 
 from . import ARCH_FOR_BASE, PREFIX_END_KEY, SERVER_CONFIG_KEY, __version__, logger
 
 #: Gemma 4's image placeholder, which vLLM's processor expands.
 IMAGE_SOFT = "<|image|>"
-#: The side, in pixels, of one soft token's patch group (pooling_kernel_size x patch_size, the core's soft_tokens).
-SOFT_TOKEN_SIDE = 48
 IMAGE_FORMATS = ("PNG", "JPEG", "WEBP", "GIF")
 LOOPBACK = ("127.0.0.1", "::1", "localhost")
-#: The core library this server is written against, as pip writes it (pyproject.toml's ``serve`` extra).
-CORE_REQUIREMENT = "strands-decider>=0.3.1.dev0,<0.5"
-#: What the server uses from the core library, all required at startup.
-CORE_NAMES = (
-    "parse_request",
-    "render",
-    "read",
-    "DecisionConfig",
-    "check_tokenizer",
-    "check_image_processor",
-    "check_decoded_size",
-    "resize_image",
-)
 
-#: The default body limit has room for BODY_IMAGE_FILES image files of IMAGE_FILE_BYTES each, base64-encoded, plus
-#: TEXT_BYTES of text and JSON (93 MiB). 16 MiB, the core's cap on an image file (MAX_IMAGE_BYTES), holds a photo of
-#: its largest size (4,096 x 4,096 pixels) as JPEG or WebP. It limits bytes, not images: the number of images is not
-#: checked, the prompt's length bounds it, and smaller files fit more of them under the same limit.
+#: The default body limit: room for four of the core's largest image files (16 MiB each) in base64, plus 8 MiB of
+#: text (93 MiB). It limits bytes, not images.
 IMAGE_FILE_BYTES = 16 * 2**20
 BODY_IMAGE_FILES = 4
 TEXT_BYTES = 8 * 2**20
-#: Bodies up to this size are read at once. A larger one first reserves its size from the server's budget of
-#: buffered body bytes (``--max-buffered-mb``), and holds it until its images are decoded and its files dropped.
+#: Bodies up to this size are read at once; a larger one first reserves its size from the budget of buffered bytes.
 SMALL_BODY = 2**20
-#: The default budget of buffered body bytes over SMALL_BODY: about two and a half bodies at the default limit.
 BUFFERED_BYTES = 256 * 2**20
-#: The default for --body-read-timeout: how long, in seconds, a body may go without a chunk arriving, and how long a
-#: large body may wait for the budget.
+#: Seconds a body may go without a chunk arriving, and a large body may wait for the budget.
 BODY_READ_TIMEOUT = 30.0
 
 
-def base64_size(n: int) -> int:
-    """The length of ``n`` bytes in base64, with room for a ``data:`` URI prefix and the JSON string's quotes."""
-    return 4 * math.ceil(n / 3) + 64
-
-
 def default_max_body(takes_images: bool) -> int:
-    """The body limit for a checkpoint: the text budget, plus room for four of the largest image files when it takes
-    images (93 MiB)."""
-    return TEXT_BYTES + (BODY_IMAGE_FILES * base64_size(IMAGE_FILE_BYTES) if takes_images else 0)
+    base64_file = (
+        4 * math.ceil(IMAGE_FILE_BYTES / 3) + 64
+    )  # with room for a data URI prefix and quotes
+    return TEXT_BYTES + (BODY_IMAGE_FILES * base64_file if takes_images else 0)
 
 
 class Refused(ValueError):
@@ -116,36 +70,24 @@ class Mismatch(RuntimeError):
     """vLLM's expanded prompt differs from the rendered one (HTTP 500: a bug, never the client's)."""
 
 
-# --- the core library -----------------------------------------------------------------------------------------------
+def errors(e: ValidationError) -> str:
+    """pydantic's errors as ``where: what``, for a 422."""
+    out = []
+    for err in e.errors(include_url=False, include_input=False):
+        where, what = ".".join(map(str, err["loc"])), err["msg"].removeprefix("Value error, ")
+        out.append(f"{where}: {what}" if where else what)
+    return "; ".join(out)
 
 
-def require_core() -> SimpleNamespace:
-    """What the server uses from the core library (``strands_decider.core``, ``CORE_REQUIREMENT``), or SystemExit
-    naming what is missing; ``serve`` calls it before the engine starts. Every helper is required: the server keeps
-    no copy of the core's checks or its resize."""
+def _core() -> Any:
     try:
         from strands_decider import core
     except ImportError as e:
         raise SystemExit(
-            f"strands-decider-vllm serve needs the core library, strands_decider.core ({CORE_REQUIREMENT}): "
-            f"install it, on Python 3.11 or later, with pip install 'strands-decider-vllm[serve]' ({e})"
+            "strands-decider-vllm serve needs the core library: pip install 'strands-decider-vllm[serve]' "
+            f"({e})"
         ) from e
-    missing = [n for n in CORE_NAMES if not hasattr(core, n)]
-    if "parse_request" not in missing and not hasattr(core, "Request"):
-        # The pydantic request, whose images parse_request leaves undecoded.
-        missing.append("Request")
-    if "read" not in missing and "stage" not in inspect.signature(core.read).parameters:
-        missing.append("read(stage=)")
-    if "check_tokenizer" not in missing and (
-        "hand_over" not in inspect.signature(core.check_tokenizer).parameters
-    ):
-        missing.append("check_tokenizer(hand_over=)")
-    if missing:
-        raise SystemExit(
-            f"strands-decider-vllm serve: the installed core library has no {', '.join(missing)}; the server "
-            f"needs {CORE_REQUIREMENT} at PR #129's head or later"
-        )
-    return SimpleNamespace(**{n: getattr(core, n) for n in CORE_NAMES})
+    return core
 
 
 # --- the checkpoint -------------------------------------------------------------------------------------------------
@@ -155,9 +97,8 @@ _COMMIT = re.compile(r"^[0-9a-f]{40}$")
 
 @dataclass(frozen=True)
 class Checkpoint:
-    """The files the server reads beside the engine: decision_config.json, config.json, processor_config.json and
-    the tokenizer, from a local directory or a Hub repo. For a Hub repo ``revision`` is the commit the files were
-    read at, and the engine is given that commit, so that both read the same one."""
+    """The files the server reads beside the engine, from a local directory or a Hub repo. For a Hub repo,
+    ``revision`` is the commit the files were read at, and the engine is given the same commit."""
 
     model: str
     revision: str | None
@@ -170,22 +111,19 @@ class Checkpoint:
     def open(cls, model: str, revision: str | None = None) -> Checkpoint:
         files: dict[str, Path] = {}
         if Path(model).is_dir():
-            for n in cls.NAMES:
-                if (Path(model) / n).is_file():
-                    files[n] = Path(model) / n
+            files = {n: Path(model) / n for n in cls.NAMES if (Path(model) / n).is_file()}
         else:
             from huggingface_hub import hf_hub_download
             from huggingface_hub.errors import EntryNotFoundError
 
-            # config.json first: its place in the cache, snapshots/<commit>/config.json, names the commit the
-            # revision resolves to now; every other file, and the engine's weights, are then read at that commit.
+            # config.json first: its cache path, snapshots/<commit>/config.json, names the commit the revision
+            # resolves to now, and every other file is read at that commit.
             files["config.json"] = Path(hf_hub_download(model, "config.json", revision=revision))
-            commit = files["config.json"].parent.name
-            if not _COMMIT.match(commit):
+            revision = files["config.json"].parent.name
+            if not _COMMIT.match(revision):
                 raise SystemExit(
-                    f"strands-decider-vllm serve: could not resolve {model!r} at revision {revision!r} to a commit"
+                    f"strands-decider-vllm serve: could not resolve {model!r} to a commit"
                 )
-            revision = commit
             for n in cls.NAMES:
                 if n in files:
                     continue
@@ -193,18 +131,13 @@ class Checkpoint:
                     files[n] = Path(hf_hub_download(model, n, revision=revision))
                 except EntryNotFoundError:
                     pass
-        for n in cls.REQUIRED:
-            if n not in files:
-                raise SystemExit(f"strands-decider-vllm serve: {model!r} has no {n}")
+        missing = [n for n in cls.REQUIRED if n not in files]
+        if missing:
+            raise SystemExit(f"strands-decider-vllm serve: {model!r} has no {', '.join(missing)}")
         return cls(model, revision, files)
 
-    def json(self, name: str) -> dict:
-        return json.loads(self.files[name].read_text())
-
-    def tokenizer(self) -> Any:
-        from tokenizers import Tokenizer
-
-        return Tokenizer.from_file(str(self.files["tokenizer.json"]))
+    def text(self, name: str) -> str:
+        return self.files[name].read_text(encoding="utf-8")
 
 
 def plugin_architecture(config: dict) -> str:
@@ -219,76 +152,51 @@ def plugin_architecture(config: dict) -> str:
     )
 
 
-def processor_problem(processor_config: dict | None, check: Any) -> str | None:
-    """Why image requests must be refused for this image processor configuration, or None. ``check`` is the core
-    library's ``check_image_processor``."""
-    if processor_config is None:
-        return "the checkpoint has no processor_config.json"
-    try:
-        check(processor_config)
-    except ValueError as e:
-        return str(e)
-    return None
-
-
 # --- images ---------------------------------------------------------------------------------------------------------
 
 
 def decode_image(data: bytes) -> Any:
-    """One image file as v1's ``vision.decode_image`` decodes it: its first frame, upright by its EXIF orientation,
-    transparent areas composited onto white, as RGB. The core has already checked its format and size."""
+    """One image file's pixels: its first frame, upright by its EXIF orientation, transparent areas on white (as
+    v1 decodes images), as RGB. The core has already checked its format and size from the header."""
     from PIL import Image, ImageOps
 
     try:
         img = Image.open(io.BytesIO(data), formats=IMAGE_FORMATS)
-    except Exception as e:
-        raise Refused(f"image could not be read as {'/'.join(IMAGE_FORMATS)}: {e}") from e
-    try:
         img.load()
         img = ImageOps.exif_transpose(img)
     except Exception as e:
         raise Refused(f"image could not be decoded: {e}") from e
     if img.mode in ("RGBA", "LA") or (img.mode == "P" and "transparency" in img.info):
         rgba = img.convert("RGBA")
-        white = Image.new("RGBA", rgba.size, (255, 255, 255, 255))
-        img = Image.alpha_composite(white, rgba)
+        img = Image.alpha_composite(Image.new("RGBA", rgba.size, (255, 255, 255, 255)), rgba)
     return img.convert("RGB")
 
 
-def prepare_image(data: bytes, tokens: int, target: Any, resize: Any) -> Any:
-    """The decoded image, resized to W x H (the core's ``resize_image``). ``target(width, height)`` gives W and H
-    from the decoded size, after the orientation: the core's ``check_decoded_size`` for this image, which refuses a
-    decoded size that is neither the header's nor its transpose. ``resize`` is the core's ``resize_image``: Pillow's
-    bicubic resampling, the width's pass and then the height's, the same pixels on every Pillow version."""
-    img = decode_image(data)
+def prepare_image(image: Any) -> Any:
+    """A rendered request's image, decoded and resized to the core's W x H, from its decoded size."""
+    core = _core()
+    img = decode_image(image.data)
     try:
-        w, h = target(*img.size)
-    except ValueError as e:  # the core refuses the decoded size
+        w, h = core.check_decoded_size(image, *img.size)
+    except ValueError as e:
         raise Refused(str(e)) from e
-    if (w // SOFT_TOKEN_SIDE) * (h // SOFT_TOKEN_SIDE) != tokens:
-        raise Mismatch(
-            f"a {img.size[0]} x {img.size[1]} image resizes to {w} x {h}, not to the core's {tokens} tokens"
-        )
-    return resize(img, w, h)
+    return core.resize_image(img, w, h)
 
 
 def without_image_files(rendered: Any) -> Any:
-    """``rendered`` with each image's file (``data``) dropped, once its pixels are decoded, so that a request does
-    not keep its files while the engine runs; everything else (spans, sha256, ids) is kept."""
-    from dataclasses import replace
-
+    """``rendered`` without its images' files, once their pixels are decoded, so a request doesn't hold them while
+    the engine runs."""
     if not rendered.images:
         return rendered
     images = tuple(replace(im, data=b"") for im in rendered.images)
     return replace(
-        rendered,
-        questions={n: replace(q, images=images) for n, q in rendered.questions.items()},
+        rendered, questions={n: replace(q, images=images) for n, q in rendered.questions.items()}
     )
 
 
 def collapse(state_ids: tuple[int, ...], images: Any, image_id: int) -> list[int]:
-    """The state ids with each image's line, ``<|image>`` N ``<|image|>`` ``<image|>``, replaced by the one
-    ``<|image|>`` that vLLM's Gemma 4 processor expands back to it."""
+    """The state ids with each image's ``<|image>`` N ``<|image|>`` ``<image|>`` replaced by the one ``<|image|>``
+    that vLLM's Gemma 4 processor expands back to it."""
     out: list[int] = []
     pos = 0
     for im in images:
@@ -300,8 +208,7 @@ def collapse(state_ids: tuple[int, ...], images: Any, image_id: int) -> list[int
 
 
 def probabilities(logprobs: dict, code_ids: tuple[int, ...]) -> list[float]:
-    """The question's code probabilities from the sampled position's processed logprobs (renormalized over its k
-    codes, which ``allowed_token_ids`` already restricts them to)."""
+    """A question's code probabilities from the sampled position's processed logprobs, renormalized over its codes."""
     lp = [logprobs[t].logprob if t in logprobs else -math.inf for t in code_ids]
     m = max(lp)
     if not math.isfinite(m):
@@ -314,21 +221,8 @@ def probabilities(logprobs: dict, code_ids: tuple[int, ...]) -> list[float]:
 # --- requests -------------------------------------------------------------------------------------------------------
 
 
-def parse_body(raw: bytes | bytearray) -> dict:
-    """The request's JSON object, or Refused."""
-    try:
-        body = json.loads(raw)
-    except (ValueError, RecursionError) as e:  # RecursionError: nested past the parser's limit
-        raise Refused(f"the body is not JSON: {e}") from e
-    if not isinstance(body, dict):
-        raise Refused(f"the body must be a JSON object, not {type(body).__name__}")
-    return body
-
-
 def refusal(e: BaseException) -> bool:
-    """Whether ``e`` refuses the request (HTTP 422): the server's or the core library's refusal (Refused), or the
-    engine's (vLLM's VLLMValidationError, which AsyncLLM.generate raises for a request its input processing or its
-    engine core refuses). Anything else is a server fault."""
+    """Whether ``e`` refuses the request (HTTP 422): the server's refusal, or the engine's VLLMValidationError."""
     from vllm.exceptions import VLLMValidationError
 
     return isinstance(e, (Refused, VLLMValidationError))
@@ -348,8 +242,7 @@ async def all_or_none(coros: list[Any]) -> list[Any]:
 
 
 class ByteBudget:
-    """A budget of buffered body bytes, granted in arrival order: a request waits until its reservation fits, and
-    later requests wait behind it, so a large body is not starved by smaller ones. One per event loop."""
+    """A budget of buffered body bytes, granted in arrival order, so a large body isn't starved by smaller ones."""
 
     def __init__(self, capacity: int) -> None:
         self.capacity = max(1, capacity)
@@ -357,8 +250,8 @@ class ByteBudget:
         self._waiters: collections.deque[tuple[int, asyncio.Future]] = collections.deque()
 
     async def take(self, n: int, timeout: float | None = None) -> int:
-        """Reserve ``n`` bytes (at most the whole budget) and return the reservation; asyncio.TimeoutError after ``timeout``
-        seconds of waiting, having taken nothing."""
+        """Reserve ``n`` bytes (at most the whole budget) and return the reservation; asyncio.TimeoutError after
+        ``timeout`` seconds, having taken nothing."""
         n = min(n, self.capacity)
         if not self._waiters and self.used + n <= self.capacity:
             self.used += n
@@ -369,12 +262,12 @@ class ByteBudget:
             await asyncio.wait_for(fut, timeout)
         except BaseException:
             if fut.done() and not fut.cancelled():
-                self.give(n)  # granted as it was cancelled or timed out
+                self.give(n)  # granted just as it was cancelled or timed out
             else:
                 try:
                     self._waiters.remove((n, fut))
                 except ValueError:
-                    pass  # a give already dropped the cancelled waiter
+                    pass
                 self._grant()
             raise
         return n
@@ -408,13 +301,16 @@ class Decider:
         body_read_timeout: float = BODY_READ_TIMEOUT,
         preprocess_workers: int = 4,
         tokenizer: Any = None,
-        core: SimpleNamespace | None = None,
     ) -> None:
-        self.core = core or require_core()
+        core = _core()
         self.engine = engine
         self.checkpoint = checkpoint
-        self.config = self.core.DecisionConfig.from_dict(checkpoint.json("decision_config.json"))
-        self.tokenizer = tokenizer if tokenizer is not None else checkpoint.tokenizer()
+        self.config = core.DecisionConfig.model_validate_json(
+            checkpoint.text("decision_config.json")
+        )
+        if tokenizer is None:
+            tokenizer = core.load_tokenizer(checkpoint.files["tokenizer.json"].parent)
+        self.tokenizer = tokenizer
         self.image_id = self.tokenizer.token_to_id(IMAGE_SOFT)
         self.served_name = served_name
         self.max_length = max_length
@@ -427,17 +323,15 @@ class Decider:
         )
         self.max_buffered = max(max_buffered, self.max_body)
         self.body_read_timeout = body_read_timeout
-        # Two lanes of preprocess_workers threads each: parsing and rendering, and image decoding. A request without
-        # images never waits behind another request's decode. Each lane's semaphore admits at most
-        # preprocess_workers at once, so nothing queues inside the pool, and a cancelled request leaves nothing
-        # behind.
+        # Two lanes of threads, rendering and image decoding, so a request without images never waits behind a
+        # decode. Each lane's semaphore admits at most preprocess_workers at once, so nothing queues in the pool.
         self.preprocess_workers = max(1, preprocess_workers)
         self._pool = ThreadPoolExecutor(
             2 * self.preprocess_workers, thread_name_prefix="strands-decider"
         )
         self._loop: Any = None
         self._lanes: dict[str, asyncio.Semaphore] = {}
-        self._budget: ByteBudget | None = None
+        self._budget = ByteBudget(self.max_buffered)
 
     @property
     def takes_images(self) -> bool:
@@ -446,65 +340,44 @@ class Decider:
     def close(self) -> None:
         self._pool.shutdown(wait=False, cancel_futures=True)
 
+    @property
+    def budget(self) -> ByteBudget:
+        self._bind()
+        return self._budget
+
     def _bind(self) -> asyncio.AbstractEventLoop:
+        """The running loop, with the lanes and the budget bound to it (asyncio primitives belong to one loop)."""
         loop = asyncio.get_running_loop()
         if self._loop is not loop:
             self._loop = loop
             self._lanes = {
-                "render": asyncio.Semaphore(self.preprocess_workers),
-                "decode": asyncio.Semaphore(self.preprocess_workers),
+                lane: asyncio.Semaphore(self.preprocess_workers) for lane in ("render", "decode")
             }
             self._budget = ByteBudget(self.max_buffered)
         return loop
-
-    @property
-    def budget(self) -> ByteBudget:
-        self._bind()
-        assert self._budget is not None
-        return self._budget
 
     async def _run(self, lane: str, fn: Any, *args: Any) -> Any:
         loop = self._bind()
         async with self._lanes[lane]:
             return await loop.run_in_executor(self._pool, fn, *args)
 
-    def render_request(self, body: Any) -> Any:
-        """The rendered request (blocking: it runs on the render lane). ``body`` is the raw body or its parsed JSON
-        object."""
+    def render_request(self, body: bytes | bytearray | Any) -> Any:
+        """The rendered request, from the raw body or a core ``Request`` (blocking: it runs on the render lane)."""
+        core = _core()
         if isinstance(body, (bytes, bytearray)):
-            body = parse_body(body)
-        elif not isinstance(body, dict):
-            raise Refused(f"the body must be a JSON object, not {type(body).__name__}")
-        # The request's own checks first, then images the checkpoint cannot take, before any is decoded, then the
-        # images and the prompt's length as the core renders it (docs/architecture.md, The core's runtime interface).
-        try:
-            request = self.core.parse_request(body)
-        except ValueError as e:  # the core library refuses the request
-            raise Refused(str(e)) from e
-        if request.images:
+            try:
+                body = core.Request.model_validate_json(body)
+            except ValidationError as e:
+                raise Refused(errors(e)) from None
+        if body.images:
             if not self.takes_images:
-                raise Refused(
-                    "this checkpoint does not take images: its decision_config.json inputs are "
-                    + json.dumps(list(self.config.inputs))
-                )
+                raise Refused("this checkpoint does not take images")
             if self.image_problem:
                 raise Refused(f"image requests are refused: {self.image_problem}")
         try:
-            return self.core.render(
-                request, self.tokenizer, self.config.prompt, max_length=self.max_length
-            )
-        except ValueError as e:  # the core library refuses an image or the prompt's length
+            return core.render(body, self.tokenizer, max_length=self.max_length)
+        except ValueError as e:  # an image or the prompt's length
             raise Refused(str(e)) from e
-
-    def prepare_images(self, rendered: Any) -> list[Any]:
-        """The request's images, decoded and resized to W x H (blocking: it runs on the decode lane)."""
-        check = self.core.check_decoded_size
-        return [
-            prepare_image(
-                im.data, im.tokens, lambda w, h, im=im: check(im, w, h), self.core.resize_image
-            )
-            for im in rendered.images
-        ]
 
     async def prepare(self, body: Any) -> tuple[Any, list[Any]]:
         """The rendered request, its image files dropped, and its images resized to W x H."""
@@ -512,32 +385,32 @@ class Decider:
         del body
         if not rendered.images:
             return rendered, []
-        images = await self._run("decode", self.prepare_images, rendered)
+        images = await self._run("decode", lambda: [prepare_image(im) for im in rendered.images])
         return without_image_files(rendered), images
 
     async def _question(
         self, q: Any, images: list[Any], rendered_images: Any
     ) -> tuple[list[float], int]:
-        """One question as one engine request: its code probabilities, and the prompt tokens vLLM served from its
+        """One question as one engine request: its code probabilities, and the prompt tokens served from vLLM's
         prefix cache."""
         from vllm import SamplingParams
         from vllm.sampling_params import RequestOutputKind
 
-        ids = collapse(q.state_ids, rendered_images, self.image_id) + list(q.question_ids)
-        prompt: dict[str, Any] = {"prompt_token_ids": ids}
+        prompt: dict[str, Any] = {
+            "prompt_token_ids": collapse(q.state_ids, rendered_images, self.image_id)
+            + list(q.question_ids)
+        }
         if images:
             prompt["multi_modal_data"] = {"image": images}
             prompt["multi_modal_uuids"] = {"image": [im.sha256 for im in rendered_images]}
-            # The images are already at W x H (prepare_image): the processor's own resize stays off.
-            prompt["mm_processor_kwargs"] = {"do_resize": False}
-        k = len(q.code_token_ids)
+            prompt["mm_processor_kwargs"] = {"do_resize": False}  # already at W x H
         sp = SamplingParams(
             max_tokens=1,
             temperature=1.0,
             top_p=1.0,
             top_k=0,
             min_p=0.0,
-            logprobs=k,
+            logprobs=len(q.code_token_ids),
             allowed_token_ids=list(q.code_token_ids),
             extra_args={PREFIX_END_KEY: q.state_len},
             detokenize=False,
@@ -551,27 +424,21 @@ class Decider:
         if list(final.prompt_token_ids) != list(q.ids):
             raise Mismatch(
                 f"vLLM's expanded prompt ({len(final.prompt_token_ids)} tokens) differs from the rendered one "
-                f"({len(q.ids)} tokens): its image token counts are not the core's N"
+                f"({len(q.ids)} tokens): its image token counts are not the core's"
             )
-        return probabilities(final.outputs[0].logprobs[0], tuple(q.code_token_ids)), int(
-            getattr(final, "num_cached_tokens", None) or 0
-        )
+        cached = int(getattr(final, "num_cached_tokens", None) or 0)
+        return probabilities(final.outputs[0].logprobs[0], tuple(q.code_token_ids)), cached
 
     async def answer(self, rendered: Any, images: list[Any]) -> dict[str, Any]:
-        """The answers to a prepared request (``prepare``)."""
+        """The answers to a prepared request. The first question runs alone, so the others reuse its cached state."""
         questions = list(rendered.questions.values())
-        first, rest = questions[:1], questions[1:]
-        if not self.prefix_caching:
-            first, rest = [], questions
+        first, rest = (questions[:1], questions[1:]) if self.prefix_caching else ([], questions)
         results = [await self._question(q, images, rendered.images) for q in first]
         results += await all_or_none([self._question(q, images, rendered.images) for q in rest])
-        answers = self.core.read(
-            [p for p, _ in results], None, self.config, rendered, stage="probabilities"
-        )
+        answers = _core().read([p for p, _ in results], self.config, rendered)
         return {
             "model": self.served_name,
             "answers": answers,
-            # v1's usage, plus the prompt tokens served from vLLM's prefix cache over all questions.
             "usage": {
                 "input_tokens": rendered.input_tokens,
                 "output_tokens": len(answers),
@@ -580,15 +447,14 @@ class Decider:
         }
 
     async def decide(self, body: Any) -> dict[str, Any]:
-        """The answers to one request: ``body`` is its raw JSON body or the parsed object."""
+        """The answers to one request: its raw JSON body or a core ``Request``."""
         rendered, images = await self.prepare(body)
         del body
         return await self.answer(rendered, images)
 
     async def decide_http(self, request: Request) -> dict[str, Any]:
-        """The answers to one HTTP request. A body over SMALL_BODY reserves its size from the budget of buffered
-        bytes before it is read past SMALL_BODY, and gives it back once the body is parsed and its images decoded,
-        before the engine runs (and at once if the client stalls, disconnects or the wait times out)."""
+        """The answers to one HTTP request. A large body's reservation from the byte budget is given back once the
+        body is parsed and its images decoded, before the engine runs."""
         reserved = 0
         try:
             raw, reserved = await read_body(
@@ -619,12 +485,11 @@ async def read_body(
 ) -> tuple[bytearray, int]:
     """The request's body and the bytes it reserved from ``budget``; the caller gives the reservation back.
 
-    - HTTP 413 past ``limit`` bytes: by its Content-Length before reading, and by what arrives while reading.
-    - A body declared over SMALL_BODY reserves its declared size before reading. One without a length reads
-      SMALL_BODY freely, then reserves the limit, and returns what it does not use once read.
-    - HTTP 503 when a reservation has waited ``timeout`` seconds (the budget is held by other large bodies).
-    - HTTP 408 when no chunk arrives for ``timeout`` seconds: a client that sends its headers and stops, or
-      vanishes without closing, gives its reservation back then. One that disconnects gives it back at once.
+    - HTTP 413 past ``limit`` bytes, by Content-Length before reading and by what arrives while reading.
+    - A body declared over SMALL_BODY reserves its size before reading; one without a length reads SMALL_BODY
+      freely, then reserves the limit, and returns what it doesn't use.
+    - HTTP 503 when a reservation has waited ``timeout`` seconds, and 408 when no chunk arrives for ``timeout``
+      seconds, so a stalled or vanished client gives its reservation back.
     """
     declared = request.headers.get("content-length")
     n = None
@@ -637,9 +502,10 @@ async def read_body(
             raise too_large(limit, n)
 
     async def reserve(size: int) -> int:
+        assert budget is not None
         try:
             return await budget.take(size, timeout)
-        except asyncio.TimeoutError:  # the builtin TimeoutError from Python 3.11 on
+        except TimeoutError:
             raise HTTPException(
                 status_code=503,
                 detail="the server is busy with other large requests; retry",
@@ -657,7 +523,7 @@ async def read_body(
                 chunk = await asyncio.wait_for(chunks.__anext__(), timeout)
             except StopAsyncIteration:
                 break
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 raise HTTPException(
                     status_code=408,
                     detail=f"no part of the body arrived for {timeout:g} s (--body-read-timeout)",
@@ -671,7 +537,7 @@ async def read_body(
             budget.give(reserved - len(body))
             reserved = len(body)
     except BaseException:  # a 408, 413 or 503, a client that disconnected, a cancellation
-        if reserved:
+        if reserved and budget is not None:
             budget.give(reserved)
         raise
     return body, reserved
@@ -679,7 +545,7 @@ async def read_body(
 
 def build_app(decider_factory: Any) -> Any:
     """The FastAPI app. ``decider_factory`` is an async callable that starts the engine and returns a
-    :class:`Decider` (``lifespan`` start), and the app shuts the engine down on exit."""
+    :class:`Decider`; the app shuts the engine down on exit."""
     from contextlib import asynccontextmanager
 
     @asynccontextmanager
@@ -697,7 +563,7 @@ def build_app(decider_factory: Any) -> Any:
         d: Decider = request.app.state.decider
         try:
             await d.engine.check_health()
-        except Exception as e:  # the engine is dead
+        except Exception as e:
             logger.error("strands-decider: engine unhealthy: %s", e)
             raise HTTPException(status_code=503, detail="engine unhealthy") from e
         return JSONResponse(
@@ -721,7 +587,7 @@ def build_app(decider_factory: Any) -> Any:
             payload = await d.decide_http(request)
         except HTTPException:
             raise
-        except ClientDisconnect:  # the client left mid-body; its reservation is already given back
+        except ClientDisconnect:
             logger.info("strands-decider: a client disconnected before its body arrived")
             return JSONResponse({"detail": "the client disconnected"}, status_code=400)
         except Exception as e:
@@ -745,22 +611,26 @@ def build_app(decider_factory: Any) -> Any:
 # --- startup --------------------------------------------------------------------------------------------------------
 
 
-def engine_args(checkpoint: Checkpoint, a: Any, max_model_len: int) -> Any:
+def engine_args(checkpoint: Checkpoint, a: Any, max_model_len: int, takes_images: bool) -> Any:
     """The engine's settings: the plugin's required flags (README, Serving) for this checkpoint's layout."""
     from vllm.engine.arg_utils import AsyncEngineArgs
 
-    config = checkpoint.json("config.json")
+    config = json.loads(checkpoint.text("config.json"))
     arch = plugin_architecture(config)
-    dc = checkpoint.json("decision_config.json")
-    takes_images = "image" in (dc.get("inputs") or [])
-    if "text_config" in config:  # the multimodal layout: the "vision" mode is in the text config
+    if (
+        "text_config" in config
+    ):  # the multimodal layout: the base's "vision" mode is in the text config
         overrides: dict[str, Any] = {
             "architectures": [arch],
             "text_config": {"use_bidirectional_attention": None},
         }
-        # No count of images: each takes at least one of the prompt's tokens, so max_model_len never binds before the
-        # prompt's length does. vLLM's profiling caps the images per prompt at max_model_len over an image's most tokens.
-        limits = {"image": max_model_len if takes_images else 0, "video": 0, "audio": 0}
+        # No count of images: the prompt's length bounds them, and vLLM's profiling caps them per prompt at
+        # max_model_len over an image's most tokens.
+        limits: dict[str, int] | None = {
+            "image": max_model_len if takes_images else 0,
+            "video": 0,
+            "audio": 0,
+        }
     else:
         overrides = {"architectures": [arch], "use_bidirectional_attention": None}
         limits = None
@@ -799,14 +669,13 @@ def engine_args(checkpoint: Checkpoint, a: Any, max_model_len: int) -> Any:
 
 def lengths(a: Any, max_length_validated: int) -> tuple[int, int]:
     """(max_length, max_model_len): the longest prompt served (``--max-length``, default the checkpoint's validated
-    length) and the engine's context (``--max-model-len``, default one token more). vLLM 0.33 refuses a prompt of
-    exactly max_model_len tokens, which leaves no position for the answer token, so max_length must be below it."""
+    length) and the engine's context (``--max-model-len``, default one token more: vLLM 0.33 refuses a prompt that
+    fills the context, which leaves no position for the answer token)."""
     max_length = a.max_length or max_length_validated
     max_model_len = a.max_model_len or max_length + 1
     if max_length >= max_model_len:
         raise SystemExit(
-            f"strands-decider-vllm serve: --max-length {max_length} must be below --max-model-len {max_model_len}: "
-            "vLLM refuses a prompt that fills the context, because the answer token needs one more position"
+            f"strands-decider-vllm serve: --max-length {max_length} must be below --max-model-len {max_model_len}"
         )
     return max_length, max_model_len
 
@@ -816,7 +685,6 @@ class Settings:
     """What ``serve`` starts with, checked before the engine starts."""
 
     checkpoint: Checkpoint
-    core: SimpleNamespace
     tokenizer: Any
     engine_args: Any
     max_length: int
@@ -826,45 +694,40 @@ class Settings:
 
 
 def settings(a: Any) -> Settings:
-    """The checkpoint's files, the core library and the engine's settings for ``a`` (the CLI's arguments), or
-    SystemExit."""
-    core = require_core()
+    """The checkpoint's files and the engine's settings for ``a`` (the CLI's arguments), or SystemExit."""
+    core = _core()
     checkpoint = Checkpoint.open(a.model, a.revision)
     try:
-        config = core.DecisionConfig.from_dict(checkpoint.json("decision_config.json"))
-    except ValueError as e:
+        config = core.DecisionConfig.model_validate_json(checkpoint.text("decision_config.json"))
+    except ValidationError as e:
         raise SystemExit(
-            f"strands-decider-vllm serve: decision_config.json: {e}. The server renders requests with the core "
-            "library and needs its schema (DecisionConfig). Serve an intermediate checkpoint with "
+            f"strands-decider-vllm serve: decision_config.json: {errors(e)}. Serve an intermediate checkpoint with "
             "`vllm serve` and pre-rendered token ids instead (README, Serving)."
-        ) from e
-    tokenizer = checkpoint.tokenizer()
+        ) from None
     try:
-        # Handed over: checked in place, and rendered from without a private copy (about 170 MB for Gemma 4's).
-        core.check_tokenizer(tokenizer, config, hand_over=True)
+        tokenizer = core.load_tokenizer(checkpoint.files["tokenizer.json"].parent)
     except ValueError as e:
         raise SystemExit(f"strands-decider-vllm serve: tokenizer.json: {e}") from e
+    takes_images = "image" in config.inputs
     image_problem = None
-    if "image" in config.inputs:
-        pc = (
-            checkpoint.json("processor_config.json")
-            if "processor_config.json" in checkpoint.files
-            else None
-        )
-        image_problem = processor_problem(pc, core.check_image_processor)
-        if image_problem:
+    if takes_images:
+        try:
+            core.check_image_processor(checkpoint.files["processor_config.json"])
+        except (KeyError, ValueError) as e:
+            image_problem = (
+                "the checkpoint has no processor_config.json" if isinstance(e, KeyError) else str(e)
+            )
             logger.error("strands-decider: image requests will be refused: %s", image_problem)
     max_length, max_model_len = lengths(a, config.max_length_validated)
     max_body = (
         int(a.max_body_mb * 2**20)
         if a.max_body_mb
-        else default_max_body("image" in config.inputs and not image_problem)
+        else default_max_body(takes_images and not image_problem)
     )
     return Settings(
         checkpoint,
-        core,
         tokenizer,
-        engine_args(checkpoint, a, max_model_len),
+        engine_args(checkpoint, a, max_model_len, takes_images),
         max_length,
         image_problem,
         max_body,
@@ -886,7 +749,6 @@ def decider(engine: Any, s: Settings, a: Any) -> Decider:
         body_read_timeout=a.body_read_timeout,
         preprocess_workers=a.preprocess_workers,
         tokenizer=s.tokenizer,
-        core=s.core,
     )
 
 
@@ -919,8 +781,7 @@ def serve(a: Any) -> None:
 
 def prepare_environment() -> None:
     """The settings vLLM reads from the environment at import: Model Runner V2, which the mask needs, and vLLM's
-    internal sockets on loopback, whatever address the HTTP server binds (the engine runs on this machine). A value
-    the caller set is kept."""
+    internal sockets on loopback, whatever address the HTTP server binds. A value the caller set is kept."""
     os.environ.setdefault("VLLM_USE_V2_MODEL_RUNNER", "1")
     os.environ.setdefault("VLLM_HOST_IP", "127.0.0.1")
     os.environ.setdefault("GLOO_SOCKET_IFNAME", "lo")

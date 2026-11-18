@@ -4,7 +4,7 @@
     python reference.py CKPT --rows ROWS.jsonl --out OUT.jsonl [--n 60]
 
 ``--requests``: JSON Lines of System One requests (``state``, ``questions``, optional ``images`` as base64). Each is
-rendered with the core library (``strands_decider.core.render``) and the checkpoint's prompt template. Each image is
+rendered with the core library (``strands_decider.core.render``). Each image is
 decoded as v1 decodes it, resized to the core's W x H with Pillow's bicubic resampling and prepared by the
 checkpoint's image processor with its resize off: ``Gemma4ImageProcessorPil``, or the 12B's
 ``Gemma4UnifiedImageProcessor``. ``--resize torchvision`` instead lets transformers' torchvision backend resize the
@@ -183,17 +183,15 @@ class Reference:
 
 
 def run_requests(ref: Reference, a) -> None:
-    from strands_decider.core import render
-    from tokenizers import Tokenizer
+    from strands_decider.core import Request, load_tokenizer, render
 
-    tok = Tokenizer.from_file(str(a.ckpt / "tokenizer.json"))
-    prompt = ref.dc["prompt"]
+    tok = load_tokenizer(a.ckpt)
     out = open(a.out, "w")
     pix = open(a.pixels, "w") if a.pixels else None
     t0 = time.time()
     for i, line in enumerate(open(a.requests)):
         body = json.loads(line)
-        rendered = render(body, tok, prompt, max_length=a.max_length)
+        rendered = render(Request.model_validate(body), tok, max_length=a.max_length)
         images = [decode(im.data) for im in rendered.images]
         mm = ref.pixels(images, a.resize)
         if mm is not None:

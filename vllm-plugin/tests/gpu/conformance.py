@@ -1,22 +1,14 @@
-"""Conformance of a running server against a checkpoint's model goldens (the core's ``agreement`` and bounds).
+"""Conformance of a running server against a checkpoint's golden_vectors.jsonl.
 
     python conformance.py CKPT --url http://127.0.0.1:8000 [--min-questions N] [--out result.json]
 
-``CKPT/golden_vectors.jsonl`` holds one JSON object per line, with the fields the core's ``read_golden_vectors``
-reads: the ``request`` (images as base64), its prompt ``variant``, its ``state_ids``, each image's ``sha256`` and
-``span`` (``images``), and under ``questions``, for each question by name, its ``question_ids``, its ``codes`` and the
-reference's ``probabilities`` (one per code, in code order).
-
-1. Each request is rendered with the core library and the checkpoint's own tokenizer (``load_tokenizer``). Its
-   variant, which must be the checkpoint's prompt, its state ids, its images and each question's ids and codes must
-   equal the golden's, with no tolerance.
-2. Each request is sent to the plugin's server (``POST /v1/systemone``). Its code probabilities are measured against
-   the reference's (``read_golden_vectors``) with the core's ``agreement``: top-1 agreement and mean |dp|. The
-   checkpoint conforms in bf16 when ``Agreement.conforms``: at least 98% and at most 0.02, on at least the core's
-   minimum of 1,000 questions. ``--min-questions`` lowers the minimum, for the end-to-end tiers' tiny goldens only.
-
-Exits 0 when the checkpoint conforms, 1 when it does not, and 3 when the goldens are missing or a line lacks section
-10's fields, so that a format this script does not know stops the check instead of passing it.
+Each golden line holds a request, the core's rendering of it (``state_ids``, each image's ``sha256`` and ``span``, and
+each question's ``question_ids`` and ``codes``) and the reference's ``probabilities`` per question. Each request is
+rendered with the core and the checkpoint's tokenizer, which must give the same rendering exactly, and sent to the
+server, whose probabilities are measured against the reference's. The checkpoint conforms with at least TOP1 top-1
+agreement and at most MEAN_ABS_DP mean |dp| on at least MIN_QUESTIONS questions (``--min-questions`` lowers it, for
+the tiers' tiny goldens). Exits 0 when it conforms, 1 when it doesn't, and 3 when the goldens are missing or a line
+can't be read, so that a format this script doesn't know stops the check instead of passing it.
 """
 
 from __future__ import annotations
@@ -28,69 +20,71 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+TOP1, MEAN_ABS_DP, MIN_QUESTIONS = 0.98, 0.02, 1000
+
 
 def read_golden(line: dict) -> dict:
-    """The fields of one golden line, checked for presence and type, or ValueError."""
+    """One golden line's fields, checked for presence and type, or ValueError."""
     try:
-        request, variant = line["request"], line["variant"]
-        state_ids = [int(t) for t in line["state_ids"]]
-        images = [
-            {"sha256": str(im["sha256"]), "span": [int(im["span"][0]), int(im["span"][1])]}
-            for im in line["images"]
-        ]
-        questions = {
-            name: {
-                "question_ids": [int(t) for t in q["question_ids"]],
-                "codes": [str(c) for c in q["codes"]],
-                "probabilities": [float(p) for p in q["probabilities"]],
-            }
-            for name, q in line["questions"].items()
+        golden = {
+            "request": dict(line["request"]),
+            "state_ids": [int(t) for t in line["state_ids"]],
+            "images": [
+                {"sha256": str(im["sha256"]), "span": [int(i) for i in im["span"]]}
+                for im in line["images"]
+            ],
+            "questions": {
+                name: {
+                    "question_ids": [int(t) for t in q["question_ids"]],
+                    "codes": [str(c) for c in q["codes"]],
+                    "probabilities": [float(p) for p in q["probabilities"]],
+                }
+                for name, q in line["questions"].items()
+            },
         }
-        if not isinstance(request, dict) or not isinstance(variant, str) or not questions:
-            raise TypeError("request must be an object, variant a string and questions not empty")
-    except (KeyError, TypeError, ValueError, IndexError, AttributeError) as e:
+    except (KeyError, TypeError, ValueError, AttributeError) as e:
+        raise ValueError(f"unreadable golden line ({type(e).__name__}: {e})") from e
+    if not golden["questions"] or any(
+        len(q["codes"]) != len(q["probabilities"]) for q in golden["questions"].values()
+    ):
         raise ValueError(
-            f"unreadable golden line ({type(e).__name__}: {e}); read_golden_vectors names its fields"
-        ) from e
-    for name, q in questions.items():
-        if len(q["codes"]) != len(q["probabilities"]):
-            raise ValueError(
-                f"unreadable golden line: question {name!r} needs one probability per code"
-            )
-    return {
-        "request": request,
-        "variant": variant,
-        "state_ids": state_ids,
-        "images": images,
-        "questions": questions,
-    }
+            "unreadable golden line: it needs questions, each with one probability per code"
+        )
+    return golden
 
 
 def rendering(golden: dict) -> dict:
     """The fields of a golden line that rendering must reproduce."""
-    return {
-        "variant": golden["variant"],
-        "state_ids": golden["state_ids"],
-        "images": golden["images"],
-        "questions": {
-            n: {"question_ids": q["question_ids"], "codes": q["codes"]}
-            for n, q in golden["questions"].items()
-        },
+    questions = {
+        n: {"question_ids": q["question_ids"], "codes": q["codes"]}
+        for n, q in golden["questions"].items()
     }
+    return {"state_ids": golden["state_ids"], "images": golden["images"], "questions": questions}
 
 
-def rendered_fields(rendered, variant: str) -> dict:
+def rendered_fields(rendered) -> dict:
     """The same fields from the core's rendering."""
-    first = next(iter(rendered.questions.values()))
     return {
-        "variant": variant,
-        "state_ids": list(first.state_ids),
+        "state_ids": list(rendered.state_ids),
         "images": [{"sha256": im.sha256, "span": list(im.span)} for im in rendered.images],
         "questions": {
             n: {"question_ids": list(q.question_ids), "codes": list(q.codes)}
             for n, q in rendered.questions.items()
         },
     }
+
+
+def agreement(ours: dict, reference: dict) -> tuple[float, float]:
+    """Top-1 agreement (the first code on a tie) and mean |dp| (each question's largest difference, averaged)."""
+
+    def top1(p: list[float]) -> int:
+        return max(range(len(p)), key=lambda i: (p[i], -i))
+
+    agree = sum(top1(ours[k]) == top1(ref) for k, ref in reference.items())
+    dp = sum(
+        max(abs(a - b) for a, b in zip(ours[k], ref, strict=True)) for k, ref in reference.items()
+    )
+    return agree / len(reference), dp / len(reference)
 
 
 def post(url: str, body: dict) -> tuple[int | None, object]:
@@ -107,7 +101,7 @@ def post(url: str, body: dict) -> tuple[int | None, object]:
 
 
 def vector(answer: dict) -> list[float]:
-    """A v1 answer's probabilities in code order: a noul's (false, true), a choice's and a score's as listed."""
+    """An answer's probabilities in code order: a noul's (false, true), a choice's and a score's as listed."""
     if "noul" in answer:
         return [1.0 - answer["noul"], answer["noul"]]
     return list(answer["probabilities"].values())
@@ -119,61 +113,53 @@ def main() -> None:
     )
     ap.add_argument("ckpt", type=Path)
     ap.add_argument("--url", required=True)
-    ap.add_argument(
-        "--min-questions",
-        type=int,
-        default=None,
-        help="the fewest questions a claim rests on (default: the core's, 1,000)",
-    )
+    ap.add_argument("--min-questions", type=int, default=MIN_QUESTIONS)
     ap.add_argument("--out")
     a = ap.parse_args()
     from strands_decider import core
-    from strands_decider.core import conformance as cc
 
     path = a.ckpt / "golden_vectors.jsonl"
     if not path.exists():
         print(f"STUB: {path} does not exist; the checkpoint's release publishes it")
         sys.exit(3)
-    config = core.DecisionConfig.load(a.ckpt / "decision_config.json")
-    tok = core.load_tokenizer(a.ckpt, config)
+    tok = core.load_tokenizer(a.ckpt)
     goldens = []
     for i, raw in enumerate(open(path)):
-        if not raw.strip():
-            continue
-        try:
-            goldens.append((i, read_golden(json.loads(raw))))
-        except ValueError as e:
-            print(f"STUB: line {i}: {e}")
-            sys.exit(3)
-    reference = cc.read_golden_vectors(path)
-    render_bad, failed, ours = [], [], {}
+        if raw.strip():
+            try:
+                goldens.append((i, read_golden(json.loads(raw))))
+            except ValueError as e:
+                print(f"STUB: line {i}: {e}")
+                sys.exit(3)
+    render_bad, failed, ours, reference = [], [], {}, {}
     for i, g in goldens:
-        rendered = core.render(g["request"], tok, g["variant"])
-        if g["variant"] != config.prompt or rendered_fields(rendered, g["variant"]) != rendering(g):
+        if rendered_fields(
+            core.render(core.Request.model_validate(g["request"]), tok)
+        ) != rendering(g):
             render_bad.append(i)
         st, r = post(a.url, g["request"])
         if st != 200:
             failed.append((i, st, str(r)[:120]))
             continue
-        for n in g["questions"]:
-            ours[(i, n)] = vector(r["answers"][n])
-    agreement = None if failed else cc.agreement(ours, reference)
-    minimum = cc.MIN_QUESTIONS if a.min_questions is None else a.min_questions
-    top1, mean_dp = cc.bounds()  # bf16's, at every size
+        for n, q in g["questions"].items():
+            ours[(i, n)], reference[(i, n)] = vector(r["answers"][n]), q["probabilities"]
+    top1, mean_dp = agreement(ours, reference) if reference and not failed else (None, None)
+    ok = (
+        not render_bad
+        and top1 is not None
+        and len(reference) >= a.min_questions
+        and top1 >= TOP1
+        and mean_dp <= MEAN_ABS_DP
+    )
     result = {
         "checkpoint": str(a.ckpt),
         "render_mismatches": render_bad[:20],
         "failed": failed[:20],
-        "questions": agreement.questions if agreement else 0,
-        "top1": agreement.top1 if agreement else None,
-        "mean_dp": agreement.mean_abs_dp if agreement else None,
-        "bounds": {"top1": top1, "mean_dp": mean_dp, "min_questions": minimum},
+        "questions": len(reference),
+        "top1": top1,
+        "mean_dp": mean_dp,
+        "bounds": {"top1": TOP1, "mean_dp": MEAN_ABS_DP, "min_questions": a.min_questions},
     }
-    ok = (
-        not render_bad
-        and agreement is not None
-        and agreement.conforms(min_questions=minimum)  # bf16's bounds
-    )
     print(json.dumps(result))
     print("CONFORMS" if ok else "DOES NOT CONFORM")
     if a.out:

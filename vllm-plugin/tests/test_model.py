@@ -225,7 +225,7 @@ def test_init_readout_reads_a_checkpoint_directory(tmp_path, caplog):
         m = init_readout(tmp_path)
     assert m.code_ids.tolist() == IDS and m.temperature == 1.5 and m.softcap == 30.0
     assert m.readout.weight.shape == (255, 8) and m.readout.weight.dtype == torch.bfloat16
-    assert caplog.text.count('no "interface" field') == 1
+    assert caplog.text == ""
     assert m.decision_inputs == ("text",) and m.logits_vocab_size == 262144
     (source,) = m.secondary_weights
     assert (source.model_or_path, source.prefix, source.allow_patterns_overrides) == (
@@ -238,11 +238,11 @@ def test_init_readout_reads_a_checkpoint_directory(tmp_path, caplog):
 @pytest.mark.parametrize(
     "overrides, softcap, match",
     [
-        ({"interface": "pplx-decider"}, 30.0, "interface must be"),
+        ({"interface": "pplx-decider"}, 30.0, "interface"),
         ({"token_ids": IDS[:-1] + [IDS[0]]}, 30.0, "distinct"),
-        ({"token_ids": IDS[:-1] + [262144]}, 30.0, "integers in"),
+        ({"token_ids": IDS[:-1] + [262144]}, 30.0, "token ids in"),
         ({"temperature": 0}, 30.0, "temperature"),
-        ({}, None, "final_logit_softcapping is missing"),
+        ({}, None, "final_logit_softcapping is required"),
         ({"final_logit_softcapping": 20.0}, 30.0, "differs"),
     ],
 )
@@ -286,9 +286,7 @@ def test_init_readout_reads_a_multimodal_checkpoint(tmp_path, caplog, arch):
     assert m.decision_inputs == ("text", "image") and m.softcap == 30.0 and caplog.text == ""
 
 
-@pytest.mark.parametrize(
-    "missing", ["interface", "inputs", "provenance", "final_logit_softcapping"]
-)
+@pytest.mark.parametrize("missing", ["interface", "inputs", "final_logit_softcapping"])
 def test_the_multimodal_layout_refuses_an_intermediate_decision_config(tmp_path, missing):
     values = {k: v for k, v in RELEASED.items() if k != missing}
     (tmp_path / "decision_config.json").write_text(json.dumps(decision_config(**values)))

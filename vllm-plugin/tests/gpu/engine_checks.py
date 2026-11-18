@@ -38,13 +38,15 @@ def check(ok, what):
     return ok
 
 
-def request_of_length(d, length: int) -> tuple[dict, object]:
+def request_of_length(d, length: int) -> tuple[object, object]:
     """A one-question request whose rendered prompt is exactly ``length`` tokens, and its rendering."""
+    from strands_decider import core
+
     question = {"q": {"type": "noul", "instructions": "Is the ticket about a refund?"}}
 
     def render(state: str):
-        body = {"state": state, "questions": question}
-        r = d.core.render(body, d.tokenizer, d.config.prompt)
+        body = core.Request.model_validate({"state": state, "questions": question})
+        r = core.render(body, d.tokenizer)
         return body, r, len(r.questions["q"].ids)
 
     words = lambda n: " ".join(["ticket"] * n)  # noqa: E731
@@ -72,7 +74,7 @@ async def run(d, length: int, max_model_len: int) -> None:
         set(out["answers"]) == {"q"} and out["usage"]["input_tokens"] == length,
         f"a request of exactly --max-length = {length} tokens is answered",
     )
-    longer = dict(body, state=body["state"] + " ticket")
+    longer = body.model_copy(update={"state": body.state + " ticket"})
     try:
         await d.decide(longer)
         check(False, "a request one token longer is refused by the server")
@@ -173,7 +175,9 @@ async def images_off_the_loop(d, requests: int = 8, per_request: int = 2) -> Non
     cls.apply = apply
     app = server.build_app(None)
     app.state.decider = d
-    question = {"q": {"type": "noul", "instructions": "Is the parcel damaged?"}}
+    question = {
+        "q": {"type": "noul", "instructions": "Is the parcel damaged?"}
+    }  # sent over HTTP as JSON
     bodies = [
         {
             "state": "Photos of the parcel.",

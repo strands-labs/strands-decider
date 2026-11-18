@@ -160,9 +160,9 @@ def scenario_images(a):
         (
             "images not a list",
             {"state": "x", "images": "abc", "questions": QUESTIONS},
-            "images: Input should be a valid list",
+            "images: Input should be a valid array",
         ),
-        ("not JSON", b"{not json", "not JSON"),
+        ("not JSON", b"{not json", "Invalid JSON"),
     ]:
         st, r, _ = post(url, body)
         check(st == 422 and want in str(r), f"{name}: HTTP {st} ({str(r)[:120]})")
@@ -251,9 +251,7 @@ def scenario_images(a):
 def scenario_textonly(url):
     st, r, _ = post(url, {"state": "x", "images": ["not even base64"], "questions": QUESTIONS})
     check(
-        st == 422
-        and r
-        == 'this checkpoint does not take images: its decision_config.json inputs are ["text"]',
+        st == 422 and r == "this checkpoint does not take images",
         f"text-only checkpoint: images refused before decoding (HTTP {st})",
     )
     check(

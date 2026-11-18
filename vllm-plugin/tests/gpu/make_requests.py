@@ -1,7 +1,7 @@
 """Requests for the GPU checks, without a dataset: System One requests with synthetic photos, or rendered text rows.
 
     python make_requests.py images OUT.jsonl [--n 24] [--seed 0]
-    python make_requests.py rows TOKENIZER.json OUT.jsonl [--n 48] [--variant strands-chat]
+    python make_requests.py rows TOKENIZER.json OUT.jsonl [--n 48]
 
 ``images``: requests with 0 to 4 images each, of mixed sizes and aspect ratios (from 64 x 48 to 1600 x 1200, panoramas
 and tall strips), in PNG, JPEG, WebP and GIF; noul, choice and score questions; short, empty and long state text.
@@ -94,12 +94,12 @@ def requests_with_images(n: int, seed: int) -> list[dict]:
     return out
 
 
-def rows(tokenizer: str, n: int, variant: str, seed: int) -> list[dict]:
-    from strands_decider.core import render
+def rows(tokenizer: str, n: int, seed: int) -> list[dict]:
+    from strands_decider.core import Request, prepare_tokenizer, render
     from tokenizers import Tokenizer
 
     rng = random.Random(seed)
-    tok = Tokenizer.from_file(tokenizer)
+    tok = prepare_tokenizer(Tokenizer.from_file(tokenizer))
     out = []
     while len(out) < n:
         body = {
@@ -109,7 +109,7 @@ def rows(tokenizer: str, n: int, variant: str, seed: int) -> list[dict]:
             },
             "questions": questions(rng),
         }
-        for q in render(body, tok, variant).questions.values():
+        for q in render(Request.model_validate(body), tok).questions.values():
             out.append(
                 {
                     "token_ids": list(q.ids),
@@ -134,13 +134,10 @@ def main() -> None:
     a2.add_argument("tokenizer")
     a2.add_argument("out")
     a2.add_argument("--n", type=int, default=48)
-    a2.add_argument("--variant", default="strands-chat")
     a2.add_argument("--seed", type=int, default=0)
     a = ap.parse_args()
     data = (
-        requests_with_images(a.n, a.seed)
-        if a.kind == "images"
-        else rows(a.tokenizer, a.n, a.variant, a.seed)
+        requests_with_images(a.n, a.seed) if a.kind == "images" else rows(a.tokenizer, a.n, a.seed)
     )
     with open(a.out, "w") as f:
         for r in data:

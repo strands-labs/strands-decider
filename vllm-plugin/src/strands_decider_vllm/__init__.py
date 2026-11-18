@@ -1,35 +1,11 @@
 """strands-decider-vllm: serve Strands Decider checkpoints on stock vLLM 0.33.
 
-A checkpoint is the base Gemma 4 model's own multimodal layout (``Gemma4ForConditionalGeneration``, or
-``Gemma4UnifiedForConditionalGeneration`` for the 12B) with its language model fine-tuned and merged in and no LM head,
-plus a trained readout ``readout.safetensors`` ([255, hidden]) and ``decision_config.json`` (``attention_mode:
-prefix_bidir``, ``pooling: last``, ``inputs``, the 255 code token ids, the temperature, the soft-cap). Intermediate
-checkpoints with a bare ``Gemma4TextModel`` decoder are served too, as text-only. The core library
-(``strands_decider.core``) reads a decision at the last prompt token: the readout applied to the final-norm hidden
-state, soft-capped, divided by the temperature, then a softmax over the question's own codes, with the prefix_bidir
-attention mask described below on every layer of the language model.
-
-What this plugin adds to vLLM, and nothing else:
-
-- Three architectures over vLLM's Gemma 4 classes, one per layout (:mod:`strands_decider_vllm.model`), whose logits
-  are the readout's 255 values (soft-capped as the core's readout does, divided by the temperature) at the codes'
-  token ids and -inf elsewhere, so a completion's logprobs are exactly the codes' log-softmax. The client
-  renormalizes over a question's own codes.
-- ``prefix_bidir`` attention on every layer of the language model: a request sends its state boundary S as
-  ``vllm_xargs.prefix_end``; state tokens [0, S), image tokens included, attend to each other in both directions and
-  never to the question, and question tokens [S, L) attend to the whole prompt in both directions. Sliding-window
-  layers get the same mask with no window (the model classes build every layer without a window). Each layer runs one
-  non-causal FlashAttention call over the request's two segments (state queries over keys [0, S), question queries
-  over keys [0, L)).
-- Prefix-cache keys that stay correct under the mask: block 0 carries a digest of the state x[0:S) and of each image's
-  content, and every block that ends past S a digest of the state and the question x[S:L). A different question on the
-  same state reuses the state's full blocks; nothing else is shared.
-- Per-request checks in the engine core: a request to a Strands Decider model that the workers could not serve as a
-  decision gets HTTP 400 from vLLM's server, and 422 from the plugin's, before it is scheduled
-  (:mod:`strands_decider_vllm.validation`), and a decision prompt with images is scheduled whole or not at all
-  (:mod:`strands_decider_vllm.scheduling`).
-- A server, ``strands-decider-vllm serve`` (:mod:`strands_decider_vllm.server`), that answers the System One request
-  (``POST /v1/systemone``, images included) with vLLM's engine in process.
+The plugin adds, for its own architectures only: the trained readout in place of the LM head
+(:mod:`strands_decider_vllm.model`), the prefix_bidir mask on every layer with no sliding window
+(:mod:`strands_decider_vllm.model_state`), prefix-cache keys that stay correct under the mask
+(:mod:`strands_decider_vllm.hashing`), per-request checks in the engine core (:mod:`strands_decider_vllm.engine`),
+scheduling that keeps a prompt with images whole (:mod:`strands_decider_vllm.scheduling`), and a System One server
+(:mod:`strands_decider_vllm.server`).
 
 ``register`` is the ``vllm.general_plugins`` entry point; vLLM calls it in every process. On a vLLM release other than
 0.33.x it logs a warning and registers nothing, so the environment's other models are unaffected.

@@ -251,8 +251,6 @@ class _Decider:
     def _init_readout(self, vllm_config: VllmConfig) -> None:
         mc = vllm_config.model_config
         spec = checkpoint_spec(mc)
-        for w in spec.warnings:
-            logger.warning("strands-decider: %s", w)
         self.decision_inputs = spec.inputs
         self.temperature = spec.temperature
         self.softcap = spec.softcap
