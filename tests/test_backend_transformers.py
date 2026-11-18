@@ -1,15 +1,14 @@
 """The transformers backend (src/strands_decider/backends/transformers.py) on tiny random-weight
 Gemma 4 checkpoints in the decision checkpoint's layout, generated here: no download, CPU in CI.
 
-- loading: both multimodal classes, the intermediate bare decoder (text only, warnings), and
-  the checkpoints it refuses;
+- loading: both multimodal classes;
 - the mask: what SDPA gets in every decoder layer is the prefix_bidir mask in the backend's
   form (never causal, no dense mask), the hidden states are those of the core's explicit
   `attention_mask`, and sliding windows have no effect;
 - state reuse: the state once and then the questions is the full pass of each prompt;
 - the readout: rows are the decoder's hidden states, and the core's regime turns them into
   the answers;
-- images: placement at the spans, the per-layer embeddings there, and the span checks;
+- images: placement at the spans and the per-layer embeddings there;
 - refusals;
 - pixels: Pillow's bicubic resize then the processor without its resize is
   `Gemma4ImageProcessorPil`, and the soft-token count is the core's N.
@@ -27,6 +26,8 @@ import json
 import math
 import os
 import warnings
+from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 import pytest
@@ -42,25 +43,27 @@ from decision_support import (  # isort: skip
     UNIFIED,
     decision_checkpoint,
     image_b64,
-    intermediate_checkpoint,
     request,
 )
 import transformers
+from core_conformance import agreement, read_golden_vectors
 
 from strands_decider.backends import transformers as tb
 from strands_decider.core import (
-    NO_VISION,
+    DecisionConfig,
+    Request,
     attention_mask,
     evaluate,
+    load_readout,
+    load_tokenizer,
     question_probabilities,
     read,
-    readout_logits,
     render,
     resize_image,
     resized_size,
-    round_to_bf16,
     soft_tokens,
 )
+from strands_decider.core.readout import readout_logits, round_to_bf16
 
 CUDA = torch.cuda.is_available()
 MPS = getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available()
@@ -91,20 +94,40 @@ def ckpt(kind, tmp_path_factory):
     return decision_checkpoint(tmp_path_factory.mktemp(kind) / "ckpt", kind)
 
 
+@dataclass(frozen=True)
+class Parts:
+    """A checkpoint's interface files, read by the core as the decision engine reads them."""
+
+    tokenizer: Any
+    config: DecisionConfig
+    weight: np.ndarray
+
+
+def parts_of(path) -> Parts:
+    return Parts(load_tokenizer(path), DecisionConfig.load(path), load_readout(path))
+
+
 @pytest.fixture(scope="module")
-def backends(ckpt, kind):
+def parts(ckpt):
+    return parts_of(ckpt)
+
+
+@pytest.fixture(scope="module")
+def backends(ckpt):
     """(reference, reuse): one full pass per question, and the state once then the questions
     in batches of two, both float32 on CPU."""
-    images = IMAGING[kind]
-    full = tb.TransformersBackend.load(str(ckpt), reuse_state=False, images=images)
-    reuse = tb.TransformersBackend.load(str(ckpt), reuse_state=True, max_batch=2, images=images)
+    full = tb.TransformersBackend.load(str(ckpt), reuse_state=False)
+    reuse = tb.TransformersBackend.load(str(ckpt), reuse_state=True, max_batch=2)
     return full, reuse
 
 
-def _rendered(backend, req):
-    ck = backend.checkpoint
-    r = render(req, ck.tokenizer(), ck.config.prompt)
+def _rendered(p: Parts, req: dict):
+    r = render(Request.model_validate(req), p.tokenizer)
     return r, list(r.state_ids), [list(q.question_ids) for q in r.questions.values()]
+
+
+def _evaluate(p: Parts, req: dict, backend) -> dict:
+    return evaluate(Request.model_validate(req), p.tokenizer, p.weight, p.config, backend)
 
 
 IMAGES = [image_b64(64, 48), image_b64(50, 90, "JPEG", 1)]
@@ -115,10 +138,8 @@ IMAGES = [image_b64(64, 48), image_b64(50, 90, "JPEG", 1)]
 
 def test_loads_the_multimodal_layout(backends, kind):
     full, reuse = backends
-    assert full.outputs == "hidden"
     assert (full.image_processor is not None) == bool(IMAGING[kind])
     assert (full.image_problem is None) == bool(IMAGING[kind])
-    assert full.checkpoint.layout == tb.MULTIMODAL and full.checkpoint.unified == (kind == UNIFIED)
     want = (
         "Gemma4UnifiedForConditionalGeneration"
         if kind == UNIFIED
@@ -129,65 +150,19 @@ def test_loads_the_multimodal_layout(backends, kind):
         "backend": "transformers",
         "device": "cpu",
         "dtype": "float32",
-        "layout": "multimodal",
         "reuse_state": False,
     }
     assert reuse.describe()["reuse_state"] is True
     # The larger sizes' bidirectional image blocks are off, whatever the base config says.
     assert full.decoder.config.get_text_config().use_bidirectional_attention is None
-    assert full.checkpoint.readout.softcap == SOFTCAP and full.checkpoint.temperature == TEMPERATURE
 
 
-def test_the_intermediate_layout_loads_as_text_only_with_warnings(tmp_path):
-    path = intermediate_checkpoint(tmp_path / "mid")
-    with pytest.warns(UserWarning) as caught:
-        backend = tb.TransformersBackend.load(str(path))
-    text = " ".join(str(w.message) for w in caught)
-    assert 'no "interface"' in text and 'no "inputs"' in text
-    assert backend.checkpoint.layout == tb.DECODER and backend.checkpoint.config is None
-    assert backend.image_processor is None and type(backend.model).__name__ == "Gemma4TextModel"
-    # Its soft-cap comes from config.json, its temperature from decision_config.json.
-    assert backend.checkpoint.readout.softcap == SOFTCAP
-    assert backend.checkpoint.temperature == TEMPERATURE
-    tok = backend.checkpoint.tokenizer()
-    state = tok.encode("a b c . a b", add_special_tokens=False).ids
-    questions = [tok.encode(q, add_special_tokens=False).ids for q in ("A B", "answer . C")]
-    h = backend.forward(state, questions)
-    with pytest.warns(UserWarning):
-        ref = tb.TransformersBackend.load(str(path), reuse_state=False).forward(state, questions)
-    assert h.shape == (2, 64) and np.abs(h - ref).max() < 1e-5
-
-
-@pytest.mark.parametrize(
-    ("overrides", "match"),
-    [
-        ({"inputs": ["text", "image"]}, "no vision encoder"),
-        ({"attention_mode": "causal"}, "attention_mode"),
-        ({"temperature": 0}, "temperature"),
-        ({"final_logit_softcapping": 20.0}, "inconsistent"),
-        ({"token_ids": [1, 2]}, "token_ids"),
-    ],
-)
-def test_an_intermediate_checkpoint_is_still_checked(tmp_path, overrides, match):
-    path = intermediate_checkpoint(tmp_path / "mid", decision=overrides)
-    with pytest.raises(ValueError, match=match):
-        tb.Checkpoint.open(str(path))
-
-
-def test_refuses_what_is_not_a_decision_checkpoint(tmp_path):
+def test_refuses_what_is_not_a_gemma4_checkpoint(tmp_path):
     path = decision_checkpoint(tmp_path / "a", GEMMA4)
-    dc = json.loads((path / "decision_config.json").read_text())
-    del dc["interface"]  # the multimodal layout is the released format: the schema is required
-    (path / "decision_config.json").write_text(json.dumps(dc))
-    with pytest.raises(ValueError, match="interface"):
-        tb.Checkpoint.open(str(path))
     cfg = json.loads((path / "config.json").read_text())
     (path / "config.json").write_text(json.dumps({**cfg, "model_type": "qwen3_5"}))
     with pytest.raises(ValueError, match="not a Gemma 4 decision checkpoint"):
-        tb.Checkpoint.open(str(path))
-    (path / "config.json").write_text(json.dumps({**cfg, "architectures": ["Gemma4ForCausalLM"]}))
-    with pytest.raises(ValueError, match="architectures"):
-        tb.Checkpoint.open(str(path))
+        tb.TransformersBackend.load(str(path))
 
 
 def test_a_model_that_keeps_plain_sdpa_is_refused(ckpt, monkeypatch):
@@ -195,15 +170,7 @@ def test_a_model_that_keeps_plain_sdpa_is_refused(ckpt, monkeypatch):
     no mask is causal; the load refuses such a model rather than serve it."""
     monkeypatch.setattr(transformers.PreTrainedModel, "set_attn_implementation", lambda *a: None)
     with pytest.raises(RuntimeError, match="did not set the decoder's attention"):
-        tb.TransformersBackend.load(str(ckpt), images=False)
-
-
-def test_devices_and_dtypes():
-    assert tb.default_dtype("cpu") == torch.float32
-    assert tb.default_dtype("cuda:1") == torch.bfloat16
-    assert tb.default_dtype("mps") == torch.bfloat16
-    with pytest.raises(ValueError, match="cpu, cuda or mps"):
-        tb.default_dtype("meta")
+        tb.TransformersBackend.load(str(ckpt))
 
 
 # ---- the mask -----------------------------------------------------------------------------
@@ -230,9 +197,9 @@ def recorder(monkeypatch):
     return rec
 
 
-def _tokens(backend, n: int, seed: int = 1) -> list[int]:
+def _tokens(p: Parts, n: int, seed: int = 1) -> list[int]:
     g = np.random.default_rng(seed)
-    vocab = backend.checkpoint.tokenizer().get_vocab_size()
+    vocab = p.tokenizer.get_vocab_size()
     return [int(t) for t in g.integers(10, vocab - 10, n)]
 
 
@@ -246,7 +213,7 @@ def test_only_the_decoder_runs_prefix_bidir_attention(backends, kind):
 
 
 @pytest.mark.parametrize("images", [[], IMAGES[:1]], ids=["text", "image"])
-def test_every_layer_attends_under_prefix_bidir(backends, kind, recorder, images):
+def test_every_layer_attends_under_prefix_bidir(backends, parts, kind, recorder, images):
     """What SDPA gets in each layer, sliding-window layers included (no layer has a window):
     in a full pass, the state's S queries over the state's keys, then the question's over all
     n keys, each with no mask; over a reused state, the state's queries over its keys with no
@@ -256,7 +223,7 @@ def test_every_layer_attends_under_prefix_bidir(backends, kind, recorder, images
     if images:
         _needs_images(kind)
     full, reuse = backends
-    r, state, questions = _rendered(full, request(images))
+    r, state, questions = _rendered(parts, request(images))
     s = len(state)
     full.forward(state, questions[:1], r.images)
     n = s + len(questions[0])
@@ -297,7 +264,7 @@ def _stock_sdpa():
         del ALL_ATTENTION_FUNCTIONS[tb.ATTENTION]  # the local override; the registration stays
 
 
-def _dense_mask_cases(backend, r, state, questions, dtype, bound):
+def _dense_mask_cases(backend, p, r, state, questions, dtype, bound):
     """Every hidden state of a full pass under `StateSplit` against that of transformers' own
     SDPA attention under the core's dense prefix_bidir mask, a 65-token question's included
     (whose pass takes the state's last query as well, and drops its row); and the state's own
@@ -319,7 +286,7 @@ def _dense_mask_cases(backend, r, state, questions, dtype, bound):
         return float(np.abs(a - b).max()) / max(1.0, float(np.abs(a).max()))
 
     s = len(state)
-    for question in (questions[0], _tokens(backend, 65)):
+    for question in (questions[0], _tokens(p, 65)):
         n = s + len(question)
         prompt = torch.tensor([state + question])
         ref = run(prompt, torch.from_numpy(attention_mask(s, n)).view(1, 1, n, n))
@@ -332,15 +299,17 @@ def _dense_mask_cases(backend, r, state, questions, dtype, bound):
 
 @pytest.mark.parametrize(("dtype", "bound"), [(torch.float32, 2e-5), (torch.bfloat16, 0.3)])
 @pytest.mark.parametrize("images", [[], IMAGES[:1]], ids=["text", "image"])
-def test_the_backends_masks_give_the_dense_masks_hidden_states(ckpt, kind, images, dtype, bound):
+def test_the_backends_masks_give_the_dense_masks_hidden_states(
+    ckpt, parts, kind, images, dtype, bound
+):
     """On CPU: float32 to float rounding (the bound of state reuse against the full pass); bf16
     to bf16's rounding, which reaches 0.03 with torch 2.15 and 0.18 with 2.7, where a wrong mask
     (the state seeing the question) moves these hidden states by more than 1."""
     if images:
         _needs_images(kind)
     backend = tb.TransformersBackend.load(str(ckpt), dtype=dtype, reuse_state=False)
-    r, state, questions = _rendered(backend, request(images))
-    _dense_mask_cases(backend, r, state, questions, dtype, bound)
+    r, state, questions = _rendered(parts, request(images))
+    _dense_mask_cases(backend, parts, r, state, questions, dtype, bound)
 
 
 def test_the_dense_masks_hidden_states_with_e2bs_heads(tmp_path):
@@ -350,9 +319,9 @@ def test_the_dense_masks_hidden_states_with_e2bs_heads(tmp_path):
     path = decision_checkpoint(
         tmp_path / "e2b", GEMMA4, text=E2B_HEADS, decision={"inputs": ["text"]}
     )
-    backend = tb.TransformersBackend.load(str(path), reuse_state=False)
-    r, state, questions = _rendered(backend, request())
-    _dense_mask_cases(backend, r, state, questions, torch.float32, 1e-4)
+    backend, p = tb.TransformersBackend.load(str(path), reuse_state=False), parts_of(path)
+    r, state, questions = _rendered(p, request())
+    _dense_mask_cases(backend, p, r, state, questions, torch.float32, 1e-4)
 
 
 def test_a_state_split_refuses_an_index_that_drops_tokens():
@@ -363,7 +332,7 @@ def test_a_state_split_refuses_an_index_that_drops_tokens():
             split[index]
 
 
-def test_sliding_windows_have_no_effect(ckpt, kind, tmp_path):
+def test_sliding_windows_have_no_effect(ckpt, parts, tmp_path):
     wide = tmp_path / "wide"
     import shutil
 
@@ -371,39 +340,39 @@ def test_sliding_windows_have_no_effect(ckpt, kind, tmp_path):
     cfg = json.loads((wide / "config.json").read_text())
     cfg["text_config"]["sliding_window"] = 100_000
     (wide / "config.json").write_text(json.dumps(cfg))
-    a = tb.TransformersBackend.load(str(ckpt), reuse_state=False, images=False)
-    b = tb.TransformersBackend.load(str(wide), reuse_state=False, images=False)
-    _, state, questions = _rendered(a, request())
+    a = tb.TransformersBackend.load(str(ckpt), reuse_state=False)
+    b = tb.TransformersBackend.load(str(wide), reuse_state=False)
+    _, state, questions = _rendered(parts, request())
     assert len(state) > 2 * 2  # longer than the window
     assert np.array_equal(a.forward(state, questions), b.forward(state, questions))
 
 
-def test_without_its_masks_the_decoder_attends_otherwise(backends):
+def test_without_its_masks_the_decoder_attends_otherwise(backends, parts):
     """Called without the backend's masks, the decoder attends otherwise (transformers builds
     no mask for a registered attention function, so every token sees every token), which gives
     other hidden states: the tests above would notice the backend dropping its masks."""
     full, _ = backends
-    _, state, questions = _rendered(full, request())
+    _, state, questions = _rendered(parts, request())
     ids = torch.tensor([state + questions[0]])
     with torch.inference_mode():
         own = full.decoder(input_ids=ids).last_hidden_state[0, -1].numpy()
     assert np.abs(own - full.forward(state, questions[:1])[0]).max() > 1e-2
 
 
-def test_the_state_never_sees_a_question(backends):
+def test_the_state_never_sees_a_question(backends, parts):
     """The state's hidden states are the same beside two different questions: to the bit when
     the two prompts are equally long, and to float rounding when they are not, since torch's
     CPU elementwise kernels can round an element differently in their vectorised and scalar
     paths, and which path an element takes depends on the tensor's length."""
     full, _ = backends
-    _, state, questions = _rendered(full, request())
+    _, state, questions = _rendered(parts, request())
     captured = []
     hook = full.decoder.register_forward_hook(
         lambda mod, args, out: captured.append(out.last_hidden_state[0, : len(state)].clone())
     )
     n = len(questions[0])
     try:
-        full.forward(state, [questions[0], _tokens(full, n)])
+        full.forward(state, [questions[0], _tokens(parts, n)])
         full.forward(state, questions[:2])
     finally:
         hook.remove()
@@ -416,7 +385,7 @@ def test_the_state_never_sees_a_question(backends):
 
 
 @pytest.mark.parametrize("images", [[], IMAGES], ids=["text", "two-images"])
-def test_state_reuse_is_the_full_pass(backends, kind, images):
+def test_state_reuse_is_the_full_pass(backends, parts, kind, images):
     """float32 on CPU: the hidden states agree to float rounding, and so do the answers: every
     field the same, numbers within 5e-4. Each number is rounded to four decimals, so one next
     to a rounding boundary can move by a step either way (on an AMD EPYC CPU with torch 2.14 a
@@ -425,14 +394,12 @@ def test_state_reuse_is_the_full_pass(backends, kind, images):
     if images:
         _needs_images(kind)
     full, reuse = backends
-    r, state, questions = _rendered(full, request(images))
+    r, state, questions = _rendered(parts, request(images))
     a, b = full.forward(state, questions, r.images), reuse.forward(state, questions, r.images)
     assert a.dtype == np.float32 and a.shape == (3, 64)
     assert np.abs(a - b).max() < 2e-5 * max(1.0, float(np.abs(a).max()))
-    ck = full.checkpoint
     _same_answers(
-        read(a, ck.readout, ck.config, r, stage="hidden"),
-        read(b, ck.readout, ck.config, r, stage="hidden"),
+        read(a, parts.config, r, weight=parts.weight), read(b, parts.config, r, weight=parts.weight)
     )
 
 
@@ -452,14 +419,14 @@ def _same_answers(a, b, tol: float = 5e-4) -> None:
         assert a == b, (a, b)
 
 
-def test_no_pass_over_the_state_is_64k_plus_1_wide(backends, recorder):
+def test_no_pass_over_the_state_is_64k_plus_1_wide(backends, parts, recorder):
     """No SDPA call is 65 queries over a longer run of keys: a batch whose longest question is
     65 tokens runs 66 wide, one more masked column, even when every question is 65 tokens; and
     a full pass of a 65-token question attends the state's last query too, and drops it."""
     full, reuse = backends
-    _, state, _ = _rendered(reuse, request())
+    _, state, _ = _rendered(parts, request())
     s = len(state)
-    qs = [_tokens(reuse, n, seed) for n, seed in ((65, 1), (40, 2), (65, 3))]
+    qs = [_tokens(parts, n, seed) for n, seed in ((65, 1), (40, 2), (65, 3))]
     reuse.forward(state, qs[:2])
     reuse.forward(state, [qs[0], qs[2]])  # no shorter question: the pad column still masked
     full.forward(state, qs[:1])
@@ -471,11 +438,11 @@ def test_no_pass_over_the_state_is_64k_plus_1_wide(backends, recorder):
     )
 
 
-def test_a_batch_without_padding_takes_no_mask(backends, recorder):
+def test_a_batch_without_padding_takes_no_mask(backends, parts, recorder):
     """Questions of one length run unmasked over the state, and give the full passes' rows."""
     full, reuse = backends
-    _, state, _ = _rendered(reuse, request())
-    qs = [_tokens(reuse, 40, seed) for seed in (4, 5)]
+    _, state, _ = _rendered(parts, request())
+    qs = [_tokens(parts, 40, seed) for seed in (4, 5)]
     a = full.forward(state, qs)
     recorder.calls.clear()
     b = reuse.forward(state, qs)
@@ -485,39 +452,37 @@ def test_a_batch_without_padding_takes_no_mask(backends, recorder):
     assert np.abs(a - b).max() < 2e-5 * max(1.0, float(np.abs(a).max()))
 
 
-def test_one_question_is_one_full_pass(backends):
+def test_one_question_is_one_full_pass(backends, parts):
     full, reuse = backends
-    _, state, questions = _rendered(full, request())
+    _, state, questions = _rendered(parts, request())
     assert np.array_equal(full.forward(state, questions[:1]), reuse.forward(state, questions[:1]))
 
 
-def test_batches_follow_the_limits(backends):
+def test_batches_follow_the_limits(backends, parts):
     _, reuse = backends
     reuse_one = tb.TransformersBackend(
-        reuse.model, reuse.checkpoint, device="cpu", dtype=torch.float32,
-        image_processor=reuse.image_processor, max_batch=32, max_batch_tokens=1,
-    )  # fmt: skip
+        reuse.model, device="cpu", dtype=torch.float32, max_batch=32, max_batch_tokens=1
+    )
     assert reuse_one._batches(10, [[1] * 3, [1] * 5, [1] * 2]) == [[0], [1], [2]]
     assert reuse._batches(10, [[1] * 3] * 5) == [[0, 1], [2, 3], [4]]
     budget = tb.TransformersBackend(
-        reuse.model, reuse.checkpoint, device="cpu", dtype=torch.float32, max_batch_tokens=40
+        reuse.model, device="cpu", dtype=torch.float32, max_batch_tokens=40
     )
     # 3 rows x (10 + 3) = 39 fit; a fourth would not.
     assert budget._batches(10, [[1] * 3] * 4) == [[0, 1, 2], [3]]
-    _, state, questions = _rendered(reuse, request())
+    _, state, questions = _rendered(parts, request())
     assert (
         np.abs(reuse_one.forward(state, questions) - reuse.forward(state, questions)).max() < 2e-5
     )
 
 
-def test_bf16_state_reuse_moves_answers_by_rounding_only(ckpt, kind):
+def test_bf16_state_reuse_moves_answers_by_rounding_only(ckpt, parts, kind):
     _needs_images(kind)
     full = tb.TransformersBackend.load(str(ckpt), dtype=torch.bfloat16, reuse_state=False)
     reuse = tb.TransformersBackend.load(str(ckpt), dtype=torch.bfloat16)
-    ck = full.checkpoint
-    r, state, questions = _rendered(full, request(IMAGES[:1]))
-    pa = read(full.forward(state, questions, r.images), ck.readout, ck.config, r, stage="hidden")
-    pb = read(reuse.forward(state, questions, r.images), ck.readout, ck.config, r, stage="hidden")
+    r, state, questions = _rendered(parts, request(IMAGES[:1]))
+    pa = read(full.forward(state, questions, r.images), parts.config, r, weight=parts.weight)
+    pb = read(reuse.forward(state, questions, r.images), parts.config, r, weight=parts.weight)
     assert pa["team"]["choice"] == pb["team"]["choice"]
     for name in ("billing", "shipping", "sales"):
         assert abs(pa["team"]["probabilities"][name] - pb["team"]["probabilities"][name]) < 0.05
@@ -526,12 +491,9 @@ def test_bf16_state_reuse_moves_answers_by_rounding_only(ckpt, kind):
 # ---- the readout --------------------------------------------------------------------------
 
 
-def test_rows_are_the_decoders_hidden_states_and_the_core_reads_them(ckpt, kind):
-    backend = tb.TransformersBackend.load(
-        str(ckpt), dtype=torch.bfloat16, reuse_state=False, images=IMAGING[kind]
-    )
-    ck = backend.checkpoint
-    r, state, questions = _rendered(backend, request())
+def test_rows_are_the_decoders_hidden_states_and_the_core_reads_them(ckpt, parts):
+    backend = tb.TransformersBackend.load(str(ckpt), dtype=torch.bfloat16, reuse_state=False)
+    r, state, questions = _rendered(parts, request())
     rows = backend.forward(state, questions)
     # A bf16 decoder's values, unrounded and unscaled: float32 holds them exactly.
     assert np.array_equal(round_to_bf16(rows), rows)
@@ -544,13 +506,11 @@ def test_rows_are_the_decoders_hidden_states_and_the_core_reads_them(ckpt, kind)
     assert np.array_equal(h.float().numpy(), rows[0])
     # The answers are the core's precision regime on those rows: the bf16 GEMM, then the cap
     # and the checkpoint's temperature in float32, against torch's own bf16 GEMM.
-    got = evaluate(request(), ck.tokenizer(), ck.readout, ck.config, backend)["answers"]
-    assert got == read(rows, ck.readout, ck.config, r, stage="hidden")
-    w = torch.from_numpy(ck.readout.weight).to(torch.bfloat16)
+    got = _evaluate(parts, request(), backend)["answers"]
+    assert got == read(rows, parts.config, r, weight=parts.weight)
+    w = torch.from_numpy(parts.weight).to(torch.bfloat16)
     z = (w @ torch.from_numpy(rows[1]).to(torch.bfloat16)).float()
-    np.testing.assert_allclose(
-        z.numpy(), readout_logits(ck.readout.weight, rows[1]), atol=0.0625 + 1e-6
-    )
+    np.testing.assert_allclose(z.numpy(), readout_logits(parts.weight, rows[1]), atol=0.0625 + 1e-6)
     p = torch.softmax(torch.tanh(z[:3] / SOFTCAP) * SOFTCAP / TEMPERATURE, 0)
     probs = got["team"]["probabilities"]
     np.testing.assert_allclose([probs["billing"], probs["shipping"], probs["sales"]], p, atol=2e-4)
@@ -559,10 +519,10 @@ def test_rows_are_the_decoders_hidden_states_and_the_core_reads_them(ckpt, kind)
 # ---- images -------------------------------------------------------------------------------
 
 
-def test_image_features_land_at_the_spans(backends, kind, monkeypatch):
+def test_image_features_land_at_the_spans(backends, parts, kind, monkeypatch):
     _needs_images(kind)
     full, _ = backends
-    r, state, questions = _rendered(full, request(IMAGES))
+    r, state, questions = _rendered(parts, request(IMAGES))
     encode = full.decoder.get_image_features
     marked = []
 
@@ -599,33 +559,13 @@ def test_image_features_land_at_the_spans(backends, kind, monkeypatch):
             assert torch.equal(seen["per_layer_inputs"][0, im.start], pad)
 
 
-def test_the_image_decides_the_answer(backends, kind):
+def test_the_image_decides_the_answer(backends, parts, kind):
     """Two images of the same size give the same ids and different answers."""
     _needs_images(kind)
     full, _ = backends
-    ck = full.checkpoint
-    a = evaluate(request([image_b64(64, 48, seed=1)]), ck.tokenizer(), ck.readout, ck.config, full)
-    b = evaluate(request([image_b64(64, 48, seed=2)]), ck.tokenizer(), ck.readout, ck.config, full)
+    a = _evaluate(parts, request([image_b64(64, 48, seed=1)]), full)
+    b = _evaluate(parts, request([image_b64(64, 48, seed=2)]), full)
     assert a["usage"] == b["usage"] and a["answers"] != b["answers"]
-
-
-def test_spans_are_checked(backends, kind):
-    _needs_images(kind)
-    full, _ = backends
-    r, state, questions = _rendered(full, request(IMAGES[:1]))
-    im = r.images[0]
-    import dataclasses
-
-    shifted = dataclasses.replace(im, start=im.start + 1, tokens=im.tokens - 1)
-    with pytest.raises(ValueError, match="span"):
-        full.forward(state, questions, [shifted])
-    with pytest.raises(ValueError, match="placeholders"):
-        full.forward(state, questions)  # placeholders, but no image
-    soft = full.image_ids[1]
-    with pytest.raises(ValueError, match="question 0 holds a media placeholder"):
-        full.forward(state, [questions[0] + [soft]], r.images)
-    with pytest.raises(ValueError, match="vocabulary"):
-        full.forward([10**7], questions)
 
 
 # ---- refusals -----------------------------------------------------------------------------
@@ -633,85 +573,57 @@ def test_spans_are_checked(backends, kind):
 
 def test_a_text_only_checkpoint_refuses_images_before_decoding_them(tmp_path):
     path = decision_checkpoint(tmp_path / "t", GEMMA4, decision={"inputs": ["text"]})
-    backend = tb.TransformersBackend.load(str(path))
+    backend, p = tb.TransformersBackend.load(str(path)), parts_of(path)
     assert backend.image_processor is None and backend.decoder.vision_tower is None
-    ck = backend.checkpoint
-    with pytest.raises(ValueError, match=r'decision_config.json inputs are \["text"\]'):
-        evaluate(request(["not even base64"]), ck.tokenizer(), ck.readout, ck.config, backend)
-    assert evaluate(request(), ck.tokenizer(), ck.readout, ck.config, backend)["answers"]
-
-
-def test_a_backend_without_its_vision_encoder_refuses_images(ckpt):
-    backend = tb.TransformersBackend.load(str(ckpt), images=False)
-    ck = backend.checkpoint
-    assert backend.image_processor is None and backend.image_problem == NO_VISION
-    with pytest.raises(ValueError, match=NO_VISION):
-        evaluate(request(IMAGES[:1]), ck.tokenizer(), ck.readout, ck.config, backend)
+    with pytest.raises(ValueError, match="does not take images"):
+        _evaluate(p, request(["not even base64"]), backend)
+    assert _evaluate(p, request(), backend)["answers"]
 
 
 @pytest.mark.parametrize(
     ("processor", "match"),
-    [
-        ({"max_soft_tokens": 560}, "'max_soft_tokens': 560"),
-        ({"patch_size": 14}, "patch_size"),
-        ({"image_processor_type": "SiglipImageProcessor"}, "names image processor"),
-    ],
+    [({"max_soft_tokens": 560}, "max_soft_tokens"), ({"patch_size": 14}, "patch_size")],
 )
 def test_an_image_processor_the_core_refuses_refuses_images(tmp_path, processor, match):
-    from strands_decider.decision import DecisionEngine
-
     path = decision_checkpoint(tmp_path / "p", GEMMA4, processor=processor)
     with pytest.warns(UserWarning, match=match):
         backend = tb.TransformersBackend.load(str(path))
-    assert backend.image_processor is None and match in backend.image_problem
-    ck = backend.checkpoint
-    engine = DecisionEngine(
-        backend, ck.tokenizer(), ck.config, ck.readout, model_name="t",
-        image_problem=backend.image_problem,
-    )  # fmt: skip
-    with pytest.raises(ValueError, match=match):
-        engine.evaluate(request(IMAGES[:1]))
-    assert engine.evaluate(request()).answers
+    assert backend.image_processor is None and backend.image_problem == tb.NO_IMAGE_PROCESSOR
+    engine = _engine(backend, parts_of(path))
+    with pytest.raises(ValueError, match="image requests are refused"):
+        engine.evaluate(Request.model_validate(request(IMAGES[:1])))
+    assert engine.evaluate(Request.model_validate(request())).answers
 
 
-def test_a_file_that_does_not_decode_is_refused_with_v1s_message(backends, kind):
+def test_an_image_processor_that_cannot_be_built_refuses_images_only(tmp_path, monkeypatch):
+    path = decision_checkpoint(tmp_path / "p", GEMMA4)
+
+    def missing(*_a, **_k):
+        raise OSError(f"{path}/processor_config.json is unreadable")
+
+    monkeypatch.setattr(tb, "load_image_processor", missing)
+    with pytest.warns(UserWarning, match="processor_config.json is unreadable"):
+        backend = tb.TransformersBackend.load(str(path))
+    # Clients get a fixed reason; the error, with its local path, is only in the warning.
+    assert backend.image_processor is None and backend.image_problem == tb.NO_IMAGE_PROCESSOR
+    assert str(path) not in backend.image_problem
+    assert _evaluate(parts_of(path), request(), backend)["answers"]
+
+
+def test_a_file_that_does_not_decode_is_refused_with_v1s_message(backends, parts, kind):
     _needs_images(kind)
     full, _ = backends
-    ck = full.checkpoint
     good = base64.b64decode(image_b64(64, 48))
     broken = good[:40] + b"\x00" * 64 + good[-12:]  # IHDR intact, image data not
-    req = request([base64.b64encode(broken).decode()])
     with pytest.raises(ValueError, match="image could not be"):
-        evaluate(req, ck.tokenizer(), ck.readout, ck.config, full)
+        _evaluate(parts, request([base64.b64encode(broken).decode()]), full)
 
 
 def test_a_prompt_past_max_length_validated_is_refused(tmp_path):
     path = decision_checkpoint(tmp_path / "m", GEMMA4, decision={"max_length_validated": 64})
     backend = tb.TransformersBackend.load(str(path))
-    ck = backend.checkpoint
     with pytest.raises(ValueError, match="exceeds the limit of 64 tokens"):
-        evaluate(request(), ck.tokenizer(), ck.readout, ck.config, backend)
-
-
-def test_config_json_must_name_the_interfaces_image_tokens(tmp_path, monkeypatch):
-    """The model replaces config.json's image ids; the prompt's are the interface's. The
-    backend compares the two without reading the tokenizer, which the engine checks."""
-    path = decision_checkpoint(tmp_path / "k", GEMMA4)
-    cfg = json.loads((path / "config.json").read_text())
-    (path / "config.json").write_text(json.dumps({**cfg, "image_token_id": 3}))
-    monkeypatch.setattr(tb.Checkpoint, "tokenizer", lambda self: pytest.fail("read the tokenizer"))
-    with pytest.warns(UserWarning, match=r"image_token_id is 3, not the interface.s id"):
-        backend = tb.TransformersBackend.load(str(path))
-    assert backend.image_processor is None and "image_token_id is 3" in backend.image_problem
-
-
-def test_a_config_json_without_a_hidden_size_is_named(tmp_path):
-    path = decision_checkpoint(tmp_path / "h", GEMMA4)
-    cfg = json.loads((path / "config.json").read_text())
-    del cfg["text_config"]["hidden_size"]
-    (path / "config.json").write_text(json.dumps(cfg))
-    with pytest.raises(ValueError, match=r"config\.json gives no hidden_size"):
-        tb.TransformersBackend.load(str(path))
+        _evaluate(parts_of(path), request(), backend)
 
 
 # ---- pixels -------------------------------------------------------------------------------
@@ -785,14 +697,14 @@ def test_an_image_turned_by_its_exif_is_resized_to_its_decoded_shape(backends, k
     assert (int(valid[:, 0].max()) + 1, int(valid[:, 1].max()) + 1) == (528 // side, 1104 // side)
 
 
-def test_a_decoded_size_that_is_not_the_headers_is_refused(backends, kind, monkeypatch):
+def test_a_decoded_size_that_is_not_the_headers_is_refused(backends, parts, kind, monkeypatch):
     _needs_images(kind)
     from PIL import Image
 
     from strands_decider.decision import RequestRefused
 
     full, _ = backends
-    r, _, _ = _rendered(full, request(IMAGES[:1]))
+    r, _, _ = _rendered(parts, request(IMAGES[:1]))
     monkeypatch.setattr(tb, "decode", lambda image: Image.new("RGB", (65, 48)))
     with pytest.raises(RequestRefused, match="image could not be decoded: its pixels are 65x48"):
         full.prepare_pixels(r.images)
@@ -813,10 +725,10 @@ def test_the_12bs_processor_counts_the_cores_n_from_the_cores_resize(w, h):
     assert int((out["image_position_ids"][0] != -1).all(-1).sum()) == n
 
 
-def test_prepare_pixels_checks_the_count(backends, kind, monkeypatch):
+def test_prepare_pixels_checks_the_count(backends, parts, kind):
     _needs_images(kind)
     full, _ = backends
-    r, _, _ = _rendered(full, request(IMAGES[:1]))
+    r, _, _ = _rendered(parts, request(IMAGES[:1]))
     import dataclasses
 
     wrong = dataclasses.replace(r.images[0], tokens=r.images[0].tokens + 1)
@@ -831,14 +743,14 @@ def _agrees_with_cpu(ckpt, device: str) -> None:
     """The device against the CPU at each precision: float32 to float rounding, which checks
     the device's kernels; and bf16, its default, to bf16's own error, which on random weights
     is large (up to about 0.1 in probability on CPU too)."""
-    assert tb.default_dtype(device) == torch.bfloat16
+    assert tb.DEVICE_DTYPES[device] == torch.bfloat16
+    ck = parts_of(ckpt)
     for dtype, bound in ((torch.float32, 5e-3), (torch.bfloat16, 0.15)):
         cpu = tb.TransformersBackend.load(str(ckpt), dtype=dtype)
         other = tb.TransformersBackend.load(str(ckpt), device=device, dtype=dtype)
-        ck = cpu.checkpoint
         for req in (request(), request(IMAGES[:1])):
-            a = evaluate(req, ck.tokenizer(), ck.readout, ck.config, cpu)["answers"]
-            b = evaluate(req, ck.tokenizer(), ck.readout, ck.config, other)["answers"]
+            a = _evaluate(ck, req, cpu)["answers"]
+            b = _evaluate(ck, req, other)["answers"]
             for name, p in a["team"]["probabilities"].items():
                 assert abs(p - b["team"]["probabilities"][name]) < bound, (dtype, name)
             assert abs(a["late"]["noul"] - b["late"]["noul"]) < bound, dtype
@@ -859,7 +771,7 @@ def test_mps_state_reuse_is_the_full_pass(ckpt, kind):
         str(ckpt), device="mps", dtype=torch.float32, reuse_state=False
     )
     reuse = tb.TransformersBackend.load(str(ckpt), device="mps", dtype=torch.float32)
-    r, state, questions = _rendered(full, request(IMAGES[:1]))
+    r, state, questions = _rendered(parts_of(ckpt), request(IMAGES[:1]))
     a, b = full.forward(state, questions, r.images), reuse.forward(state, questions, r.images)
     assert np.abs(a - b).max() < 1e-4 * max(1.0, float(np.abs(a).max()))
 
@@ -880,11 +792,10 @@ E2B_HEADS = {
 }
 
 
-def _question_batches(backend, widths, seed=0, state_len=300):
+def _question_batches(vocab: int, widths, seed=0, state_len=300):
     """A `state_len`-token state and, for each width, three questions padded to that width in
     one batch over the state's keys and values."""
     g = np.random.default_rng(seed)
-    vocab = backend.checkpoint.tokenizer().get_vocab_size()
     toks = lambda n: [int(t) for t in g.integers(10, vocab - 10, n)]  # noqa: E731
     state = toks(state_len)
     return state, [(w, [toks(w), toks(w - 7), toks(w - 30)]) for w in widths]
@@ -924,7 +835,8 @@ def test_cuda_question_batches_of_64k_plus_1_tokens_over_a_cached_state(tmp_path
         return h[0, -1].numpy()
 
     for state_len in (300, 321):
-        state, cases = _question_batches(reuse, WIDTHS_64K_PLUS_1, state_len=state_len)
+        vocab = parts_of(path).tokenizer.get_vocab_size()
+        state, cases = _question_batches(vocab, WIDTHS_64K_PLUS_1, state_len=state_len)
         for width, qs in cases:
             assert reuse._batches(len(state), qs) == [[0, 1, 2]]  # one pass, `width` wide
             ref = np.stack([dense(state, q) for q in qs])
@@ -978,7 +890,8 @@ def test_cuda_every_attention_call_against_float64(tmp_path, monkeypatch, dtype,
     check = _Float64Check(tb._sdpa)
     monkeypatch.setattr(tb, "_sdpa", check)
     for state_len in (300, 321):
-        state, cases = _question_batches(reuse, (64, 65, 129), state_len=state_len)
+        vocab = parts_of(path).tokenizer.get_vocab_size()
+        state, cases = _question_batches(vocab, (64, 65, 129), state_len=state_len)
         for _, qs in cases:
             full.forward(state, qs)
             reuse.forward(state, qs)
@@ -1035,17 +948,6 @@ def test_cuda_prefix_bidir_attention_against_float64(head_dim, dtype, bound):
     check(out, q, k, v, torch.ones(2, 40, cached + 40, dtype=torch.bool, device="cuda"))
 
 
-def test_prefix_bidir_attention_refuses_what_it_does_not_apply():
-    q = torch.zeros(1, 2, 5, 4)
-    with pytest.raises(NotImplementedError, match="softcap"):
-        tb.prefix_bidir_attention(None, q, q, q, None, softcap=30.0)
-    with pytest.raises(NotImplementedError, match="position_bias"):
-        tb.prefix_bidir_attention(None, q, q, q, None, position_bias=torch.zeros(1, 2, 5, 5))
-    for split, keys in ((tb.StateSplit(0), 5), (tb.StateSplit(5), 5), (tb.StateSplit(2), 7)):
-        with pytest.raises(ValueError, match="for a whole prompt"):
-            tb.prefix_bidir_attention(None, q, torch.zeros(1, 2, keys, 4), q, split)
-
-
 # ---- a real checkpoint --------------------------------------------------------------------
 
 REAL = os.environ.get("STRANDS_DECIDER_TEST_CHECKPOINT")
@@ -1057,29 +959,36 @@ def _fits_in_float32(backend) -> bool:
     return extra < 0.8 * torch.cuda.mem_get_info()[0]
 
 
+def _real() -> str:
+    from strands_decider.decision import checkpoint_dir
+
+    path = checkpoint_dir(REAL)
+    assert path is not None, REAL
+    return path
+
+
 @pytest.mark.skipif(not REAL, reason="set STRANDS_DECIDER_TEST_CHECKPOINT to a decision checkpoint")
 def test_a_real_checkpoint():
-    """A real decision checkpoint, on CUDA when there is one: it loads in its layout,
-    an image request runs where it takes images, and on the test request state reuse gives
-    the full passes' choice, and every noul, score and probability within REAL_REQUEST_BOUND."""
+    """A real decision checkpoint, on CUDA when there is one: it loads, an image request runs
+    where it takes images, and on the test request state reuse gives the full passes' choice,
+    and every noul, score and probability within REAL_REQUEST_BOUND."""
     device = "cuda" if CUDA else "cpu"
+    path = _real()
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        full = tb.TransformersBackend.load(REAL, device=device, reuse_state=False)
+        full = tb.TransformersBackend.load(path, device=device, reuse_state=False)
     reuse = tb.TransformersBackend(
-        full.model, full.checkpoint, device=device, dtype=full.dtype,
+        full.model, device=device, dtype=full.dtype,
         image_processor=full.image_processor, image_problem=full.image_problem,
     )  # fmt: skip
-    ck = full.checkpoint
-    assert ck.config is not None, "a decision checkpoint, not an intermediate one"
+    p = parts_of(path)
     images = (
         [base64.b64encode(_photo(640, 480, "JPEG", 0)).decode()]
         if full.image_processor is not None
         else []
     )
-    tok = ck.tokenizer()
-    a = evaluate(request(images), tok, ck.readout, ck.config, full)["answers"]
-    b = evaluate(request(images), tok, ck.readout, ck.config, reuse)["answers"]
+    a = _evaluate(p, request(images), full)["answers"]
+    b = _evaluate(p, request(images), reuse)["answers"]
     assert a["team"]["choice"] == b["team"]["choice"]
     for name, x in a.items():
         for key in ("noul", "score", "probabilities"):
@@ -1105,18 +1014,19 @@ def test_a_real_checkpoint_reuses_states_as_full_passes_in_float32():
     differ by up to 0.4 in probability, with dense masks as with none. Skips where the model
     does not fit the GPU in float32 (one 80 GB GPU takes a 12B, not a 26B-A4B or 31B)."""
     device = "cuda" if CUDA else "cpu"
+    path = _real()
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        full = tb.TransformersBackend.load(REAL, device=device, reuse_state=False, images=False)
-    ck = full.checkpoint
+        full = tb.TransformersBackend.load(path, device=device, reuse_state=False)
     if full.dtype == torch.bfloat16:
         if not _fits_in_float32(full):
             pytest.skip("the model does not fit the GPU in float32")
         full = tb.TransformersBackend(
-            full.model.float(), ck, device=device, dtype=torch.float32, reuse_state=False
+            full.model.float(), device=device, dtype=torch.float32, reuse_state=False
         )
-    f32_reuse = tb.TransformersBackend(full.model, ck, device=device, dtype=torch.float32)
-    cases = [_question_batches(f32_reuse, WIDTHS_64K_PLUS_1, state_len=n) for n in (300, 321)]
+    f32_reuse = tb.TransformersBackend(full.model, device=device, dtype=torch.float32)
+    vocab = parts_of(path).tokenizer.get_vocab_size()
+    cases = [_question_batches(vocab, WIDTHS_64K_PLUS_1, state_len=n) for n in (300, 321)]
     for state, by_width in cases:
         for width, qs in by_width:
             ra, rb = full.forward(state, qs), f32_reuse.forward(state, qs)
@@ -1126,28 +1036,25 @@ def test_a_real_checkpoint_reuses_states_as_full_passes_in_float32():
 
 # ---- model goldens -----------------------------------------------------------------------
 #
-# A golden_vectors.jsonl line (`read_golden_vectors`): {"request", "variant", "state_ids",
-# "images": [{"sha256", "span"}], "questions": {name: {"question_ids", "codes",
-# "probabilities"}}}. The core reads the reference's probabilities (`read_golden_vectors`) and
-# measures a runtime against them (`agreement`, `Agreement.conforms`).
+# A golden_vectors.jsonl line: {"request", "state_ids", "images": [{"sha256", "span"}],
+# "questions": {name: {"question_ids", "codes", "probabilities"}}}. The tests read the
+# reference's probabilities (`read_golden_vectors`) and measure a runtime against them
+# (`agreement`, `Agreement.conforms`).
 
 GOLDENS = "golden_vectors.jsonl"
 
 
-def golden_probabilities(path, backend) -> dict:
+def golden_probabilities(path, p: Parts, backend) -> dict:
     """`backend`'s code probabilities on the goldens at `path`, keyed as `read_golden_vectors`
     keys the reference's, after checking that every line renders to the goldens' ids, spans,
     image hashes and codes exactly (a runtime's ids equal the goldens')."""
-    ck = backend.checkpoint
-    tok = ck.tokenizer()
     out = {}
     with open(path, encoding="utf-8") as f:
         for line_number, line in enumerate(f):
             if not line.strip():
                 continue
             g = json.loads(line)
-            assert g["variant"] == ck.config.prompt, f"line {line_number}: another prompt"
-            r = render(g["request"], tok, g["variant"])
+            r = render(Request.model_validate(g["request"]), p.tokenizer)
             assert list(r.state_ids) == g["state_ids"], f"line {line_number}: state ids differ"
             spans = [{"sha256": im.sha256, "span": [im.start, im.end]} for im in r.images]
             assert spans == g["images"], f"line {line_number}: image spans differ"
@@ -1159,26 +1066,22 @@ def golden_probabilities(path, backend) -> dict:
                 assert list(q.codes) == want["codes"], f"line {line_number}, {name}: codes"
             state, qs = list(r.state_ids), [list(q.question_ids) for q in r.questions.values()]
             rows = backend.forward(state, qs, r.images)
-            probs = question_probabilities(rows, ck.readout, ck.config, r, stage="hidden")
-            out.update({(line_number, n): [float(x) for x in p] for n, p in probs.items()})
+            probs = question_probabilities(rows, p.config, r, weight=p.weight)
+            out.update({(line_number, n): [float(x) for x in v] for n, v in probs.items()})
     return out
 
 
-def write_goldens(path, backend, requests) -> None:
+def write_goldens(path, p: Parts, backend, requests) -> None:
     """Goldens in golden_vectors.jsonl's format, from `backend` (one full pass per prompt, as the
     reference runtime computes them)."""
-    ck = backend.checkpoint
-    tok = ck.tokenizer()
     with open(path, "w", encoding="utf-8") as f:
         for req in requests:
-            r = render(req, tok, ck.config.prompt)
+            r = render(Request.model_validate(req), p.tokenizer)
             state, qs = list(r.state_ids), [list(q.question_ids) for q in r.questions.values()]
-            probs = question_probabilities(
-                backend.forward(state, qs, r.images), ck.readout, ck.config, r, stage="hidden"
-            )
+            rows = backend.forward(state, qs, r.images)
+            probs = question_probabilities(rows, p.config, r, weight=p.weight)
             line = {
                 "request": req,
-                "variant": r.variant,
                 "state_ids": list(r.state_ids),
                 "images": [{"sha256": im.sha256, "span": [im.start, im.end]} for im in r.images],
                 "questions": {
@@ -1193,19 +1096,19 @@ def write_goldens(path, backend, requests) -> None:
             f.write(json.dumps(line) + "\n")
 
 
-def test_the_goldens_check_passes_its_own_goldens_and_catches_a_wrong_id(backends, kind, tmp_path):
-    from strands_decider.core import agreement, read_golden_vectors
-
+def test_the_goldens_check_passes_its_own_goldens_and_catches_a_wrong_id(
+    backends, parts, kind, tmp_path
+):
     full, reuse = backends
     reqs = [request(), request(state="")]
     if IMAGING[kind]:
         reqs.append(request(IMAGES))
     path = tmp_path / GOLDENS
-    write_goldens(path, full, reqs)
+    write_goldens(path, parts, full, reqs)
     reference = read_golden_vectors(path)
     assert len(reference) == 3 * len(reqs)
     for backend in (full, reuse):
-        measured = agreement(golden_probabilities(path, backend), reference)
+        measured = agreement(golden_probabilities(path, parts, backend), reference)
         assert measured.questions == len(reference)
         assert measured.top1 == 1.0 and measured.mean_abs_dp < 1e-4
         # bf16's bounds are met, but on too few questions for a conformance claim.
@@ -1215,7 +1118,7 @@ def test_the_goldens_check_passes_its_own_goldens_and_catches_a_wrong_id(backend
     g["questions"]["late"]["question_ids"][-1] += 1
     path.write_text("\n".join([json.dumps(g), *lines[1:]]) + "\n")
     with pytest.raises(AssertionError, match="rendered ids differ"):
-        golden_probabilities(path, full)
+        golden_probabilities(path, parts, full)
 
 
 @pytest.mark.skipif(not REAL, reason="set STRANDS_DECIDER_TEST_CHECKPOINT to a decision checkpoint")
@@ -1223,24 +1126,23 @@ def test_a_real_checkpoint_meets_its_goldens():
     """The rendered ids are the goldens', and in bf16 the runtime conforms (top-1
     agreement at least 98% and mean |dp| at most 0.02, on at least 1,000 questions), both with
     one full pass per prompt (the reference) and with the state reused."""
-    from strands_decider.core import agreement, read_golden_vectors
-
-    path = os.path.join(tb.Checkpoint.open(REAL).path, GOLDENS)
-    if not os.path.exists(path):
+    path = _real()
+    goldens = os.path.join(path, GOLDENS)
+    if not os.path.exists(goldens):
         pytest.skip(f"the checkpoint has no {GOLDENS} yet")
     device = "cuda" if CUDA else "cpu"
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         full = tb.TransformersBackend.load(
-            REAL, device=device, dtype=torch.bfloat16, reuse_state=False
+            path, device=device, dtype=torch.bfloat16, reuse_state=False
         )
     reuse = tb.TransformersBackend(
-        full.model, full.checkpoint, device=device, dtype=full.dtype,
+        full.model, device=device, dtype=full.dtype,
         image_processor=full.image_processor, image_problem=full.image_problem,
     )  # fmt: skip
-    reference = read_golden_vectors(path)
+    p, reference = parts_of(path), read_golden_vectors(goldens)
     for backend in (full, reuse):
-        measured = agreement(golden_probabilities(path, backend), reference)
+        measured = agreement(golden_probabilities(goldens, p, backend), reference)
         assert measured.conforms(), (backend.reuse_state, measured)
 
 
@@ -1257,7 +1159,7 @@ def test_the_12bs_pixels_are_pillows_resize_in_48_pixel_patches(tmp_path, w, h, 
     padding is zero."""
     path = decision_checkpoint(tmp_path / "u", UNIFIED)
     backend = tb.TransformersBackend.load(str(path))
-    r, _, _ = _rendered(backend, request([base64.b64encode(_photo(w, h, fmt, 5)).decode()]))
+    r, _, _ = _rendered(parts_of(path), request([base64.b64encode(_photo(w, h, fmt, 5)).decode()]))
     im = r.images[0]
     px = backend.prepare_pixels([im])
     values, positions = px["pixel_values"][0].numpy(), px["image_position_ids"][0].numpy()
@@ -1275,77 +1177,41 @@ def test_the_12bs_pixels_are_pillows_resize_in_48_pixel_patches(tmp_path, w, h, 
 # ---- load-time checks ---------------------------------------------------------------------
 
 
-def test_an_image_processor_that_cannot_be_built_refuses_images_only(tmp_path, monkeypatch):
-    path = decision_checkpoint(tmp_path / "p", GEMMA4)
-
-    def missing(*_a, **_k):
-        raise OSError(f"{path}/processor_config.json is unreadable")
-
-    monkeypatch.setattr(tb, "load_image_processor", missing)
-    with pytest.warns(UserWarning, match="processor_config.json is unreadable"):
-        backend = tb.TransformersBackend.load(str(path))
-    # Clients get a fixed reason; the error, with its local path, is only in the warning.
-    assert backend.image_processor is None and backend.image_problem == tb.PROCESSOR_FAILED
-    assert str(path) not in backend.image_problem
-    ck = backend.checkpoint
-    assert evaluate(request(), ck.tokenizer(), ck.readout, ck.config, backend)["answers"]
-
-
-def test_a_readout_of_the_wrong_width_is_refused_before_the_weights_load(tmp_path, monkeypatch):
-    from safetensors.torch import save_file
-
-    path = decision_checkpoint(tmp_path / "w", GEMMA4)
-    save_file(
-        {"weight": torch.zeros(255, 32, dtype=torch.bfloat16)}, str(path / "readout.safetensors")
-    )
-    monkeypatch.setattr(tb, "_load_model", lambda *a, **k: pytest.fail("loaded the weights"))
-    with pytest.raises(ValueError, match=r"not \[255, 64\]"):
-        tb.TransformersBackend.load(str(path))
-
-
-def test_dtypes_are_chosen_and_checked(ckpt, kind):
-    backend = tb.TransformersBackend.load(str(ckpt), dtype=torch.bfloat16, images=IMAGING[kind])
+def test_dtypes_and_devices(ckpt):
+    backend = tb.TransformersBackend.load(str(ckpt), dtype=torch.bfloat16)
     assert backend.describe()["dtype"] == "bfloat16"
-    with pytest.raises(ValueError, match="float32 or bfloat16"):
-        tb.TransformersBackend.load(str(ckpt), dtype=torch.float16)
     with pytest.raises(ValueError, match="cpu, cuda or mps"):
-        tb.TransformersBackend.load(str(ckpt), device="meta", dtype=torch.float32)
+        tb.TransformersBackend.load(str(ckpt), device="meta")
 
 
 # ---- refusals and faults, and concurrency -------------------------------------------------
 
 
-def _engine(backend, **kwargs):
+def _engine(backend, p: Parts, **kwargs):
     from strands_decider.decision import DecisionEngine
 
-    ck = backend.checkpoint
-    return DecisionEngine(
-        backend, ck.tokenizer(), ck.config, ck.readout, model_name="t",
-        image_problem=backend.image_problem, **kwargs,
-    )  # fmt: skip
+    return DecisionEngine(backend, p.tokenizer, p.config, p.weight, model_name="t", **kwargs)
 
 
-def test_refusals_are_the_callers_and_failures_the_runtimes(backends, kind, monkeypatch):
+def test_refusals_are_the_callers_and_failures_the_runtimes(backends, parts, kind, monkeypatch):
     from strands_decider.decision import RequestRefused
 
     full, _ = backends
-    engine = _engine(full)
-    with pytest.raises(RequestRefused, match="audio input is not supported"):
-        engine.evaluate({**request(), "audio": ["UklGRg=="]})
+    engine = _engine(full, parts)
     with pytest.raises(RequestRefused, match="exceeds the limit"):
-        engine.evaluate(request(state="word " * 5000))
+        engine.evaluate(Request.model_validate(request(state="word " * 5000)))
     if IMAGING[kind]:
         good = base64.b64decode(image_b64(64, 48))
         broken = base64.b64encode(good[:40] + b"\x00" * 64 + good[-12:]).decode()
         with pytest.raises(RequestRefused, match="image could not be"):
-            engine.evaluate(request([broken]))
+            engine.evaluate(Request.model_validate(request([broken])))
 
     def fails(*_a, **_k):
         raise ValueError("an internal check")
 
     monkeypatch.setattr(full, "forward", fails)
     with pytest.raises(RuntimeError, match="an internal check"):
-        engine.evaluate(request())
+        engine.evaluate(Request.model_validate(request()))
 
 
 class _Peak:
@@ -1380,13 +1246,14 @@ def _threads(fn, n: int = 6) -> list:
 
 
 @pytest.mark.parametrize("slots", [1, 3])
-def test_the_engine_bounds_concurrent_requests(backends, monkeypatch, slots):
+def test_the_engine_bounds_concurrent_requests(backends, parts, monkeypatch, slots):
     full, _ = backends
-    engine = _engine(full, max_concurrency=slots)
-    want = engine.evaluate(request()).model_dump()
+    engine = _engine(full, parts, max_concurrency=slots)
+    req = Request.model_validate(request())
+    want = engine.evaluate(req).model_dump()
     peak = _Peak(full.forward)
     monkeypatch.setattr(full, "forward", peak)
-    got = _threads(lambda: engine.evaluate(request()).model_dump())
+    got = _threads(lambda: engine.evaluate(req).model_dump())
     assert all(g == want for g in got)
     # One slot: never two at once. More: never past the bound (overlap depends on timing).
     assert peak.peak == 1 if slots == 1 else 1 <= peak.peak <= slots
@@ -1396,11 +1263,9 @@ def test_the_engine_bounds_concurrent_requests(backends, monkeypatch, slots):
 def test_mps_calls_take_turns_across_backends(ckpt, kind, monkeypatch):
     """Metal aborts on two threads at once, whichever backend each runs: two backends over
     one model on MPS share one lock."""
-    one = tb.TransformersBackend.load(str(ckpt), device="mps", images=IMAGING[kind])
-    two = tb.TransformersBackend(
-        one.model, one.checkpoint, device="mps", dtype=one.dtype, reuse_state=False
-    )
-    _, state, questions = _rendered(one, request())
+    one = tb.TransformersBackend.load(str(ckpt), device="mps")
+    two = tb.TransformersBackend(one.model, device="mps", dtype=one.dtype, reuse_state=False)
+    _, state, questions = _rendered(parts_of(ckpt), request())
     want = [b.forward(state, questions) for b in (one, two)]
     peak = _Peak(lambda f, *a, **k: f(*a, **k), hold=0.02)
     for b in (one, two):
@@ -1408,16 +1273,3 @@ def test_mps_calls_take_turns_across_backends(ckpt, kind, monkeypatch):
     got = _threads(lambda: [b.forward(state, questions) for b in (one, two)], n=4)
     assert peak.peak == 1
     assert all(np.array_equal(g[i], want[i]) for g in got for i in (0, 1))
-
-
-def test_an_intermediate_checkpoints_float32_readout_is_rounded_to_bf16(tmp_path):
-    """W is bf16: a runtime that reads an f32 readout rounds it to bf16 first."""
-    from safetensors.torch import save_file
-
-    path = intermediate_checkpoint(tmp_path / "mid")
-    w = torch.randn(255, 64, generator=torch.Generator().manual_seed(3))
-    save_file({"weight": w}, str(path / "readout.safetensors"))
-    ck = tb.Checkpoint.open(str(path))
-    assert ck.config is None and ck.warnings  # an intermediate checkpoint, its notes kept
-    assert np.array_equal(ck.readout.weight, round_to_bf16(w.numpy()))
-    assert not np.array_equal(ck.readout.weight, w.numpy())

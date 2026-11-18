@@ -1,60 +1,10 @@
 """The transformers backend: decision checkpoints on PyTorch, on CPU, CUDA or Apple's MPS.
 
-It is the reference runtime, the PyTorch model behind `strands_decider.core.evaluate`: a
-checkpoint's `golden_vectors.jsonl` holds its probabilities, in bf16 on CUDA with
-`reuse_state=False`. It implements the core's `Backend`: given a state's token
-ids, its images with their spans, and each question's ids, it returns each question's final-norm hidden state at its last token
-(`outputs = "hidden"`).
-
-Loading. A decision checkpoint is the base model's own multimodal checkpoint,
-loaded with transformers' class for it: `Gemma4ForConditionalGeneration` for E2B, E4B, 26B-A4B
-and 31B, `Gemma4UnifiedForConditionalGeneration` for the 12B. `readout.safetensors` and
-`decision_config.json` sit beside it, the latter validated by the core's `DecisionConfig`. The
-audio encoder is not built: the core refuses audio, and transformers'
-audio tower has no SDPA path. A checkpoint made before that layout, a bare `Gemma4TextModel`
-whose `decision_config.json` predates `interface` and `inputs`, loads as text only, with a
-warning for each missing field. It names no prompt, so it runs on token ids rendered elsewhere;
-`strands-decider ask` and `serve` refuse it.
-
-The mask. The decoder's layers run `prefix_bidir_attention`, PyTorch's SDPA made
-never causal, and every layer gets the backend's form of the prefix_bidir mask, in a dict keyed
-by layer type. The dict replaces Gemma 4's own mask construction: the causal rule, the sliding
-windows, and the bidirectional image blocks of the larger sizes (`use_bidirectional_attention:
-"vision"`) all go. SDPA applies the mask it is given and no window of its own. The mask is never
-a dense L x L one, which costs L^2 bytes as booleans and more once SDPA has turned it into a
-float mask. A pass over a whole prompt takes the state's length (`StateSplit`): each layer attends
-the state's queries to the state's keys and the question's queries to every key, unmasked. The
-state's own pass takes no mask. A batch of questions over the state's keys and values takes,
-when its questions differ in length, one row of key columns per question, [rows, 1, 1, S +
-width], which PyTorch's memory-efficient kernel on CUDA still expands over the batch's
-queries. An image's placeholders are state tokens like any other.
-
-State reuse. By default a state with several questions is encoded once, its keys
-and values kept for every layer, and the questions then run over them at positions S
-onwards: the state never attends to a question, so its keys and values are the same for every
-question. Questions run in batches (`max_batch`, `max_batch_tokens`), padded on the right,
-each one seeing only the state and itself. A single question, and every question with
-`reuse_state=False`, is one full prompt in one forward pass, the reference.
-tests/test_backend_transformers.py checks that the two agree.
-
-The readout. Rows are float32, which holds a bf16 decoder's values exactly; the
-core's `Readout` does the bf16 GEMM and then the soft-cap and the temperature in float32.
-
-Images. Each file is decoded as v1 decodes it (`vision.decode_image`), its
-decoded size checked against its header (`check_decoded_size`), resized to the size the image
-processor would choose for the decoded, oriented size by the core's bicubic resize
-(`resize_image`: the width's pass, then the height's), and given to the checkpoint's image
-processor with its own resize off. For E2B, E4B, 26B-A4B and 31B that is
-`Gemma4ImageProcessorPil`, whose pixels this reproduces wherever Pillow resizes the width
-first (always before Pillow 13); the 12B's
-`Gemma4UnifiedImageProcessor` has only a torchvision backend, so 12B images need torchvision.
-The processor's soft-token count must equal the core's N. The model runs its vision encoder
-in the pass that holds the state, and each image's N vectors take the place of its
-placeholders; at those positions E2B's and E4B's per-layer embeddings are the pad token's, as
-transformers looks them up.
-
-Devices (`DEVICE_DTYPES`). CPU runs float32: bf16 is 3 to 4 times slower on CPUs without bf16
-instructions. CUDA runs bf16, the reference precision. MPS runs bf16, which works there.
+It is the reference runtime: in bf16 on CUDA with `reuse_state=False`, its probabilities are the
+ones a checkpoint's golden vectors hold. It loads the base's multimodal class without the audio
+tower, runs every decoder layer under the prefix_bidir mask, and returns each question's
+final-norm hidden state at its last token. By default the state is encoded once and the
+questions run over its keys and values.
 """
 
 from __future__ import annotations
@@ -67,299 +17,72 @@ import os
 import threading
 import warnings
 from collections.abc import Iterator, Sequence
-from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, cast
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
 
 from ..core import (
-    CODES,
-    CONTROL_TOKEN_IDS,
-    HIDDEN,
     NO_VISION,
     DecisionConfig,
-    Readout,
     RenderedImage,
     check_decoded_size,
     check_image_processor,
-    load_tokenizer,
     resize_image,
 )
-from ..core.config import FILENAME, IMAGE, TEXT, check_float32_scale
-from ..core.images import (
-    IMAGE_CLOSE,
-    IMAGE_OPEN,
-    IMAGE_SOFT,
-)
-from ..core.readout import MODEL_CONFIG_FILE, READOUT_FILE, load_safetensors
+from ..core.config import IMAGE
 from ..refusals import RequestRefused
 
 if TYPE_CHECKING:
     from PIL import Image
-    from tokenizers import Tokenizer
 
-    from ..core import Backend
-
-# The two layouts a checkpoint may have.
-MULTIMODAL = "multimodal"  # the base's own multimodal checkpoint: the released layout
-DECODER = "decoder"  # a bare Gemma 4 text decoder: the intermediate checkpoints, text only
-ARCHITECTURE = "Gemma4ForConditionalGeneration"
-UNIFIED_ARCHITECTURE = "Gemma4UnifiedForConditionalGeneration"
-MODEL_TYPES = {"gemma4": (MULTIMODAL, False), "gemma4_unified": (MULTIMODAL, True)}
-DECODER_MODEL_TYPES = {"gemma4_text": False, "gemma4_unified_text": True}
-PROCESSOR_FILE = "processor_config.json"
-TOKENIZER_FILE = "tokenizer.json"
-# The image processor every Gemma 4 base names in its processor_config.json, by checkpoint class.
-IMAGE_PROCESSOR_TYPES = {False: "Gemma4ImageProcessor", True: "Gemma4UnifiedImageProcessor"}
-# Gemma 4's media placeholders (the bases' config.json): image, audio and video. A bare
-# decoder's config does not carry them.
-MEDIA_TOKEN_IDS = (258880, 258881, 258884)
-
-# The dtype each device runs in, unless the caller names one. CPU: float32, since bf16 is 3 to
-# 4 times slower on CPUs without bf16 instructions (E2B with an image on 16 EPYC 7R13 cores:
-# 1.8 s against 6.5 s for the state). CUDA: bf16, the reference precision. MPS: bf16. On
-# random-weight models with Gemma 4's head sizes it runs, SDPA with and without boolean masks, and
-# lands as far from float32 on CPU as bf16 on CPU does; float32 on MPS matches float32 on CPU
-# to 1e-3 (measured with torch 2.15.0 on an M4 Pro; tests/test_backend_transformers.py,
-# test_mps_*).
+# The base's multimodal class, by config.json's model_type: the 12B is Gemma4Unified.
+ARCHITECTURES = {
+    "gemma4": "Gemma4ForConditionalGeneration",
+    "gemma4_unified": "Gemma4UnifiedForConditionalGeneration",
+}
+# CPU runs float32: bf16 is 3 to 4 times slower on CPUs without bf16 instructions (E2B with an
+# image on 16 EPYC 7R13 cores: 1.8 s against 6.5 s). CUDA runs bf16, the reference precision.
 DEVICE_DTYPES = {"cpu": torch.float32, "cuda": torch.bfloat16, "mps": torch.bfloat16}
-# The most tokens one question batch may hold: rows x (S + the longest question). Each row
-# carries its own copy of the state's keys and values through every layer, so the budget
-# bounds that copy.
+# The most tokens one question batch may hold, rows x (S + the longest question): each row
+# carries its own copy of the state's keys and values through every layer.
 MAX_BATCH_TOKENS = 65536
-# Taken by every backend on MPS around its device work (re-entrant: `forward` holds it while it
-# calls `prepare_pixels`).
+# Metal aborts the process when two threads use the device at once, so calls on MPS take turns.
 MPS_TURNS = threading.RLock()
+# Told to clients when the image processor can't be built; the reason, which may name local
+# paths, is only logged.
+NO_IMAGE_PROCESSOR = (
+    "this server can't prepare images for this checkpoint, so image requests are refused"
+)
 
 
-def default_dtype(device: str) -> torch.dtype:
-    """The dtype `device` runs in (`DEVICE_DTYPES`)."""
-    kind = torch.device(device).type
-    if kind not in DEVICE_DTYPES:
-        raise ValueError(f"the transformers backend runs on cpu, cuda or mps, not {device!r}")
-    return DEVICE_DTYPES[kind]
-
-
-# ---- the checkpoint -----------------------------------------------------------------------
-
-
-def _read_json(path: str) -> Any:
-    with open(path, encoding="utf-8") as f:
-        return json.load(f)
-
-
-def _layout(model_config: dict[str, Any], where: str) -> tuple[str, bool]:
-    """(layout, unified) from config.json: the base's multimodal class, or a bare decoder."""
-    model_type = model_config.get("model_type")
-    architectures = model_config.get("architectures") or []
-    if model_type in MODEL_TYPES:
-        layout, unified = MODEL_TYPES[model_type]
-        want = UNIFIED_ARCHITECTURE if unified else ARCHITECTURE
-        if architectures != [want]:
-            raise ValueError(
-                f"{where}: config.json has model_type {model_type!r}, so its architectures "
-                f"must be [{want!r}], not {architectures!r}"
-            )
-        return layout, unified
-    if model_type in DECODER_MODEL_TYPES:
-        return DECODER, DECODER_MODEL_TYPES[model_type]
-    raise ValueError(
-        f"{where}: not a Gemma 4 decision checkpoint: config.json has model_type "
-        f"{model_type!r}; this backend loads {sorted(MODEL_TYPES)} (the base's multimodal "
-        f"checkpoint) and {sorted(DECODER_MODEL_TYPES)} (a bare decoder)"
-    )
-
-
-def _text_softcap(model_config: dict[str, Any]) -> Any:
-    for d in (model_config, model_config.get("text_config") or {}):
-        if "final_logit_softcapping" in d:
-            return d["final_logit_softcapping"]
-    return None
-
-
-def _intermediate(
-    dc: dict[str, Any], model_config: dict[str, Any], where: str
-) -> tuple[float, float, list[str]]:
-    """(temperature, soft-cap, warnings) of a decoder checkpoint's decision_config.json made
-    before the schema had `interface`, `inputs`, `prompt` and `provenance`. What the readout
-    needs is checked as strictly as `DecisionConfig` checks it; each missing field is a
-    warning, and the checkpoint takes text only."""
-    notes = [
-        f'{where}: {FILENAME} has no "interface" field: an intermediate checkpoint, read as '
-        "a strands-decider decoder that takes text only"
-    ]
-    for key, want in (
-        ("format_version", 1),
-        ("attention_mode", "prefix_bidir"),
-        ("pooling", "last"),
-    ):
-        value = dc.get(key)
-        if value != want or isinstance(value, bool):
-            raise ValueError(f"{where}: {FILENAME}: {key} must be {want!r}, not {value!r}")
-    if list(dc.get("codes") or []) != list(CODES):
-        raise ValueError(f"{where}: {FILENAME}: codes must be the 255 answer codes, A to IV")
-    ids = dc.get("token_ids")
-    if (
-        not isinstance(ids, list)
-        or len(ids) != len(CODES)
-        or not all(isinstance(i, int) and not isinstance(i, bool) and i >= 0 for i in ids)
-        or len(set(ids)) != len(ids)
-    ):
-        raise ValueError(f"{where}: {FILENAME}: token_ids must be {len(CODES)} distinct ids")
-    temperature = check_float32_scale("temperature", dc.get("temperature"))
-    theirs = _text_softcap(model_config)
-    ours = dc.get("final_logit_softcapping", theirs)
-    if ours is None:
-        raise ValueError(
-            f"{where}: neither {FILENAME} nor config.json has final_logit_softcapping; the "
-            "readout is soft-capped, and is never served without its cap"
-        )
-    if theirs is not None and theirs != ours:
-        raise ValueError(
-            f"{where}: config.json has final_logit_softcapping {theirs!r} and {FILENAME} "
-            f"has {ours!r}; the checkpoint is inconsistent"
-        )
-    softcap = check_float32_scale("final_logit_softcapping", ours)
-    if "inputs" in dc:
-        if dc["inputs"] != [TEXT]:
-            raise ValueError(
-                f"{where}: {FILENAME} inputs are {dc['inputs']!r}, but the checkpoint is a bare "
-                'text decoder with no vision encoder; it takes ["text"]'
-            )
-    else:
-        notes.append(f'{where}: {FILENAME} has no "inputs" field: serving text only')
-    return temperature, softcap, notes
-
-
-@dataclass(frozen=True)
-class Checkpoint:
-    """A decision checkpoint's directory, read and checked, before any weight is loaded.
-
-    `config` is the validated `decision_config.json`, or None for an intermediate checkpoint,
-    which predates the schema; `readout` is `readout.safetensors` with the soft-cap. `inputs`
-    is what the checkpoint takes: `config.inputs`, or ("text",) for a bare decoder."""
-
-    path: str
-    layout: str
-    unified: bool
-    config: DecisionConfig | None
-    readout: Readout
-    temperature: float
-    inputs: tuple[str, ...]
-    model_config: dict[str, Any] = field(repr=False)
-    warnings: tuple[str, ...] = ()
-
-    @classmethod
-    def open(cls, checkpoint: str, *, revision: str | None = None) -> Checkpoint:
-        """From a local directory, or a Hugging Face Hub repo id (downloaded to the Hub cache)."""
-        from ..modeling import checkpoint_dir
-
-        path = checkpoint_dir(checkpoint, revision=revision)
-        model_config = _read_json(os.path.join(path, MODEL_CONFIG_FILE))
-        layout, unified = _layout(model_config, path)
-        dc = _read_json(os.path.join(path, FILENAME))
-        if not isinstance(dc, dict):
-            raise ValueError(f"{path}: {FILENAME} must hold a JSON object")
-        if layout == DECODER and "interface" not in dc:
-            temperature, softcap, notes = _intermediate(dc, model_config, path)
-            weight = load_safetensors(os.path.join(path, READOUT_FILE))
-            if set(weight) != {"weight"} or weight["weight"].shape[0] != len(CODES):
-                raise ValueError(
-                    f"{path}: {READOUT_FILE} must hold one tensor, `weight` [255, hidden]"
-                )
-            return cls(
-                path, layout, unified, None, Readout(weight["weight"], softcap), temperature,
-                (TEXT,), model_config, tuple(notes),
-            )  # fmt: skip
-        config = DecisionConfig.from_dict(dc)
-        if layout == DECODER and IMAGE in config.inputs:
-            raise ValueError(
-                f'{path}: {FILENAME} inputs name "image", but the checkpoint is a bare text '
-                "decoder with no vision encoder; an image checkpoint has the base's multimodal "
-                "layout"
-            )
-        readout = Readout.load(path, config)
-        return cls(
-            path, layout, unified, config, readout, config.temperature, config.inputs, model_config
-        )
-
-    def tokenizer(self) -> Tokenizer:
-        """The checkpoint's tokenizer; for a decision checkpoint checked against the
-        interface's control and code ids (the core's `load_tokenizer`). An intermediate
-        checkpoint's is read as it is: it runs on ids rendered elsewhere."""
-        if self.config is not None:
-            return load_tokenizer(self.path, self.config)
-        from tokenizers import Tokenizer
-
-        return Tokenizer.from_file(os.path.join(self.path, TOKENIZER_FILE))
-
-    def processor_config(self) -> dict[str, Any] | None:
-        p = os.path.join(self.path, PROCESSOR_FILE)
-        return _read_json(p) if os.path.exists(p) else None
-
-
-def image_processor_problem(processor_config: Any, unified: bool) -> str | None:
-    """Why images cannot be served with this `processor_config.json`, or None. The soft-token
-    count N depends on the processor's patch size, pooling kernel and soft-token budget, so a
-    processor with other values would put a different number of vectors where the prompt has
-    N placeholders (`check_image_processor`)."""
-    if not isinstance(processor_config, dict):
-        return f"the checkpoint has no {PROCESSOR_FILE}, so image requests are refused"
-    ip = processor_config.get("image_processor")
-    if not isinstance(ip, dict):
-        return f"{PROCESSOR_FILE} has no image_processor, so image requests are refused"
-    want = IMAGE_PROCESSOR_TYPES[unified]
-    if ip.get("image_processor_type") not in (want, want + "Pil"):
-        return (
-            f"{PROCESSOR_FILE} names image processor {ip.get('image_processor_type')!r}, not "
-            f"{want!r}, so image requests are refused"
-        )
-    try:
-        check_image_processor(processor_config)
-    except ValueError as e:  # its message names the settings, never a path
-        return f"{e}; image requests are refused"
-    return None
-
-
-# ---- pixels -------------------------------------------------------------------------------
-
-
-class ImageRefused(RequestRefused):
-    """An image file the runtime cannot decode: the caller's error, with v1's message."""
+# ---- images --------------------------------------------------------------------------------
 
 
 def decode(image: RenderedImage) -> Image.Image:
-    """The image's file as v1 decodes it (`vision.decode_image`): the first frame, upright by
-    its EXIF orientation, transparent areas on white, RGB. A file that fails is refused with
-    v1's message (`ImageRefused`)."""
-    from ..vision import decode_image
+    """The image's pixels, decoded by v1's decoder so a file gives the same pixels on v1 and
+    v2: the first frame, upright by its EXIF orientation, transparent areas on white, RGB."""
+    from ..images import decode_image
 
     try:
         return decode_image(base64.b64encode(image.data).decode("ascii"))
     except ValueError as e:
-        raise ImageRefused(str(e)) from e
+        raise RequestRefused(str(e)) from e
 
 
 def resize(image: RenderedImage, img: Image.Image) -> Image.Image:
-    """The decoded `img` of `image` resized to the size the processor would choose for the
-    decoded, oriented size (which must be the header's or its transpose: `check_decoded_size`),
-    by the core's bicubic resize (`resize_image`, the width's pass, then the height's, the same
-    on every Pillow)."""
+    """`img` resized with the core's `resize_image` to the size the processor would choose for
+    its decoded, upright size."""
     try:
         width, height = check_decoded_size(image, *img.size)
     except ValueError as e:
-        raise ImageRefused(str(e)) from e
-    resized: Image.Image = resize_image(img, width, height)
-    return resized
-
-
-PROCESSOR_FAILED = "the image processor could not be built, so image requests are refused"
+        raise RequestRefused(str(e)) from e
+    return resize_image(img, width, height)
 
 
 def load_image_processor(path: str, unified: bool) -> Any:
-    """The checkpoint's image processor from its processor_config.json: Gemma 4's PIL backend,
-    or for the 12B its only one, which needs torchvision."""
+    """Gemma 4's PIL image processor, or for the 12B its only one, which needs torchvision."""
     import transformers
 
     if unified:
@@ -371,7 +94,7 @@ def load_image_processor(path: str, unified: bool) -> Any:
     return transformers.Gemma4ImageProcessorPil.from_pretrained(path)
 
 
-# ---- attention ----------------------------------------------------------------------------
+# ---- attention -----------------------------------------------------------------------------
 
 # The name `prefix_bidir_attention` is registered under in transformers' attention functions,
 # and set on the decoder's config at load; the vision encoder keeps transformers' SDPA.
@@ -381,14 +104,14 @@ ATTENTION = "strands_decider_prefix_bidir"
 @dataclass(frozen=True)
 class StateSplit:
     """The prefix_bidir mask of one whole prompt, by its state's length: the first `length`
-    tokens (the state) attend to the state, and the others (the question) to every token."""
+    tokens (the state) attend to the state, and the others (the question) to every token. A dense
+    L x L mask would cost L^2 bytes, and more once SDPA turns it into a float mask."""
 
     length: int
 
     def __getitem__(self, index: Any) -> StateSplit:
-        """The split itself, for an index that keeps every row and column: transformers 5.23
-        indexes each layer's mask so (`[:, :, 0:, :]`) ahead of Gemma 4's KV-shared layers.
-        Any other index is refused, since the split counts token positions from 0."""
+        # transformers 5.23 indexes each layer's mask ([:, :, 0:, :]) ahead of Gemma 4's
+        # KV-shared layers; an index that drops tokens would shift the split, so it's refused.
         whole = slice(None).indices(1 << 62)
         if isinstance(index, tuple) and all(
             isinstance(i, slice) and i.indices(1 << 62) == whole for i in index
@@ -404,13 +127,11 @@ def _sdpa(
     mask: torch.Tensor | None,
     scale: float | None,
 ) -> torch.Tensor:
-    """PyTorch's SDPA, never causal, for queries [rows, heads, n, head_dim] over keys and
-    values [rows, kv heads, keys, head_dim], under a boolean `mask` broadcastable to
-    [rows, heads, n, keys] or none; returns [rows, heads, n, head_dim]. Grouped keys and values
-    go to SDPA as they are only with no mask and head_dim at most 256, on CPU, or on CUDA in
-    bf16 or fp16 (in float32, torch 2.7's CUDA SDPA takes them only in its math kernel, with an
-    n x keys matrix per head); otherwise each is repeated per query head, as transformers' SDPA
-    attention does. MPS always repeats them, which torch 2.7 and 2.15 run alike."""
+    """SDPA, never causal, for queries [rows, heads, n, head_dim] over keys and values [rows,
+    kv heads, keys, head_dim]. Grouped keys go to SDPA as they are only with no mask and
+    head_dim at most 256, on CPU or on CUDA in 16 bits: in float32, torch 2.7's CUDA SDPA takes
+    them only in its math kernel, with an n x keys matrix per head. Otherwise each is repeated
+    per query head, as transformers' SDPA attention does; MPS always repeats them."""
     groups = query.shape[1] // key.shape[1]
     gqa = (
         groups > 1
@@ -435,67 +156,52 @@ def prefix_bidir_attention(
     attention_mask: torch.Tensor | StateSplit | None,
     **kwargs: Any,
 ) -> tuple[torch.Tensor, None]:
-    """A decoder layer's attention, the signature of transformers' attention functions:
-    SDPA (`_sdpa`), never causal, under `attention_mask`. None: every query attends to every
-    key. A boolean tensor: as SDPA applies it. A `StateSplit`: two SDPA calls with no mask,
-    the state's queries over the state's keys, then the question's over every key; when the
-    question is 64k+1 tokens long, the second call also takes the state's last query, and
-    drops its row, so that no call is 64k+1 queries over a longer run of keys (see
-    `_over_state`). Returns [rows, tokens, heads, head_dim] and no attention weights. A soft-cap
-    or a position bias, which no Gemma 4 layer has, is refused."""
-    for name in ("softcap", "position_bias"):
-        if kwargs.get(name) is not None:
-            raise NotImplementedError(f"prefix_bidir_attention takes no {name}")
+    """A decoder layer's attention, in the signature of transformers' attention functions.
+    None: every query attends to every key. A boolean tensor: SDPA applies it. A StateSplit: two
+    unmasked SDPA calls, the state's queries over the state's keys and the question's over every
+    key. Returns [rows, tokens, heads, head_dim] and no attention weights."""
     scale = kwargs.get("scaling")
     if not isinstance(attention_mask, StateSplit):
         return _sdpa(query, key, value, attention_mask, scale).transpose(1, 2).contiguous(), None
     s = attention_mask.length
     rows, heads, n, dim = query.shape
-    if not 0 < s < n or key.shape[2] != n:
-        raise ValueError(
-            f"a StateSplit of {s} tokens is for a whole prompt, longer than its state: "
-            f"{n} queries over {key.shape[2]} keys"
-        )
     out = query.new_empty(rows, n, heads, dim)
     out[:, :s] = _sdpa(query[:, :, :s], key[:, :, :s], value[:, :, :s], None, scale).transpose(1, 2)
+    # torch 2.7's CUDA SDPA gets 64k+1 queries over a longer run of keys wrong with one key/value
+    # head (E2B): such a question also takes the state's last query, whose row is dropped.
     first = s - 1 if (n - s) % 64 == 1 else s
     rest = _sdpa(query[:, :, first:], key, value, None, scale)
     out[:, s:] = rest[:, :, s - first :].transpose(1, 2)
     return out, None
 
 
-def _use_prefix_bidir_attention(model: Any, layout: str) -> None:
+def _use_prefix_bidir_attention(model: Any) -> None:
     """Run the decoder's attention through `prefix_bidir_attention`, and check that every
-    decoder layer does: a model that cannot switch is only warned about, and transformers'
-    SDPA with no mask is causal, so the state would not see its own later tokens."""
+    decoder layer does: transformers' SDPA with no mask is causal, so a layer left on it would
+    keep the state from seeing its own later tokens, with no error."""
     import transformers
 
     transformers.AttentionInterface.register(ATTENTION, prefix_bidir_attention)
-    model.set_attn_implementation(ATTENTION if layout == DECODER else {"text_config": ATTENTION})
+    model.set_attn_implementation({"text_config": ATTENTION})
     layers = [m for m in model.modules() if type(m).__name__.endswith("TextAttention")]
     # transformers' only record of the attention a layer runs is its config's private field.
     got = {m.config._attn_implementation for m in layers}  # noqa: SLF001
     if not layers or got != {ATTENTION}:
         raise RuntimeError(
             f"transformers {transformers.__version__} did not set the decoder's attention to "
-            f"{ATTENTION!r} (its layers run {sorted(map(str, got))}), so the prefix_bidir mask "
-            "cannot be applied"
+            f"{ATTENTION!r} (its layers run {sorted(map(str, got))})"
         )
-
-
-# ---- the state's keys and values ----------------------------------------------------------
 
 
 class StateCache:
     """A state's keys and values, layer by layer, behind the two methods of a transformers
     cache that Gemma 4's decoders call (`update` and `get_seq_length`).
 
-    In the state pass it records each layer's keys and values and returns them as they are.
-    Frozen, it serves question passes: `update` returns the state's keys and values, repeated
-    across the batch, followed by the questions', and stores nothing, so one state serves any
-    number of question batches. The KV-shared layers of E2B and E4B call nothing: they reuse
-    the keys and values that the last layer of their type got from `update`, state and
-    question both."""
+    In the state's pass it records each layer's keys and values. Frozen, it serves question
+    passes: `update` returns the state's keys and values, repeated across the batch, followed by
+    the questions', and stores nothing, so one state serves any number of question batches.
+    E2B's and E4B's KV-shared layers call nothing: they reuse what the last layer of their type
+    got from `update`."""
 
     def __init__(self) -> None:
         self.layers: dict[int, tuple[torch.Tensor, torch.Tensor]] = {}
@@ -525,13 +231,13 @@ class StateCache:
         self.length, self.frozen = length, True
 
 
-# ---- the backend --------------------------------------------------------------------------
+# ---- loading -------------------------------------------------------------------------------
 
 
 @contextlib.contextmanager
 def _quiet_loading() -> Iterator[None]:
-    """transformers' load report lists every tensor it does not use, the audio tower's
-    hundreds included; the backend checks the loading info itself."""
+    """transformers' load report lists every tensor it doesn't use, the audio tower's hundreds
+    included; `_load_model` checks the loading info itself."""
     from transformers.utils import logging as hf_logging
 
     level = hf_logging.get_verbosity()
@@ -542,98 +248,49 @@ def _quiet_loading() -> Iterator[None]:
         hf_logging.set_verbosity(level)
 
 
-# Tensors the backend does not build, and so does not read: the audio encoder and its
-# projection always, the vision encoder and its projection for a text-only load.
+# Tensors the backend doesn't build: the audio encoder always, the vision encoder without images.
 _AUDIO_PREFIXES = ("model.audio_tower.", "model.embed_audio.")
 _VISION_PREFIXES = ("model.vision_tower.", "model.vision_embedder.", "model.embed_vision.")
 
 
-def _load_model(ckpt: Checkpoint, dtype: torch.dtype, *, vision: bool) -> torch.nn.Module:
+def _load_model(path: str, architecture: str, dtype: torch.dtype, *, vision: bool) -> Any:
     import transformers
 
-    if ckpt.layout == DECODER:
-        with _quiet_loading():
-            loaded = transformers.AutoModel.from_pretrained(
-                ckpt.path, dtype=dtype, attn_implementation="sdpa", output_loading_info=True
-            )
-        expected: tuple[str, ...] = ()
-    else:
-        conf = transformers.AutoConfig.from_pretrained(ckpt.path)
-        conf.audio_config = None
-        if not vision:
-            conf.vision_config = None
-        # Made redundant by prefix_bidir, and bypassed by the mask dict in any case.
-        conf.get_text_config().use_bidirectional_attention = None
-        cls = getattr(transformers, UNIFIED_ARCHITECTURE if ckpt.unified else ARCHITECTURE, None)
-        if cls is None:
-            raise RuntimeError(
-                f"transformers {transformers.__version__} has no "
-                f"{UNIFIED_ARCHITECTURE if ckpt.unified else ARCHITECTURE}; upgrade it"
-            )
-        with _quiet_loading():
-            loaded = cls.from_pretrained(
-                ckpt.path,
-                config=conf,
-                dtype=dtype,
-                attn_implementation="sdpa",
-                output_loading_info=True,
-            )
-        expected = _AUDIO_PREFIXES + (() if vision else _VISION_PREFIXES)
-    model, info = loaded
-    _use_prefix_bidir_attention(model, ckpt.layout)
-    missing = sorted(info.get("missing_keys") or [])
-    if missing:
-        raise ValueError(
-            f"{ckpt.path}: the checkpoint lacks {len(missing)} of the model's tensors, such as "
-            f"{missing[:3]}"
+    conf = transformers.AutoConfig.from_pretrained(path)
+    conf.audio_config = None  # the core refuses audio, and the audio tower has no SDPA path
+    if not vision:
+        conf.vision_config = None
+    # Gemma 4's bidirectional image blocks are replaced by the prefix_bidir mask in any case.
+    conf.get_text_config().use_bidirectional_attention = None
+    with _quiet_loading():
+        model, info = getattr(transformers, architecture).from_pretrained(
+            path, config=conf, dtype=dtype, attn_implementation="sdpa", output_loading_info=True
         )
-    unexpected = sorted(k for k in info.get("unexpected_keys") or [] if not k.startswith(expected))
+    _use_prefix_bidir_attention(model)
+    missing = sorted(info.get("missing_keys") or [])
+    if missing:  # transformers would initialise them at random
+        raise ValueError(
+            f"{path}: the checkpoint lacks {len(missing)} tensors, such as {missing[:3]}"
+        )
+    skipped = _AUDIO_PREFIXES + (() if vision else _VISION_PREFIXES)
+    unexpected = sorted(k for k in info.get("unexpected_keys") or [] if not k.startswith(skipped))
     if unexpected:
         warnings.warn(
-            f"{ckpt.path}: {len(unexpected)} tensors the model does not use, such as "
-            f"{unexpected[:3]}",
-            stacklevel=3,
+            f"{path}: {len(unexpected)} unused tensors, such as {unexpected[:3]}", stacklevel=3
         )
-    return cast("torch.nn.Module", model)
+    return model
 
 
-def _check_readout_width(ckpt: Checkpoint) -> None:
-    """The readout must have one row per code and the decoder's hidden size, read from
-    config.json (`text_config.hidden_size`, or the top level for a bare decoder)."""
-    cfg = ckpt.model_config
-    hidden = (cfg.get("text_config") or cfg).get("hidden_size")
-    if not isinstance(hidden, int) or isinstance(hidden, bool) or hidden < 1:
-        raise ValueError(f"{ckpt.path}: config.json gives no hidden_size for the decoder")
-    weight = ckpt.readout.weight
-    shape = None if weight is None else tuple(weight.shape)
-    if shape != (len(CODES), hidden):
-        raise ValueError(
-            f"{ckpt.path}: readout.safetensors `weight` is {shape}, not "
-            f"[{len(CODES)}, {hidden}]: the decoder's hidden size"
-        )
-
-
-def _ids(name: str, seq: Sequence[int], vocab: int) -> list[int]:
-    ids = [int(t) for t in seq]
-    if not ids:
-        raise ValueError(f"{name} has no tokens")
-    bad = [t for t in ids if not 0 <= t < vocab]
-    if bad:
-        raise ValueError(f"{name} holds token ids outside the vocabulary of {vocab}: {bad[:3]}")
-    return ids
+# ---- the backend ---------------------------------------------------------------------------
 
 
 class TransformersBackend:
-    """`strands_decider.core.Backend` on a transformers Gemma 4 model (see the module
-    docstring). Build one with `load`. `forward` may be called from several threads at once;
-    on MPS, where two threads on the device abort the process, calls take turns."""
-
-    outputs = HIDDEN
+    """`strands_decider.core.Backend` on a transformers Gemma 4 model. Build one with `load`.
+    `forward` may be called from several threads at once; on MPS calls take turns."""
 
     def __init__(
         self,
-        model: torch.nn.Module,
-        checkpoint: Checkpoint,
+        model: Any,
         *,
         device: str,
         dtype: torch.dtype,
@@ -641,109 +298,62 @@ class TransformersBackend:
         image_problem: str | None = None,
         reuse_state: bool = True,
         max_batch: int = 32,
-        max_batch_tokens: int | None = MAX_BATCH_TOKENS,
+        max_batch_tokens: int = MAX_BATCH_TOKENS,
     ):
-        if max_batch < 1 or (max_batch_tokens is not None and max_batch_tokens < 1):
-            raise ValueError("max_batch and max_batch_tokens must be positive")
         self.model = model
-        self.checkpoint = checkpoint
+        self.decoder: Any = (
+            model.model
+        )  # Gemma4Model or Gemma4UnifiedModel, with the vision encoder
         self.device = device
         self.dtype = dtype
+        self.image_processor = image_processor
+        self.image_problem = image_problem if image_processor is None else None
         self.reuse_state = reuse_state
         self.max_batch = max_batch
         self.max_batch_tokens = max_batch_tokens
-        # Metal aborts the process when two threads use the device at once, whichever backend
-        # they run: one lock for every backend on MPS.
+        text = self.decoder.config.get_text_config()
+        self.layer_types = sorted(set(text.layer_types))
+        self.pad_id = int(text.pad_token_id or 0)
         self._turns: contextlib.AbstractContextManager[Any] = (
             MPS_TURNS if torch.device(device).type == "mps" else contextlib.nullcontext()
-        )
-        # The decoder, with the vision encoder where there is one: Gemma4Model or
-        # Gemma4UnifiedModel inside the multimodal class, or the bare Gemma4TextModel.
-        self.decoder: Any = model if checkpoint.layout == DECODER else cast(Any, model).model
-        cfg: Any = self.decoder.config
-        text: Any = cfg.get_text_config()
-        self.layer_types = sorted(set(text.layer_types))
-        self.vocab_size = int(text.vocab_size)
-        self.pad_id = int(text.pad_token_id or 0)
-        self.hidden_size = int(text.hidden_size)
-        weight = checkpoint.readout.weight
-        if weight is None or weight.shape != (len(CODES), self.hidden_size):
-            shape = None if weight is None else weight.shape
-            raise ValueError(
-                f"{checkpoint.path}: readout.safetensors `weight` is {shape}, not "
-                f"[{len(CODES)}, {self.hidden_size}]: the decoder's hidden size"
-            )
-        if checkpoint.layout == MULTIMODAL:
-            self.media_ids = frozenset(
-                int(i) for i in (cfg.image_token_id, cfg.audio_token_id, cfg.video_token_id)
-            )
-            self.image_ids = (int(cfg.boi_token_id), int(cfg.image_token_id), int(cfg.eoi_token_id))
-        else:
-            self.media_ids = frozenset(MEDIA_TOKEN_IDS)
-            self.image_ids = (-1, MEDIA_TOKEN_IDS[0], -1)
-        has_vision = getattr(self.decoder, "embed_vision", None) is not None
-        self.image_processor = image_processor if has_vision else None
-        # Why image requests are refused, None when the backend has an image path; the
-        # decision engine refuses them with it before their files are read.
-        self.image_problem = (
-            None if self.image_processor is not None else (image_problem or NO_VISION)
         )
 
     @classmethod
     def load(
         cls,
-        checkpoint: str | Checkpoint,
+        path: str,
         *,
         device: str = "cpu",
         dtype: torch.dtype | None = None,
-        images: bool = True,
         reuse_state: bool = True,
         max_batch: int = 32,
-        max_batch_tokens: int | None = MAX_BATCH_TOKENS,
-        revision: str | None = None,
+        max_batch_tokens: int = MAX_BATCH_TOKENS,
     ) -> TransformersBackend:
-        """Load `checkpoint` (a directory, a Hub repo id, or an opened `Checkpoint`) onto
-        `device`, in `dtype` (`DEVICE_DTYPES[device]` when None). The vision encoder is built
-        when the checkpoint takes images and `images` is true; a checkpoint whose image
-        processor or tokenizer the core's checks refuse loads without it, and its image requests
-        are refused with the reason (`image_problem`)."""
-        ckpt = (
-            checkpoint
-            if isinstance(checkpoint, Checkpoint)
-            else Checkpoint.open(checkpoint, revision=revision)
-        )
-        for note in ckpt.warnings:
-            warnings.warn(note, stacklevel=2)
-        _check_readout_width(ckpt)  # before the weights, which may be tens of GB
-        default = default_dtype(device)  # checks the device
-        dtype = dtype or default
-        if dtype not in (torch.float32, torch.bfloat16):
-            raise ValueError(f"the transformers backend runs float32 or bfloat16, not {dtype}")
+        """The decision checkpoint in directory `path` on `device`, in `dtype` (the device's
+        own by default). The vision encoder is built when the checkpoint takes images and its
+        image processor can be built; otherwise image requests are refused (`image_problem`)."""
+        kind = torch.device(device).type
+        if kind not in DEVICE_DTYPES:
+            raise ValueError(f"the transformers backend runs on cpu, cuda or mps, not {device!r}")
+        with open(os.path.join(path, "config.json"), encoding="utf-8") as f:
+            model_type = json.load(f).get("model_type")
+        if model_type not in ARCHITECTURES:
+            raise ValueError(
+                f"{path}: not a Gemma 4 decision checkpoint (model_type {model_type!r})"
+            )
         processor, problem = None, None
-        if images and IMAGE in ckpt.inputs:
-            problem = image_processor_problem(ckpt.processor_config(), ckpt.unified)
-            if problem is None:
-                problem = _image_ids_problem(ckpt)
-            if problem is None:
-                try:
-                    processor = load_image_processor(ckpt.path, ckpt.unified)
-                except (ImportError, AttributeError, OSError, ValueError) as e:
-                    # A transformers without the class, or an unreadable processor config. The
-                    # reason clients get is fixed; the error, which may name local paths, is
-                    # only logged.
-                    problem = PROCESSOR_FAILED
-                    warnings.warn(
-                        f"{ckpt.path}: the image processor could not be built: "
-                        f"{type(e).__name__}: {e}",
-                        stacklevel=2,
-                    )
-            if problem is not None and problem != PROCESSOR_FAILED:
-                warnings.warn(f"{ckpt.path}: {problem}", stacklevel=2)
-        model = _load_model(ckpt, dtype, vision=processor is not None)
+        if IMAGE in DecisionConfig.load(path).inputs:
+            try:
+                check_image_processor(path)
+                processor = load_image_processor(path, model_type == "gemma4_unified")
+            except (ImportError, OSError, ValueError) as e:
+                warnings.warn(f"{path}: image requests are refused: {e}", stacklevel=2)
+                problem = NO_IMAGE_PROCESSOR
+        dtype = dtype or DEVICE_DTYPES[kind]
+        model = _load_model(path, ARCHITECTURES[model_type], dtype, vision=processor is not None)
         model.to(device).eval()
         return cls(
             model,
-            ckpt,
             device=device,
             dtype=dtype,
             image_processor=processor,
@@ -754,24 +364,17 @@ class TransformersBackend:
         )
 
     def describe(self) -> dict[str, Any]:
-        """What the backend runs, for logs and health checks."""
         return {
             "backend": "transformers",
             "device": self.device,
             "dtype": str(self.dtype).removeprefix("torch."),
-            "layout": self.checkpoint.layout,
             "reuse_state": self.reuse_state,
         }
 
-    # ---- images -------------------------------------------------------------------------
-
     def prepare_pixels(self, images: Sequence[RenderedImage]) -> dict[str, torch.Tensor]:
-        """The vision encoder's inputs for `images`, on the device: each file decoded as v1
-        decodes it, its decoded size checked against its header, resized by `resize` here (the
-        core's bicubic `resize_image`), then through the checkpoint's image processor with its
-        own resize off. Checks that the processor counts each image's N. The model runs its
-        encoder on them in the pass that holds the state, and puts each image's N vectors at its
-        placeholders, in order."""
+        """The vision encoder's inputs: each file decoded, resized by the core's `resize_image`,
+        then through the image processor with its own resize off, so every backend feeds the
+        encoder the same pixels. The model puts each image's N vectors at its placeholders."""
         if self.image_processor is None:
             raise ValueError(self.image_problem or NO_VISION)
         pixels = [resize(im, decode(im)) for im in images]
@@ -788,39 +391,6 @@ class TransformersBackend:
                 "image_position_ids": out["image_position_ids"].to(self.device),
             }
 
-    # ---- the decoder ---------------------------------------------------------------------
-
-    def _check_media(
-        self, state: list[int], questions: list[list[int]], images: Sequence[RenderedImage]
-    ) -> None:
-        """Placeholders only where the images' spans say, and none in a question: the model
-        puts the encoder's vectors wherever it finds the image token, in order."""
-        boi, soft, eoi = self.image_ids
-        expected: list[int] = []
-        prev = 0
-        for i, im in enumerate(images):
-            start, end = im.start, im.end
-            if (
-                not (prev < start and end < len(state))
-                or state[start - 1] != boi
-                or state[end] != eoi
-            ):
-                raise ValueError(
-                    f"image {i}: its span [{start}, {end}) is not between <|image> and <image|> "
-                    "in the state, after the previous image"
-                )
-            expected += range(start, end)
-            prev = end + 1
-        found = [j for j, t in enumerate(state) if t in self.media_ids]
-        if found != expected or any(state[j] != soft for j in found):
-            raise ValueError(
-                "the state's media placeholders are not exactly its images' spans: "
-                f"{len(found)} placeholders for {len(expected)} image tokens"
-            )
-        for i, q in enumerate(questions):
-            if any(t in self.media_ids for t in q):
-                raise ValueError(f"question {i} holds a media placeholder; images go in the state")
-
     def _decode(
         self,
         ids: torch.Tensor,
@@ -829,12 +399,9 @@ class TransformersBackend:
         cache: StateCache | None = None,
         pixels: dict[str, torch.Tensor] | None = None,
     ) -> torch.Tensor:
-        """The final-norm hidden states of `ids` [rows, n], every layer under `mask`, which
-        `prefix_bidir_attention` applies (None: every token sees every token, the cached ones
-        included; or a boolean mask broadcastable to [rows, 1, n, cached + n]; or a
-        `StateSplit`), at `positions` [rows, n]. `pixels` (`prepare_pixels`) go to the pass
-        whose ids hold the images' placeholders."""
-        extra = pixels or {}
+        """The final-norm hidden states of `ids` [rows, n] at `positions`, every layer under
+        `mask`. The mask dict replaces Gemma 4's own mask construction: its causal rule, its
+        sliding windows and its bidirectional image blocks all go."""
         out = self.decoder(
             input_ids=ids,
             attention_mask={t: mask for t in self.layer_types},
@@ -842,7 +409,7 @@ class TransformersBackend:
             past_key_values=cache,
             use_cache=cache is not None,
             return_dict=True,
-            **extra,
+            **(pixels or {}),
         )
         hidden: torch.Tensor = out.last_hidden_state
         return hidden
@@ -850,24 +417,20 @@ class TransformersBackend:
     def _full_pass(
         self, state: list[int], question: list[int], pixels: dict[str, torch.Tensor] | None
     ) -> torch.Tensor:
-        """One prompt, one forward pass under prefix_bidir: the reference."""
-        n = len(state) + len(question)
+        """One prompt in one forward pass under prefix_bidir: the reference."""
         ids = torch.tensor([state + question], device=self.device)
-        positions = torch.arange(n, device=self.device).view(1, -1)
+        positions = torch.arange(ids.shape[1], device=self.device).view(1, -1)
         return self._decode(ids, StateSplit(len(state)), positions, None, pixels)[0, -1]
 
     def _batches(self, s: int, questions: list[list[int]]) -> list[list[int]]:
-        """Consecutive runs of question indices: at most `max_batch` rows, and rows x (S + the
+        """Runs of consecutive question indices: at most `max_batch` rows, and rows x (S + the
         longest question) at most `max_batch_tokens`, one question at least."""
         out: list[list[int]] = []
         cur: list[int] = []
         width = 0
         for i, q in enumerate(questions):
             w = max(width, len(q))
-            full = len(cur) >= self.max_batch or (
-                self.max_batch_tokens is not None
-                and (len(cur) + 1) * (s + w) > self.max_batch_tokens
-            )
+            full = len(cur) >= self.max_batch or (len(cur) + 1) * (s + w) > self.max_batch_tokens
             if cur and full:
                 out.append(cur)
                 cur, w = [], len(q)
@@ -879,34 +442,29 @@ class TransformersBackend:
     def _over_state(
         self, state: list[int], questions: list[list[int]], pixels: dict[str, torch.Tensor] | None
     ) -> list[torch.Tensor]:
-        """The state once, then the questions in batches over its keys and values."""
+        """The state once, then the questions in batches over its keys and values. The state
+        never attends to a question, so its keys and values are the same for every question."""
         s = len(state)
         cache = StateCache()
         ids = torch.tensor([state], device=self.device)
-        # The state sees the state, all of it: no mask.
         self._decode(ids, None, torch.arange(s, device=self.device).view(1, -1), cache, pixels)
         cache.freeze(s)
         rows: list[torch.Tensor] = [torch.empty(0)] * len(questions)
         for batch in self._batches(s, questions):
             qs = [questions[i] for i in batch]
             width = max(len(q) for q in qs)
-            if width % 64 == 1:
-                # torch 2.7's CUDA SDPA got such passes wrong for one key/value head (E2B).
-                # One more masked column of padding sidesteps it on any version, at no cost
-                # to the answers.
+            if width % 64 == 1:  # torch 2.7's CUDA SDPA bug (prefix_bidir_attention): pad by one
                 width += 1
             ids = torch.full((len(qs), width), self.pad_id, dtype=torch.long)
             for r, q in enumerate(qs):
                 ids[r, : len(q)] = torch.tensor(q)
-            # Each row sees the state and its own question, never the padding after it; padding
-            # rows see the same, so no row is fully masked. One row of key columns per question,
-            # for all its queries; no mask when no row has padding.
+            # Each row sees the state and its own question, never the padding after it: one row
+            # of key columns per question, [rows, 1, 1, S + width]; no mask without padding.
             mask: torch.Tensor | None = None
             if any(len(q) < width for q in qs):
                 lengths = torch.tensor([len(q) for q in qs], device=self.device)
                 cols = torch.arange(s + width, device=self.device)
-                keep = cols.view(1, -1) < (s + lengths).view(-1, 1)
-                mask = keep[:, None, None, :]  # [rows, 1, 1, S + width]
+                mask = (cols.view(1, -1) < (s + lengths).view(-1, 1))[:, None, None, :]
             positions = (torch.arange(width, device=self.device) + s).expand(len(qs), -1)
             hidden = self._decode(ids.to(self.device), mask, positions, cache)
             for r, i in enumerate(batch):
@@ -914,33 +472,19 @@ class TransformersBackend:
         return rows
 
     def forward(
-        self,
-        state: list[int],
-        questions: list[list[int]],
-        images: Sequence[RenderedImage] = (),
+        self, state: list[int], questions: list[list[int]], images: Sequence[RenderedImage] = ()
     ) -> np.ndarray:
-        """Each question run after the shared state under prefix_bidir, seeing no other
-        question; returns the final-norm hidden state at each question's last token, float32,
-        [len(questions), hidden]. `images` are the state's, in order, with their spans."""
-        state = _ids("the state", state, self.vocab_size)
-        if not questions:
-            raise ValueError("forward needs at least one question")
-        qs = [_ids(f"question {i}", q, self.vocab_size) for i, q in enumerate(questions)]
-        images = tuple(images)
-        if images and self.image_processor is None:
-            raise ValueError(self.image_problem or NO_VISION)
-        self._check_media(state, qs, images)
+        """Each question after the shared state under prefix_bidir, seeing no other question:
+        the final-norm hidden state at each question's last token, float32, [questions, hidden]."""
         # Decoded and resized on the CPU first; only the copy to the device takes turns on MPS.
-        # The reference reruns the vision encoder in each prompt's pass, as one prompt per pass
-        # does; with the state reused it runs once, in the state's pass.
         pixels = self.prepare_pixels(images) if images else None
         with self._turns, torch.inference_mode():
-            # One question gains nothing from a shared state and would pay a second pass (as
-            # v1's engine measured; here E2B on an H100 took 324 ms against 174 ms).
-            if self.reuse_state and len(qs) > 1:
-                rows = self._over_state(state, qs, pixels)
+            # One question gains nothing from a shared state and would pay a second pass (E2B on
+            # an H100: 324 ms against 174 ms).
+            if self.reuse_state and len(questions) > 1:
+                rows = self._over_state(state, questions, pixels)
             else:
-                rows = [self._full_pass(state, q, pixels) for q in qs]
+                rows = [self._full_pass(state, q, pixels) for q in questions]
             out: np.ndarray = torch.stack(rows).float().cpu().numpy()
         return out
 
@@ -954,10 +498,7 @@ def load_backend(
     max_batch: int = 32,
     max_batch_tokens: int | None = None,
 ) -> TransformersBackend:
-    """The loader `strands_decider.decision.BACKENDS` names for cpu, cuda and mps: `dtype` is
-    one of `load_backend.dtypes`, or None for the device's own."""
-    if dtype is not None and dtype not in DTYPES:
-        raise ValueError(f"the transformers backend runs {' or '.join(DTYPES)}, not {dtype!r}")
+    """The loader `strands_decider.decision.BACKENDS` names for cpu, cuda and mps."""
     return TransformersBackend.load(
         path,
         device=device,
@@ -966,49 +507,3 @@ def load_backend(
         max_batch=max_batch,
         max_batch_tokens=max_batch_tokens or MAX_BATCH_TOKENS,
     )
-
-
-# The dtypes a caller may name (`--dtype`), checked before anything is loaded.
-DTYPES = ("float32", "bfloat16")
-load_backend.dtypes = DTYPES  # type: ignore[attr-defined]
-
-
-def _image_ids_problem(ckpt: Checkpoint) -> str | None:
-    """Why config.json's image token ids are not the interface's, or None: the model replaces
-    the ids config.json names, and the prompt's placeholders are the interface's
-    (`CONTROL_TOKEN_IDS`, which the checkpoint's tokenizer is held to by `load_tokenizer`)."""
-    cfg = ckpt.model_config
-    for name, key in (
-        (IMAGE_OPEN, "boi_token_id"),
-        (IMAGE_SOFT, "image_token_id"),
-        (IMAGE_CLOSE, "eoi_token_id"),
-    ):
-        if cfg.get(key) != CONTROL_TOKEN_IDS[name]:
-            return (
-                f"config.json's {key} is {cfg.get(key)}, not the interface's id for {name}, "
-                f"{CONTROL_TOKEN_IDS[name]}, so image requests are refused"
-            )
-    return None
-
-
-if TYPE_CHECKING:
-
-    def _implements_the_core_protocol(backend: TransformersBackend) -> Backend:
-        return backend  # mypy checks TransformersBackend against the core's Backend
-
-
-__all__ = [
-    "DECODER",
-    "DEVICE_DTYPES",
-    "MULTIMODAL",
-    "Checkpoint",
-    "ImageRefused",
-    "StateCache",
-    "TransformersBackend",
-    "decode",
-    "default_dtype",
-    "image_processor_problem",
-    "load_backend",
-    "load_image_processor",
-    "resize",
-]

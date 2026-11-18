@@ -13,21 +13,21 @@ import threading
 import time
 import warnings
 from collections.abc import AsyncIterator, Callable
-from typing import Annotated, Any
+from typing import Any
 
 import anyio
-from fastapi import Body, Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
+from pydantic import ValidationError
 
 from . import __version__
+from .core import Request as DecisionRequest
 from .decision import (
     DECISION,
     INTERMEDIATE,
     DecisionEngine,
     EngineBusy,
-    check_device,
-    check_dtype,
-    check_max_length,
+    check_options,
     checkpoint_kind,
     load_decision_engine,
     refuse_intermediate,
@@ -93,6 +93,10 @@ def _warm_up_image(engine: SystemOneEngine, state: str, question: Question) -> N
     engine.evaluate(SystemOneRequest(state=state, questions={"q": question}, images=[image]))
 
 
+# Either kind of engine: v1's, or a decision checkpoint's.
+Engine = SystemOneEngine | DecisionEngine
+
+
 def create_app(
     checkpoint: str,
     *,
@@ -125,14 +129,7 @@ def create_app(
             raise ValueError(
                 "--device-map is for v1 checkpoints; a decision checkpoint runs on one device"
             )
-        check_device(device)
-        check_dtype(device, dtype)  # imports the device's backend: its import errors show here
-        if queue_timeout is not None and queue_timeout <= 0:
-            raise ValueError("--queue-timeout must be positive")
-        try:
-            check_max_length(max_length)
-        except ValueError:
-            raise ValueError("--max-length must be at least 1") from None
+        check_options(device, dtype)
         if vision:
             warnings.warn(
                 "--vision is for v1 checkpoints: a decision checkpoint takes images when its "
@@ -173,7 +170,7 @@ def create_app(
         max_batch_tokens=max_batch_tokens,
     )
 
-    def _default_build_engine() -> SystemOneEngine | DecisionEngine:
+    def _default_build_engine() -> Engine:
         if decision:
             # Images follow the checkpoint's decision_config.json `inputs`, not --vision;
             # --no-prefix-cache runs each question as one full prompt (the reference).
@@ -216,13 +213,6 @@ def create_app(
         if max_concurrency and not isinstance(engine, DecisionEngine):
             app.state.limiter = anyio.CapacityLimiter(max_concurrency)
         try:
-            if isinstance(engine, DecisionEngine) and not decision:
-                # The routes below were chosen for v1's request model, which would drop `audio`
-                # and require a `state`: a decision engine is served from its checkpoint's path.
-                raise TypeError(
-                    "build_engine gave a DecisionEngine, but the server takes v1's requests: "
-                    "serve a decision checkpoint by its path, without build_engine"
-                )
             # Listener binds only after lifespan startup returns, so /health (/ping)
             # fails until this is done.
             if warmup:
@@ -250,8 +240,8 @@ def create_app(
     guard = engine_lock if _needs_serialisation(device) else contextlib.nullcontext()
 
     # async, like /ping below: FastAPI runs a sync dependency in the worker thread pool too.
-    async def get_engine(request: Request) -> SystemOneEngine:
-        engine: SystemOneEngine = request.app.state.engine
+    async def get_engine(request: Request) -> Engine:
+        engine: Engine = request.app.state.engine
         return engine
 
     # SageMaker and AgentCore Runtime call /ping and /invocations; each is the same
@@ -260,7 +250,7 @@ def create_app(
     # health check 2 s.
     @app.get("/health")
     @app.get("/ping")
-    async def health(eng: SystemOneEngine = Depends(get_engine)) -> dict:
+    async def health(eng: Engine = Depends(get_engine)) -> dict:
         if isinstance(eng, DecisionEngine):
             return {"status": "ok", "checkpoint": checkpoint, **eng.describe()}
         return {
@@ -275,7 +265,7 @@ def create_app(
             "vision": vision,
         }
 
-    def evaluate(eng: SystemOneEngine, request: Any) -> SystemOneResponse:
+    def evaluate(eng: Engine, request: Any) -> SystemOneResponse:
         # A decision engine bounds its own concurrency and its backend takes turns on MPS, so
         # its refusals never wait behind the server's lock.
         lock = contextlib.nullcontext() if isinstance(eng, DecisionEngine) else guard
@@ -285,7 +275,7 @@ def create_app(
     # The engine runs in a worker thread. With --max-concurrency N, at most N requests run at
     # once: for a v1 engine the rest wait on the event loop, holding no thread and no GPU
     # memory; a decision engine queues them for at most --queue-timeout.
-    async def answer(eng: SystemOneEngine, request: Any, http: Request) -> JSONResponse:
+    async def answer(eng: Engine, request: Any, http: Request) -> JSONResponse:
         started = time.perf_counter()
         try:
             response = await anyio.to_thread.run_sync(
@@ -302,22 +292,27 @@ def create_app(
         return JSONResponse(content=payload)
 
     if decision:
-        # A decision engine takes the JSON the client sent and checks it with the core
-        # (`parse_request`). v1's request model would drop `audio`, which the core refuses, and
-        # require a `state`, which the core does not.
+        # The body goes to the core's request model, parsed by pydantic's JSON parser: v1's
+        # model would drop `audio`, which the core refuses, and require a `state`.
         @app.post("/v1/systemone", response_model=SystemOneResponse)
         @app.post("/invocations", response_model=SystemOneResponse)
         async def systemone_decision(
-            body: Annotated[Any, Body()], http: Request, eng: SystemOneEngine = Depends(get_engine)
+            http: Request, eng: Engine = Depends(get_engine)
         ) -> JSONResponse:
-            return await answer(eng, body, http)
+            try:
+                request = DecisionRequest.model_validate_json(await http.body())
+            except ValidationError as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
+            return await answer(eng, request, http)
 
     else:
 
         @app.post("/v1/systemone", response_model=SystemOneResponse)
         @app.post("/invocations", response_model=SystemOneResponse)
         async def systemone(
-            request: SystemOneRequest, http: Request, eng: SystemOneEngine = Depends(get_engine)
+            request: SystemOneRequest,
+            http: Request,
+            eng: Engine = Depends(get_engine),
         ) -> JSONResponse:
             return await answer(eng, request, http)
 

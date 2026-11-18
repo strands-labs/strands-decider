@@ -4,12 +4,10 @@
 multimodal class saved by transformers (`Gemma4ForConditionalGeneration`, or
 `Gemma4UnifiedForConditionalGeneration` for the 12B's encoder-free design) in bf16,
 `processor_config.json`, a word-level tokenizer with Gemma 4's control tokens and codes at
-their ids (`tokenizer()`, so that the core's `check_tokenizer` holds), `readout.safetensors`
-and `decision_config.json`, whose `token_ids` are therefore Gemma 4's. The decoder has a sliding window of 2, shorter than any prompt
-here, so a runtime that kept the window would answer differently; the Gemma 4 variant has
-E2B's KV-shared layers and per-layer embeddings. `intermediate_checkpoint` writes the layout
-the intermediate checkpoints have: a bare `Gemma4TextModel` and a decision_config.json from
-before `interface`, `inputs`, `prompt` and `provenance`.
+their ids (`tokenizer()`, so that the core's `prepare_tokenizer` accepts it),
+`readout.safetensors` and `decision_config.json`. The decoder has a sliding window of 2, shorter
+than any prompt here, so a runtime that kept the window would answer differently; the Gemma 4
+variant has E2B's KV-shared layers and per-layer embeddings.
 """
 
 from __future__ import annotations
@@ -50,10 +48,9 @@ PROCESSOR_TYPES = {
 
 
 def tokenizer():
-    """The toy tokenizer of tests/core_support.py, with Gemma 4's ids where the interface
-    fixes them, so that a checkpoint's tokenizer passes the core's `check_tokenizer`: the
-    control tokens at `CONTROL_TOKEN_IDS`, `<eos>` at 1, and each code at its id in
-    `CODE_TOKEN_IDS`. The other words take the free ids from 0 up."""
+    """A word-level tokenizer with Gemma 4's ids where the interface fixes them: the control
+    tokens at `CONTROL_TOKEN_IDS`, `<eos>` at 1, and each code at its id in `CODE_TOKEN_IDS`.
+    The other words take the free ids from 0 up."""
     from tokenizers import AddedToken, Regex, Tokenizer, models, pre_tokenizers
 
     words = ["<unk>", "\n", " ", ".", "<", ">", "/", '"', "=", "—", "answer", "model", "user"]
@@ -222,31 +219,6 @@ def decision_checkpoint(
         json.dumps(decision_config(kind, tok, **(decision or {})))
     )
     _readout(path, (text or {}).get("hidden_size", HIDDEN), seed)
-    return path
-
-
-def intermediate_checkpoint(path: Path, *, seed: int = 0, decision: dict | None = None) -> Path:
-    """A bare Gemma4TextModel with a decision_config.json from before the interface field."""
-    tok = tokenizer()
-    torch.manual_seed(seed)
-    model = transformers.Gemma4TextModel(gemma4_text_config(vocab_size(tok)))
-    path.mkdir(parents=True, exist_ok=True)
-    model.to(torch.bfloat16).save_pretrained(str(path))
-    tok.save(str(path / "tokenizer.json"))
-    dc = {
-        "format_version": 1,
-        "base_model": BASE[GEMMA4][0],
-        "revision": BASE[GEMMA4][1],
-        "codes": list(CODES),
-        "token_ids": [tok.token_to_id(c) for c in CODES],
-        "temperature": TEMPERATURE,
-        "attention_mode": "prefix_bidir",
-        "pooling": "last",
-        "finetune": {"epochs": 1.0},
-    }
-    dc.update(decision or {})
-    (path / "decision_config.json").write_text(json.dumps(dc))
-    _readout(path, HIDDEN, seed)
     return path
 
 

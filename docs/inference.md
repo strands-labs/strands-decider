@@ -303,12 +303,10 @@ there, because it computes with 4B of its parameters per token. On one H100, the
 
 ## Decision checkpoints
 
-A decision checkpoint follows the decision interface, which `strands_decider.core` implements
-([architecture.md](architecture.md#the-cores-runtime-interface)): the base Gemma 4
-model's own multimodal checkpoint with the fine-tuning merged in, beside `readout.safetensors`
-and a `decision_config.json` that says `"interface": "strands-decider"`. `ask` and `serve` take
-one the way they take any checkpoint, a local directory or a Hub id; every other checkpoint
-keeps the path described above.
+A decision checkpoint is the base Gemma 4 model's multimodal checkpoint with the fine-tuning
+merged in, beside `readout.safetensors` and a `decision_config.json` that says
+`"interface": "strands-decider"` ([architecture.md](architecture.md#the-cores-runtime-interface)).
+`ask` and `serve` take one like any other checkpoint, a local directory or a Hub id.
 
 ```bash
 strands-decider ask path/to/decision-checkpoint --state "A photo sent with a claim." \
@@ -316,33 +314,28 @@ strands-decider ask path/to/decision-checkpoint --state "A photo sent with a cla
 strands-decider serve path/to/decision-checkpoint --port 8000
 ```
 
-The core library renders each request with the checkpoint's prompt, and the transformers
-backend (`backends/transformers.py`) runs the model: every layer under the interface's mask,
-the state encoded once when a request asks several questions, the answers read from the hidden
-state at each question's last token. CPU runs float32, CUDA and MPS bf16, and `--dtype float32`
-or `--dtype bfloat16` chooses; the first line the command prints names the device and dtype. A
-request may carry images when the checkpoint's `decision_config.json` lists `image` in
-`inputs`; `--vision` is not needed, and warns. Images need the `vision` extra
-(`pip install "strands-decider[vision]"`, Pillow and torchvision; the 12B's image processor
-exists only for torchvision). A request whose `audio` field is anything but null is refused
-with 422, since the interface takes no audio; other fields the interface does not define are
-ignored, as v1 ignores them. `--no-prefix-cache` runs one full pass per question (the
-reference, on CUDA in bf16); `--max-batch` and `--max-batch-tokens` bound the questions of one
-pass over a state. The server answers `--max-concurrency` requests at a time on the model
-(default 1), so a burst of long or image requests cannot hold several states on the GPU
-together; the others wait up to `--queue-timeout` seconds (default 60) and then get 503. A
-refused request is answered at once, without waiting. `--revision` names the branch, tag or
-commit of a checkpoint on the Hub. A prompt longer than the checkpoint's `max_length_validated`
-is refused with 422, never truncated; `--max-length N` serves prompts of up to N tokens
-instead, and a value above the validated length, which is the operator's decision, is warned
-about at startup. `/health` reports the backend,
-the device, the dtype, the longest prompt served, whether images are served and the
-concurrency. `--device-map` does not apply, and `--dtype`, `--revision` and `--max-length`
-apply to decision checkpoints only.
+The core renders each request and the transformers backend (`backends/transformers.py`) runs
+the model, encoding the state once when a request asks several questions. CPU runs float32, and
+CUDA and MPS bf16; `--dtype float32` or `--dtype bfloat16` chooses. A request may carry images
+when `decision_config.json` lists `image` in `inputs`, with the `vision` extra installed
+(`pip install "strands-decider[vision]"`; the 12B's image processor needs torchvision). A
+request whose `audio` is anything but null is refused with 422.
 
-A checkpoint from before the interface, whose `decision_config.json` has no `interface`, names
-no prompt, so `ask` and `serve` refuse it; `TransformersBackend` runs it on token ids rendered
-elsewhere, as text only.
+Options that apply to decision checkpoints only:
+
+- `--no-prefix-cache`: one full pass per question, the reference on CUDA in bf16.
+- `--max-batch`, `--max-batch-tokens`: bound the questions of one pass over a state.
+- `--max-concurrency` (default 1) and `--queue-timeout` (default 60 s): requests past the
+  limit wait, then get 503, so a burst of long or image requests can't hold several states on
+  the GPU at once. A refused request is answered without waiting.
+- `--max-length N`: serve prompts of up to N tokens instead of `max_length_validated`. A
+  longer prompt gets 422 and is never truncated; a value above the validated length warns.
+- `--revision`: the branch, tag or commit of a checkpoint on the Hub.
+
+`--vision` and `--device-map` are for v1 checkpoints. `/health` reports the backend, device,
+dtype, longest prompt served, whether images are served, and the concurrency. A checkpoint from
+before the interface, whose `decision_config.json` has no `interface` field, is refused: export
+it as a decision checkpoint first.
 
 ## Asking many questions is nearly free
 

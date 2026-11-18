@@ -123,6 +123,7 @@ def serve_cmd(
     max_length: int | None = typer.Option(
         None,
         "--max-length",
+        min=1,
         help="Decision checkpoints: refuse prompts longer than this many tokens (default: "
         "decision_config.json's max_length_validated). Raising it past the validated length is "
         "the operator's decision.",
@@ -231,22 +232,18 @@ def ask_cmd(
     if kind == DECISION:
         # A decision checkpoint: images go in the request, and the checkpoint's
         # decision_config.json says whether it takes them.
-        from .decision import RequestRefused, check_device, check_dtype, load_decision_engine
+        from .decision import check_options, load_decision_engine
 
         try:
-            check_device(selected_device)
+            check_options(selected_device, dtype)
         except ValueError as e:
-            raise typer.BadParameter(str(e), param_hint="--device") from e
-        try:
-            check_dtype(selected_device, dtype)
-        except ValueError as e:
-            raise typer.BadParameter(str(e), param_hint="--dtype") from e
+            raise typer.BadParameter(str(e)) from e
         engine = load_decision_engine(
             checkpoint, device=selected_device, dtype=dtype, revision=revision
         )
         try:
             response = engine.ask(state, questions, _base64_files(image))
-        except RequestRefused as e:  # the request's fault: an image or a prompt it refuses
+        except ValueError as e:  # the request's fault: an image or a prompt it refuses
             raise typer.BadParameter(str(e)) from e
     elif dtype is not None or revision is not None:
         flag = "--dtype" if dtype is not None else "--revision"
