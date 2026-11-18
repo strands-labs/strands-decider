@@ -63,7 +63,6 @@ from strands_decider.core.images import (
     MAX_SOFT_TOKENS,
     PATCH_SIZE,
     POOLING_KERNEL_SIZE,
-    decode_images,
 )
 
 COULD_NOT_READ = "image could not be read as PNG/JPEG/WEBP/GIF: "
@@ -306,13 +305,6 @@ def test_the_image_processors_settings_are_checked(tmp_path):
             check_image_processor({"image_processor": {**good["image_processor"], k: v}})
     with pytest.raises(ValueError, match="can't take images"):
         check_image_processor({"image_processor": {"patch_size": 16}})
-
-
-def test_decode_images_takes_any_number_of_images():
-    with pytest.raises(ValueError, match="image is not valid base64"):
-        decode_images(["not base64!"] * 5)
-    images = decode_images([image_b64(n) for n in IMAGE_FILES])
-    assert [i.data for i in images] == [image_bytes(n) for n in IMAGE_FILES]
 
 
 def test_audio_is_refused_rather_than_ignored():

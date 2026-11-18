@@ -759,9 +759,9 @@ def test_s_is_a_token_boundary(controls):
     requests = [*(WITH_CONTROLS if controls else PLAIN_TEXT)]
     requests += IMAGES_WITH_CONTROLS if controls else IMAGES_PLAIN_TEXT
     for req in requests:
-        parts, rendered = _parts(_r(req), None), render(_r(req), tok)
-        for name, q in parts.questions.items():
-            assert encode(tok, parts.state + q[-1]) == list(rendered.questions[name].ids)
+        (state, _, questions), rendered = _parts(_r(req), None), render(_r(req), tok)
+        for name, q in questions.items():
+            assert encode(tok, state + q.prompt) == list(rendered.questions[name].ids)
     rng = random.Random(f"s-{controls}")
     neighbours = [*_PIECES, "\r", "\t", " ", "\u00a0", "\u2028", "\u3000", "\ufeff", "\x00"]
     if controls:

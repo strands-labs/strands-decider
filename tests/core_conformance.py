@@ -1,4 +1,4 @@
-"""How every runtime's parity tests measure its answers against the reference's.
+"""How a runtime's parity tests measure its answers against the reference's.
 
 A runtime conforms when, on at least MIN_QUESTIONS questions, its top-1 agreement is at least
 TOP1 and its mean |dp| (the largest difference over a question's codes, averaged) at most

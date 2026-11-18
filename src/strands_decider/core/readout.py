@@ -11,6 +11,7 @@ import os
 from typing import Any
 
 import numpy as np
+import numpy.typing as npt
 
 from ..confidence import derive_confidence, derive_score_confidence
 from .codes import CODES
@@ -39,7 +40,7 @@ def load_safetensors(path: str | os.PathLike[str]) -> dict[str, np.ndarray]:
     return out
 
 
-def round_to_bf16(x: Any) -> np.ndarray:
+def round_to_bf16(x: npt.ArrayLike) -> np.ndarray:
     """`x` rounded to the nearest bf16 (ties to even), held as float32."""
     a: np.ndarray = np.asarray(x, dtype=np.float32)
     u: np.ndarray = np.atleast_1d(a).view(np.uint32).astype(np.uint64)  # the add can't wrap
@@ -62,7 +63,7 @@ def code_probabilities(z: np.ndarray, softcap: float, temperature: float) -> np.
     """softmax(tanh(z / c) * c / T) in float32, over the logits given (a question's k)."""
     c, t = np.float32(softcap), np.float32(temperature)
     s = np.tanh(np.asarray(z, dtype=np.float32) / c) * c / t
-    e = np.exp(s - s.max())
+    e = np.exp(s - np.max(s))
     out: np.ndarray = e / e.sum(dtype=np.float32)
     return out
 
@@ -120,7 +121,7 @@ def question_probabilities(
     if len(rows) != len(names):
         raise ValueError(f"expected {len(names)} rows, one per question, not {len(rows)}")
     if weight is not None:
-        rows = list(readout_logits(weight, np.stack(rows)))
+        rows = list(readout_logits(weight, np.asarray(rows)))
     out = {}
     for name, row in zip(names, rows, strict=True):
         v = np.asarray(row)

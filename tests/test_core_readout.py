@@ -8,6 +8,7 @@ import struct
 
 import numpy as np
 import pytest
+from core_conformance import agreement
 from core_support import decision_config_fixture, readout_goldens
 
 from strands_decider.core import (
@@ -20,11 +21,14 @@ from strands_decider.core import (
     load_readout,
     question_probabilities,
     read,
+)
+from strands_decider.core.readout import (
+    answer,
+    code_probabilities,
+    load_safetensors,
     readout_logits,
     round_to_bf16,
 )
-from strands_decider.core.readout import answer, code_probabilities, load_safetensors
-from strands_decider.testing import agreement
 
 C = 30.0  # Gemma 4's final_logit_softcapping
 
@@ -249,3 +253,48 @@ def test_agreement():
     a = agreement({"a": [0.9, 0.1], "b": [0.4, 0.6]}, {"a": [0.8, 0.2], "b": [0.7, 0.3]})
     assert a.questions == 2 and a.top1 == 0.5 and a.mean_abs_dp == pytest.approx(0.2)
     assert not a.conforms()
+
+
+class _Backend:
+    """Returns a fixed row per question, and records what it was given."""
+
+    def __init__(self, row):
+        self.row, self.calls = row, []
+
+    def forward(self, state, questions, images=()):
+        self.calls.append((state, questions, images))
+        return [self.row] * len(questions)
+
+
+def test_evaluate_end_to_end():
+    from core_support import gemma4_tokenizer
+
+    from strands_decider.core import Request, evaluate
+
+    tok, cfg = gemma4_tokenizer(), DecisionConfig.model_validate(decision_config_fixture())
+    request = Request.model_validate_json(
+        '{"state": "I was charged twice.", "questions": {'
+        '"refund": {"type": "noul", "instructions": "Is a refund requested?"}, '
+        '"team": {"type": "choice", "instructions": "Which team?", '
+        '"criteria": {"billing": null, "tech": null, "sales": null}}}}'
+    )
+    rng = np.random.default_rng(0)
+    w, h = round_to_bf16(rng.normal(0, 0.5, size=(255, 8))), round_to_bf16(rng.normal(size=8))
+
+    backend = _Backend(h)
+    out = evaluate(request, tok, w, cfg, backend)
+    assert set(out["answers"]) == {"refund", "team"} and out["answers"]["team"]["type"] == "choice"
+    state, questions, images = backend.calls[0]
+    assert len(questions) == 2 and images == ()
+    assert out["usage"]["input_tokens"] == len(state) + sum(map(len, questions))
+
+    # A backend that applies the readout itself returns probabilities, and gives the same answers.
+    p = code_probabilities(readout_logits(w, h[None])[0], C, cfg.temperature)
+    assert evaluate(request, tok, None, cfg, _Backend(p))["answers"] == out["answers"]
+
+    with pytest.raises(ValueError, match="exceeds the limit"):
+        evaluate(request, tok, w, cfg, _Backend(h), max_length=10)
+    text_only = cfg.model_copy(update={"inputs": ("text",)})
+    with_image = request.model_copy(update={"images": ["aGVsbG8="]})
+    with pytest.raises(ValueError, match="does not take images"):
+        evaluate(with_image, tok, w, text_only, _Backend(h))

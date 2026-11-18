@@ -30,8 +30,6 @@ from .readout import (
     load_readout,
     question_probabilities,
     read,
-    readout_logits,
-    round_to_bf16,
 )
 from .request import Request
 from .runtime import NO_VISION, Backend, attention_mask, evaluate
@@ -62,12 +60,10 @@ __all__ = [
     "prepare_tokenizer",
     "question_probabilities",
     "read",
-    "readout_logits",
     "render",
     "render_content",
     "render_text",
     "resize_image",
     "resized_size",
-    "round_to_bf16",
     "soft_tokens",
 ]

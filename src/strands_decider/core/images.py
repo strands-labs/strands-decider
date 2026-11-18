@@ -15,9 +15,16 @@ import math
 import os
 import re
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from pathlib import Path
+from types import ModuleType
+from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, ValidationError
+
+if TYPE_CHECKING:
+    from PIL.Image import Image
+
+    from .prompt import RenderedImage
 
 # The formats and pixel limit v1 accepts, so a client can send v2 what it sends v1.
 IMAGE_FORMATS = ("PNG", "JPEG", "WEBP", "GIF")
@@ -65,21 +72,23 @@ def soft_tokens(width: int, height: int) -> int:
     return (h // side) * (w // side)
 
 
-def resize_image(image: Any, width: int, height: int) -> Any:
+def resize_image(image: Image, width: int, height: int) -> Image:
     """A decoded RGB PIL image resized to W x H with Pillow's bicubic filter, width first, then
     height. Every backend resizes with this and runs its processor with its own resize off, so
     they all give the encoder the same pixels (one two-axis `resize` changes pass order in Pillow 13)."""
-    Image = _pillow()
+    pil = _pillow()
     if image.mode != "RGB":  # Pillow resizes palette and 1-bit images by nearest neighbour
         raise ValueError(f"resize_image takes the decoded RGB image, not a {image.mode} one")
     if image.width != width:
-        image = image.resize((width, image.height), Image.Resampling.BICUBIC)
+        image = image.resize((width, image.height), pil.Resampling.BICUBIC)
     if image.height != height:
-        image = image.resize((width, height), Image.Resampling.BICUBIC)
+        image = image.resize((width, height), pil.Resampling.BICUBIC)
     return image
 
 
-def check_decoded_size(image: Any, width: int, height: int) -> tuple[int, int]:
+def check_decoded_size(
+    image: EncodedImage | RenderedImage, width: int, height: int
+) -> tuple[int, int]:
     """(W, H) to resize a decoded image of `width` x `height` to. The decoded size must be the
     header's, or its transpose after EXIF orientation; W and H come from the decoded size."""
     header = (image.width, image.height)
@@ -104,14 +113,15 @@ class _ProcessorSettings(BaseModel):
 def check_image_processor(config: dict[str, Any] | str | os.PathLike[str]) -> None:
     """That a checkpoint's processor_config.json (read, or its path or directory) sizes images as
     the core counts their placeholders; a mismatch would give the encoder the wrong number of slots."""
-    if not isinstance(config, dict):
-        path = os.fspath(config)
-        if os.path.isdir(path):
-            path = os.path.join(path, PROCESSOR_CONFIG_FILE)
-        with open(path, encoding="utf-8") as f:
-            config = json.load(f)
+    if isinstance(config, dict):
+        settings = config
+    else:
+        path = Path(config)
+        settings = json.loads(
+            (path / PROCESSOR_CONFIG_FILE if path.is_dir() else path).read_text("utf-8")
+        )
     try:
-        _ProcessorSettings.model_validate(config.get("image_processor", config))
+        _ProcessorSettings.model_validate(settings.get("image_processor", settings))
     except ValidationError as e:
         raise ValueError(f"the checkpoint's image processor can't take images here: {e}") from None
 
@@ -134,7 +144,7 @@ class EncodedImage:
         return soft_tokens(self.width, self.height)
 
 
-def _pillow() -> Any:
+def _pillow() -> ModuleType:
     try:
         from PIL import Image
     except ImportError as e:
@@ -168,7 +178,3 @@ def decode_image(data: str) -> EncodedImage:
         )
     # A JPEG with more pictures after the first (MPO, as some cameras write) is a JPEG.
     return EncodedImage(raw, "JPEG" if fmt == "MPO" else fmt, width, height)
-
-
-def decode_images(images: list[str]) -> tuple[EncodedImage, ...]:
-    return tuple(decode_image(i) for i in images)

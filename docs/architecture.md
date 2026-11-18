@@ -220,53 +220,26 @@ encoding rather than guess whether it has a batch dimension.
 ## The core's runtime interface
 
 Every v2 runtime imports `strands_decider.core`, so its code and its goldens
-(`tests/fixtures/core/`) define the v2 models' decision interface. This section is the core's
-Python API for a runtime. The goldens fix what a checkpoint depends on, and the API can change
-without a new checkpoint format.
+(`tests/fixtures/core/`) define the v2 models' decision interface.
 
-A runtime supplies the decoder as a `Backend` (`core/runtime.py`). Its `forward(state,
-questions, images)` takes the state's token ids, each question's ids and the state's images
-(each a `RenderedImage`, with its file, its sha256 and the span of its placeholders). It runs every
-question after the shared state under `prefix_bidir`, seeing no other question, and returns one
-row per question, read at the question's last token. `outputs` names the stage of the rows, and
-the core applies the rest of the readout, so nothing is applied twice.
+A runtime loads a checkpoint with `DecisionConfig.load`, `load_tokenizer`, `load_readout` and,
+for images, `check_image_processor`. It supplies the decoder as a `Backend` (`core/runtime.py`),
+whose `forward(state, questions, images)` takes the state's token ids, each question's ids and
+the state's images (each a `RenderedImage`, with its file, its sha256 and the span of its
+placeholders). It runs every question after the shared state under `prefix_bidir`, seeing no
+other question, and returns one row per question at its last token. A row is the final-norm
+hidden state, or the codes' probabilities for a backend that applies the readout itself.
 
-| `outputs` | a row holds | the core then applies |
-| --- | --- | --- |
-| `hidden` | h, the final-norm hidden state | the bf16 GEMM, the soft-cap, the temperature, the softmax |
-| `raw_logits` | z = W h | the rounding to bf16, the soft-cap, the temperature, the softmax |
-| `capped_logits` | tanh(z / c) * c | the temperature, the softmax |
-| `final_logits` | tanh(z / c) * c / T | the softmax |
-| `probabilities` | the codes' probabilities | renormalisation over the question's k codes |
+`evaluate(request, tokenizer, weight, config, backend)` answers one `Request`, which a server
+builds with `Request.model_validate_json`. It refuses images when the checkpoint's `inputs` lack
+`image`, renders the request, calls `forward` once and reads the answers, from hidden states when
+given the readout `weight` and from probabilities when `weight` is None. A backend with no vision
+encoder raises `NO_VISION` from `forward`. A runtime may batch, cache the state's keys and values
+(keyed on the state's ids and each image's `sha256`), or split the work across devices, provided
+each question's result is what it would be alone.
 
-A row of logits or probabilities holds all 255 codes or only the question's k, in code order.
-The core refuses capped logits beyond ±c and final logits beyond ±c / T, which catches some
-mislabelled stages. Only the stage's name prevents the rest.
-
-`strands-decider-vllm` is a `probabilities` backend. Its model applies the soft-cap and the
-checkpoint's temperature, so it asks vLLM for a completion with `allowed_token_ids` set to the
-question's k code ids, `logprobs` k and `temperature` 1.0, under `--logprobs-mode
-processed_logprobs`, since vLLM would divide by any other temperature a second time. The server
-needs `--max-logprobs 255` for questions of up to 255 options (`strands-decider-vllm serve` sets
-it). Asking for all 255 codes instead, without `allowed_token_ids`, can underflow to all zeros
-over a question's codes at a small temperature, and the core refuses such a row.
-
-`evaluate(request, tokenizer, readout, config, backend)` answers one request, checking
-everything it can before the decoder runs. It checks the backend's stage and the readout, parses
-the request (`parse_request`), refuses images before decoding any when the checkpoint's `inputs`
-lack `image`, renders the request (which checks each image's header), and checks the rendered
-prompt and code ids against the checkpoint. Only then does it call `forward`, once. A backend
-with no vision encoder raises `NO_VISION`, v1's text-only message, from `forward`. `read`,
-`question_probabilities`, `readout_logits` and `answer` are the readout's steps, public for
-runtimes that need them. A runtime may batch, cache the state's keys and values (keyed on the
-state's ids and each image's `sha256`, and reused only when the whole state matches), or split
-the work across devices, provided each question's result is what it would be alone.
-
-`render` encodes text with a private plain-text copy of the tokenizer, about 170 MB for Gemma
-4's, so that renders on several threads, and other users of the same tokenizer, cannot change
-how request text is encoded. A caller short of memory, such as an AWS Lambda function, hands its
-tokenizer over with `plain_text_tokenizer`, or loads it with `load_tokenizer(...,
-hand_over=True)`, and no copy is made.
+`render` needs a tokenizer that encodes request text with special-token matching off, so the text
+can never become a control token. `load_tokenizer` and `prepare_tokenizer` set it up that way.
 
 ## Layout
 

@@ -12,7 +12,7 @@ from itertools import groupby
 from typing import TYPE_CHECKING
 
 from .codes import CODE_TOKEN_IDS, CODES, CONTROL_TOKEN_IDS
-from .images import IMAGE_CLOSE, IMAGE_OPEN, IMAGE_SOFT, EncodedImage, decode_images
+from .images import IMAGE_CLOSE, IMAGE_OPEN, IMAGE_SOFT, EncodedImage, decode_image
 from .request import Content, Request
 
 if TYPE_CHECKING:
@@ -165,21 +165,24 @@ class RenderedRequest:
 
 
 @dataclass(frozen=True)
-class _Parts:
-    state: list[str]
-    images: tuple[EncodedImage, ...]
-    # name -> (kind, codes, options in rendered order, request options, descriptions, prompt)
-    questions: dict[
-        str, tuple[str, tuple[str, ...], list[str], tuple[str, ...], list[str], list[str]]
-    ]
+class _Question:
+    kind: str
+    codes: tuple[str, ...]
+    options: tuple[str, ...]  # in rendered order: options[k] is codes[k]'s
+    request_options: tuple[str, ...]
+    descriptions: tuple[str, ...]
+    prompt: list[str]
 
 
-def _parts(request: Request, option_orders: dict[str, list[int]] | None) -> _Parts:
+def _parts(
+    request: Request, option_orders: dict[str, list[int]] | None
+) -> tuple[list[str], tuple[EncodedImage, ...], dict[str, _Question]]:
+    """The state part, the decoded image headers, and each question's part."""
     orders = option_orders or {}
     unknown = set(orders) - set(request.questions)
     if unknown:
         raise ValueError(f"option_orders names unknown questions {sorted(unknown)}")
-    images = decode_images(request.images)
+    images = tuple(decode_image(i) for i in request.images)
     questions = {}
     for name, question in request.questions.items():
         q = question.normalised()
@@ -187,20 +190,20 @@ def _parts(request: Request, option_orders: dict[str, list[int]] | None) -> _Par
         if sorted(order) != list(range(len(q.options))):
             raise ValueError(f"question {name!r}: option_orders must permute its options")
         codes = CODES[: len(order)]
-        options = [q.options[i] for i in order]
-        descriptions = [render_content(q.criteria[i]) for i in order]
+        options = tuple(q.options[i] for i in order)
+        descriptions = tuple(render_content(q.criteria[i]) for i in order)
         lines = [option_line(*x) for x in zip(codes, options, descriptions, strict=True)]
         prompt = question_part(q.kind, render_content(q.instructions), lines)
-        questions[name] = (q.kind, codes, options, q.options, descriptions, prompt)
-    return _Parts(state_part(render_content(request.state), images), images, questions)
+        questions[name] = _Question(q.kind, codes, options, q.options, descriptions, prompt)
+    return state_part(render_content(request.state), images), images, questions
 
 
 def render_text(
     request: Request, *, option_orders: dict[str, list[int]] | None = None
 ) -> tuple[str, dict[str, str]]:
     """The prompt as text, control tokens as their strings: the state part and each question's."""
-    parts = _parts(request, option_orders)
-    return "".join(parts.state), {n: "".join(q[-1]) for n, q in parts.questions.items()}
+    state, _, questions = _parts(request, option_orders)
+    return "".join(state), {n: "".join(q.prompt) for n, q in questions.items()}
 
 
 def render(
@@ -219,23 +222,16 @@ def render(
             "the tokenizer must encode with special-token matching off, so request text can't "
             "become a control token: load it with load_tokenizer or prepare_tokenizer"
         )
-    parts = _parts(request, option_orders)
-    state_ids = tuple(encode(tokenizer, parts.state))
+    state, encoded_images, questions = _parts(request, option_orders)
+    state_ids = tuple(encode(tokenizer, state))
     starts = [i + 1 for i, t in enumerate(state_ids) if t == CONTROL_TOKEN_IDS[IMAGE_OPEN]]
     images = tuple(
         RenderedImage(im.data, im.format, im.width, im.height, im.sha256, start, im.tokens)
-        for im, start in zip(parts.images, starts, strict=True)
+        for im, start in zip(encoded_images, starts, strict=True)
     )
     out = {}
-    for name, (
-        kind,
-        codes,
-        options,
-        request_options,
-        descriptions,
-        prompt,
-    ) in parts.questions.items():
-        question_ids = tuple(encode(tokenizer, prompt))
+    for name, q in questions.items():
+        question_ids = tuple(encode(tokenizer, q.prompt))
         if max_length is not None and len(state_ids) + len(question_ids) > max_length:
             raise ValueError(
                 f"question {name!r}: prompt of {len(state_ids) + len(question_ids)} tokens "
@@ -244,16 +240,16 @@ def render(
             )
         out[name] = RenderedQuestion(
             name=name,
-            kind=kind,
+            kind=q.kind,
             state_ids=state_ids,
             question_ids=question_ids,
-            codes=codes,
-            code_token_ids=CODE_TOKEN_IDS[: len(codes)],
-            options=tuple(options),
-            request_options=request_options,
-            descriptions=tuple(descriptions),
-            state_text="".join(parts.state),
-            question_text="".join(prompt),
+            codes=q.codes,
+            code_token_ids=CODE_TOKEN_IDS[: len(q.codes)],
+            options=q.options,
+            request_options=q.request_options,
+            descriptions=q.descriptions,
+            state_text="".join(state),
+            question_text="".join(q.prompt),
             images=images,
         )
     return RenderedRequest(model=request.model, questions=out)

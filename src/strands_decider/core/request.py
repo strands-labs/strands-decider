@@ -110,7 +110,7 @@ AnyQuestion = Annotated[
 
 
 class Request(_Model):
-    """A System One request. `images` stay base64 until `images.decode_images` checks them."""
+    """A System One request. `images` stay base64 until `render` checks them (`images.decode_image`)."""
 
     state: Content = ""
     questions: dict[str, AnyQuestion] = Field(min_length=1)
