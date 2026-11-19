@@ -317,9 +317,8 @@ strands-decider serve path/to/decision-checkpoint --port 8000
 The core renders each request and the transformers backend (`backends/transformers.py`) runs
 the model, encoding the state once when a request asks several questions. CPU runs float32, and
 CUDA and MPS bf16; `--dtype float32` or `--dtype bfloat16` chooses. A request may carry images
-when `decision_config.json` lists `image` in `inputs`, with the `vision` extra installed
-(`pip install "strands-decider[vision]"`; the 12B's image processor needs torchvision). A
-request whose `audio` is anything but null is refused with 422.
+when `decision_config.json` lists `image` in `inputs`. A request whose `audio` is anything but
+null is refused with 422.
 
 The serving options, as a decision checkpoint takes them:
 

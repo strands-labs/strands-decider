@@ -5,7 +5,6 @@ STRANDS_DECIDER_TEST_CHECKPOINT, a decision checkpoint."""
 from __future__ import annotations
 
 import contextlib
-import importlib.util
 import math
 import os
 import warnings
@@ -15,7 +14,7 @@ import pytest
 import torch
 import transformers
 
-from decision_support import GEMMA4, KINDS, UNIFIED, decision_checkpoint, image_b64, request  # isort: skip
+from decision_support import GEMMA4, KINDS, decision_checkpoint, image_b64, request  # isort: skip
 
 from strands_decider.backends.images import image_pixels
 from strands_decider.backends.transformers import TransformersBackend, load_backend
@@ -85,11 +84,6 @@ def sdpa_calls(monkeypatch):
 
     monkeypatch.setattr(torch.nn.functional, "scaled_dot_product_attention", record)
     return calls
-
-
-def _needs_images(kind: str) -> None:
-    if kind == UNIFIED and importlib.util.find_spec("torchvision") is None:
-        pytest.skip("the 12B's image processor needs torchvision")
 
 
 def _prompt(path, req: dict):
@@ -176,8 +170,6 @@ def test_full_passes_are_the_cores_dense_mask(ckpt, kind, images, dtype, bound):
     """At the last token on CPU, bf16's rounding reaches 0.039 with torch 2.7 and 0.016 with 2.14;
     a wrong mask moves it by 0.246 at least. The window of 2 is shorter than the prompt: no layer
     keeps it."""
-    if images:
-        _needs_images(kind)
     backend = load_backend(str(ckpt), dtype=dtype, reuse_state=False)
     _check_against_the_dense_mask(ckpt, backend, request(IMAGES[:images]), bound)
 
@@ -222,8 +214,6 @@ def test_no_layer_gets_a_dense_mask(backends, ckpt, sdpa_calls):
 @pytest.mark.parametrize("images", [0, 2], ids=["text", "two-images"])
 def test_state_reuse_is_the_full_pass(backends, ckpt, kind, images):
     """float32 on CPU, to float rounding."""
-    if images:
-        _needs_images(kind)
     full, reuse = backends
     state, questions, imgs = _prompt(ckpt, request(IMAGES[:images]))
     a, b = full.forward(state, questions, imgs), reuse.forward(state, questions, imgs)
@@ -277,7 +267,6 @@ def test_no_pass_over_the_state_is_64k_plus_1_queries_wide(backends, ckpt, sdpa_
 def test_a_device_agrees_with_the_cpu(ckpt, kind, device):
     """float32 to float rounding, the device's kernels' check, reusing the state as in full
     passes; bf16 to its own error, large on random weights (about 0.1 in probability on CPU)."""
-    _needs_images(kind)
     for dtype, bound in (("float32", 5e-3), ("bfloat16", 0.15)):
         cpu = load_backend(str(ckpt), dtype=dtype)
         other = load_backend(str(ckpt), device=device, dtype=dtype)

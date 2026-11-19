@@ -14,7 +14,7 @@ image sits at `token index + rope_delta` (negative). Left to itself, a suffix-on
 forward after a cached prefix builds positions from the full prefix+suffix mask, and
 reads a `rope_deltas` left on the module by the previous request.
 
-Needs transformers >= 5.18 and Pillow (`pip install "strands-decider[vision]"`).
+Needs transformers >= 5.18.
 """
 
 from __future__ import annotations

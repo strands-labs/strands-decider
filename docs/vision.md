@@ -10,7 +10,7 @@ Gemma 4 models load the text decoder of their base model and drop its vision enc
 ## Using it
 
 ```bash
-pip install "strands-decider[vision]"     # Pillow; needs transformers >= 5.18
+pip install strands-decider     # needs transformers >= 5.18
 strands-decider serve StrandsAgents/strands-decider-2B-qwen3.5-v1-2610 --vision --port 8000
 ```
 

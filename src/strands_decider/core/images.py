@@ -147,7 +147,7 @@ def _pillow() -> Any:  # PIL.Image, typed only where Pillow is installed
     try:
         from PIL import Image
     except ImportError as e:
-        raise ImportError('image input needs Pillow: pip install "strands-decider[vision]"') from e
+        raise ImportError("image input needs Pillow: pip install pillow") from e
     return Image
 
 

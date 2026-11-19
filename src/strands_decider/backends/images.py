@@ -6,7 +6,9 @@ from __future__ import annotations
 import base64
 import warnings
 from collections.abc import Callable
-from typing import TYPE_CHECKING, TypeVar
+from typing import TypeVar
+
+from PIL import Image
 
 from ..core import (
     DecisionConfig,
@@ -16,10 +18,8 @@ from ..core import (
     resize_image,
 )
 from ..core.config import IMAGE
+from ..images import decode_image
 from ..refusals import RequestRefused
-
-if TYPE_CHECKING:
-    from PIL import Image
 
 _Processor = TypeVar("_Processor")
 
@@ -29,8 +29,6 @@ def image_pixels(image: RenderedImage) -> Image.Image:
     first frame, upright by its EXIF orientation, transparent areas on white, RGB), then resized
     by the core's `resize_image` from its decoded, upright size. A file whose pixels don't decode
     is refused."""
-    from ..images import decode_image
-
     try:
         img = decode_image(base64.b64encode(image.data).decode("ascii"))
         return resize_image(img, *check_decoded_size(image, *img.size))
@@ -47,6 +45,6 @@ def load_image_processor(path: str, build: Callable[[], _Processor]) -> _Process
     try:
         check_image_processor(path)
         return build()
-    except (ImportError, OSError, ValueError) as e:
+    except (OSError, ValueError) as e:
         warnings.warn(f"{path}: image requests are refused: {e}", stacklevel=3)
         return None
