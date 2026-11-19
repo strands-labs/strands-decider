@@ -7,29 +7,27 @@ Compatibility with the Jev API itself is not verified.
 
 from __future__ import annotations
 
+import base64
 import contextlib
+import io
 import os
+import sys
 import threading
 import time
 import warnings
 from collections.abc import AsyncIterator, Callable
-from typing import Any
 
 import anyio
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
+from pydantic import ValidationError
 
 from . import __version__
 from .core import Request as DecisionRequest
-from .decision import (
-    DecisionEngine,
-    EngineBusy,
-    check_options,
-    is_decision_checkpoint,
-    load_decision_engine,
-)
+from .decision import DecisionEngine, is_decision_checkpoint, load_decision_engine
 from .infer import EngineConfig, SystemOneEngine, load_mlx
 from .modeling import StrandsDeciderModel, refuse_token_readout
+from .refusals import EngineBusy, RequestRefused
 from .schema import (
     ChoiceQuestion,
     NoulQuestion,
@@ -128,21 +126,22 @@ def create_app(
                 "decision_config.json inputs list them",
                 stacklevel=2,
             )
-        check_options(device, dtype)
-        return _decision_app(
+        engine = load_decision_engine(
             checkpoint,
-            warmup=warmup,
             device=device,
-            model_name=resolved_name,
+            dtype=dtype,
             reuse_state=use_prefix_cache,
             max_batch=max_batch,
             max_batch_tokens=max_batch_tokens,
-            dtype=dtype,
+            max_length=max_length,
+            model_name=resolved_name,
             max_concurrency=max_concurrency or 1,
             queue_timeout=queue_timeout,
             revision=revision,
-            max_length=max_length,
         )
+        if warmup:  # before uvicorn binds the listener
+            _warm_up_decision(engine)
+        return _decision_app(engine, checkpoint)
     for flag, value in (("--dtype", dtype), ("--revision", revision), ("--max-length", max_length)):
         if value is not None:
             raise ValueError(f"{flag} is for decision checkpoints")
@@ -257,44 +256,71 @@ def create_app(
     return app
 
 
-def _decision_app(checkpoint: str, *, warmup: bool, **engine_options: Any) -> FastAPI:
-    """The app for a decision checkpoint, on the paths and with the responses of v1's. The engine
-    bounds its own concurrency, after its refusals and with a timeout (503), and its backend takes
-    turns on MPS, so the app adds no limiter and no lock."""
+def _warm_up_decision(engine: DecisionEngine) -> None:
+    """A request with a question of each kind, and one with an image if images are served, so
+    that the first requests don't pay for lazy initialisation. A warm-up prompt longer than the
+    served length is skipped."""
+    state = "A warm-up request, answered before the server accepts requests."
+    questions = {
+        "noul": {"type": "noul", "instructions": "Is this a warm-up?"},
+        "choice": {
+            "type": "choice",
+            "instructions": "Pick one.",
+            "criteria": {"a": None, "b": None},
+        },
+        "score": {"type": "score", "instructions": "How warm is it?", "criteria": ["cold", "warm"]},
+    }
+    requests = [{"state": state, "questions": questions}]
+    if engine.image_problem is None:
+        from PIL import Image
 
-    @contextlib.asynccontextmanager
-    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        app.state.engine = load_decision_engine(checkpoint, **engine_options)
-        if warmup:  # the listener binds only after this returns
-            app.state.engine.warm_up()
-        yield
+        buf = io.BytesIO()
+        Image.new("RGB", (64, 64), (128, 128, 128)).save(buf, "PNG")
+        image = base64.b64encode(buf.getvalue()).decode("ascii")
+        requests.append(
+            {"state": state, "questions": {"noul": questions["noul"]}, "images": [image]}
+        )
+    started = time.perf_counter()
+    for body in requests:
+        try:
+            engine.evaluate(DecisionRequest.model_validate(body))
+        except RequestRefused as e:
+            print(f"[strands-decider] a warm-up request was skipped: {e}", file=sys.stderr)
+    print(f"[strands-decider] warmed up in {time.perf_counter() - started:.1f} s")
 
+
+def _decision_app(engine: DecisionEngine, checkpoint: str) -> FastAPI:
+    """A decision checkpoint on v1's paths, with v1's responses. The engine bounds its own
+    concurrency, after its refusals and with a timeout (503), and its backend takes turns on MPS,
+    so the app adds no limiter and no lock."""
     app = FastAPI(
         title="strands-decider System One",
         version=__version__,
         description="Typed, calibrated answers. Choice, Score and Noul over one state.",
-        lifespan=lifespan,
     )
+    app.state.engine = engine
 
     @app.get("/health")
     @app.get("/ping")
-    async def health(http: Request) -> dict:
-        return {"status": "ok", "checkpoint": checkpoint, **http.app.state.engine.describe()}
+    async def health() -> dict:
+        return {"status": "ok", "checkpoint": checkpoint, **engine.describe()}
 
     @app.post("/v1/systemone", response_model=SystemOneResponse)
     @app.post("/invocations", response_model=SystemOneResponse)
     async def systemone(http: Request) -> JSONResponse:
-        engine: DecisionEngine = http.app.state.engine
         try:
             # The core's request model, not v1's: v1's would drop `audio`, which the core
             # refuses, and require a `state`.
             request = DecisionRequest.model_validate_json(await http.body())
-            started = time.perf_counter()
+        except ValidationError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        started = time.perf_counter()
+        try:
             response = await anyio.to_thread.run_sync(engine.evaluate, request)
+        except RequestRefused as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
         except EngineBusy as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
-        except ValueError as exc:  # pydantic's ValidationError, or a RequestRefused
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
         payload = response.model_dump()
         payload["latency_ms"] = round((time.perf_counter() - started) * 1000, 2)
         return JSONResponse(content=payload)

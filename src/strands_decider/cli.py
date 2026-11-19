@@ -8,9 +8,11 @@ Run them as `python -m training.train`, `python -m training.evaluate`,
 from __future__ import annotations
 
 import atexit
+import base64
 import logging
 import os
 import sys
+from pathlib import Path
 
 import torch
 import typer
@@ -140,7 +142,7 @@ def serve_cmd(
     from .server import create_app
 
     selected_device = resolve_device(device)
-    try:  # the checks that refuse the arguments run here, before anything is announced
+    try:  # before anything is announced: the arguments' checks, and a decision checkpoint's load
         app_ = create_app(
             checkpoint,
             device=selected_device,
@@ -224,25 +226,33 @@ def ask_cmd(
         raise typer.BadParameter("ask at least one --noul / --choice / --score question")
 
     selected_device = resolve_device(device)
+    images = [base64.b64encode(Path(p).read_bytes()).decode("ascii") for p in image or []]
     from .decision import is_decision_checkpoint, load_decision_engine
 
     if is_decision_checkpoint(checkpoint, revision=revision):
         # Images go in the request; the checkpoint's decision_config.json says if it takes them.
+        from .core import Request
+
+        request = {
+            "state": state,
+            "questions": {n: q.model_dump() for n, q in questions.items()},
+            "images": images,
+        }
         try:
             engine = load_decision_engine(
                 checkpoint, device=selected_device, dtype=dtype, revision=revision
             )
-            response = engine.ask(state, questions, _base64_files(image))
+            response = engine.evaluate(Request.model_validate(request))
         except ValueError as e:  # a device or dtype, an image or a prompt it refuses
             raise typer.BadParameter(str(e)) from e
     elif dtype is not None or revision is not None:
         flag = "--dtype" if dtype is not None else "--revision"
         raise typer.BadParameter(f"{flag} is for decision checkpoints", param_hint=flag)
-    elif image:
+    elif images:
         from .vision import load_vision_engine
 
         response = load_vision_engine(checkpoint, EngineConfig(device=selected_device)).ask_images(
-            state, questions, _base64_files(image)
+            state, questions, images
         )
     else:
         response = load_engine(checkpoint, device=selected_device).ask(state, questions)
@@ -254,16 +264,6 @@ def ask_cmd(
     # `ask` is done once its answer is printed; see main().
     global _exit_fast
     _exit_fast = True
-
-
-def _base64_files(paths: list[str] | None) -> list[str]:
-    import base64
-
-    encoded = []
-    for path in paths or []:
-        with open(path, "rb") as fh:
-            encoded.append(base64.b64encode(fh.read()).decode("ascii"))
-    return encoded
 
 
 def _print_answers(response: SystemOneResponse) -> None:
