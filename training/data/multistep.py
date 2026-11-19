@@ -242,15 +242,41 @@ def musique_pairs(rows: Iterable[dict], n_questions: int, seed: int = 0) -> list
     return [r for k in pick for r in by[k]]
 
 
-def fits(examples: list[Example], tokenizer: Any, max_tokens: int) -> list[Example]:
-    """Drop rows whose rendered prompt exceeds the window (truncation would cut options)."""
+def fits(
+    examples: list[Example], tokenizer: Any, max_tokens: int, render: str | None = None
+) -> list[Example]:
+    """Drop rows whose rendered prompt exceeds the window (truncation would cut options).
+
+    With `render` "strands-chat", measure core.render's prompt instead, with every phrasing
+    of the question, because the collator samples one and refuses a prompt that is too long.
+    A row core.render refuses is dropped too.
+    """
+    from strands_decider import core
     from strands_decider.prompting import build_prompt
 
-    return [
-        e
-        for e in examples
-        if len(tokenizer(build_prompt(e.state, e.to_question())[0])["input_ids"]) <= max_tokens
-    ]
+    from .collate import chat_tokenizer
+
+    if render is None:
+        return [
+            e
+            for e in examples
+            if len(tokenizer(build_prompt(e.state, e.to_question())[0])["input_ids"]) <= max_tokens
+        ]
+
+    if render != core.CHAT:
+        raise ValueError(f"render {render!r}: None or {core.CHAT} only")
+    tok = chat_tokenizer(tokenizer)
+
+    def chat_len(e: Example) -> float:
+        try:
+            return max(
+                len(core.render(e.to_request(i), tok).questions["q"].ids)
+                for i in e.all_instructions()
+            )
+        except ValueError:  # the core refuses the row
+            return float("inf")
+
+    return [e for e in examples if chat_len(e) <= max_tokens]
 
 
 def main(argv: list[str] | None = None) -> None:
