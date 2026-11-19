@@ -40,8 +40,7 @@ def _auto_device() -> str:
 
 
 def _decision_mlx_available() -> bool:
-    """Whether the MLX backend can serve a model checkpoint: Apple silicon, the mlx extra,
-    and mlx-vlm, which that backend runs on."""
+    """Apple silicon with the mlx extra, mlx-vlm included."""
     import importlib.util
 
     from .infer import mlx_available
@@ -49,25 +48,21 @@ def _decision_mlx_available() -> bool:
     return mlx_available() and importlib.util.find_spec("mlx_vlm") is not None
 
 
-MLX_HINT = (
-    "on Apple silicon, model checkpoints are validated on MLX, not MPS: "
-    "pip install 'strands-decider[mlx]', then pass --device mlx or no --device"
-)
-
-
 def _auto_decision_device() -> str:
-    """The default device for a model checkpoint: cuda, then mlx on Apple silicon when the
-    mlx extra is installed, then mps, then cpu. MPS is not the validated Mac path for these
-    checkpoints, so landing on it without the extra prints a hint (to stderr, so that
-    `ask --json` stays valid JSON)."""
+    """A model checkpoint's default: cuda, then mlx with the mlx extra, then mps, then cpu.
+    On mps it notes that MLX is the Mac backend they are validated on: on stderr, so that
+    `ask --json` stays JSON, and as plain text, which rich would read "[mlx]" in as markup."""
     if torch.cuda.is_available():
         return "cuda"
     if _decision_mlx_available():
         return "mlx"
     device = _auto_device()
     if device == "mps":
-        # Plain text: rich would read "[mlx]" in the hint as markup and drop it.
-        typer.echo(f"note: {MLX_HINT}", err=True)
+        typer.echo(
+            "note: on Apple silicon, model checkpoints are validated on MLX, not MPS: "
+            "pip install 'strands-decider[mlx]', then pass --device mlx or no --device",
+            err=True,
+        )
     return device
 
 
@@ -344,19 +339,14 @@ def convert_mlx_cmd(
     """Write the MLX artifact of a model checkpoint, for `--device mlx`."""
     try:
         from .backends.mlx_convert import convert
-    except ImportError as e:
-        console.print(f"[red]error[/] {e}")
+
+        artifact = convert(checkpoint, out, bits=bits, group_size=group_size)
+    except (ImportError, ValueError, OSError, RuntimeError) as e:
+        typer.echo(f"error: {e}", err=True)  # plain text, as rich would read "[mlx]" as markup
         raise typer.Exit(1) from e
-    try:
-        summary = convert(checkpoint, out, bits=bits, group_size=group_size)
-    except (ValueError, FileNotFoundError, FileExistsError, RuntimeError) as e:
-        console.print(f"[red]error[/] {e}")
-        raise typer.Exit(1) from e
-    q = summary["quantization"]
-    console.print(
-        f"[green]wrote[/] {summary['artifact']}: {summary['bytes'] / 1e9:.2f} GB, "
-        + (f"decoder at {q['bits']} bits (group {q['group_size']})" if q else "bf16")
-    )
+    size = sum(f.stat().st_size for f in artifact.iterdir()) / 1e9
+    precision = f"decoder at {bits} bits (group {group_size})" if bits else "bf16"
+    console.print(f"[green]wrote[/] {artifact}: {size:.2f} GB, {precision}")
 
 
 @app.command("info", hidden=True)
