@@ -157,19 +157,6 @@ def test_the_load_warms_up_then_drops_the_lazy_tables_pages(load, tmp_path):
     assert load.dropped == [(0, 0), (100, 800)]
 
 
-def test_health(load):
-    assert call(load(DECIDER_MAX_REQUEST_TOKENS="5000"), url_event("GET", "/health")) == (
-        200,
-        {
-            "status": "ok",
-            "model": "tiny-decision-q8_0",
-            "inputs": ["text", "image"],
-            "max_length": 512,
-            "max_request_tokens": 5000,
-        },
-    )
-
-
 def test_answers(load):
     handler = load()
     status, body = call(handler, url_event("POST", "/v1/systemone", REQUEST))
@@ -224,10 +211,21 @@ def test_a_backend_error_is_the_requests_only_if_a_value_error(load, error, stat
     )
 
 
-@pytest.mark.parametrize(("value", "limit"), [(None, 16384), ("", 16384), ("0", None)])
-def test_the_request_limit_fails_closed(load, value, limit):
+@pytest.mark.parametrize(
+    ("value", "limit"), [("5000", 5000), (None, 16384), ("", 16384), ("0", None)]
+)
+def test_health_and_the_request_limit_which_fails_closed(load, value, limit):
     handler = load(**({} if value is None else {"DECIDER_MAX_REQUEST_TOKENS": value}))
-    assert handler._model.result().health()["max_request_tokens"] == limit
+    assert call(handler, url_event("GET", "/health")) == (
+        200,
+        {
+            "status": "ok",
+            "model": "tiny-decision-q8_0",
+            "inputs": ["text", "image"],
+            "max_length": 512,
+            "max_request_tokens": limit,
+        },
+    )
 
 
 def test_an_on_demand_load_answers_once_ready_and_exits_if_it_fails(load, tmp_path, monkeypatch):
