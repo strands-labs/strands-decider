@@ -1,4 +1,4 @@
-"""Build what the Lambda image serves from a decision checkpoint.
+"""Build what the Lambda image serves from a model checkpoint with a decision_config.json.
 
     python build_artifact.py CHECKPOINT OUT_DIR --llama-cpp DIR --quantize PATH [--revision REV]
         [--expect-digest SHA256] [--work DIR] [--gguf-tmp DIR]

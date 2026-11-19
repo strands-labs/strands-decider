@@ -2,13 +2,6 @@
   "app": "npx tsx bin/cdk-app.ts",
   "context": {
     "model": "StrandsAgents/strands-decider-2B-qwen3.5-v1-2610",
-    "model_revision": "main",
-    "decision": false,
-    "checkpoint_revision": "main",
-    "snapstart": false,
-    "vision": false,
-    "image_long_side": 448,
-    "decoder_precision": "q8_0",
-    "vision_precision": "f16"
+    "model_revision": "main"
   }
 }

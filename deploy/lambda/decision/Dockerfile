@@ -1,9 +1,9 @@
-# AWS Lambda image for a decision checkpoint (../README.md, Decision checkpoints): the decoder as a
-# Q8_0 GGUF and the vision tower as an mmproj GGUF that llama.cpp runs, behind the torch-free core
+# AWS Lambda image for a model checkpoint with a decision_config.json (../README.md, Model
+# checkpoints): the decoder as a Q8_0 GGUF and the vision tower as an mmproj GGUF that llama.cpp runs, behind the torch-free core
 # (strands_decider.core) and its llama.cpp backend (strands_decider.backends.llama_cpp).
-# `cdk deploy -c decision=true` builds it; by hand, from the repository root:
+# `cdk deploy` builds it for such a checkpoint; by hand, from the repository root:
 #   docker build --platform linux/arm64 -f deploy/lambda/decision/Dockerfile \
-#     --build-arg CHECKPOINT=<Hub id, or s3:// URI with --secret for its credentials> .
+#     --build-arg MODEL=<Hub id, or s3:// URI with --secret for its credentials> .
 # Every stage is the Lambda base image, pinned by digest, so what is built links against the
 # libraries it runs on.
 ARG BASE=public.ecr.aws/lambda/python:3.12@sha256:21c21867e3c999a5b9471c16e089bb44a4da0e4e4104a26056799dacadeac278
@@ -38,10 +38,10 @@ COPY src /opt/strands-decider/src
 COPY deploy/lambda/decision/scripts /opt/scripts
 ENV PYTHONPATH=/opt/strands-decider/src
 RUN python /opt/scripts/shim_check.py --llama-cpp /llama --lib /opt/libdecision.so
-ARG CHECKPOINT
-ARG CHECKPOINT_REVISION=main
-# The sha256 of the checkpoint's manifest (README.md, Decision checkpoints), to refuse any other.
-ARG CHECKPOINT_DIGEST=
+ARG MODEL
+ARG MODEL_REVISION=main
+# The sha256 of the checkpoint's manifest (README.md, What the build does), to refuse any other.
+ARG MODEL_DIGEST=
 # The checkpoint goes to the container's disk and the BF16 GGUF to memory (/tmp/gguf): written to
 # Docker's storage in CodeBuild, the converter's write fails with "Not enough free space" with
 # hundreds of GB free. Both are gone when the step ends. An s3:// checkpoint is read with the
@@ -49,8 +49,8 @@ ARG CHECKPOINT_DIGEST=
 RUN --mount=type=secret,id=aws_container_credentials_uri --mount=type=tmpfs,target=/tmp/gguf \
     if [ -s /run/secrets/aws_container_credentials_uri ]; then \
       export AWS_CONTAINER_CREDENTIALS_RELATIVE_URI="$(cat /run/secrets/aws_container_credentials_uri)"; fi \
-    && python /opt/scripts/build_artifact.py "${CHECKPOINT}" /model \
-      --revision "${CHECKPOINT_REVISION}" --expect-digest "${CHECKPOINT_DIGEST}" --llama-cpp /llama \
+    && python /opt/scripts/build_artifact.py "${MODEL}" /model \
+      --revision "${MODEL_REVISION}" --expect-digest "${MODEL_DIGEST}" --llama-cpp /llama \
       --quantize /usr/local/bin/llama-quantize --work /tmp/build --gguf-tmp /tmp/gguf \
     && rm -rf /tmp/build /tmp/hf \
     && chmod -R a+rX /model  # Lambda runs the function as a user other than root

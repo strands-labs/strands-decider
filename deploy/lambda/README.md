@@ -18,9 +18,9 @@ or documents as they arrive, moderation and routing queues, batch scoring, a che
 agent's consequential action. For a guard on every tool call of an agent loop, serve on a GPU
 ([deploy/README.md](../README.md)).
 
-The same CDK app deploys a decision checkpoint, the format of the Strands Decider v2 models,
-with text and images: `-c decision=true`. See
-[Decision checkpoints](#decision-checkpoints).
+The same CDK app deploys the Strands Decider v2 models, with text and images: give it the model,
+and it reads what format the checkpoint is ([Model checkpoints with a
+decision_config.json](#model-checkpoints-with-a-decision_configjson)).
 
 To follow it you need:
 
@@ -110,23 +110,35 @@ Every setting is a CDK context value. Change it in `cdk.json`, or pass `-c key=v
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
-| `model` | `StrandsAgents/strands-decider-2B-qwen3.5-v1-2610` | The strands-decider model, a Hugging Face Hub id. Any Qwen3.5 model with a pointer head works. It names the stack. |
-| `model_revision` | `main` | The model's revision. Use a release's date tag (`YYMMDD`) to pin it ([designs/inference.md, Model artifact](../../designs/inference.md#model-artifact)). |
+| `model` | `StrandsAgents/strands-decider-2B-qwen3.5-v1-2610` | The strands-decider model, a Hugging Face Hub id, or for a checkpoint with a `decision_config.json` also an `s3://bucket/prefix/` URI of a checkpoint directory in the same account. It names the stack ([Which stack a model gets](#which-stack-a-model-gets)). |
+| `model_revision` | `main` | The model's Hub revision. Use a release's date tag (`YYMMDD`) to pin it ([designs/inference.md, Model artifact](../../designs/inference.md#model-artifact)). |
 | `snapstart` | `false` | `true` turns SnapStart on: new execution environments answer in about 6 s instead of up to 30 s, for about $39.50 a month while the stack exists ([What it costs](#what-it-costs)) |
 | `vision` | `false` | `true` adds the base model's vision tower, for requests with images ([Images](#images)) |
 | `image_long_side` | `448` | The longest side, in pixels, an image is scaled to, as for `serve --vision`; `768` makes a square image 576 tokens instead of 196 ([Image size](#image-size)) |
 | `decoder_precision` | `q8_0` | `f16` keeps the decoder unquantized: closer to the torch engine, and slower ([Precision](#precision)) |
 | `vision_precision` | `f16` | `f32` for the vision tower ([Precision](#precision)) |
-| `max_request_tokens` | `24576`, `16384` for a decision checkpoint | The most tokens one request may forward, the state once plus every question; `0` for no limit ([Limits](#limits)) |
-| `decision` | `false` | `true` deploys a decision checkpoint, `checkpoint`, instead of `model` ([Decision checkpoints](#decision-checkpoints)) |
-| `checkpoint` | none | The decision checkpoint: a Hugging Face Hub id, or an `s3://bucket/prefix/` URI of a checkpoint directory in the same account. It names the stack. |
-| `checkpoint_revision` | `main` | The checkpoint's Hub revision; the build resolves it to a commit and records it |
-| `checkpoint_digest` | none | The checkpoint's manifest digest ([What the build does](#what-the-build-does)); the build refuses a checkpoint with another |
-| `stack_name` | from the model | The stack's name, instead of one made from `model` or `checkpoint` (an `s3://` checkpoint's name gets 8 hex digits of its URI's sha256, so checkpoints of one name in different places get stacks of their own) |
+| `max_request_tokens` | `24576`, `16384` for a checkpoint with a `decision_config.json` | The most tokens one request may forward, the state once plus every question; `0` for no limit ([Limits](#limits)) |
+| `model_digest` | none | A checkpoint with a `decision_config.json`: its manifest digest ([What the build does](#what-the-build-does)); the build refuses a checkpoint with another |
+| `stack_name` | from the model | The stack's name, instead of one made from `model` (an `s3://` checkpoint's name gets 8 hex digits of its URI's sha256, so checkpoints of one name in different places get stacks of their own) |
 
-A decision checkpoint reads `checkpoint`, `checkpoint_revision`, `checkpoint_digest`,
-`max_request_tokens` and `stack_name`. The other settings are the v1 model's, and
-`snapstart=true` is refused.
+`snapstart`, `vision`, `image_long_side`, `decoder_precision` and `vision_precision` are only
+supported for v1 model checkpoints, and `model_digest` is not supported for them.
+
+### Which stack a model gets
+
+Before it creates anything, the app asks the Hugging Face Hub which files `model` has at
+`model_revision` and deploys the format the checkpoint declares:
+
+| The checkpoint has | The app deploys |
+| --- | --- |
+| `strands_decider_config.json` | a v1 model checkpoint, as this guide describes |
+| `decision_config.json` naming `"interface": "strands-decider"` and `"format_version": 1` | a model checkpoint with a `decision_config.json` ([Model checkpoints with a decision_config.json](#model-checkpoints-with-a-decision_configjson)) |
+
+Anything else is refused before anything is deployed: both files or neither, another interface
+or `format_version`, or a model or revision the Hub doesn't show (the app reads public models
+only). An `s3://` model is always the second kind, since v1's build reads only the Hub; that
+build checks its `decision_config.json` before converting anything. So `cdk synth`, `cdk deploy`
+and `cdk destroy` need to reach the Hub.
 
 ## What it costs
 
@@ -278,16 +290,16 @@ text answers to within 0.004. An `f32` vision tower with the Q8_0 decoder is slo
   at, not as camera originals.
 - One request at a time per execution environment. Lambda scales by adding environments.
 
-## Decision checkpoints
+## Model checkpoints with a decision_config.json
 
-`-c decision=true` deploys a decision checkpoint instead: the Strands Decider v2 format, a
-Gemma 4 model in its base's multimodal layout with a trained readout beside it. The function
-answers the same `POST /v1/systemone`, with images, and `GET /health`, behind the same
-IAM-authenticated Function URL, and takes the request as a direct invocation too.
+A checkpoint with a `decision_config.json` is the Strands Decider v2 format: a Gemma 4 model in
+its base's multimodal layout with a trained readout beside it. The function answers the same
+`POST /v1/systemone`, with images, and `GET /health`, behind the same IAM-authenticated Function
+URL, and takes the request as a direct invocation too.
 
 ```bash
-npx cdk deploy -c decision=true -c checkpoint=<Hub id, or s3://bucket/prefix/> \
-  [-c checkpoint_revision=<Hub revision>] [-c checkpoint_digest=<sha256>]
+npx cdk deploy -c model=<Hub id, or s3://bucket/prefix/> \
+  [-c model_revision=<Hub revision>] [-c model_digest=<sha256>]
 ```
 
 Lambda serves E2B, with text and images. E4B does not fit with its vision tower: its text model
@@ -314,12 +326,12 @@ against transformers (tests/test_llama_cpp_shim.py runs the same check). The bui
 the conversion, the `prefix_bidir` mask, state reuse, the image rows and the answers are the
 reference's.
 
-The build then reads the checkpoint, from the Hugging Face Hub at the commit `checkpoint_revision`
+The build then reads the checkpoint, from the Hugging Face Hub at the commit `model_revision`
 resolves to, each LFS file checked against the sha256 the Hub records, or, for an `s3://` URI,
 with the CodeBuild project's role, which the stack grants read access to that prefix only. It
 records the checkpoint's manifest digest, the sha256 of the lines `<sha256>  <file>` for its files
 sorted by name (in the checkpoint's directory, `sha256sum * | sort -k 2 | sha256sum`), and with
-`checkpoint_digest` refuses any other. `decision/scripts/build_artifact.py` checks the checkpoint as
+`model_digest` refuses any other. `decision/scripts/build_artifact.py` checks the checkpoint as
 the function will, then converts it with llama.cpp's own `convert_hf_to_gguf.py`:
 
 - the decoder to BF16, then Q8_0 with `llama-quantize`, the lowest type that keeps the
@@ -343,7 +355,7 @@ to 40 s and answer their first request in 30 to 80 s, though an environment on a
 not cached the image still takes 6 to 8 minutes. So after each deploy, call `GET /health` until it
 answers, before sending traffic.
 
-SnapStart is not offered for decision checkpoints (`snapstart=true` is refused): it has not been
+SnapStart is not offered for these checkpoints (`snapstart` is refused): it has not been
 measured with a load that reads 5 GB from a lazily loaded image, and the page-cache drop below
 assumes the environment read the files itself.
 
@@ -368,7 +380,8 @@ assumes the environment read the files itself.
 
 ### Measurements
 
-Measured in us-east-1 on an E2B decision checkpoint (Gemma 4 E2B, prompt `strands-chat`), with the
+Measured in us-east-1 on an E2B checkpoint with a `decision_config.json` (Gemma 4 E2B, prompt
+`strands-chat`), with the
 Q8_0 decoder and Q8_0 vision tower the build makes. Warm requests, server-side medians:
 
 | Request | Graviton2 | Graviton3 | Cost on Graviton2 |
@@ -411,16 +424,15 @@ environment), and the images', the state's and each question's milliseconds.
 ## Deleting it
 
 ```bash
-npx cdk destroy                    # the default model
-npx cdk destroy -c model=<Hub id>  # any other model you deployed
-npx cdk destroy -c decision=true -c checkpoint=<the checkpoint you deployed>
+npx cdk destroy                      # the default model
+npx cdk destroy -c model=<the model>  # any other model you deployed
 ```
 
 This deletes everything that model's `cdk deploy` created: the function, its versions and their
 snapshots, the alias and Function URL, the log group, the ECR repository with the image, the
 CodeBuild project and the roles. The log groups that CodeBuild and deploy-time-build's trigger
 function write to stay, with the build logs: `/aws/codebuild/ContainerImageBuildArm64*` and
-`/aws/lambda/*-DeployTimeBuildCustomRes-*`, at most a few hundred KB each. A decision checkpoint's
-stack owns those two log groups too, so `cdk destroy` deletes them; deploy-time-build's trigger
+`/aws/lambda/*-DeployTimeBuildCustomRes-*`, at most a few hundred KB each. A `decision_config.json`
+checkpoint's stack owns those two log groups too, so `cdk destroy` deletes them; deploy-time-build's trigger
 function can write to its group once more while it handles its own deletion, which leaves that
 group behind.
