@@ -7,10 +7,9 @@ returned as P(true)), a `choice` (one of N options) or a `score` (a level on an 
 scale). Install the package, point the commands at the published Hub id or at a checkpoint you
 trained, then `strands-decider ask` or `strands-decider serve`. Pass `--device cuda`, `mps`, `cpu` or `mlx`
 explicitly; without it the CLI picks cuda, then mps, then cpu, and mlx only when asked for. A
-model checkpoint is the exception: on Apple silicon with the `mlx` extra installed, it
-defaults to mlx, the Mac backend it is validated on, and without the extra it runs on mps with
-a note to install it. A
-checkpoint from `training/recipe.sh all` is already calibrated; calibrate any other
+model checkpoint is the exception: on Apple silicon with the `mlx` extra it defaults to mlx,
+the Mac backend it is validated on, and without the extra it runs on mps with a note to install
+it. A checkpoint from `training/recipe.sh all` is already calibrated; calibrate any other
 checkpoint with `python -m training.evaluate calibrate` before you serve it.
 
 `eval` and `calibrate` also accept `--device cuda`, `mps`, or `cpu` and use the same
@@ -80,12 +79,12 @@ Transformers' `causal_conv1d_fn` falls back to its reference PyTorch path. On CP
 `chunk_gated_delta_rule` also falls back. On MPS, `mps_kernels.py` replaces that second
 function, so only the first fallback matters there, and it costs 32 ms a forward.
 
-**macOS (Apple silicon) with MLX.** The `mlx` extra adds mlx, mlx-lm, mlx-vlm and Pillow, and
-`--device mlx` runs the torso on Metal through mlx-lm
-([Serving on a Mac with MLX](#serving-on-a-mac-with-mlx)), or a model checkpoint through
-mlx-vlm ([Model checkpoints on MLX](#model-checkpoints-on-mlx)).
-For v1 checkpoints MLX is opt-in: with the extra installed, a command without `--device` still
-runs on MPS. A model checkpoint runs on MLX by default when the extra is installed.
+**macOS (Apple silicon) with MLX.** The `mlx` extra adds mlx, mlx-lm, mlx-vlm and Pillow.
+`--device mlx` runs a v1 checkpoint's torso on Metal through mlx-lm
+([Serving on a Mac with MLX](#serving-on-a-mac-with-mlx)) and a model checkpoint through
+mlx-vlm ([Model checkpoints on MLX](#model-checkpoints-on-mlx)). For v1 checkpoints MLX is
+opt-in: with the extra installed, a command without `--device` still runs on MPS. A decision
+checkpoint runs on MLX by default.
 
 ```bash
 pip install -e ".[dev,mlx]"
@@ -322,11 +321,11 @@ strands-decider serve path/to/model-checkpoint --port 8000
 ```
 
 The core renders each request and the transformers backend (`backends/transformers.py`) runs
-the model, encoding the state once when a request asks several questions; on `--device mlx` the
-MLX backend runs it instead ([Model checkpoints on MLX](#model-checkpoints-on-mlx)). CPU runs float32, and
-CUDA and MPS bf16; `--dtype float32` or `--dtype bfloat16` chooses. A request may carry images
-when `decision_config.json` lists `image` in `inputs`. A request whose `audio` is anything but
-null is refused with 422.
+the model, encoding the state once when a request asks several questions; on `--device mlx`
+the MLX backend runs it ([Model checkpoints on MLX](#model-checkpoints-on-mlx)). CPU runs
+float32, and CUDA and MPS bf16; `--dtype float32` or `--dtype bfloat16` chooses. A request may
+carry images when `decision_config.json` lists `image` in `inputs`. A request whose `audio` is
+anything but null is refused with 422.
 
 The serving options, as a model checkpoint takes them:
 
@@ -431,16 +430,11 @@ Evaluations run one at a time, because `_fit` keeps a request's option offsets o
 
 ### Model checkpoints on MLX
 
-A model checkpoint (the Gemma 4 base's multimodal checkpoint with its fine-tuning merged in,
-beside a `readout.safetensors` and a `decision_config.json`) runs on
-`--device mlx` through mlx-vlm ([`backends/mlx.py`](../src/strands_decider/backends/mlx.py)),
-behind the same decision engine as the transformers backend ([Decision
-checkpoints](#model-checkpoints)): the same request checks, audio refused with 422, one
-request at a time on the model, and `/health` naming the backend (`mlx-vlm`). The weights run
-in the dtype they are stored in, bf16 for a model checkpoint, unless `--dtype` says
-otherwise. It takes images whenever the checkpoint's `inputs` hold `image`; `--vision` is not
-needed. A checkpoint whose `config.json` transformers 5.2x wrote (`per_layer_config` in place
-of the bases' `global_head_dim`) is read in the bases' form.
+On `--device mlx`, a model checkpoint runs through mlx-vlm
+([`backends/mlx.py`](../src/strands_decider/backends/mlx.py)) behind the same decision engine,
+request checks and responses as on the other devices ([Model checkpoints](#model-checkpoints));
+`/health` names the backend `mlx-vlm`. The weights run in the dtype they are stored in unless
+`--dtype` says otherwise, and images are taken whenever the checkpoint's `inputs` list `image`.
 
 ```bash
 strands-decider ask CHECKPOINT --device mlx --state "A photo from the support chat." \
@@ -448,66 +442,50 @@ strands-decider ask CHECKPOINT --device mlx --state "A photo from the support ch
 strands-decider serve CHECKPOINT --device mlx --port 8099
 ```
 
-The backend implements the core's `Backend`
-([runtime interface](../docs/architecture.md#the-cores-runtime-interface)) over mlx-vlm's own
-Gemma 4 classes, unpatched:
-
-- Every pass hands mlx-vlm a mask, which it gives every layer as it is, so `prefix_bidir` holds
-  on every layer with no sliding window. The state is encoded once, into plain KV caches, and
-  each question runs over it; `--no-prefix-cache` runs each question as its own full pass under
-  the dense mask instead.
-- On E2B and E4B, whose last layers read an earlier layer's keys and values, a question carries
-  only its last token through those layers, which is exact.
-- An image is decoded as v1 decodes it, resized with the core's `resize_image`, prepared by the
-  checkpoint's image processor with its resize off, and encoded in bf16; its vectors replace the
-  placeholders at its span in the state.
-- The backend hands the core the final-norm hidden state, and the core applies the readout: a
-  bf16 GEMM, then the soft-cap, the temperature and the softmax in float32.
+The backend runs mlx-vlm's own Gemma 4 classes, unpatched, with an explicit `prefix_bidir` mask
+on every layer and no sliding window. The state is encoded once into KV caches and each question
+runs over them (`--no-prefix-cache`: one full pass per question). Images are resized with the
+core's `resize_image` and prepared by mlx-vlm's image processor with its resize off. The
+backend hands the core the final-norm hidden state, and the core applies the readout.
 
 `strands-decider convert-mlx CHECKPOINT OUT [--bits 8|4]` writes an MLX artifact, bf16 without
-`--bits` ([`backends/mlx_convert.py`](../src/strands_decider/backends/mlx_convert.py)), which
-`ask` and `serve` load like the checkpoint on `--device mlx`, and refuse on any other device:
-its `config.json` carries a marker, and only mlx-vlm reads its layout. Only the decoder is
-quantized: the vision and audio encoders and their projections stay bf16, and
-`readout.safetensors`, `decision_config.json`, `processor_config.json` and the tokenizer are
-copied byte for byte. The artifact is written into `OUT.partial-*` beside `OUT`, reloaded, and
-only then renamed to `OUT` with the usual permissions. `mlx_vlm.convert` alone would lose the
-readout and quantize the audio projection.
+`--bits` ([`backends/mlx_convert.py`](../src/strands_decider/backends/mlx_convert.py)). `ask`
+and `serve` load it like the checkpoint on `--device mlx` and refuse it on any other device.
+Only the decoder is quantized; the vision and audio encoders and their projections stay bf16,
+and the decision files (`readout.safetensors`, `decision_config.json`, `processor_config.json`,
+the tokenizer) are copied byte for byte. The artifact is written beside `OUT`, reloaded, and
+only then renamed to `OUT`, so a failed conversion leaves nothing. `mlx_vlm.convert` alone would
+lose the readout and quantize the audio projection.
 
-Measured on an M4 Pro (48 GB) with a pre-release Strands Decider v2 E2B checkpoint in the
-multimodal layout, against reference outputs computed with transformers in bf16 on a GPU, one
-masked pass per prompt:
+Measured on an M4 Pro (48 GB) with a pre-release E2B model checkpoint, against reference
+outputs from transformers in bf16 on a GPU, one masked pass per prompt:
 
-- Text. On the reference's 1,200 prompts (300 in each of four length buckets, about 256 to 8K
-  tokens; given as the reference's own token ids), bf16 agrees on the top code for 99.25% of
-  questions (98.67% to 99.67% per bucket), with mean |Δp| 0.0065 and at most 0.086. Every
-  disagreement is a near-tie, with the reference's top two at most 0.084 apart. The 8-bit
-  artifact agrees on 98.83% (98.00% to 99.67% per bucket), with mean |Δp| 0.0099 and at most
-  0.225; 11 of its 14 disagreements are within 0.02 in the reference, and the widest is 0.107.
-- Images. On 24 requests over six photographs (an astronaut's portrait, a greyscale photograph
-  of a cameraman, a cat, a cup of coffee, a deep-field telescope image and a rocket launch; one
-  to four images per request, an empty state, and a 1,300-token state), bf16 agrees with the
-  reference, whose pixels come from transformers' `Gemma4ImageProcessorPil`, on 24 of 24 top
-  codes, with mean |Δp| 0.0021 and at most 0.024. The 8-bit artifact agrees on 24 of 24 too,
-  with mean |Δp| 0.0043.
+- Text. On 1,200 prompts (300 in each of four length buckets, about 256 to 8K tokens), bf16
+  agrees on the top code for 99.25% of questions (98.67% to 99.67% per bucket), with mean |Δp|
+  0.0065 and at most 0.086; every disagreement is a near-tie, the reference's top two at most
+  0.084 apart. The 8-bit artifact agrees on 98.83% (98.00% to 99.67%), with mean |Δp| 0.0099
+  and at most 0.225; 11 of its 14 disagreements are within 0.02 in the reference, the widest
+  0.107.
+- Images. On 24 requests over six photographs (one to four images each, an empty state and a
+  1,300-token state), with the reference's pixels from transformers' `Gemma4ImageProcessorPil`,
+  bf16 and 8-bit agree on 24 of 24 top codes, with mean |Δp| 0.0021 and 0.0043 (at most 0.024
+  in bf16).
 - Latency, the state encoded and then one question: a median of 78 ms at about 270 tokens,
   231 ms at 1,100, 968 ms at 3,900 and 2,471 ms at 7,400 in bf16, and 70, 233, 1,010 and
-  2,485 ms in 8-bit. A one-image request of 350 tokens takes 300 ms, against 90 ms for the same
-  prompt with the image's placeholders left as they are; requests with two, three and four
-  images (630 to 1,140 tokens) take 567, 841 and 1,099 ms. `ask` with one image, from the shell
-  to its printed answer, model load included, takes 6.0 s on the 8-bit artifact.
+  2,485 ms in 8-bit. A one-image request of 350 tokens takes 300 ms (90 ms with the
+  placeholders alone); two, three and four images (630 to 1,140 tokens) take 567, 841 and
+  1,099 ms. `ask` with one image on the 8-bit artifact, model load included, takes 6.0 s.
 - Memory. bf16 holds 8.9 GiB (the audio encoder is not loaded) and peaks at 9.3 GiB at 270
-  tokens and 11.8 GiB at 7,400; the 8-bit artifact holds 4.9 GiB and peaks at 5.3 and 7.7 GiB.
+  tokens and 11.8 GiB at 7,400; 8-bit holds 4.9 GiB and peaks at 5.3 and 7.7 GiB.
   `convert-mlx --bits 8` wrote the 5.9 GB artifact in 11 s, with a peak footprint of 13.1 GB.
 
-The 12B, 26B-A4B and 31B load strictly, and convert to 8 bits (and the 26B-A4B to 4), with the
-same code; their answers on a Mac are not yet measured.
+The 12B, 26B-A4B and 31B load strictly and convert to 8 bits (and the 26B-A4B to 4) with the
+same code; their answers on a Mac are not yet measured. A 4-bit E2B has agreed on only 88.9% of
+top codes.
 
 Limits. mlx-vlm is pinned to the release tested, and the backend refuses another at load,
-because it relies on mlx-vlm's Gemma 4 internals; mlx is capped at the minor version tested. A
-4-bit E2B quantized with the same affine quantizer has agreed on only 88.9% of top codes.
-`serve --max-concurrency` requests reach the backend at once (default 1), queued on its one
-worker thread, and the others wait up to `--queue-timeout` seconds and get 503; images are
-decoded for two requests at a time, on the calling threads, as numpy. Each request encodes
-its state afresh: there is no cache across requests. `--max-batch` and `--max-batch-tokens` do
-not apply on mlx, where questions run one at a time over the state.
+because it calls mlx-vlm's internals. The model runs on one worker thread, since MLX arrays
+belong to the thread that made them: `serve --max-concurrency` requests reach it at once
+(default 1), the others wait up to `--queue-timeout` seconds and then get 503, and each request's
+images are decoded on its own thread meanwhile. There is no cache across requests.
+`--max-batch` and `--max-batch-tokens` do not apply: questions run one at a time.
