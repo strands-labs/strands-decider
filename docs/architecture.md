@@ -1,8 +1,9 @@
 # Architecture
 
 This document describes the model: the pointer readout, the three question types, the
-training objective and the design decisions behind them. It ends with the repository
-layout. Paths are relative to the repository root unless they are links. The published
+training objective and the design decisions behind them. It then gives the runtime interface
+of `strands_decider.core`, which the v2 models use, and ends with the repository layout. Paths
+are relative to the repository root unless they are links. The published
 `strands_decider` package (inference) lives under `src/strands_decider/`; the training
 code lives under `training/`. An inference module path such as `infer.py` is relative
 to `src/strands_decider/`; a training module path such as `data/teacher.py` is relative
@@ -216,11 +217,36 @@ would corrupt the prefix — following decider-2b's `shared_prefix.py`. A layer 
 any other tensor raises `UnforkableCache`, and the engine falls back to exact batched
 encoding rather than guess whether it has a batch dimension.
 
+## The core's runtime interface
+
+Every v2 runtime imports `strands_decider.core`, so its code and its goldens
+(`tests/fixtures/core/`) define the v2 models' decision interface.
+
+A runtime loads a checkpoint with `DecisionConfig.load`, `load_tokenizer`, `load_readout` and,
+for images, `check_image_processor`. It supplies the decoder as a `Backend` (`core/runtime.py`),
+whose `forward(state, questions, images)` takes the state's token ids, each question's ids and
+the state's images (each a `RenderedImage`, with its file, its sha256 and the span of its
+placeholders). It runs every question after the shared state under `prefix_bidir`, seeing no
+other question, and returns one row per question at its last token. A row is the final-norm
+hidden state, or the codes' probabilities for a backend that applies the readout itself.
+
+`evaluate(request, tokenizer, weight, config, backend)` answers one `Request`, which a server
+builds with `Request.model_validate_json`. It refuses images when the checkpoint's `inputs` lack
+`image`, renders the request, calls `forward` once and reads the answers, from hidden states when
+given the readout `weight` and from probabilities when `weight` is None. A backend with no vision
+encoder raises `NO_VISION` from `forward`. A runtime may batch, cache the state's keys and values
+(keyed on the state's ids and each image's `sha256`), or split the work across devices, provided
+each question's result is what it would be alone.
+
+`render` needs a tokenizer that encodes request text with special-token matching off, so the text
+can never become a control token. `load_tokenizer` and `prepare_tokenizer` set it up that way.
+
 ## Layout
 
 ```
 src/strands_decider/              -- published package (inference only)
-  schema.py       wire types; the confidence formula
+  schema.py       wire types
+  confidence.py   the confidence formulas, without dependencies
   prompting.py    state/question rendering; slot <-> option binding
   modeling.py     LLM torso (Qwen3 or hybrid Qwen3.5) + pointer (or slot) readout;
                   masked softmax; KL reference; is_hybrid
@@ -233,6 +259,8 @@ src/strands_decider/              -- published package (inference only)
   hf_export.py    a checkpoint as a Hugging Face model folder (safetensors, card, manifest)
   naming.py       release naming helpers (used by hf_export and release scripts)
   vision.py       Qwen3.5 vision-tower engine (`serve --vision`, `ask --image`)
+  core/           the decision interface without torch: prompt rendering, the code
+                  readout, decision_config.json, the runtime contract
 
 training/                         -- not published; run as `python -m training.<module>`
   train.py        LoRA + readout training loop (`python -m training.train`)
@@ -312,7 +340,9 @@ tests/            pytest only: test_core (no GPU), test_server (stubbed), test_g
                   test_catchall, test_distill, test_hf_export, test_checkpoint_load,
                   test_cli_build, test_data_identity, test_configs, test_run_recipe,
                   test_llm_client, test_cli_exit,
-                  test_ddp (`-m distributed` for the multi-GPU runs)
+                  test_ddp (`-m distributed` for the multi-GPU runs);
+                  test_core_prompt, test_core_readout, test_core_config, test_core_images
+                  (the torch-free core)
 docs/             architecture.md -- this document; inference.md -- serving a checkpoint:
                   install, ask, serve, the HTTP API, a Mac
 .github/          workflows/tests.yml -- the CPU tests; workflows/generators-live-test.yml
