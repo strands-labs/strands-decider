@@ -1,13 +1,23 @@
-"""LoRA on the routed experts of a Gemma 4 mixture-of-experts decoder (the 26B-A4B).
+"""Expert LoRA: LoRA adapters on the expert layers of Gemma 4 26B-A4B, which PEFT cannot reach.
 
-transformers keeps the experts of a layer fused in `layers.<i>.experts`, two 3-D parameters:
+"Expert LoRA" is this repository's name for it, not a method of its own. It is LoRA
+(https://arxiv.org/abs/2106.09685): the base weight W stays frozen, and training learns a
+small low-rank update B @ A that is added to it.
 
-    gate_up_proj  [E, 2 * I, H]   (gate rows first, then up rows)
+Why this file exists. Gemma 4 26B-A4B is a mixture-of-experts model. Beside its dense MLP, each
+layer has many small MLPs (the experts), and a router sends every token to a few of them.
+Training adds LoRA through PEFT (https://huggingface.co/docs/peft), which wraps nn.Linear
+modules. transformers does not keep the experts as nn.Linear modules. It keeps all the experts
+of a layer in `layers.<i>.experts`, as two 3-D parameters:
+
+    gate_up_proj  [E, 2 * I, H]   (E experts; gate rows first, then up rows)
     down_proj     [E, H, I]
 
-PEFT's `target_modules` wraps nn.Linear modules only, so it never reaches them. ExpertLoRA
-replaces `experts` by a module that holds the frozen original as `.base` and adds one LoRA
-per expert to each fused matrix:
+So PEFT never reaches them, and without this file the experts keep the base model's weights
+while the rest of the layer trains.
+
+What it does. `attach` replaces `experts` by an ExpertLoRA module that holds the frozen
+original as `.base` and adds one LoRA per expert to each of the two parameters:
 
     gate_up[e] + s * gate_up_b[e] @ gate_up_a[e]    gate_up_a [E, r, H], gate_up_b [E, 2I, r]
     down[e]    + s * down_b[e] @ down_a[e]          down_a    [E, r, I], down_b    [E, H, r]
@@ -16,6 +26,10 @@ with s = alpha / r and B = 0 at the start, so step 0 computes the base model. Th
 (`layers.<i>.router`) is not touched and stays frozen. The masters are float32; the math
 runs in the activations' dtype. The forward never builds a full delta: each token's low-rank
 terms go through the same expert-sorted matmuls as the base weights.
+
+`expert_lora: true` in a training config turns it on (modeling.StrandsDeciderConfig).
+`state_dict` and `load_state` save and load the adapters (FILE, beside PEFT's adapter in a
+checkpoint), and `merge_and_unwrap` folds them into the base weights.
 """
 
 from __future__ import annotations

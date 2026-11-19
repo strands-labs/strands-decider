@@ -18,6 +18,7 @@ from typing import Any
 
 import torch
 from tokenizers import Tokenizer
+from transformers import PreTrainedTokenizerFast
 
 from strands_decider import core
 from strands_decider.prompting import build_prompt
@@ -46,16 +47,18 @@ class CollatorConfig:
 _CHAT_TOKENIZER_LOCK = threading.Lock()
 
 
+# Cached, so that a tokenizer is copied once: a copy of Gemma 4's tokenizer takes about half a
+# second, and the trainer's length check asks for it once for every 1,000 rows.
 @lru_cache(maxsize=2)
-def _chat_tokenizer(tokenizer: Any) -> Tokenizer:
+def _chat_tokenizer(tokenizer: PreTrainedTokenizerFast) -> Tokenizer:
     return core.prepare_tokenizer(Tokenizer.from_str(tokenizer.backend_tokenizer.to_str()))
 
 
-def chat_tokenizer(tokenizer: Any) -> Tokenizer:
+def chat_tokenizer(tokenizer: PreTrainedTokenizerFast) -> Tokenizer:
     """The tokenizer `core.render` takes, for a Hugging Face `tokenizer`: a copy of its backend
     that encodes request text as plain text, checked to be Gemma 4's (`core.prepare_tokenizer`).
-    A copy, so that `tokenizer` itself keeps its own settings. Made once for each tokenizer; the
-    lock stops the threads of the start-up length check from making one each."""
+    A copy, so that `tokenizer` itself keeps its own settings. The length check runs on a pool
+    of threads; the lock stops them from making a copy each before the first one is cached."""
     with _CHAT_TOKENIZER_LOCK:
         return _chat_tokenizer(tokenizer)
 

@@ -26,7 +26,11 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from huggingface_hub import snapshot_download
+from safetensors import safe_open
 from transformers import AutoConfig, AutoModel, AutoTokenizer
+
+from . import expert_lora, prefix_split_attention
+from .core import CODE_TOKEN_IDS, MAX_CODES
 
 # Large negative rather than -inf: keeps softmax finite under autocast/bf16, where
 # -inf can produce NaNs if an entire row is masked by a malformed batch.
@@ -289,8 +293,6 @@ class TokenReadoutHead(nn.Module):
 
     def __init__(self, hidden_size: int, dropout: float = 0.0, softcap: float | None = None):
         super().__init__()
-        from .core import MAX_CODES
-
         self.dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
         self.proj = nn.Linear(hidden_size, MAX_CODES, bias=False)
         self.softcap = softcap
@@ -341,8 +343,6 @@ def lm_head_rows(config: StrandsDeciderConfig, torso: nn.Module, ids: list[int])
     if getattr(base, "tie_word_embeddings", True):
         weight = torso.get_input_embeddings().weight.detach()
         return weight[index.to(weight.device)].float().cpu()
-    from safetensors import safe_open
-
     local = config.base_model
     if not os.path.isdir(local):
         local = snapshot_download(local, revision=config.base_revision)
@@ -509,16 +509,13 @@ class StrandsDeciderModel(nn.Module):
         model = cls(config, torso, tok)
         if config.head_type == "token_readout":
             assert isinstance(model.head, TokenReadoutHead)
-            from .core import CODE_TOKEN_IDS  # Gemma 4's: the prompt's codes are its tokens
-
+            # At Gemma 4's code ids: the prompt lists each option under one of its code tokens.
             model.head.proj.weight.data.copy_(lm_head_rows(config, torso, list(CODE_TOKEN_IDS)))
         if config.use_lora:
             model.attach_lora()
         return model
 
     def attach_expert_lora(self) -> None:
-        from . import expert_lora
-
         c = self.config
         alpha = c.lora_alpha if c.expert_lora_alpha is None else c.expert_lora_alpha
         expert_lora.attach(self.torso, c.expert_lora_r, alpha, c.lora_dropout)
@@ -651,11 +648,9 @@ class StrandsDeciderModel(nn.Module):
             # per row, which runs on a faster kernel. The mask is still built and passed, and
             # it is what short batches use. Installed once and left in place: a gradient
             # checkpoint's recompute must take the same path as the forward it repeats.
-            from .prefix_split_attention import install, set_rows
-
             assert prefix_end is not None  # checked above
-            install(self.torso, self.config.attn_split)
-            set_rows(prefix_end, attention_mask)
+            prefix_split_attention.install(self.torso, self.config.attn_split)
+            prefix_split_attention.set_rows(prefix_end, attention_mask)
         hidden = self.encode(input_ids, mask, past_key_values=past_key_values)
         pooled = pool_last_token(hidden, attention_mask).to(torch.float32)
         if opt_idx is None or readout:
@@ -705,8 +700,6 @@ class StrandsDeciderModel(nn.Module):
         if self.config.use_lora:
             self.torso.save_pretrained(os.path.join(path, "lora"))
         if self.config.expert_lora:
-            from . import expert_lora
-
             save_file(
                 expert_lora.state_dict(self.torso),
                 os.path.join(path, "lora", expert_lora.FILE),
@@ -768,8 +761,6 @@ class StrandsDeciderModel(nn.Module):
         obj.head.to(torch.float32)
         if config.expert_lora:
             from safetensors.torch import load_file
-
-            from . import expert_lora
 
             obj.attach_expert_lora()
             expert_lora.load_state(torso, load_file(os.path.join(lora_dir, expert_lora.FILE)))
