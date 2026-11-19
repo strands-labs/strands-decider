@@ -32,10 +32,6 @@ import json
 import shutil
 from pathlib import Path
 
-CODES_FILE = (
-    None  # the codes come from the core library when installed, else from the tokenizer below
-)
-
 SMALL_TEXT = dict(
     hidden_size=128,
     intermediate_size=256,
@@ -47,20 +43,6 @@ SMALL_TEXT = dict(
     global_head_dim=64,
     sliding_window=64,
 )
-
-
-def codes() -> list[str]:
-    """The 255 answer codes: A to Z, AA to IV without GZ (the core's ``CODES``)."""
-    letters = [chr(c) for c in range(ord("A"), ord("Z") + 1)]
-    out = list(letters)
-    for a in letters:
-        for b in letters:
-            out.append(a + b)
-            if a + b == "IV":
-                return [c for c in out if c != "GZ"]
-    raise AssertionError
-
-
 #: The standard deviation of the tiny models' attention logits at initialization (see condition_attention).
 LOGIT_STD = 1.5
 
@@ -88,24 +70,10 @@ def condition_attention(model) -> int:
     return n
 
 
-def text_config(
-    base: dict,
-    layout: str,
-    hetero: bool,
-    bidir: bool,
-    head_dim: int | None = None,
-    rotary: float | None = None,
-) -> dict:
-    tc = dict(base)
-    tc.update(SMALL_TEXT)
-    if head_dim:
-        tc["head_dim"] = tc["global_head_dim"] = head_dim
+def text_config(base: dict, layout: str, hetero: bool, bidir: bool) -> dict:
+    tc = {**base, **SMALL_TEXT}
     if hetero:
         tc["global_head_dim"] = 2 * tc["head_dim"]
-    if rotary is not None:
-        rp = {k: dict(v) for k, v in tc["rope_parameters"].items()}
-        rp["full_attention"]["partial_rotary_factor"] = rotary
-        tc["rope_parameters"] = rp
     if layout == "multimodal" or layout == "decoder":
         tc["num_kv_shared_layers"] = 2
         tc["hidden_size_per_layer_input"] = 16
@@ -129,13 +97,6 @@ def main() -> None:
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--vision-bidir", action="store_true")
     ap.add_argument("--hetero-heads", action="store_true")
-    ap.add_argument("--head-dim", type=int, default=None, help="both head sizes (default 64)")
-    ap.add_argument(
-        "--rotary",
-        type=float,
-        default=None,
-        help="the full layers' partial_rotary_factor (base: 0.25)",
-    )
     ap.add_argument("--base-model", default="google/gemma-4-E2B-it")
     ap.add_argument("--base-revision", default="3e22461f65e89153144f8adb70e3b8c2cc9845a7")
     a = ap.parse_args()
@@ -143,14 +104,12 @@ def main() -> None:
     import torch
     import transformers
     from safetensors.torch import save_file
-    from tokenizers import Tokenizer
+    from strands_decider.core import CODE_TOKEN_IDS, CODES, load_tokenizer
 
     torch.manual_seed(a.seed)
     base = json.loads((a.base / "config.json").read_text())
     a.out.mkdir(parents=True, exist_ok=True)
-    tc = text_config(
-        base["text_config"], a.layout, a.hetero_heads, a.vision_bidir, a.head_dim, a.rotary
-    )
+    tc = text_config(base["text_config"], a.layout, a.hetero_heads, a.vision_bidir)
     if a.layout == "decoder":
         cfg = transformers.Gemma4TextConfig(**{k: v for k, v in tc.items() if k != "model_type"})
         cfg.architectures = ["Gemma4TextModel"]
@@ -199,17 +158,13 @@ def main() -> None:
     hidden = SMALL_TEXT["hidden_size"]
     readout = (torch.randn(255, hidden) * 0.25).to(torch.bfloat16)
     save_file({"weight": readout.contiguous()}, str(a.out / "readout.safetensors"))
-    tok = Tokenizer.from_file(str(a.out / "tokenizer.json"))
-    cs = codes()
-    ids = [tok.token_to_id(c) for c in cs]
-    assert all(i is not None for i in ids) and len(set(ids)) == 255, "a code is not one token"
     dc = {
         "interface": "strands-decider",
         "format_version": 1,
         "prompt": "strands-chat",
         "inputs": a.inputs.split(","),
-        "codes": cs,
-        "token_ids": ids,
+        "codes": list(CODES),
+        "token_ids": list(CODE_TOKEN_IDS),
         "temperature": 1.0,
         "final_logit_softcapping": tc["final_logit_softcapping"],
         "attention_mode": "prefix_bidir",
@@ -217,12 +172,18 @@ def main() -> None:
         "max_length_validated": 4096,
         "provenance": {"base_model": a.base_model, "base_revision": a.base_revision},
     }
-    if (
-        a.layout == "decoder"
-    ):  # an intermediate checkpoint: its decision_config.json predates these fields
-        for k in ("interface", "inputs", "provenance", "prompt", "max_length_validated"):
+    if a.layout == "decoder":  # an intermediate checkpoint, whose file predates these fields
+        for k in (
+            "interface",
+            "inputs",
+            "provenance",
+            "prompt",
+            "max_length_validated",
+            "final_logit_softcapping",
+        ):
             dc.pop(k)
     (a.out / "decision_config.json").write_text(json.dumps(dc, indent=2))
+    load_tokenizer(a.out)  # the core's check that the codes are Gemma 4's single tokens
     n = sum(p.numel() for p in model.parameters())
     print(
         json.dumps(

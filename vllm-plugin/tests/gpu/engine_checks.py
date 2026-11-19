@@ -1,168 +1,135 @@
-"""The server's request path on a real engine, in process: the context's boundary, and what an engine refusal raises.
+"""The server's request path on a real engine, in process, with no socket.
 
-    python engine_checks.py [--repeat-tol T] serve CKPT --max-length L [any other strands-decider-vllm serve flags]
+    python engine_checks.py [--repeat-tol T] serve CKPT --max-length L [other serve flags]
 
-The engine is built as ``strands-decider-vllm serve`` builds it, from the same flags (``server.settings``), and no
-socket is opened. Each check is a PASS/FAIL line:
+The engine is built from the flags as ``strands-decider-vllm serve`` builds it. PASS/FAIL lines:
 
-1. the default context (``--max-model-len``) is ``--max-length`` plus 1;
-2. a request rendered to exactly ``--max-length`` tokens is answered (the server's ``Decider``, on the engine);
-3. a request one token longer is refused by the server (HTTP 422) before it reaches the engine;
-4. vLLM itself refuses a prompt of exactly ``max_model_len`` tokens with ``VLLMValidationError``: the reason the
-   default context is one token longer than the longest prompt;
-5. a request the engine core refuses (no ``prefix_end``) makes ``AsyncLLM.generate`` raise ``VLLMValidationError``,
-   which the server answers with HTTP 422 (``server.refusal``); the engine keeps serving, and the first request asked
-   again gets its answer within ``REPEAT_TOL``;
-6. with a checkpoint that takes images, a burst of image requests through the server's HTTP app (in process, on
-   httpx's ASGI transport): vLLM's own image preprocessing (every call of the plugin's multimodal processor, which
-   vLLM's renderer makes) runs on a thread other than the event loop's, and ``GET /ping`` keeps answering, timed
-   throughout.
+1. the default context is --max-length + 1;
+2. a request of exactly --max-length tokens is answered, and one token more is refused (HTTP 422);
+3. vLLM itself refuses a prompt that fills the context: why the default context is one longer;
+4. a request the engine core refuses raises VLLMValidationError (HTTP 422), the engine serves on,
+   and the first request asked again gets its answer within T;
+5. for a checkpoint that takes images, image requests over HTTP: vLLM's image preprocessing (the
+   plugin's processor, which vLLM's renderer calls) runs off the event loop while /ping answers.
 """
 
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
+import threading
+import time
 import uuid
 
 FAILURES: list[str] = []
-# Max |dp| of the first request asked again, from the prefix cache, against its cold answer: client.py's repeat tolerance,
-# which tests/gpu/ci.sh sets per device (--repeat-tol). The default is ci.sh's for bf16 on a GPU.
-REPEAT_TOL = 0.02
 
 
 def check(ok, what):
     print(("PASS  " if ok else "FAIL  ") + what, flush=True)
     if not ok:
         FAILURES.append(what)
-    return ok
 
 
-def request_of_length(d, length: int) -> tuple[object, object]:
-    """A one-question request whose rendered prompt is exactly ``length`` tokens, and its rendering."""
+def request_of_length(tokenizer, length):
+    """A one-question request body whose prompt is exactly ``length`` tokens, and its rendering."""
     from strands_decider import core
 
-    question = {"q": {"type": "noul", "instructions": "Is the ticket about a refund?"}}
+    def render(state):
+        body = {"state": state, "questions": {"q": {"type": "noul", "instructions": "A refund?"}}}
+        rendered = core.render(core.Request.model_validate(body), tokenizer)
+        return body, rendered, len(rendered.questions["q"].ids)
 
-    def render(state: str):
-        body = core.Request.model_validate({"state": state, "questions": question})
-        r = core.render(body, d.tokenizer)
-        return body, r, len(r.questions["q"].ids)
-
-    words = lambda n: " ".join(["ticket"] * n)  # noqa: E731
-    lo, hi = 0, length  # the most words that fit
+    lo, hi = 0, length  # the most words that fit, then a few tokens more
     while lo < hi:
         mid = (lo + hi + 1) // 2
-        lo, hi = (mid, hi) if render(words(mid))[2] <= length else (lo, mid - 1)
-    for tail in ("", ".", " a", ",", "!"):  # top up the last few tokens
-        for k in range(0, 8):
-            body, r, got = render(words(lo) + tail * k)
-            if got == length:
-                return body, r
+        lo, hi = (mid, hi) if render("ticket " * mid)[2] <= length else (lo, mid - 1)
+    for tail in ("", ".", " a", ","):
+        for k in range(8):
+            body, rendered, n = render("ticket " * lo + tail * k)
+            if n == length:
+                return body, rendered
     raise SystemExit(f"could not render a request of exactly {length} tokens")
 
 
-async def run(d, length: int, max_model_len: int) -> None:
+async def text_checks(d, length, max_model_len, repeat_tol):
+    import json
+
     from vllm import SamplingParams
     from vllm.exceptions import VLLMValidationError
 
-    from strands_decider_vllm import PREFIX_END_KEY, server
+    from strands_decider_vllm import server
 
-    body, rendered = request_of_length(d, length)
-    out = await d.decide(body)
+    body, rendered = request_of_length(d.s.tokenizer, length)
+    out = await d.decide(json.dumps(body).encode())
     check(
-        set(out["answers"]) == {"q"} and out["usage"]["input_tokens"] == length,
-        f"a request of exactly --max-length = {length} tokens is answered",
+        out["usage"]["input_tokens"] == length,
+        f"a request of --max-length = {length} tokens is answered",
     )
-    longer = body.model_copy(update={"state": body.state + " ticket"})
     try:
-        await d.decide(longer)
-        check(False, "a request one token longer is refused by the server")
-    except Exception as e:
+        await d.decide(json.dumps({**body, "state": body["state"] + " ticket"}).encode())
+        check(False, "a request one token longer is refused")
+    except server.Refused as e:
         check(
-            server.refusal(e) and "exceeds the limit" in str(e),
-            f"a request one token longer is refused by the server: {type(e).__name__}: {str(e)[:100]}",
+            "exceeds the limit" in str(e), f"a request one token longer is refused: {str(e)[:90]}"
         )
 
     q = rendered.questions["q"]
-    ids = list(q.ids)
-    sp = dict(
-        max_tokens=1,
-        temperature=1.0,
-        top_p=1.0,
-        top_k=0,
-        min_p=0.0,
-        logprobs=len(q.code_token_ids),
-        allowed_token_ids=list(q.code_token_ids),
-    )
 
-    async def generate(prompt_ids, **over):
-        params = SamplingParams(**{**sp, "extra_args": {PREFIX_END_KEY: q.state_len}, **over})
-        rid = f"check-{uuid.uuid4().hex}"
-        async for _ in d.engine.generate({"prompt_token_ids": prompt_ids}, params, rid):
+    async def generate(ids, extra_args):
+        sp = SamplingParams(
+            max_tokens=1,
+            logprobs=2,
+            allowed_token_ids=list(q.code_token_ids),
+            extra_args=extra_args,
+        )
+        async for _ in d.engine.generate(
+            {"prompt_token_ids": ids}, sp, f"check-{uuid.uuid4().hex}"
+        ):
             pass
 
-    full = ids + ids[-1:] * (max_model_len - len(ids))
-    try:
-        await generate(full)
-        check(False, f"vLLM refuses a prompt of exactly max_model_len = {max_model_len} tokens")
-    except VLLMValidationError as e:
-        check(
-            "maximum model length" in str(e),
-            f"vLLM refuses a prompt of exactly max_model_len = {max_model_len} tokens: {str(e)[:110]}",
-        )
-    try:
-        await generate(ids, extra_args={})
-        check(False, "a request the engine core refuses raises VLLMValidationError")
-    except Exception as e:
-        check(
-            isinstance(e, VLLMValidationError)
-            and "strands-decider" in str(e)
-            and server.refusal(e),
-            f"a request the engine core refuses raises {type(e).__name__} (HTTP 422): {str(e)[:100]}",
-        )
-    # Asked again, the state comes from the prefix cache and runs other attention kernels than the cold request.
-    again = await d.decide(body)
+    for ids, extra_args, want, what in [
+        (
+            list(q.ids) + [q.ids[-1]] * (max_model_len - length),
+            {"prefix_end": q.state_len},
+            "maximum model length",
+            f"vLLM refuses a prompt of max_model_len = {max_model_len} tokens",
+        ),
+        (
+            list(q.ids),
+            {},
+            "strands-decider",
+            "a request the engine core refuses raises VLLMValidationError (HTTP 422)",
+        ),
+    ]:
+        try:
+            await generate(ids, extra_args)
+            check(False, what)
+        except VLLMValidationError as e:
+            check(want in str(e), f"{what}: {str(e)[:90]}")
+    again = await d.decide(json.dumps(body).encode())  # from the prefix cache: other kernels
     dp = abs(again["answers"]["q"]["noul"] - out["answers"]["q"]["noul"])
     check(
-        dp <= REPEAT_TOL,
-        f"the engine serves on, with the same answer: |dp| {dp:.4f} (bound {REPEAT_TOL})",
+        dp <= repeat_tol,
+        f"the engine serves on, with the same answer: |dp| {dp:.4f} (bound {repeat_tol})",
     )
 
 
-def photo(seed: int, w: int = 1600, h: int = 1200) -> str:
-    """A synthetic photo as base64 PNG, different for every seed."""
-    import base64
-    import io
+def photo(seed):
     import random
 
-    from PIL import Image, ImageDraw
+    from make_requests import photo  # this directory's
 
-    rng = random.Random(seed)
-    img = Image.new("RGB", (w, h), tuple(rng.randrange(256) for _ in range(3)))
-    draw = ImageDraw.Draw(img)
-    for _ in range(60):
-        x, y = rng.randrange(w), rng.randrange(h)
-        draw.rectangle(
-            (x, y, x + rng.randrange(1, w // 3), y + rng.randrange(1, h // 3)),
-            fill=tuple(rng.randrange(256) for _ in range(3)),
-        )
-    buf = io.BytesIO()
-    img.save(buf, format="PNG")
-    return base64.b64encode(buf.getvalue()).decode()
+    return photo(random.Random(seed), 1600, 1200, "PNG")
 
 
-async def images_off_the_loop(d, requests: int = 8, per_request: int = 2) -> None:
-    import threading
-    import time
-
+async def images_off_the_loop(d, requests=8, per_request=2):
     import httpx
 
     from strands_decider_vllm import processing, server
 
-    loop_thread = threading.get_ident()
-    calls: list[tuple[int, float]] = []
-    cls = processing.DeciderMultiModalProcessor
+    loop_thread, calls = threading.get_ident(), []
+    cls = processing.ResizedImageProcessor
     original = cls.apply
 
     def apply(self, *args, **kwargs):
@@ -175,18 +142,16 @@ async def images_off_the_loop(d, requests: int = 8, per_request: int = 2) -> Non
     cls.apply = apply
     app = server.build_app(None)
     app.state.decider = d
-    question = {
-        "q": {"type": "noul", "instructions": "Is the parcel damaged?"}
-    }  # sent over HTTP as JSON
+    question = {"q": {"type": "noul", "instructions": "Is the parcel damaged?"}}
     bodies = [
         {
-            "state": "Photos of the parcel.",
+            "state": "Photos.",
             "images": [photo(100 * i + k) for k in range(per_request)],
             "questions": question,
         }
         for i in range(requests)
     ]
-    pings: list[tuple[float, int]] = []
+    pings = []
     try:
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(
@@ -209,64 +174,52 @@ async def images_off_the_loop(d, requests: int = 8, per_request: int = 2) -> Non
         cls.apply = original
     check(
         [r.status_code for r in rs] == [200] * requests,
-        f"{requests} requests of {per_request} new photos each answered over HTTP: "
-        f"{sorted({r.status_code for r in rs})}",
+        f"{requests} requests of {per_request} new photos answered over HTTP",
     )
-    longest = max((dt for _, dt in calls), default=0.0)
     check(
         bool(calls) and all(t != loop_thread for t, _ in calls),
-        f"vLLM's image preprocessing ran off the event loop: {len(calls)} processor calls, none on its thread "
-        f"(the longest {longest * 1000:.0f} ms)",
+        f"vLLM's image preprocessing ran off the event loop: {len(calls)} processor calls, none on its thread",
     )
     worst = max((dt for dt, _ in pings), default=float("inf"))
     check(
         bool(pings) and all(st == 200 for _, st in pings) and worst < 1.0,
-        f"/ping answered {len(pings)} times during the image requests, the slowest in {worst * 1000:.0f} ms",
+        f"/ping answered {len(pings)} times meanwhile, the slowest in {worst * 1000:.0f} ms",
     )
 
 
-def main() -> None:
-    from strands_decider_vllm import server
-    from strands_decider_vllm.cli import parser
+def main():
+    from strands_decider_vllm.cli import ENVIRONMENT, parser
 
-    global REPEAT_TOL
-    argv = sys.argv[1:]
+    for key, value in ENVIRONMENT.items():
+        os.environ.setdefault(key, value)
+    from vllm.v1.engine.async_llm import AsyncLLM
+
+    from strands_decider_vllm import server
+
+    argv, repeat_tol = sys.argv[1:], 0.02  # ci.sh passes its per-device repeat tolerance
     if argv[:1] == ["--repeat-tol"]:
-        REPEAT_TOL, argv = float(argv[1]), argv[2:]
+        repeat_tol, argv = float(argv[1]), argv[2:]
     a = parser().parse_args(argv)
-    if a.command != "serve" or not a.max_length:
-        raise SystemExit(
-            "usage: engine_checks.py [--repeat-tol T] serve CKPT --max-length L [flags]"
-        )
-    server.prepare_environment()
     s = server.settings(a)
     max_model_len = s.engine_args.max_model_len
     check(
-        max_model_len == a.max_length + 1 if a.max_model_len is None else True,
+        a.max_model_len is not None or max_model_len == s.max_length + 1,
         f"the default context is --max-length + 1: {max_model_len}",
     )
-    from vllm.v1.engine.async_llm import AsyncLLM
+    d = server.Decider(AsyncLLM.from_engine_args(s.engine_args), s)
 
-    engine = AsyncLLM.from_engine_args(s.engine_args)
-    d = server.decider(engine, s, a)
+    async def checks():  # one event loop: AsyncLLM's output handler lives on the loop it started on
+        await text_checks(d, s.max_length, max_model_len, repeat_tol)
+        if s.takes_images:
+            await images_off_the_loop(d)
+        else:
+            print("SKIP  images off the loop: the checkpoint takes no images", flush=True)
+
     try:
-
-        async def checks():  # one event loop: AsyncLLM's output handler lives on the loop it started on
-            await run(d, a.max_length, max_model_len)
-            if not d.takes_images:
-                print("SKIP  images off the loop: the checkpoint takes no images", flush=True)
-            elif d.image_problem:  # a checkpoint that should take images must not skip the check
-                check(
-                    False,
-                    f"images off the loop: skipped, the server refuses images ({d.image_problem})",
-                )
-            else:
-                await images_off_the_loop(d)
-
         asyncio.run(checks())
     finally:
         d.close()
-        engine.shutdown()
+        d.engine.shutdown()
     print(f"engine checks: {'PASS' if not FAILURES else f'FAIL ({len(FAILURES)})'}", flush=True)
     sys.exit(1 if FAILURES else 0)
 

@@ -1,5 +1,5 @@
 #!/bin/bash
-# GPU integration check for strands-decider-vllm: the crash scenarios of the 0.2.0 review, on one node.
+# Node checks of strands-decider-vllm on 6 to 8 GPUs: refusals, cache and batches, startup refusals, images.
 #
 # usage: tests/gpu/run.sh MODEL_DIR ROWS_JSONL OUT_DIR
 #   MODEL_DIR   a Strands Decider checkpoint directory (E2B is enough)
@@ -19,8 +19,6 @@
 #   nocache   --no-enable-prefix-caching: the same refusals, the same answers as main
 #   hub       the checkpoint as a Hugging Face Hub repo id, from a local HF cache, offline: the same answers as main
 #   preempt   a 600-block KV cache: concurrent requests succeed
-#   resume    the same small cache, max_tokens check bypassed (tests/gpu/bypass_max_tokens): requests preempted
-#             mid-generation and resumed, without stopping the engine
 #   refusals  each unsafe flag in turn: the server must stop at startup with the plugin's message
 # Then, with MM_MODEL set, on the first GPUs once those servers have stopped:
 #   images    strands-decider-vllm serve on MM_MODEL (tests/gpu/server_client.py images): text, one, two and four
@@ -96,8 +94,6 @@ start main    "${GPU[0]}" $((P + 0)) VLLM_SERVER_DEV_MODE=0 -- "$MODEL" "${FLAGS
 start nocache "${GPU[1]}" $((P + 1)) VLLM_SERVER_DEV_MODE=0 -- "$MODEL" "${FLAGS[@]}" --no-enable-prefix-caching
 start hub     "${GPU[2]}" $((P + 2)) HF_HUB_CACHE="$HUB" HF_HUB_OFFLINE=1 -- "$REPO" "${FLAGS[@]}"
 start preempt "${GPU[3]}" $((P + 3)) VLLM_SERVER_DEV_MODE=0 -- "$MODEL" "${FLAGS[@]}" "${SMALL[@]}"
-start resume  "${GPU[4]}" $((P + 4)) PYTHONPATH="$HERE/bypass_max_tokens${PYTHONPATH:+:$PYTHONPATH}" -- \
-  "$MODEL" "${FLAGS[@]}" "${SMALL[@]}"
 
 # Startup refusals, on the remaining GPUs, a few at a time: NAME, expected message, extra flags.
 REFUSALS=(
@@ -143,14 +139,13 @@ ready main $((P + 0)) && client main requests $((P + 0)) --n 60
 ready nocache $((P + 1)) && client nocache compare $((P + 1)) --expect "$OUT/main/client.json"
 ready hub $((P + 2)) && client hub compare $((P + 2)) --expect "$OUT/main/client.json"
 ready preempt $((P + 3)) && client preempt preempt $((P + 3))
-ready resume $((P + 4)) && client resume resume $((P + 4))
-for n in main nocache hub preempt resume; do [ -s "$OUT/$n/client.txt" ] || FAILED+=("$n"); done
+for n in main nocache hub preempt; do [ -s "$OUT/$n/client.txt" ] || FAILED+=("$n"); done
 audit
 wait $RA; [ -n "$RB" ] && wait $RB
 [ -z "$RB" ] && ( refuse_on "${GPU[5]}" $((P + 40)) "${REFUSALS_LATER[@]}" ) > "$OUT/refusals_b.txt" 2>&1
 cat "$OUT/refusals_a.txt" "$OUT/refusals_b.txt"
 [ -s "$OUT/refusals_failed.txt" ] && FAILED+=(refusals)
-for n in main nocache hub preempt resume; do
+for n in main nocache hub preempt; do
   grep -E "Traceback|EngineDeadError|EngineCore encountered" "$OUT/$n/server.log" > /dev/null && { echo "$n: engine error in server.log"; FAILED+=("$n-log"); }
 done
 

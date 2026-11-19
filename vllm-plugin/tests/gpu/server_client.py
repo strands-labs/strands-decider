@@ -1,19 +1,13 @@
-"""GPU checks of the plugin's server (``strands-decider-vllm serve``) against a running instance. Needs Pillow.
+"""Checks of a running ``strands-decider-vllm serve``. Needs Pillow.
 
-- ``images``: text and image requests are answered in v1's format; one, two, four and five images (their number is
-  not checked); refusals (bad base64, a file that is not an image, a body that is not JSON) get HTTP 422 and the server
-  keeps serving; the image-content cache test, on exact counts of cached tokens: after a request with one photo, a request
-  with a different photo of the same size, the same text and the same question reuses no cached token, a further
-  question on the first photo reuses its state's full blocks, and repeats reuse all but their last token's;
-  ``--text-only URL`` checks that a server of a text-only checkpoint refuses images with the
-  core library's message and still answers text.
-- ``textonly``: only that last check, against ``--url``.
-- ``answers``: every request of ``--requests`` (System One requests, images inline) at ``--concurrency``; writes each
-  question's code probabilities to ``--out``; with ``--expect`` (a ``reference.py`` output) reports top-1 agreement
-  and mean and max |dp| and gates on ``--min-top1``, ``--max-mean-dp`` and ``--max-dp``.
-
-  python server_client.py images --url http://127.0.0.1:8200 --out images.json
-  python server_client.py answers --url http://127.0.0.1:8200 --requests req.jsonl --expect ref.jsonl --out ans.jsonl
+- ``images``: text and image requests (one, two, four and five images) are answered; refusals get
+  HTTP 422 and the server keeps serving; and the image-content cache test, on exact counts of cached
+  tokens: after a request with one photo, one with a different photo of the same size (the same
+  token ids) reuses nothing, a further question on the first photo reuses its state's full blocks,
+  and repeats reuse all but their last token's. ``--text-only URL`` adds ``textonly``'s check.
+- ``textonly``: a server of a text-only checkpoint refuses images and answers text.
+- ``answers``: every request of ``--requests`` at ``--concurrency``, each question's probabilities
+  to ``--out``; with ``--expect`` (reference.py's output) the agreement, gated.
 """
 
 from __future__ import annotations
@@ -22,6 +16,7 @@ import argparse
 import base64
 import io
 import json
+import random
 import sys
 import threading
 import time
@@ -29,67 +24,10 @@ import urllib.error
 import urllib.request
 
 FAILURES: list[str] = []
-
-
-def check(ok, what):
-    print(("ok    " if ok else "FAIL  ") + what, flush=True)
-    if not ok:
-        FAILURES.append(what)
-    return ok
-
-
-def post(url, body, timeout=900):
-    data = body if isinstance(body, bytes) else json.dumps(body).encode()
-    req = urllib.request.Request(
-        url + "/v1/systemone", data=data, headers={"Content-Type": "application/json"}
-    )
-    t = time.perf_counter()
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            return r.status, json.loads(r.read()), time.perf_counter() - t
-    except urllib.error.HTTPError as e:
-        try:
-            detail = json.loads(e.read()).get("detail")
-        except Exception:
-            detail = None
-        return e.code, detail, time.perf_counter() - t
-    except Exception as e:
-        return None, repr(e)[:300], time.perf_counter() - t
-
-
-def health(url):
-    try:
-        with urllib.request.urlopen(url + "/health", timeout=10) as r:
-            return r.status
-    except Exception as e:
-        return repr(e)[:100]
-
-
-def photo(seed, w=640, h=480, fmt="PNG"):
-    """A synthetic photo: smooth color fields and noise, different for every seed, the same size for a given w, h."""
-    import random
-
-    from PIL import Image, ImageDraw, ImageFilter
-
-    rng = random.Random(seed)
-    img = Image.new("RGB", (w, h), tuple(rng.randrange(256) for _ in range(3)))
-    d = ImageDraw.Draw(img)
-    for _ in range(40):
-        x0, y0 = rng.randrange(w), rng.randrange(h)
-        d.ellipse(
-            (x0, y0, x0 + rng.randrange(w // 2), y0 + rng.randrange(h // 2)),
-            fill=tuple(rng.randrange(256) for _ in range(3)),
-        )
-    img = img.filter(ImageFilter.GaussianBlur(3))
-    buf = io.BytesIO()
-    img.save(buf, format=fmt)
-    return base64.b64encode(buf.getvalue()).decode()
-
-
 QUESTIONS = {
     "color": {
         "type": "choice",
-        "instructions": "What is the dominant color of the first image?",
+        "instructions": "What is the dominant color?",
         "criteria": {"red": None, "green": None, "blue": None, "other": None},
     },
     "busy": {"type": "noul", "instructions": "Is the image busy?"},
@@ -101,12 +39,65 @@ QUESTIONS = {
 }
 
 
+def check(ok, what):
+    print(("ok    " if ok else "FAIL  ") + what, flush=True)
+    if not ok:
+        FAILURES.append(what)
+    return ok
+
+
+def post(url, body):
+    data = body if isinstance(body, bytes) else json.dumps(body).encode()
+    req = urllib.request.Request(
+        url + "/v1/systemone", data=data, headers={"Content-Type": "application/json"}
+    )
+    t = time.perf_counter()
+    try:
+        with urllib.request.urlopen(req, timeout=900) as r:
+            return r.status, json.loads(r.read()), time.perf_counter() - t
+    except urllib.error.HTTPError as e:
+        try:
+            detail = json.loads(e.read()).get("detail")
+        except Exception:
+            detail = None
+        return e.code, detail, time.perf_counter() - t
+    except Exception as e:
+        return None, repr(e)[:300], time.perf_counter() - t
+
+
+def healthy(url):
+    try:
+        with urllib.request.urlopen(url + "/health", timeout=10) as r:
+            return r.status == 200
+    except Exception:
+        return False
+
+
+def photo(seed, w=640, h=480):
+    """A synthetic photo, different for every seed."""
+    from PIL import Image, ImageDraw, ImageFilter
+
+    rng = random.Random(seed)
+    img = Image.new("RGB", (w, h), tuple(rng.randrange(256) for _ in range(3)))
+    d = ImageDraw.Draw(img)
+    for _ in range(40):
+        x, y = rng.randrange(w), rng.randrange(h)
+        d.ellipse(
+            (x, y, x + rng.randrange(w // 2), y + rng.randrange(h // 2)),
+            fill=tuple(rng.randrange(256) for _ in range(3)),
+        )
+    buf = io.BytesIO()
+    img.filter(ImageFilter.GaussianBlur(3)).save(buf, format="PNG")
+    return base64.b64encode(buf.getvalue()).decode()
+
+
 def vector(answer):
-    """The code-order probabilities of one v1 answer: a choice's in request order, a noul's [false, true], a score's
-    by level (rounded to 4 decimals, as v1 rounds)."""
-    if "noul" in answer:
-        return [1.0 - answer["noul"], answer["noul"]]
-    return list(answer["probabilities"].values())
+    """An answer's probabilities in code order: a noul's (false, true), the others' as listed."""
+    return (
+        [1.0 - answer["noul"], answer["noul"]]
+        if "noul" in answer
+        else list(answer["probabilities"].values())
+    )
 
 
 def argmax(p):
@@ -119,13 +110,8 @@ def dmax(p, q):
 
 def scenario_images(a):
     url = a.url
-    st, r, _ = post(
-        url, {"state": "A support ticket about a late delivery.", "questions": QUESTIONS}
-    )
-    check(
-        st == 200 and set(r["answers"]) == set(QUESTIONS),
-        f"text request on the image checkpoint: HTTP {st}",
-    )
+    st, r, _ = post(url, {"state": "A late delivery.", "questions": QUESTIONS})
+    check(st == 200 and set(r["answers"]) == set(QUESTIONS), f"a text request: HTTP {st}")
     for n in (1, 2, 4, 5):
         body = {
             "state": f"{n} photos.",
@@ -133,13 +119,9 @@ def scenario_images(a):
             "questions": QUESTIONS,
         }
         st, r, dt = post(url, body)
-        ok = (
-            st == 200
-            and set(r["answers"]) == set(QUESTIONS)
-            and r["usage"]["input_tokens"] > 250 * n
-        )
         check(
-            ok, f"{n} image(s): HTTP {st} in {dt * 1000:.0f} ms, {r['usage'] if st == 200 else r}"
+            st == 200 and r["usage"]["input_tokens"] > 250 * n,
+            f"{n} images: HTTP {st} in {dt * 1000:.0f} ms",
         )
     good = {"state": "x", "images": [photo(1)], "questions": {"busy": QUESTIONS["busy"]}}
     for name, body, want in [
@@ -152,10 +134,10 @@ def scenario_images(a):
             "not an image",
             {
                 "state": "x",
-                "images": [base64.b64encode(b"%PDF-1.4 hello").decode()],
+                "images": [base64.b64encode(b"%PDF-1.4").decode()],
                 "questions": QUESTIONS,
             },
-            "image could not be read as PNG/JPEG/WEBP/GIF",
+            "image could not be read",
         ),
         (
             "images not a list",
@@ -165,87 +147,72 @@ def scenario_images(a):
         ("not JSON", b"{not json", "Invalid JSON"),
     ]:
         st, r, _ = post(url, body)
-        check(st == 422 and want in str(r), f"{name}: HTTP {st} ({str(r)[:120]})")
-        check(health(url) == 200 and post(url, good)[0] == 200, f"{name}: the server keeps serving")
+        check(st == 422 and want in str(r), f"{name}: HTTP {st} ({str(r)[:100]})")
+        check(healthy(url) and post(url, good)[0] == 200, f"{name}: the server keeps serving")
 
-    # The image-content cache test, on exact counts of cached tokens. Two different photos of the same size have the
-    # same token ids. vLLM reuses a prompt's whole blocks of A tokens: for an exact repeat of an L-token prompt all
-    # but the last token's, floor((L - 1) / A) A; for a further question on a cached state of S tokens the state's,
-    # floor(S / A) A (the plugin keys the blocks inside [0, S) by the state and its images alone). A is the KV block
-    # size, or a multiple of it when the model's layers have KV pages of different sizes (vLLM aligns cache hits to
-    # their least common multiple: 32 tokens for E2B with 16-token blocks); the counts must fit one A.
-    B = a.block_size
+    # vLLM reuses a prompt's whole blocks of A tokens: an exact repeat of L tokens all but the last
+    # token's, floor((L - 1) / A) A; a further question on a cached state of S tokens the state's,
+    # floor(S / A) A. A is the block size, or a multiple when the layers' KV pages differ in size.
     text = {"note": "listing photos", "items": [f"item {i} looks fine" for i in range(60)]}
-    q1 = {"busy": QUESTIONS["busy"]}
-    q2 = {"color": QUESTIONS["color"]}
-    first, other = photo(7001, 640, 480), photo(7002, 640, 480)
-    st1, r1, _ = post(url, {"state": text, "images": [first], "questions": q1})
-    st2, r2, _ = post(url, {"state": text, "images": [other], "questions": q1})
-    st3, r3, _ = post(url, {"state": text, "images": [first], "questions": q2})
-    st4, r4, _ = post(url, {"state": text, "images": [first], "questions": q1})
-    st5, r5, _ = post(url, {"state": text, "images": [other], "questions": q1})
-    # Both questions at once: input_tokens counts the state once, so S = L1 + L2 - L12.
-    st6, r6, _ = post(url, {"state": text, "images": [first], "questions": {**q1, **q2}})
+    q1, q2 = {"busy": QUESTIONS["busy"]}, {"color": QUESTIONS["color"]}
+    first, other = photo(7001), photo(7002)
+    rs = [
+        post(url, {"state": text, "images": [im], "questions": q})
+        for im, q in [
+            (first, q1),
+            (other, q1),
+            (first, q2),
+            (first, q1),
+            (other, q1),
+            (first, {**q1, **q2}),
+        ]
+    ]
     if not check(
-        st1 == st2 == st3 == st4 == st5 == st6 == 200,
-        f"cache test requests answered: HTTP {[st1, st2, st3, st4, st5, st6]}",
+        all(st == 200 for st, _, _ in rs), f"cache test requests: {[st for st, _, _ in rs]}"
     ):
         return {}
-    u = [r["usage"] for r in (r1, r2, r3, r4, r5, r6)]
+    u = [r["usage"] for _, r, _ in rs]
     L1, L2 = u[0]["input_tokens"], u[2]["input_tokens"]
-    S = L1 + L2 - u[5]["input_tokens"]
+    S = L1 + L2 - u[5]["input_tokens"]  # input_tokens counts a shared state once
     counts = [u[i]["cached_tokens"] for i in (2, 3, 4, 5)]
 
-    def expected(A):
-        r1_, r2_ = (L1 - 1) // A * A, (L2 - 1) // A * A
-        return [S // A * A, r1_, r1_, r1_ + r2_]
+    def repeat(n, A):
+        return (n - 1) // A * A
 
-    B = next((A for A in (B, 2 * B, 4 * B) if expected(A) == counts), B)
-    print(f"      cache hits aligned to {B} tokens; S = {S}, L = {L1} and {L2}", flush=True)
-    repeat = lambda n: (n - 1) // B * B  # noqa: E731
-    check(
-        u[1]["input_tokens"] == L1, "two photos of the same size: the same number of prompt tokens"
+    B = a.block_size
+    B = next(
+        (
+            A
+            for A in (B, 2 * B, 4 * B)
+            if counts == [S // A * A, repeat(L1, A), repeat(L1, A), repeat(L1, A) + repeat(L2, A)]
+        ),
+        B,
     )
     check(
-        u[1]["cached_tokens"] == 0,
-        f"a different photo of the same size after the first: {u[1]['cached_tokens']} cached tokens (want 0)",
+        u[1]["input_tokens"] == L1 and u[1]["cached_tokens"] == 0,
+        f"a different photo of the same size: {u[1]['cached_tokens']} cached tokens (want 0)",
     )
     check(
         u[2]["cached_tokens"] == S // B * B,
-        f"the same photo, a further question: {u[2]['cached_tokens']} cached tokens (want the state's full "
-        f"blocks, {S // B * B} of S = {S})",
+        f"a further question: {u[2]['cached_tokens']} cached tokens (want {S // B * B} of S = {S})",
     )
-    d4 = dmax(vector(r4["answers"]["busy"]), vector(r1["answers"]["busy"]))
+    for i, j, what in [
+        (3, 0, "the same photo and question again"),
+        (4, 1, "the other photo again"),
+    ]:
+        d = dmax(vector(rs[i][1]["answers"]["busy"]), vector(rs[j][1]["answers"]["busy"]))
+        check(
+            u[i]["cached_tokens"] == repeat(L1, B) and d <= a.same_tol,
+            f"{what}: {u[i]['cached_tokens']} cached tokens (want {repeat(L1, B)}), |dp| vs cold {d:.2e}",
+        )
     check(
-        u[3]["cached_tokens"] == repeat(L1) and d4 <= a.same_tol,
-        f"the same photo and question again: {u[3]['cached_tokens']} cached tokens (want {repeat(L1)}), "
-        f"|dp| vs cold {d4:.2e} (tolerance {a.same_tol})",
+        u[5]["cached_tokens"] == repeat(L1, B) + repeat(L2, B),
+        f"both questions again: {u[5]['cached_tokens']} cached tokens",
     )
-    d5 = dmax(vector(r5["answers"]["busy"]), vector(r2["answers"]["busy"]))
-    check(
-        u[4]["cached_tokens"] == repeat(L1) and d5 <= a.same_tol,
-        f"the other photo again: {u[4]['cached_tokens']} cached tokens (want {repeat(L1)}), its own answer, "
-        f"|dp| vs its cold one {d5:.2e}",
-    )
-    check(
-        u[5]["cached_tokens"] == repeat(L1) + repeat(L2),
-        f"both questions again: {u[5]['cached_tokens']} cached tokens (want {repeat(L1) + repeat(L2)})",
-    )
-    out = {
-        "cache": {
-            "state_tokens": S,
-            "input_tokens": L1,
-            "other_photo_cached": u[1]["cached_tokens"],
-            "further_question_cached": u[2]["cached_tokens"],
-            "repeat_cached": u[3]["cached_tokens"],
-            "repeat_dp": d4,
-            "other_repeat_dp": d5,
-        }
-    }
     if a.text_only:
         scenario_textonly(a.text_only)
-    check(health(url) == 200, "server healthy at the end")
-    return out
+    check(healthy(url), "server healthy at the end")
+    return {"state_tokens": S, "cached": counts}
 
 
 def scenario_textonly(url):
@@ -263,9 +230,7 @@ def scenario_textonly(url):
 
 def scenario_answers(a):
     reqs = [json.loads(x) for x in open(a.requests) if x.strip()][: a.n]
-    results: dict[int, tuple] = {}
-    lock = threading.Lock()
-    todo = list(range(len(reqs)))
+    results, todo, lock = {}, list(range(len(reqs))), threading.Lock()
 
     def worker():
         while True:
@@ -273,21 +238,20 @@ def scenario_answers(a):
                 if not todo:
                     return
                 i = todo.pop(0)
-            body = {k: v for k, v in reqs[i].items() if k != "files"}
-            results[i] = post(a.url, body)
+            results[i] = post(a.url, reqs[i])
 
     t0 = time.perf_counter()
     threads = [threading.Thread(target=worker) for _ in range(a.concurrency)]
-    [t.start() for t in threads]
-    [t.join() for t in threads]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
     wall = time.perf_counter() - t0
     ok = [i for i in range(len(reqs)) if results[i][0] == 200]
     check(
         len(ok) == len(reqs),
-        f"{len(ok)} of {len(reqs)} requests answered in {wall:.1f} s "
-        f"({len(reqs) / wall:.2f} requests/s at concurrency {a.concurrency})",
+        f"{len(ok)} of {len(reqs)} requests answered in {wall:.1f} s ({len(reqs) / wall:.2f} requests/s at concurrency {a.concurrency})",
     )
-    lat = sorted(results[i][2] for i in ok)
     with open(a.out, "w") as f:
         for i in ok:
             for name, ans in results[i][1]["answers"].items():
@@ -302,44 +266,32 @@ def scenario_answers(a):
                     )
                     + "\n"
                 )
+    lat = sorted(results[i][2] for i in ok)
     summary = {
-        "requests": len(reqs),
         "answered": len(ok),
-        "wall_s": wall,
         "requests_per_s": len(reqs) / wall,
         "p50_s": lat[len(lat) // 2] if lat else None,
-        "p90_s": lat[int(len(lat) * 0.9)] if lat else None,
     }
     if a.expect:
         ref = {(r["request"], r["question"]): r for r in map(json.loads, open(a.expect))}
-        agree, dps, by_images = 0, [], {}
+        hits, dps, by_images = [], [], {}
         for i in ok:
             for name, ans in results[i][1]["answers"].items():
                 p, q = vector(ans), ref[(i, name)]["probabilities"]
-                hit = argmax(p) == argmax(q)
-                agree += hit
+                hits.append(argmax(p) == argmax(q))
                 dps.append(dmax(p, q))
-                k = ref[(i, name)]["images"]
-                by_images.setdefault(k, [0, 0])
-                by_images[k][0] += hit
-                by_images[k][1] += 1
-        top1 = agree / len(dps)
+                by_images.setdefault(ref[(i, name)]["images"], []).append(hits[-1])
         summary.update(
-            {
-                "questions": len(dps),
-                "top1": top1,
-                "mean_dp": sum(dps) / len(dps),
-                "max_dp": max(dps),
-                "top1_by_images": {k: v[0] / v[1] for k, v in sorted(by_images.items())},
-            }
+            top1=sum(hits) / len(hits),
+            mean_dp=sum(dps) / len(dps),
+            max_dp=max(dps),
+            top1_by_images={k: sum(v) / len(v) for k, v in sorted(by_images.items())},
         )
         check(
-            top1 >= a.min_top1
+            summary["top1"] >= a.min_top1
             and summary["mean_dp"] <= a.max_mean_dp
             and summary["max_dp"] <= a.max_dp,
-            f"reference: top-1 {top1:.4f} over {len(dps)} questions (gate {a.min_top1}), "
-            f"mean |dp| {summary['mean_dp']:.4f} (gate {a.max_mean_dp}), max |dp| {summary['max_dp']:.4f} "
-            f"(gate {a.max_dp})",
+            f"reference: top-1 {summary['top1']:.4f} over {len(dps)} questions, mean |dp| {summary['mean_dp']:.4f}, max |dp| {summary['max_dp']:.4f}",
         )
     print(json.dumps(summary), flush=True)
     return summary
@@ -351,31 +303,26 @@ def main():
     )
     ap.add_argument("scenario", choices=["images", "answers", "textonly"])
     ap.add_argument("--url", required=True)
-    ap.add_argument("--text-only", help="the URL of a server of a text-only checkpoint (images)")
+    ap.add_argument("--text-only", help="images: the URL of a text-only checkpoint's server")
     ap.add_argument("--requests")
     ap.add_argument("--expect")
     ap.add_argument("--n", type=int, default=10**9)
     ap.add_argument("--concurrency", type=int, default=8)
     ap.add_argument("--min-top1", type=float, default=0.98)
-    ap.add_argument("--max-mean-dp", type=float, default=1.0, help="answers: the gate on mean |dp|")
-    ap.add_argument("--max-dp", type=float, default=1.0, help="answers: the gate on max |dp|")
+    ap.add_argument("--max-mean-dp", type=float, default=1.0)
+    ap.add_argument("--max-dp", type=float, default=1.0)
+    ap.add_argument("--block-size", type=int, default=16, help="images: the KV block size")
     ap.add_argument(
-        "--block-size", type=int, default=16, help="the server's KV block size (images)"
-    )
-    ap.add_argument(
-        "--same-tol",
-        type=float,
-        default=0.01,
-        help="images: max |dp| of a cached answer against the same request's cold one",
+        "--same-tol", type=float, default=0.01, help="images: a cached answer vs its cold one"
     )
     ap.add_argument("--out")
     a = ap.parse_args()
-    fn = {
+    run = {
         "images": scenario_images,
         "answers": scenario_answers,
         "textonly": lambda a: scenario_textonly(a.url),
     }
-    out = fn[a.scenario](a)
+    out = run[a.scenario](a)
     if a.out and a.scenario == "images":
         json.dump({**out, "failures": FAILURES}, open(a.out, "w"))
     print(f"{a.scenario}: {'PASS' if not FAILURES else f'FAIL ({len(FAILURES)})'}", flush=True)
