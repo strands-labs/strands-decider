@@ -61,9 +61,6 @@ gcc -O3 -fPIC -shared -o "$BUILD/libdecision.so" "$DECISION/shim.c" \
     -I"$SRC/include" -I"$SRC/ggml/include" -I"$SRC/tools/mtmd" -Wl,--no-undefined \
     -Wl,--start-group $(find "$BUILD" -name '*.a') -Wl,--end-group \
     -fopenmp -lstdc++ -lm -lpthread -ldl
-for f in sd_load sd_free sd_load_vision sd_vision_info sd_n_embd_inp sd_encode_image sd_forward; do
-    nm -D --defined-only "$BUILD/libdecision.so" | grep -q " T $f\$" || { echo "build_native.sh: no $f" >&2; exit 1; }
-done
 
 if [ "$LAMBDA" = "--lambda" ]; then
     objdump -f "$BUILD/libdecision.so" | grep -q "architecture: aarch64" \

@@ -10,7 +10,7 @@ environment's AWS credentials), or a local directory. OUT_DIR gets:
                            from the bf16 checkpoint), then llama-quantize to Q8_0
     mmproj.gguf            for a checkpoint whose inputs hold "image": the vision tower and its
                            projection, convert_hf_to_gguf.py --mmproj at q8_0, without the audio
-                           tower (vision_only_mmproj.py)
+                           tower (`vision_only`)
     readout.safetensors, decision_config.json, tokenizer.json, processor_config.json
                            the checkpoint's own, unchanged
     artifact.json          the model's name; the checkpoint, its resolved Hub commit and its
@@ -22,8 +22,8 @@ checked against the sha256 the Hub records. The manifest digest is the sha256 of
 `<sha256>  <file>`, one per file of the checkpoint, sorted by name (in a checkpoint directory,
 `sha256sum * | sort -k 2 | sha256sum`); with --expect-digest, any other is refused.
 
-Before anything is converted, the checkpoint is loaded as the function loads it: its
-decision_config.json, readout, tokenizer and, for images, image processor settings.
+Before anything is converted, the checkpoint is loaded as the function loads it. The functions that
+read GGUFs import llama.cpp's gguf-py, which main() puts on sys.path.
 """
 
 from __future__ import annotations
@@ -37,6 +37,8 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+
+import numpy as np
 
 # From a checkout, the repository's own package; in the image build, the one beside this script.
 for _parent in Path(__file__).resolve().parents:
@@ -52,13 +54,23 @@ from strands_decider.core import (  # noqa: E402
 )
 from strands_decider.core.config import IMAGE  # noqa: E402
 
-HERE = Path(__file__).resolve().parent
 QUANT = "Q8_0"
 # The decoder and the vision tower must leave the function room for llama.cpp's buffers, Python and
 # a request's state within Lambda's 10,240 MB: E2B's are 4.95 GB and, at q8_0, 0.23 GB.
 MAX_BYTES = 6_000_000_000
 FILES = ("readout.safetensors", "decision_config.json", "tokenizer.json", "processor_config.json")
 CHUNK = 16 << 20
+# The tensors llama.cpp reads lazily, a few rows per batch: Gemma 4 E2B's and E4B's per-layer
+# embedding table, half of E2B's file.
+LAZY_TENSORS = ("per_layer_token_embd.weight",)
+
+
+def is_audio_tensor(name: str) -> bool:
+    return name.startswith(("a.", "mm.a."))
+
+
+def is_audio_key(key: str) -> bool:
+    return key == "clip.has_audio_encoder" or key.startswith("clip.audio.")
 
 
 def fetch(checkpoint: str, revision: str | None, work: Path) -> tuple[Path, str | None]:
@@ -67,6 +79,7 @@ def fetch(checkpoint: str, revision: str | None, work: Path) -> tuple[Path, str 
     if os.path.isdir(checkpoint):
         return Path(checkpoint), None
     dest = work / "checkpoint"
+    dest.mkdir(parents=True, exist_ok=True)
     started, total = time.time(), 0
     if checkpoint.startswith("s3://"):
         import boto3
@@ -83,7 +96,6 @@ def fetch(checkpoint: str, revision: str | None, work: Path) -> tuple[Path, str 
                 rel = obj["Key"][len(prefix) :]
                 if not rel or "/" in rel:  # the checkpoint's own files, not subdirectories
                     continue
-                (dest / rel).parent.mkdir(parents=True, exist_ok=True)
                 s3.download_file(bucket, obj["Key"], str(dest / rel), Config=cfg)
                 total += obj["Size"]
         if total == 0:
@@ -96,10 +108,10 @@ def fetch(checkpoint: str, revision: str | None, work: Path) -> tuple[Path, str 
         commit = info.sha
         snapshot_download(checkpoint, revision=commit, local_dir=dest)
         for f in info.siblings or []:
-            lfs = getattr(f, "lfs", None)
-            want = getattr(lfs, "sha256", None) if lfs is not None else None
-            if want and sha256(dest / f.rfilename) != want:
-                raise SystemExit(f"{f.rfilename} does not have the sha256 the Hub records, {want}")
+            if f.lfs and sha256(dest / f.rfilename) != f.lfs.sha256:
+                raise SystemExit(
+                    f"{f.rfilename} does not have the sha256 the Hub records, {f.lfs.sha256}"
+                )
         total = sum(p.stat().st_size for p in dest.rglob("*") if p.is_file())
     print(
         f"fetched {checkpoint} ({commit or 'no commit'}): {total:,} bytes in {time.time() - started:.0f} s",
@@ -120,12 +132,12 @@ def manifest_digest(ckpt: Path) -> str:
 
 def check(ckpt: Path) -> DecisionConfig:
     """The checkpoint's decision config, with its other files loaded as the function loads them."""
+    missing = [name for name in FILES if not (ckpt / name).is_file()]
+    if missing:
+        raise SystemExit(f"{ckpt} has no {', '.join(missing)}")
     config = DecisionConfig.load(ckpt)
     load_readout(ckpt)
     load_tokenizer(ckpt)
-    for name in FILES:
-        if not (ckpt / name).is_file():
-            raise SystemExit(f"{ckpt} has no {name}")
     if IMAGE in config.inputs:
         check_image_processor(ckpt)
     return config
@@ -146,21 +158,65 @@ def sha256(path: Path) -> str:
     return h.hexdigest()
 
 
-def gguf_has_audio(llama_cpp: Path, path: Path) -> bool:
-    sys.path.insert(0, str(llama_cpp / "gguf-py"))
+def vision_only(src: Path, dst: Path) -> None:
+    """The converter's mmproj without its audio tower: the vision tower and its projection byte
+    for byte, and every key but the audio ones, `general.size_label` recomputed from the tensors
+    left, as the converter computes it. mtmd loads every encoder in the file, and E2B's 0.6 GB
+    audio tower does not fit beside the vision tower on Lambda."""
     import gguf
 
-    return any(t.name.startswith(("a.", "mm.a.")) for t in gguf.GGUFReader(path).tensors)
+    reader = gguf.GGUFReader(src)
+    tensors = [t for t in reader.tensors if not is_audio_tensor(t.name)]
+    writer = gguf.GGUFWriter(dst, arch="clip", endianess=reader.endianess)
+    alignment = reader.get_field(gguf.Keys.General.ALIGNMENT)
+    if alignment is not None:
+        writer.data_alignment = alignment.contents()
+    for field in reader.fields.values():
+        # GGUFWriter writes the architecture and the GGUF.* header fields itself.
+        if field.name == gguf.Keys.General.ARCHITECTURE or field.name.startswith("GGUF."):
+            continue
+        if is_audio_key(field.name):
+            continue
+        value = field.contents()
+        if field.name == gguf.Keys.General.SIZE_LABEL:
+            value = gguf.size_label(sum(int(t.n_elements) for t in tensors), 0, 0, 0)
+        kind = field.types[0]
+        sub = field.types[-1] if kind == gguf.GGUFValueType.ARRAY else None
+        writer.add_key_value(field.name, value, kind, sub_type=sub)
+    for t in tensors:
+        writer.add_tensor_info(t.name, t.data.shape, t.data.dtype, t.data.nbytes, t.tensor_type)
+    writer.write_header_to_file()
+    writer.write_kv_data_to_file()
+    writer.write_ti_data_to_file()
+    for t in tensors:
+        writer.write_tensor_data(t.data, tensor_endianess=reader.endianess)
+    writer.close()
 
 
-# The tensors llama.cpp reads lazily, a few rows per batch: Gemma 4 E2B's and E4B's per-layer
-# embedding table, half of E2B's file.
-LAZY_TENSORS = ("per_layer_token_embd.weight",)
+def check_mmproj(mmproj: Path, ckpt: Path) -> None:
+    """That the mmproj normalises pixels and cuts patches as the checkpoint's image processor does.
+    The converter writes them from the checkpoint, so a llama.cpp pin that writes them otherwise
+    shows here."""
+    import gguf
+
+    fields = gguf.GGUFReader(mmproj).fields
+    got = [fields[f"clip.vision.{k}"].contents() for k in ("image_mean", "image_std", "patch_size")]
+    settings = json.loads((ckpt / "processor_config.json").read_text("utf-8"))
+    p = settings.get("image_processor", settings)
+    normalise = p.get("do_normalize")
+    want = [
+        p["image_mean"] if normalise else [0, 0, 0],
+        p["image_std"] if normalise else [1, 1, 1],
+        p["patch_size"],
+    ]
+    if not (np.allclose(got[0], want[0]) and np.allclose(got[1], want[1]) and got[2] == want[2]):
+        raise SystemExit(
+            f"the mmproj preprocesses with {got} (mean, std, patch), the processor with {want}"
+        )
 
 
-def lazy_ranges(llama_cpp: Path, path: Path) -> list[list[int]]:
+def lazy_ranges(path: Path) -> list[list[int]]:
     """The byte ranges, in the GGUF, of the tensors llama.cpp reads only a few rows of at a time."""
-    sys.path.insert(0, str(llama_cpp / "gguf-py"))
     import gguf
 
     return [
@@ -200,6 +256,7 @@ def main() -> None:
     a.work.mkdir(parents=True, exist_ok=True)
     tmp = a.gguf_tmp or a.work
     rev = llama_cpp_rev(a.llama_cpp)
+    sys.path.insert(0, str(a.llama_cpp / "gguf-py"))
     ckpt, commit = fetch(a.checkpoint, a.revision, a.work)
     digest = manifest_digest(ckpt)
     print(f"checkpoint manifest digest {digest}", flush=True)
@@ -221,17 +278,9 @@ def main() -> None:
         full = tmp / "mmproj-full.gguf"
         run(sys.executable, convert, ckpt, "--mmproj", "--outtype", "q8_0", "--outfile", full,
             "--model-name", name)  # fmt: skip
-        if gguf_has_audio(a.llama_cpp, full):
-            run(
-                sys.executable,
-                HERE / "vision_only_mmproj.py",
-                a.llama_cpp,
-                full,
-                a.out / "mmproj.gguf",
-            )
-            full.unlink()
-        else:
-            shutil.move(full, a.out / "mmproj.gguf")
+        vision_only(full, a.out / "mmproj.gguf")
+        full.unlink()
+        check_mmproj(a.out / "mmproj.gguf", ckpt)
         files["mmproj.gguf"] = a.out / "mmproj.gguf"
     size = sum(p.stat().st_size for p in files.values())
     if size > MAX_BYTES:
@@ -247,10 +296,8 @@ def main() -> None:
         "checkpoint": a.checkpoint,
         "revision": commit,
         "checkpoint_digest": digest,
-        "inputs": list(config.inputs),
-        "quantization": QUANT,
         "llama_cpp": rev,
-        "lazy_ranges": lazy_ranges(a.llama_cpp, a.out / "model.gguf"),
+        "lazy_ranges": lazy_ranges(a.out / "model.gguf"),
         "files": {k: {"size": p.stat().st_size, "sha256": sha256(p)} for k, p in files.items()},
     }
     (a.out / "artifact.json").write_text(json.dumps(artifact, indent=2) + "\n")
