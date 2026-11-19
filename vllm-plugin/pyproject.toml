@@ -35,4 +35,4 @@ extend = "../pyproject.toml"
 
 [tool.ruff.lint.per-file-ignores]
 # The plugin works through vLLM internals that have no public API (see README, Limits).
-"**/*.py" = ["SLF001", "RUF005"]
+"**/*.py" = ["SLF001"]

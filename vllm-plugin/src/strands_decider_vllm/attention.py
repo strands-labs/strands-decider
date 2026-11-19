@@ -1,56 +1,32 @@
-"""FlashAttention for prefix_bidir: a layer's step as one non-causal call over each request's two segments.
+"""vLLM's FlashAttention and CPU attention, which run a step's prefix_bidir split when its metadata
+carries one (``model_state``): one stock call per list of (token rows, restricted metadata).
 
-In a step that computes prefix_bidir tokens, :class:`~strands_decider_vllm.model_state.PrefixBidirModelState`
-attaches a :class:`Split` to the step's attention metadata. Every attention layer then runs:
-
-- the scheduled tokens of each prefix_bidir request as up to two non-causal FlashAttention sequences on the paged KV
-  cache: its state queries over keys ``[0, S)`` and its question queries over keys ``[0, L)``;
-- every other token (requests without a boundary, decode rows), causal over its own request's keys, as vLLM would.
-
-That is the prefix_bidir mask, with no mask function: state tokens attend bidirectionally to the state [0, S) and
-never to the question; question tokens attend bidirectionally to the whole prompt [0, L). Metadata without a split
-takes vLLM's path unchanged.
+Two calls per layer on the same paged KV cache are correct because both backends write a step's
+keys and values in their own op before attention (``do_kv_cache_update``); ``forward`` only reads.
+Metadata without a split takes vLLM's path unchanged.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Any
 
 import torch
+from vllm import envs
+from vllm.v1.attention.backends.cpu_attn import CPUAttentionBackend, CPUAttentionBackendImpl
 from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend, FlashAttentionImpl
 
-#: Attribute under which the model state attaches a :class:`Split` to a FlashAttentionMetadata.
+try:  # vLLM 0.34 moved the CPU ops to vllm._cpu_ops
+    from vllm import _cpu_ops as ops
+except ImportError:
+    from vllm import _custom_ops as ops
+
+#: The attribute under which the model state attaches a step's split to a metadata object.
 SPLIT_ATTR = "strands_decider_split"
+Split = list[tuple[torch.Tensor | slice, Any]]
 
 
-@dataclass
-class Split:
-    """The calls of a split step. ``bidir`` is the stock metadata restricted to the non-causal segments; ``rest`` the
-    other segments (causal), or None. ``*_rows`` are the segments' token rows in the step."""
-
-    bidir_rows: torch.Tensor | slice
-    rest_rows: torch.Tensor | slice | None
-    bidir: Any
-    rest: Any | None
-
-
-def _take(x: torch.Tensor, rows: torch.Tensor | slice) -> torch.Tensor:
-    return x[rows] if isinstance(rows, slice) else x.index_select(0, rows)
-
-
-def _put(dst: torch.Tensor, rows: torch.Tensor | slice, src: torch.Tensor) -> None:
-    if isinstance(rows, slice):
-        dst[rows] = src
-    else:
-        dst.index_copy_(0, rows, src)
-
-
-class SplitFlashAttentionImpl(FlashAttentionImpl):
-    """:class:`FlashAttentionImpl` that runs a :class:`Split` as one non-causal and one causal stock call."""
-
-    #: FlashAttention's sliding_window for "no window".
-    no_window = (-1, -1)
+class _SplitImpl:
+    no_window: Any  # the implementation's sliding_window for "no window"
 
     def forward(
         self,
@@ -64,9 +40,10 @@ class SplitFlashAttentionImpl(FlashAttentionImpl):
         output_scale: torch.Tensor | None = None,
         output_block_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        split = getattr(attn_metadata, SPLIT_ATTR, None) if attn_metadata is not None else None
+        split: Split | None = getattr(attn_metadata, SPLIT_ATTR, None)
+        stock = super().forward
         if split is None:
-            return super().forward(
+            return stock(
                 layer,
                 query,
                 key,
@@ -77,30 +54,54 @@ class SplitFlashAttentionImpl(FlashAttentionImpl):
                 output_scale,
                 output_block_scale,
             )
-        if self.sliding_window not in (None, (-1, -1)):
-            raise RuntimeError(
-                "strands-decider: a windowed layer received prefix_bidir metadata; the model class builds "
-                "every layer without one"
-            )
-        q = _take(query, split.bidir_rows)
-        out = output.new_empty(q.shape)
-        super().forward(
-            layer, q, key, value, kv_cache, split.bidir, out, output_scale, output_block_scale
-        )
-        _put(output, split.bidir_rows, out)
-        if split.rest is not None:
-            q = _take(query, split.rest_rows)
+        for rows, md in split:
+            q = query[rows]
             out = output.new_empty(q.shape)
-            super().forward(
-                layer, q, key, value, kv_cache, split.rest, out, output_scale, output_block_scale
-            )
-            _put(output, split.rest_rows, out)
+            md = self._prepared(layer, md, query.dtype)
+            stock(layer, q, key, value, kv_cache, md, out, output_scale, output_block_scale)
+            output[rows] = out
         return output
 
+    def _prepared(self, layer: Any, md: Any, dtype: torch.dtype) -> Any:
+        return md
 
-class SplitFlashAttentionBackend(FlashAttentionBackend):
-    """vLLM's FlashAttention backend with :class:`SplitFlashAttentionImpl`; registered in place of FLASH_ATTN."""
 
+class FlashImpl(_SplitImpl, FlashAttentionImpl):
+    no_window = (-1, -1)
+
+
+class CPUImpl(_SplitImpl, CPUAttentionBackendImpl):
+    no_window = -1
+
+    def _prepared(self, layer: Any, md: Any, dtype: torch.dtype) -> Any:
+        # The CPU kernel takes a plan built from the batch's lengths: one per restricted metadata,
+        # which every layer of its KV-cache group shares.
+        if md.scheduler_metadata is None:
+            md.scheduler_metadata = ops.cpu_attn_get_scheduler_metadata(
+                num_reqs=int(md.seq_lens.shape[0]),
+                num_heads=self.num_heads,
+                num_kv_heads=self.num_kv_heads,
+                head_dim=self.head_size,
+                seq_lens=md.seq_lens,
+                dtype=dtype,
+                query_start_loc=md.query_start_loc,
+                causal=md.causal,
+                sliding_window_size=self.no_window,
+                isa=layer.isa,
+                enable_kv_split=envs.VLLM_CPU_ATTN_SPLIT_KV,
+                dynamic_causal=None,
+                kv_cache_dtype=self.kv_cache_dtype,
+            )
+        return md
+
+
+class FlashBackend(FlashAttentionBackend):
     @staticmethod
-    def get_impl_cls() -> type[SplitFlashAttentionImpl]:
-        return SplitFlashAttentionImpl
+    def get_impl_cls() -> type[FlashImpl]:
+        return FlashImpl
+
+
+class CPUBackend(CPUAttentionBackend):
+    @staticmethod
+    def get_impl_cls() -> type[CPUImpl]:
+        return CPUImpl
