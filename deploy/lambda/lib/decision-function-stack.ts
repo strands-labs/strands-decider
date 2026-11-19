@@ -39,9 +39,9 @@ const ASSET_EXCLUDE = [
  * slowest request measured under it stays inside the 15-minute timeout on Graviton2, and one at
  * 24,576 does not (README.md, Decision checkpoints, Limits).
  */
-export const DECISION_MAX_REQUEST_TOKENS = 16384;
+const DECISION_MAX_REQUEST_TOKENS = 16384;
 
-export const CHECKPOINT_NEEDED = "set the decision checkpoint: -c checkpoint=<Hub id or s3://bucket/prefix/>";
+const CHECKPOINT_NEEDED = "set the decision checkpoint: -c checkpoint=<Hub id or s3://bucket/prefix/>";
 
 /**
  * An s3:// checkpoint's bucket and its key prefix, ending in "/", or undefined for a Hub id. The
@@ -65,6 +65,7 @@ export function parseS3Checkpoint(checkpoint: string): { bucket: string; prefix:
  * the same name under different prefixes or buckets get stacks of their own.
  */
 export function decisionStackName(checkpoint: string): string {
+  if (!checkpoint) throw new Error(CHECKPOINT_NEEDED);
   const trimmed = checkpoint.replace(/\/+$/, "");
   if (!trimmed.startsWith("s3://")) return stackNameFor(trimmed);
   const hash = createHash("sha256").update(trimmed).digest("hex").slice(0, 8);
