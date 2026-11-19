@@ -1,4 +1,5 @@
-"""The model: a pretrained LLM torso with its LM head removed, plus a pointer readout.
+"""The model: a pretrained LLM torso with its LM head removed, plus a pointer readout
+(or, opt-in, a token readout; see TokenReadoutHead).
 
     input -> [LLM torso] -> hidden states -> [PointerHead] -> one logit per option
 
@@ -25,7 +26,11 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from huggingface_hub import snapshot_download
+from safetensors import safe_open
 from transformers import AutoConfig, AutoModel, AutoTokenizer
+
+from . import expert_lora, prefix_split_attention
+from .core import CODE_TOKEN_IDS, MAX_CODES
 
 # Large negative rather than -inf: keeps softmax finite under autocast/bf16, where
 # -inf can produce NaNs if an entire row is masked by a malformed batch.
@@ -66,12 +71,23 @@ class StrandsDeciderConfig:
     # at all, so this is where the context curve goes flat.
     max_length: int = 3072
     torch_dtype: str = "bfloat16"
-    # Not read by this version (the pointer head is the only readout); kept on the config
-    # so every export writes `head_type: "pointer"` into its JSON. Older strands-decider
-    # versions default a missing head_type to "slot" and crash loading a pointer export,
-    # and out-of-tree readers may parse this field directly.
+    # "pointer" (PointerHead, the default) or "token_readout" (TokenReadoutHead, opt-in).
+    # Written into every export's JSON: older strands-decider versions default a missing
+    # head_type to "slot" and crash loading a pointer export, and out-of-tree readers may
+    # parse this field directly.
     head_type: str = "pointer"
     pointer_dim: int = 256
+    # Token readout only: the attention, "causal" (the torso's own) or "prefix_bidir"
+    # (prefix_bidir_masks). Its prompt is always strands-chat (core.render).
+    attention_mode: str = "causal"
+    # Micro-batches of at least this many padded tokens run prefix_bidir as two unmasked SDPA
+    # calls per row instead of one masked call (prefix_split_attention); 0 = always masked.
+    # The v2 recipe uses 1024.
+    attn_split: int = 0
+    # Token readout only: the cap on its logits, cap * tanh(x / cap) (0.0: none). Recorded from
+    # the base model's final_logit_softcapping when training starts, then read from here, so a
+    # checkpoint keeps the cap it trained with whatever the base model's config says later.
+    readout_softcap: float | None = None
     # Populated after `python -m training.evaluate calibrate` runs; 1.0 is a no-op. `temperature` is the
     # fallback; `temperature_by_kind` overrides it per primitive where fitted.
     # One global scalar cannot serve all three: noul/choice/score sit at very
@@ -96,6 +112,12 @@ class StrandsDeciderConfig:
             "down_proj",
         ]
     )
+    # LoRA on every routed expert of a mixture-of-experts torso (Gemma 4 26B-A4B): one adapter
+    # of rank expert_lora_r per expert on its fused gate_up and down projections, router frozen
+    # (expert_lora.py). expert_lora_alpha None is lora_alpha. Off by default.
+    expert_lora: bool = False
+    expert_lora_r: int = 8
+    expert_lora_alpha: int | None = None
     # Start every prompt with the tokenizer's BOS token even when its own post-processor
     # adds none (ensure_bos). gemma-4-E2B-it's tokenizer leaves BOS to its chat template,
     # and without it the frozen -it torso reads JevBench at chance (73/231, against 135
@@ -107,8 +129,27 @@ class StrandsDeciderConfig:
     # cost in speed. Off by default; a torso without such a table ignores it.
     host_embeddings: bool = False
 
+    def __post_init__(self) -> None:
+        readout = self.head_type == "token_readout"
+        if self.attention_mode not in (("causal", "prefix_bidir") if readout else ("causal",)):
+            raise ValueError(f"attention_mode {self.attention_mode!r} with head {self.head_type!r}")
+        if self.expert_lora and not (readout and self.use_lora):
+            raise ValueError("expert_lora goes with head_type token_readout and use_lora")
+
     def to_json(self) -> str:
-        return json.dumps(asdict(self), indent=2)
+        d = asdict(self)
+        # A pointer config's JSON stays the one earlier versions wrote and read.
+        for key, default in (
+            ("attention_mode", "causal"),
+            ("attn_split", 0),
+            ("readout_softcap", None),
+            ("expert_lora", False),
+            ("expert_lora_r", 8),
+            ("expert_lora_alpha", None),
+        ):
+            if d[key] == default:
+                del d[key]
+        return json.dumps(d, indent=2)
 
     @classmethod
     def from_json(cls, path: str) -> StrandsDeciderConfig:
@@ -123,9 +164,10 @@ class StrandsDeciderConfig:
         # Released checkpoints carry head_type="pointer" explicitly. A slot-era checkpoint
         # would set it to "slot": fail cleanly rather than silently loading as pointer.
         head_type = d.get("head_type")
-        if head_type is not None and head_type != "pointer":
+        if head_type is not None and head_type not in HEAD_TYPES:
             raise ValueError(
-                f"{path}: head_type={head_type!r}; this version loads pointer-head checkpoints only"
+                f"{path}: head_type={head_type!r}; this version loads "
+                "pointer-head and token-readout-head checkpoints only"
             )
         # Drop any key the current dataclass does not know (e.g. legacy head_type="pointer",
         # num_slots, head_hidden, head_init, kl_frozen_weight on a released config).
@@ -238,14 +280,136 @@ class PointerHead(nn.Module):
         return (o @ d).squeeze(-1) * self.scale
 
 
+class TokenReadoutHead(nn.Module):
+    """The 255-code readout of strands_decider.core: Linear(hidden, 255), no bias, read at
+    the last prompt token.
+
+    Row k scores the option listed under code k (core.CODES); the row is seeded from the LM
+    head's row of that code's token (lm_head_rows), so the untrained readout gives
+    the base model's own distribution over the codes. A torso whose LM head caps its logits
+    (Gemma 4: final_logit_softcapping) has these capped the same way: cap * tanh(x / cap). The
+    cap is StrandsDeciderConfig.readout_softcap, saved with the checkpoint.
+    """
+
+    def __init__(self, hidden_size: int, dropout: float = 0.0, softcap: float | None = None):
+        super().__init__()
+        self.dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
+        self.proj = nn.Linear(hidden_size, MAX_CODES, bias=False)
+        self.softcap = softcap
+
+    def forward(self, decide: torch.Tensor, n_options: int) -> torch.Tensor:
+        """decide [B, d] -> logits [B, n_options]; masked_log_softmax masks each row's rest."""
+        # float32 from here on: under bf16 autocast the product comes back in bf16, and the
+        # runtimes cap, scale and normalise in float32 (core/readout.py).
+        logits: torch.Tensor = self.proj(self.dropout(decide)).float()
+        if self.softcap:
+            logits = self.softcap * torch.tanh(logits / self.softcap)
+        return logits[:, :n_options]
+
+
+HEAD_TYPES = ("pointer", "token_readout")
+
+
 def build_head(config: StrandsDeciderConfig, hidden_size: int) -> nn.Module:
-    """The pointer readout, in fp32.
+    """The readout `config.head_type` names, in fp32.
 
     The head trains in fp32 even when the torso is bf16: it is tiny, and a
     low-precision classifier is a needless source of calibration error.
     """
-    head = PointerHead(hidden_size, dim=config.pointer_dim, dropout=config.head_dropout)
+    head: nn.Module
+    if config.head_type == "token_readout":
+        if config.readout_softcap is None:
+            raise ValueError("a token readout config needs readout_softcap (0.0 for no cap)")
+        head = TokenReadoutHead(
+            hidden_size, dropout=config.head_dropout, softcap=config.readout_softcap or None
+        )
+    else:
+        head = PointerHead(hidden_size, dim=config.pointer_dim, dropout=config.head_dropout)
     return head.to(torch.float32)
+
+
+def logit_softcap(torso: nn.Module) -> float | None:
+    """The cap a torso's LM head puts on its logits (Gemma: final_logit_softcapping), or None."""
+    cap = getattr(getattr(torso, "config", None), "final_logit_softcapping", None)
+    return float(cap) if cap else None
+
+
+def lm_head_rows(config: StrandsDeciderConfig, torso: nn.Module, ids: list[int]) -> torch.Tensor:
+    """The base model's LM head rows for token `ids` [len(ids), hidden]: the torso's input
+    embeddings when the base ties them (Qwen3.5-2B, Gemma 4 E2B), else the base
+    checkpoint's lm_head.weight, read from its safetensors."""
+    base = AutoConfig.from_pretrained(config.base_model, revision=config.base_revision)
+    index = torch.tensor(ids, dtype=torch.long)
+    if getattr(base, "tie_word_embeddings", True):
+        weight = torso.get_input_embeddings().weight.detach()
+        return weight[index.to(weight.device)].float().cpu()
+    local = config.base_model
+    if not os.path.isdir(local):
+        local = snapshot_download(local, revision=config.base_revision)
+    for name in sorted(f for f in os.listdir(local) if f.endswith(".safetensors")):
+        with safe_open(os.path.join(local, name), framework="pt") as fh:
+            for key in fh.keys():
+                if key.endswith("lm_head.weight"):
+                    return fh.get_tensor(key)[index].float()
+    raise ValueError(f"{config.base_model}: no lm_head.weight, and its embeddings are not tied")
+
+
+def prefix_bidir_masks(
+    torso_config: Any, attention_mask: torch.Tensor, prefix_end: torch.Tensor, dtype: torch.dtype
+) -> dict[str, torch.Tensor]:
+    """The decoder's masks, per layer type, for attention_mode "prefix_bidir" on right-padded rows.
+
+    Each row splits at prefix_end, its first question token. A state token attends to the
+    whole state, both ways, and never to the question; a question token attends to the state
+    and to its own question, both ways. Full-attention layers take this mask. So do
+    sliding-window layers, without their window: under prefix_bidir no layer is cut to its
+    window, as the v2 recipe trains (Gemma 4: 512 tokens on E2B and E4B, 1,024 on 12B).
+    Linear-attention layers (Qwen3.5) keep the padding mask and stay causal. Any other layer
+    type is refused.
+    """
+    impl = getattr(torso_config, "_attn_implementation", None) or "sdpa"
+    # "prefix_split" (prefix_split_attention, attn_split) takes the boolean mask SDPA takes:
+    # it hands batches under its minimum length to SDPA unchanged.
+    if impl not in ("sdpa", "eager", "prefix_split"):
+        raise ValueError(f"attention_mode prefix_bidir needs sdpa or eager attention, not {impl}")
+    pos = torch.arange(attention_mask.size(1), device=attention_mask.device)
+    in_state = pos[None, :] < prefix_end.to(pos.device)[:, None]  # [B, L]
+    # [B, query, key]: a state query sees the state's keys, a question query every real key.
+    sees = torch.where(in_state[:, :, None], in_state[:, None, :], True)
+    allowed = (sees & attention_mask.bool()[:, None, :])[:, None]  # [B, 1, L, L]
+    mask = allowed
+    if impl == "eager":  # an additive mask
+        mask = torch.zeros(allowed.shape, dtype=dtype, device=allowed.device)
+        mask = mask.masked_fill(~allowed, torch.finfo(dtype).min)
+    types = set(getattr(torso_config, "layer_types", None) or ["full_attention"])
+    unknown = types - {"full_attention", "sliding_attention", "linear_attention"}
+    if unknown:
+        raise ValueError(f"attention_mode prefix_bidir does not know layer types {sorted(unknown)}")
+    return {t: attention_mask if t == "linear_attention" else mask for t in types}
+
+
+def serving_attn_override(
+    config: StrandsDeciderConfig, torso_cfg: Any, trainable: bool, attn_implementation: str | None
+) -> str | None:
+    """The attention a loaded checkpoint must be switched to, or None to keep what it has.
+
+    Serving only: training keeps the attention `from_pretrained_base` gives it, and a caller
+    that names one is obeyed. A token readout is never switched: this repository's engines
+    refuse to serve one (`refuse_token_readout`), so the override would only slow its
+    evaluation down with a dense additive mask over the whole batch.
+    """
+    if trainable or attn_implementation is not None or config.head_type == "token_readout":
+        return None
+    return serving_attn_implementation(torso_cfg)
+
+
+def refuse_token_readout(config: StrandsDeciderConfig) -> None:
+    """The serving engines in this repository serve the pointer head only."""
+    if getattr(config, "head_type", "pointer") == "token_readout":  # test stubs carry none
+        raise ValueError(
+            "a token_readout checkpoint is served by a separate inference stack; "
+            "not supported by this engine"
+        )
 
 
 def gather_options(hidden: torch.Tensor, opt_idx: torch.Tensor) -> torch.Tensor:
@@ -307,13 +471,15 @@ def apply_temperature(logits: torch.Tensor, temperature: Any) -> torch.Tensor:
 
 
 class StrandsDeciderModel(nn.Module):
-    """LLM torso + pointer head. The LM output head is never loaded."""
+    """LLM torso + readout head. The LM output head is never loaded."""
 
     def __init__(self, config: StrandsDeciderConfig, torso: nn.Module, tokenizer: Any):
         super().__init__()
         self.config = config
         self.torso = torso
         self.tokenizer = tokenizer
+        if config.head_type == "token_readout" and config.readout_softcap is None:
+            config.readout_softcap = logit_softcap(torso) or 0.0
         self.head = build_head(config, self.hidden_size(torso))
 
     @staticmethod
@@ -341,9 +507,18 @@ class StrandsDeciderModel(nn.Module):
 
         torso = cls._load_torso(config, device_map, attn_implementation)
         model = cls(config, torso, tok)
+        if config.head_type == "token_readout":
+            assert isinstance(model.head, TokenReadoutHead)
+            # At Gemma 4's code ids: the prompt lists each option under one of its code tokens.
+            model.head.proj.weight.data.copy_(lm_head_rows(config, torso, list(CODE_TOKEN_IDS)))
         if config.use_lora:
             model.attach_lora()
         return model
+
+    def attach_expert_lora(self) -> None:
+        c = self.config
+        alpha = c.lora_alpha if c.expert_lora_alpha is None else c.expert_lora_alpha
+        expert_lora.attach(self.torso, c.expert_lora_r, alpha, c.lora_dropout)
 
     @staticmethod
     def _load_torso(
@@ -418,6 +593,8 @@ class StrandsDeciderModel(nn.Module):
             task_type="FEATURE_EXTRACTION",
         )
         self.torso = get_peft_model(self.torso, lora_cfg)
+        if self.config.expert_lora:  # after PEFT, which freezes every non-LoRA parameter
+            self.attach_expert_lora()
 
     def freeze_torso(self) -> None:
         for p in self.torso.parameters():
@@ -431,7 +608,7 @@ class StrandsDeciderModel(nn.Module):
     def encode(
         self,
         input_ids: torch.Tensor,
-        attention_mask: torch.Tensor,
+        attention_mask: torch.Tensor | dict[str, torch.Tensor],
         past_key_values: Any = None,
     ) -> torch.Tensor:
         out = self.torso(
@@ -455,16 +632,35 @@ class StrandsDeciderModel(nn.Module):
         past_key_values: Any = None,
         temperature: Any | None = None,
         opt_idx: torch.Tensor | None = None,
+        prefix_end: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
-        if opt_idx is None:
+        readout = self.config.head_type == "token_readout"
+        if opt_idx is None and not readout:
             raise ValueError("pointer head needs opt_idx (option token positions)")
-        hidden = self.encode(input_ids, attention_mask, past_key_values=past_key_values)
+        mask: torch.Tensor | dict[str, torch.Tensor] = attention_mask
+        if readout and self.config.attention_mode == "prefix_bidir":
+            if prefix_end is None:
+                raise ValueError("attention_mode prefix_bidir needs prefix_end")
+            dtype = self.torso.get_input_embeddings().weight.dtype
+            mask = prefix_bidir_masks(self.torso.config, attention_mask, prefix_end, dtype)
+        if readout and self.config.attention_mode == "prefix_bidir" and self.config.attn_split:
+            # Long batches: the same attention as the mask above, as two unmasked SDPA calls
+            # per row, which runs on a faster kernel. The mask is still built and passed, and
+            # it is what short batches use. Installed once and left in place: a gradient
+            # checkpoint's recompute must take the same path as the forward it repeats.
+            assert prefix_end is not None  # checked above
+            prefix_split_attention.install(self.torso, self.config.attn_split)
+            prefix_split_attention.set_rows(prefix_end, attention_mask)
+        hidden = self.encode(input_ids, mask, past_key_values=past_key_values)
         pooled = pool_last_token(hidden, attention_mask).to(torch.float32)
-        # Indices are relative to what was actually forwarded, so with a shared
-        # prefix cache the caller passes suffix-relative positions and this works
-        # unchanged -- `hidden` is the suffix in that case.
-        options = gather_options(hidden, opt_idx).to(torch.float32)
-        logits = self.head(pooled, options)
+        if opt_idx is None or readout:
+            logits = self.head(pooled, int(n_slots.max()))
+        else:
+            # Indices are relative to what was actually forwarded, so with a shared
+            # prefix cache the caller passes suffix-relative positions and this works
+            # unchanged -- `hidden` is the suffix in that case.
+            options = gather_options(hidden, opt_idx).to(torch.float32)
+            logits = self.head(pooled, options)
 
         logits = apply_temperature(
             logits, self.config.temperature if temperature is None else temperature
@@ -503,6 +699,12 @@ class StrandsDeciderModel(nn.Module):
         save_file(state, os.path.join(path, "head.safetensors"), metadata={"format": "pt"})
         if self.config.use_lora:
             self.torso.save_pretrained(os.path.join(path, "lora"))
+        if self.config.expert_lora:
+            save_file(
+                expert_lora.state_dict(self.torso),
+                os.path.join(path, "lora", expert_lora.FILE),
+                metadata={"format": "pt"},
+            )
         self.tokenizer.save_pretrained(path)
 
     @classmethod
@@ -538,10 +740,9 @@ class StrandsDeciderModel(nn.Module):
             ensure_bos(tok)
 
         torso = cls._load_torso(config, device_map, attn_implementation)
-        # serving only: training keeps the attention from_pretrained_base gives it
-        serving = not trainable and attn_implementation is None
-        if serving and serving_attn_implementation(torso.config):
-            torso.set_attn_implementation(serving_attn_implementation(torso.config))
+        impl = serving_attn_override(config, torso.config, trainable, attn_implementation)
+        if impl:
+            torso.set_attn_implementation(impl)
 
         if config.use_lora:
             from peft import PeftModel
@@ -558,6 +759,14 @@ class StrandsDeciderModel(nn.Module):
         obj.head = build_head(config, cls.hidden_size(torso))
         obj.head.load_state_dict(head_state)
         obj.head.to(torch.float32)
+        if config.expert_lora:
+            from safetensors.torch import load_file
+
+            obj.attach_expert_lora()
+            expert_lora.load_state(torso, load_file(os.path.join(lora_dir, expert_lora.FILE)))
+            for m in expert_lora.modules(torso).values():
+                for p in expert_lora.PARTS:
+                    getattr(m, p).requires_grad_(trainable)
         return obj
 
 

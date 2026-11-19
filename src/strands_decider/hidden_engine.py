@@ -305,7 +305,10 @@ def save_assets(model: StrandsDeciderModel, path: str, model_name: str) -> None:
     (tokenizer.json, head.safetensors, head_config.json). The torso is the backend's."""
     from safetensors.numpy import save_file
 
+    from .modeling import refuse_token_readout
+
     cfg = model.config
+    refuse_token_readout(cfg)
     os.makedirs(path, exist_ok=True)
     model.tokenizer.backend_tokenizer.save(os.path.join(path, "tokenizer.json"))
     weights = {k: v.detach().float().cpu().numpy() for k, v in model.head.state_dict().items()}
