@@ -355,9 +355,9 @@ src/strands_decider/              -- published package (inference only)
   backends/       runtimes for model checkpoints: transformers.py runs them on PyTorch
                   (CPU, CUDA, MPS) and is the reference runtime, transformers_attention.py
                   its prefix_bidir attention, images.py the pixels every backend encodes;
-                  mlx.py runs them on Apple silicon through mlx-vlm (--device mlx),
-                  mlx_convert.py writes their MLX artifacts (convert-mlx), and
-                  mlx_format.py holds the rules that need no MLX
+                  mlx.py runs them on Apple silicon through mlx-vlm (--device mlx), and
+                  mlx_format.py loads them into mlx-vlm and writes their MLX artifacts
+                  (convert-mlx)
   decision.py     model checkpoints behind ask and serve: the core and a backend
   refusals.py     the request errors serve maps to 422 and 503
 
