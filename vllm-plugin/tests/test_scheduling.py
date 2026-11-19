@@ -1,14 +1,22 @@
-"""A prompt with images is scheduled whole or not at all, and one held back is not overtaken: vLLM's
-own Scheduler, driven step by step with a full encoder cache. No GPU needed."""
+"""A prompt with images is scheduled whole or not at all, and one held back is not starved by smaller
+ones: vLLM's own Scheduler, driven step by step with a full encoder cache."""
 
 from __future__ import annotations
 
-import dataclasses
 import json
 
 import pytest
+import torch
+from vllm import SamplingParams
+from vllm.config import CacheConfig, ModelConfig, SchedulerConfig, VllmConfig
+from vllm.multimodal.inputs import MultiModalFeatureSpec, PlaceholderRange
+from vllm.v1.core.encoder_cache_manager import EncoderCacheManager
+from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheGroupSpec
+from vllm.v1.outputs import ModelRunnerOutput
+from vllm.v1.request import Request
+from vllm.v1.structured_output import StructuredOutputManager
 
-from strands_decider_vllm import scheduling
+from strands_decider_vllm import register
 
 TINY_LLAMA = {
     "architectures": ["LlamaForCausalLM"],
@@ -26,29 +34,21 @@ IMAGE = 280  # one image's embeddings, the most a Gemma 4 image has
 
 
 @pytest.fixture
-def scheduler(tmp_path, monkeypatch):
-    """vLLM's Scheduler (or AsyncScheduler) with an encoder cache of ``cache`` embeddings, set after
-    construction: vLLM would size it from a multimodal model's processor, which isn't needed here."""
-    torch = pytest.importorskip("torch")
-    pytest.importorskip("vllm.v1.core.sched.scheduler")
-    from vllm.config import CacheConfig, ModelConfig, SchedulerConfig, VllmConfig
-    from vllm.v1.core.encoder_cache_manager import EncoderCacheManager
-    from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheGroupSpec
-    from vllm.v1.structured_output import StructuredOutputManager
-
-    import strands_decider_vllm
-
-    strands_decider_vllm.register()
+def scheduler(tmp_path):
+    """vLLM's Scheduler (AsyncScheduler if ``asynchronous``) of a Strands Decider engine, with an
+    encoder cache of ``cache`` embeddings, set after construction: vLLM would size it from a
+    multimodal model's processor, which isn't needed here."""
+    register()
     (tmp_path / "config.json").write_text(json.dumps(TINY_LLAMA))
 
-    def make(cache, *, asynchronous=False, decider=True, max_model_len=1200):
-        monkeypatch.setattr(scheduling, "serves_decider", lambda vllm_config: decider)
+    def make(cache, *, asynchronous=False, max_model_len=1200):
         model = ModelConfig(
             model=str(tmp_path),
             skip_tokenizer_init=True,
             max_model_len=max_model_len,
             dtype="float32",
         )
+        model.model_arch_config.architectures = ["StrandsDeciderForConditionalGeneration"]
         sched = SchedulerConfig(
             max_num_seqs=64,
             max_num_batched_tokens=max_model_len,
@@ -79,10 +79,6 @@ def scheduler(tmp_path, monkeypatch):
 
 def request(rid, images, length):
     """A request of ``length`` tokens with an image of IMAGE embeddings at each (id, offset)."""
-    from vllm import SamplingParams
-    from vllm.multimodal.inputs import MultiModalFeatureSpec, PlaceholderRange
-    from vllm.v1.request import Request
-
     features = [
         MultiModalFeatureSpec(
             data=None,
@@ -104,33 +100,20 @@ def request(rid, images, length):
 
 def finish(s, out):
     """The model runner's output for a step: one token per scheduled request."""
-    from vllm.v1.outputs import ModelRunnerOutput
-
     ids = list(out.num_scheduled_tokens)
-    kwargs: dict = {"req_ids": ids, "sampled_token_ids": [[7] for _ in ids]}
-    if "req_id_to_index" in {f.name for f in dataclasses.fields(ModelRunnerOutput)}:
-        kwargs["req_id_to_index"] = {r: i for i, r in enumerate(ids)}  # gone in vLLM 0.34
-    s.update_from_output(out, ModelRunnerOutput(**kwargs))
+    s.update_from_output(out, ModelRunnerOutput(req_ids=ids, sampled_token_ids=[[7] for _ in ids]))
 
 
-@pytest.mark.parametrize("decider", [False, True])
-def test_a_prompt_vllm_would_cut_before_an_image_waits_whole(scheduler, decider):
+def test_a_prompt_vllm_would_cut_before_an_image_waits_whole(scheduler):
     # A (two images, 560 of 600 embeddings) is in flight; B shares A's first image and needs 280
-    # more; C, text only, is behind B.
-    s = scheduler(600, decider=decider)
+    # more; C, text only, is behind B. vLLM 0.34 holds B back whole (vLLM #65399).
+    s = scheduler(600)
     s.add_request(request("A", [("x", 10), ("a2", 300)], 600))
     first = s.schedule()
     b = request("B", [("x", 10), ("b2", 300)], 600)
     s.add_request(b)
     s.add_request(request("C", [], 300))
     second = s.schedule()  # before A's step is processed, as with asynchronous scheduling
-    if not decider:
-        import vllm
-
-        # vLLM 0.33 alone schedules B up to its second image, half a prompt; 0.34 defers B whole.
-        half = vllm.__version__.startswith("0.33.")
-        assert second.num_scheduled_tokens == ({"B": 300, "C": 300} if half else {"C": 300})
-        return
     assert second.num_scheduled_tokens == {"C": 300}
     ecm = s.encoder_cache_manager
     assert ecm.get_cached_input_ids(b) == set() and ecm.cached["x"] == {"A"}, "B's reference went"
@@ -143,8 +126,8 @@ def test_a_prompt_vllm_would_cut_before_an_image_waits_whole(scheduler, decider)
 @pytest.mark.parametrize("asynchronous", [False, True])
 def test_a_held_back_request_is_not_starved_by_smaller_ones(scheduler, asynchronous):
     # A 4-image request (1,120 of 1,200 embeddings) arrives while three 1-image requests are in
-    # flight, and two more arrive every step. Without holding the later ones back too, each step
-    # fits smaller requests into the room left and the big one is never scheduled.
+    # flight, and two more arrive every step. Without the plugin, under asynchronous scheduling each
+    # step fits smaller requests into the room left and the big one is never scheduled.
     s = scheduler(1200, asynchronous=asynchronous)
     n = 0
 
