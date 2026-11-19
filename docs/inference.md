@@ -19,7 +19,7 @@ CPU), so they report the numbers serving returns. `--device mlx` is refused.
 - [Model artifact](#model-artifact): what a checkpoint holds, and the Hugging Face export.
 - [Ask](#ask): one command, with recorded v19 output and how to read its confidence.
 - [Serve](#serve): `POST /v1/systemone` and `/health`, on `127.0.0.1` with no authentication.
-- [Decision checkpoints](#decision-checkpoints): checkpoints of the decision interface
+- [Model checkpoints](#model-checkpoints): checkpoints of the decision interface
   (`strands_decider.core`), with images, on the transformers backend.
 - [Asking many questions is nearly free](#asking-many-questions-is-nearly-free): the shared-prefix cache.
 - [Serving on a Mac](#serving-on-a-mac): MPS, and the one kernel that had to be replaced.
@@ -301,17 +301,17 @@ took 4.9 s (E2B), 7.2 s (E4B), 13.5 s (12B) and 7.8 s (26B-A4B). The 26B-A4B is 
 there, because it computes with 4B of its parameters per token. On one H100, the median is
 102 ms, 139 ms, 136 ms and 245 ms.
 
-## Decision checkpoints
+## Model checkpoints
 
-A decision checkpoint is the base Gemma 4 model's multimodal checkpoint with the fine-tuning
+A model checkpoint is the base Gemma 4 model's multimodal checkpoint with the fine-tuning
 merged in, beside `readout.safetensors` and a `decision_config.json` that says
 `"interface": "strands-decider"` ([architecture.md](architecture.md#the-cores-runtime-interface)).
 `ask` and `serve` take one like any other checkpoint, a local directory or a Hub id.
 
 ```bash
-strands-decider ask path/to/decision-checkpoint --state "A photo sent with a claim." \
+strands-decider ask path/to/model-checkpoint --state "A photo sent with a claim." \
   --image photo.jpg --choice "What does the photo show?=a car,a bicycle,a house"
-strands-decider serve path/to/decision-checkpoint --port 8000
+strands-decider serve path/to/model-checkpoint --port 8000
 ```
 
 The core renders each request and the transformers backend (`backends/transformers.py`) runs
@@ -320,7 +320,7 @@ CUDA and MPS bf16; `--dtype float32` or `--dtype bfloat16` chooses. A request ma
 when `decision_config.json` lists `image` in `inputs`. A request whose `audio` is anything but
 null is refused with 422.
 
-The serving options, as a decision checkpoint takes them:
+The serving options, as a model checkpoint takes them:
 
 - `--no-prefix-cache`: one full pass per question, the reference on CUDA in bf16.
 - `--max-batch`, `--max-batch-tokens`: bound the questions of one pass over a state.

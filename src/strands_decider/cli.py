@@ -68,7 +68,7 @@ def serve_cmd(
     no_prefix_cache: bool = typer.Option(
         False,
         "--no-prefix-cache",
-        help="Encode each question with its own copy of the state; for a decision checkpoint, "
+        help="Encode each question with its own copy of the state; for a model checkpoint, "
         "one full pass per question (the reference, on CUDA in bfloat16).",
     ),
     model_name: str | None = typer.Option(
@@ -80,7 +80,7 @@ def serve_cmd(
         False,
         "--vision",
         help="Keep Qwen3.5's vision tower so requests may carry `images` (docs/vision.md). A "
-        "decision checkpoint takes images when its decision_config.json lists them.",
+        "model checkpoint takes images when its decision_config.json lists them.",
     ),
     max_batch: int = typer.Option(
         32,
@@ -104,29 +104,29 @@ def serve_cmd(
         min=1,
         help="Run at most N requests on the model at once; the rest wait. v1 checkpoints: no cap "
         "beyond the 40-thread worker pool by default, and a waiting request holds no thread or GPU "
-        "memory. Decision checkpoints: 1 by default, and a request waits up to --queue-timeout.",
+        "memory. Model checkpoints: 1 by default, and a request waits up to --queue-timeout.",
     ),
     dtype: str | None = typer.Option(
         None,
         "--dtype",
-        help="Decision checkpoints: float32 or bfloat16. Default: float32 on cpu, bfloat16 on "
+        help="Model checkpoints: float32 or bfloat16. Default: float32 on cpu, bfloat16 on "
         "cuda and mps.",
     ),
     queue_timeout: float = typer.Option(
         60.0,
         "--queue-timeout",
-        help="Decision checkpoints: seconds a request waits for the model before a 503.",
+        help="Model checkpoints: seconds a request waits for the model before a 503.",
     ),
     revision: str | None = typer.Option(
         None,
         "--revision",
-        help="Decision checkpoints on the Hub: the branch, tag or commit to load.",
+        help="Model checkpoints on the Hub: the branch, tag or commit to load.",
     ),
     max_length: int | None = typer.Option(
         None,
         "--max-length",
         min=1,
-        help="Decision checkpoints: refuse prompts longer than this many tokens (default: "
+        help="Model checkpoints: refuse prompts longer than this many tokens (default: "
         "decision_config.json's max_length_validated). Raising it past the validated length is "
         "the operator's decision.",
     ),
@@ -142,7 +142,7 @@ def serve_cmd(
     from .server import create_app
 
     selected_device = resolve_device(device)
-    try:  # before anything is announced: the arguments' checks, and a decision checkpoint's load
+    try:  # before anything is announced: the arguments' checks, and a model checkpoint's load
         app_ = create_app(
             checkpoint,
             device=selected_device,
@@ -193,12 +193,12 @@ def ask_cmd(
     revision: str | None = typer.Option(
         None,
         "--revision",
-        help="Decision checkpoints on the Hub: the branch, tag or commit to load.",
+        help="Model checkpoints on the Hub: the branch, tag or commit to load.",
     ),
     dtype: str | None = typer.Option(
         None,
         "--dtype",
-        help="Decision checkpoints: float32 or bfloat16. Default: float32 on cpu, bfloat16 on "
+        help="Model checkpoints: float32 or bfloat16. Default: float32 on cpu, bfloat16 on "
         "cuda and mps.",
     ),
 ) -> None:
@@ -227,9 +227,9 @@ def ask_cmd(
 
     selected_device = resolve_device(device)
     images = [base64.b64encode(Path(p).read_bytes()).decode("ascii") for p in image or []]
-    from .decision import is_decision_checkpoint, load_decision_engine
+    from .decision import is_model_checkpoint, load_decision_engine
 
-    if is_decision_checkpoint(checkpoint, revision=revision):
+    if is_model_checkpoint(checkpoint, revision=revision):
         # Images go in the request; the checkpoint's decision_config.json says if it takes them.
         from .core import Request
 
@@ -247,7 +247,9 @@ def ask_cmd(
             raise typer.BadParameter(str(e)) from e
     elif dtype is not None or revision is not None:
         flag = "--dtype" if dtype is not None else "--revision"
-        raise typer.BadParameter(f"{flag} is for decision checkpoints", param_hint=flag)
+        raise typer.BadParameter(
+            f"{flag} is for model checkpoints, not v1 checkpoints", param_hint=flag
+        )
     elif images:
         from .vision import load_vision_engine
 

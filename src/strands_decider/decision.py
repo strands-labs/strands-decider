@@ -1,7 +1,7 @@
-"""Decision checkpoints behind `strands-decider ask` and `serve`.
+"""Model checkpoints behind `strands-decider ask` and `serve`.
 
 A directory or Hub repo whose decision_config.json names `"interface": "strands-decider"` is a
-decision checkpoint, served here with the core and a backend; anything else takes v1's path,
+model checkpoint, served here with the core and a backend; anything else takes v1's path,
 unchanged.
 """
 
@@ -48,7 +48,7 @@ class DecisionBackend(Backend, Protocol):
         ...
 
 
-def is_decision_checkpoint(checkpoint: str, *, revision: str | None = None) -> bool:
+def is_model_checkpoint(checkpoint: str, *, revision: str | None = None) -> bool:
     """Whether `checkpoint`, a directory or a Hub repo, has a decision_config.json of this
     interface. Other decision models ship a file of that name too; theirs, a v1 checkpoint, and a
     checkpoint that can't be found take v1's path, which reports it."""
@@ -61,7 +61,7 @@ def is_decision_checkpoint(checkpoint: str, *, revision: str | None = None) -> b
 
 
 class DecisionEngine:
-    """A decision checkpoint answering System One requests: the core renders each request, the
+    """A model checkpoint answering System One requests: the core renders each request, the
     backend runs the decoder, and the core reads the answers.
 
     At most `max_concurrency` requests run on the backend at once. One, the default, keeps a
@@ -157,11 +157,11 @@ def load_decision_engine(
     queue_timeout: float = 60.0,
     revision: str | None = None,
 ) -> DecisionEngine:
-    """The decision checkpoint `checkpoint`, a directory or a Hub repo, on `device`. Its interface
+    """The model checkpoint `checkpoint`, a directory or a Hub repo, on `device`. Its interface
     files are read and checked before the backend loads the weights. `reuse_state=False` runs each
     question as one full prompt; on CUDA in bfloat16 that is the reference."""
     if device.split(":", 1)[0] not in _DEVICES:
-        raise ValueError(f"decision checkpoints run on {', '.join(_DEVICES)}, not {device!r}")
+        raise ValueError(f"model checkpoints run on {', '.join(_DEVICES)}, not {device!r}")
     if dtype is not None and dtype not in _DTYPES:
         raise ValueError(f"--dtype is one of {', '.join(_DTYPES)}, not {dtype!r}")
     path = checkpoint_dir(checkpoint, revision)
@@ -196,7 +196,7 @@ def load_decision_engine(
     )
     d = backend.describe()
     logger.debug(
-        "decision checkpoint: %s on %s in %s, images %s, %s",
+        "model checkpoint: %s on %s in %s, images %s, %s",
         d["backend"],
         d["device"],
         d["dtype"],

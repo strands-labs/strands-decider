@@ -1,4 +1,4 @@
-"""`strands-decider serve` and `ask` on decision checkpoints, with tiny random-weight checkpoints
+"""`strands-decider serve` and `ask` on model checkpoints, with tiny random-weight checkpoints
 (tests/decision_support.py): which checkpoints take the decision path, the HTTP API with text
 and images, and its refusals. v1 checkpoints keep v1's path; tests/test_server.py and
 tests/test_cli_exit.py cover it."""
@@ -15,13 +15,13 @@ import torch
 from fastapi.testclient import TestClient
 from typer.testing import CliRunner
 
-from decision_support import decision_checkpoint, image_b64, request  # isort: skip
+from decision_support import model_checkpoint, image_b64, request  # isort: skip
 
 from strands_decider import cli, modeling, server
 from strands_decider.core import Request, evaluate, load_tokenizer, render
 from strands_decider.decision import (
     NO_IMAGE_PROCESSOR,
-    is_decision_checkpoint,
+    is_model_checkpoint,
     load_decision_engine,
 )
 from strands_decider.schema import SystemOneResponse
@@ -31,13 +31,13 @@ IMAGE = image_b64(64, 48)
 
 @pytest.fixture(scope="module")
 def ckpt(tmp_path_factory):
-    return decision_checkpoint(tmp_path_factory.mktemp("decision") / "ckpt")
+    return model_checkpoint(tmp_path_factory.mktemp("decision") / "ckpt")
 
 
 @pytest.fixture(scope="module")
 def text_only(tmp_path_factory):
     path = tmp_path_factory.mktemp("text") / "ckpt"
-    return decision_checkpoint(path, decision={"inputs": ["text"]})
+    return model_checkpoint(path, decision={"inputs": ["text"]})
 
 
 @pytest.fixture(autouse=True)
@@ -56,15 +56,15 @@ def _cli(*args: str) -> tuple[int, str]:
 
 
 def test_which_checkpoints_take_the_decision_path(ckpt, tmp_path, monkeypatch):
-    assert is_decision_checkpoint(str(ckpt))
-    assert not is_decision_checkpoint(str(tmp_path / "missing"))  # v1's loader reports it
-    assert not is_decision_checkpoint(str(tmp_path))  # no decision_config.json: v1's
+    assert is_model_checkpoint(str(ckpt))
+    assert not is_model_checkpoint(str(tmp_path / "missing"))  # v1's loader reports it
+    assert not is_model_checkpoint(str(tmp_path))  # no decision_config.json: v1's
     (tmp_path / "decision_config.json").write_text(json.dumps({"format_id": "another-format"}))
-    assert not is_decision_checkpoint(str(tmp_path))  # another decision model's
+    assert not is_model_checkpoint(str(tmp_path))  # another decision model's
     calls = []
     snapshot = lambda repo, revision=None: calls.append((repo, revision)) or str(ckpt)  # noqa: E731
     monkeypatch.setattr(modeling, "snapshot_download", snapshot)
-    assert is_decision_checkpoint("org/decision", revision="v2")
+    assert is_model_checkpoint("org/decision", revision="v2")
     assert calls == [("org/decision", "v2")]
 
 
@@ -77,7 +77,7 @@ def test_the_engine_answers_as_the_core_does(ckpt):
         assert engine.evaluate(req) == want
 
 
-def test_serve_answers_a_decision_checkpoint(ckpt):
+def test_serve_answers_a_model_checkpoint(ckpt):
     with TestClient(server.create_app(str(ckpt), device="cpu", model_name="tiny")) as client:
         health = client.get("/health").json()
         r = client.post("/v1/systemone", json=request([image_b64(50, 90, "JPEG")]))
@@ -119,9 +119,9 @@ def test_serve_refuses_what_the_interface_refuses(ckpt, text_only):
 def test_a_processor_that_fails_refuses_images_only_and_names_no_path(tmp_path, cause):
     """Clients get a fixed reason; the error, which may name local paths, is only warned."""
     if cause == "settings the core refuses":
-        path = decision_checkpoint(tmp_path / "p", processor={"max_soft_tokens": 560})
+        path = model_checkpoint(tmp_path / "p", processor={"max_soft_tokens": 560})
     else:
-        path = decision_checkpoint(tmp_path / "p")
+        path = model_checkpoint(tmp_path / "p")
         (path / "processor_config.json").unlink()
     with pytest.warns(UserWarning, match="image requests are refused"), _client(path) as client:
         r = client.post("/v1/systemone", json=request([IMAGE]))
@@ -185,7 +185,7 @@ def test_a_full_engine_answers_503_and_refusals_do_not_wait(ckpt, monkeypatch):
 
 
 def test_serve_command_options(ckpt, tmp_path, monkeypatch):
-    """`serve` gives a decision checkpoint its options; an option for the other kind of
+    """`serve` gives a model checkpoint its options; an option for the other kind of
     checkpoint is refused before anything is announced, and --vision warns."""
     import uvicorn
 
@@ -201,13 +201,13 @@ def test_serve_command_options(ckpt, tmp_path, monkeypatch):
     keys = ("dtype", "reuse_state", "max_concurrency", "queue_timeout", "max_length")
     assert [health[k] for k in keys] == ["bfloat16", False, 2, 5.0, 1000]
     for args, hint in (
-        ([str(tmp_path), "--dtype", "bfloat16"], "--dtype is for decision"),
-        ([str(tmp_path), "--revision", "main"], "--revision is for decision"),
-        ([str(tmp_path), "--max-length", "100"], "--max-length is for decision"),
+        ([str(tmp_path), "--dtype", "bfloat16"], "--dtype is for model checkpoints"),
+        ([str(tmp_path), "--revision", "main"], "--revision is for model checkpoints"),
+        ([str(tmp_path), "--max-length", "100"], "--max-length is for model checkpoints"),
         ([str(ckpt), "--dtype", "float16"], "--dtype is one of"),
         ([str(ckpt), "--max-length", "0"], "greater than or equal to 1"),
         ([str(ckpt), "--device-map", "auto"], "--device-map is for v1"),
-        ([str(ckpt), "--device", "tpu"], "decision checkpoints run on cpu, cuda, mps"),
+        ([str(ckpt), "--device", "tpu"], "model checkpoints run on cpu, cuda, mps"),
     ):
         code, out = _cli("serve", *args)
         assert code == 2 and "serving" not in out and hint in out, out
@@ -235,7 +235,7 @@ def test_serve_takes_a_max_length(ckpt, caplog):
     assert "a warm-up request was skipped" in caplog.text
 
 
-def test_ask_on_a_decision_checkpoint(ckpt, text_only, tmp_path):
+def test_ask_on_a_model_checkpoint(ckpt, text_only, tmp_path):
     img = tmp_path / "x.png"
     img.write_bytes(base64.b64decode(IMAGE))
     out = CliRunner().invoke(cli.app, ["ask", str(ckpt), "--state", "a b c", "--noul", "a b?",
@@ -248,7 +248,10 @@ def test_ask_on_a_decision_checkpoint(ckpt, text_only, tmp_path):
     assert cli._exit_fast
     for args, hint in (
         ([str(text_only), "--image", str(img), "--device", "cpu"], "does not take images"),
-        ([str(tmp_path), "--device", "cpu", "--dtype", "bfloat16"], "--dtype is for decision"),
+        (
+            [str(tmp_path), "--device", "cpu", "--dtype", "bfloat16"],
+            "--dtype is for model checkpoints",
+        ),
     ):
         code, out = _cli("ask", args[0], "--state", "x", "--noul", "y?", *args[1:])
         assert code == 2 and hint in out, out

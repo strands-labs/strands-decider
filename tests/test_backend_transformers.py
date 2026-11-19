@@ -1,6 +1,6 @@
 """The transformers backend on tiny random-weight Gemma 4 checkpoints (tests/decision_support.py):
 no download, CPU in CI. The CUDA and MPS tests skip without them; the real-checkpoint tests need
-STRANDS_DECIDER_TEST_CHECKPOINT, a decision checkpoint."""
+STRANDS_DECIDER_TEST_CHECKPOINT, a model checkpoint."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ import pytest
 import torch
 import transformers
 
-from decision_support import GEMMA4, KINDS, decision_checkpoint, image_b64, request  # isort: skip
+from decision_support import GEMMA4, KINDS, model_checkpoint, image_b64, request  # isort: skip
 
 from strands_decider.backends.images import image_pixels
 from strands_decider.backends.transformers import TransformersBackend, load_backend
@@ -49,14 +49,14 @@ def kind(request):
 
 @pytest.fixture(scope="module")
 def ckpt(kind, tmp_path_factory):
-    return decision_checkpoint(tmp_path_factory.mktemp(kind) / "ckpt", kind)
+    return model_checkpoint(tmp_path_factory.mktemp(kind) / "ckpt", kind)
 
 
 @pytest.fixture(scope="module")
 def e2b(tmp_path_factory):
     """A text-only checkpoint with E2B's attention layout."""
     path = tmp_path_factory.mktemp("e2b") / "ckpt"
-    return decision_checkpoint(path, GEMMA4, text=E2B_HEADS, decision={"inputs": ["text"]})
+    return model_checkpoint(path, GEMMA4, text=E2B_HEADS, decision={"inputs": ["text"]})
 
 
 def _reusing(backend, **settings):

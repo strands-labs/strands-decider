@@ -1,6 +1,6 @@
-"""Tiny random-weight decision checkpoints for the backend tests (no download).
+"""Tiny random-weight model checkpoints for the backend tests (no download).
 
-`decision_checkpoint` writes a decision checkpoint's files: the base's multimodal class saved by
+`model_checkpoint` writes a model checkpoint's files: the base's multimodal class saved by
 transformers in bf16, processor_config.json, a word-level tokenizer with Gemma 4's control tokens
 and codes at their ids (so the core's `prepare_tokenizer` accepts it), readout.safetensors and
 decision_config.json. The decoder's sliding window of 2 is shorter than any prompt here, so a
@@ -109,7 +109,7 @@ def _model(kind: str, vocab: int, text: dict):
     return transformers.Gemma4ForConditionalGeneration(config)
 
 
-def decision_checkpoint(
+def model_checkpoint(
     path: Path,
     kind: str = GEMMA4,
     *,
@@ -117,7 +117,7 @@ def decision_checkpoint(
     processor: dict | None = None,
     text: dict | None = None,
 ) -> Path:
-    """A tiny decision checkpoint of `kind` at `path`; `decision`, `processor` and `text` override
+    """A tiny model checkpoint of `kind` at `path`; `decision`, `processor` and `text` override
     fields of decision_config.json, of processor_config.json's image_processor, and of the
     decoder's configuration."""
     from safetensors.torch import save_file

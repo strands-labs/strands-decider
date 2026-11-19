@@ -352,10 +352,10 @@ src/strands_decider/              -- published package (inference only)
   vision.py       Qwen3.5 vision-tower engine (`serve --vision`, `ask --image`)
   core/           the decision interface without torch: prompt rendering, the code
                   readout, decision_config.json, the runtime contract
-  backends/       runtimes for decision checkpoints: transformers.py runs them on PyTorch
+  backends/       runtimes for model checkpoints: transformers.py runs them on PyTorch
                   (CPU, CUDA, MPS) and is the reference runtime, transformers_attention.py
                   its prefix_bidir attention, images.py the pixels every backend encodes
-  decision.py     decision checkpoints behind ask and serve: the core and a backend
+  decision.py     model checkpoints behind ask and serve: the core and a backend
   refusals.py     the request errors serve maps to 422 and 503
 
 training/                         -- not published; run as `python -m training.<module>`
@@ -440,7 +440,7 @@ tests/            pytest only: test_core (no GPU), test_server (stubbed), test_g
                   test_core_prompt, test_core_readout, test_core_config, test_core_images
                   (the torch-free core);
                   test_backend_transformers, test_backend_images, test_decision_serving
-                  (decision checkpoints, on tiny random-weight checkpoints that
+                  (model checkpoints, on tiny random-weight checkpoints that
                   decision_support.py writes)
 docs/             architecture.md -- this document; inference.md -- serving a checkpoint:
                   install, ask, serve, the HTTP API, a Mac

@@ -1,4 +1,4 @@
-"""The transformers backend: decision checkpoints on PyTorch, on CPU, CUDA or Apple's MPS.
+"""The transformers backend: model checkpoints on PyTorch, on CPU, CUDA or Apple's MPS.
 
 It is the reference runtime: in bf16 on CUDA with `reuse_state=False`, its probabilities are the
 ones a checkpoint's golden vectors hold. It loads the base's multimodal class without the audio
@@ -47,12 +47,12 @@ def load_backend(
     max_batch: int = 32,
     max_batch_tokens: int | None = None,
 ) -> TransformersBackend:
-    """The decision checkpoint in directory `path` on `device`, in `dtype` (the device's own by
+    """The model checkpoint in directory `path` on `device`, in `dtype` (the device's own by
     default). The vision encoder is built only with the image processor (`load_image_processor`),
     and the audio tower never: the core refuses audio, and it has no SDPA path."""
     config = transformers.AutoConfig.from_pretrained(path)
     if config.model_type not in _ARCHITECTURES:
-        raise ValueError(f"{path}: not a Gemma 4 decision checkpoint ({config.model_type!r})")
+        raise ValueError(f"{path}: not a Gemma 4 model checkpoint ({config.model_type!r})")
     processor = load_image_processor(path, lambda: _image_processor(path, config.model_type))
     config.audio_config = None
     if processor is None:

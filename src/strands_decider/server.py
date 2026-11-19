@@ -24,7 +24,7 @@ from pydantic import ValidationError
 
 from . import __version__
 from .core import Request as DecisionRequest
-from .decision import DecisionEngine, is_decision_checkpoint, load_decision_engine
+from .decision import DecisionEngine, is_model_checkpoint, load_decision_engine
 from .infer import EngineConfig, SystemOneEngine, load_mlx
 from .modeling import StrandsDeciderModel, refuse_token_readout
 from .refusals import EngineBusy, RequestRefused
@@ -115,16 +115,16 @@ def create_app(
     # on the same host cannot be confused. HF repo ids ("org/name") collapse to `name`.
     resolved_name = model_name or os.path.basename(checkpoint.rstrip("/")) or checkpoint
 
-    # A decision checkpoint gets its own app; anything else takes v1's path below, unchanged.
+    # A model checkpoint gets its own app; anything else takes v1's path below, unchanged.
     # Tests that inject a v1 engine (`build_engine`) skip the check.
-    if build_engine is None and is_decision_checkpoint(checkpoint, revision=revision):
+    if build_engine is None and is_model_checkpoint(checkpoint, revision=revision):
         if device_map:
             raise ValueError(
-                "--device-map is for v1 checkpoints; a decision checkpoint runs on one device"
+                "--device-map is for v1 checkpoints; a model checkpoint runs on one device"
             )
         if vision:
             warnings.warn(
-                "--vision is for v1 checkpoints: a decision checkpoint takes images when its "
+                "--vision is for v1 checkpoints: a model checkpoint takes images when its "
                 "decision_config.json inputs list them",
                 stacklevel=2,
             )
@@ -146,7 +146,7 @@ def create_app(
         return _decision_app(engine, checkpoint)
     for flag, value in (("--dtype", dtype), ("--revision", revision), ("--max-length", max_length)):
         if value is not None:
-            raise ValueError(f"{flag} is for decision checkpoints")
+            raise ValueError(f"{flag} is for model checkpoints, not v1 checkpoints")
     if device_map and (vision or not device.startswith("cuda")):
         raise ValueError("--device-map splits the text torso across CUDA GPUs: use it with cuda")
     if vision and device == "mlx":
@@ -292,7 +292,7 @@ def _warm_up_decision(engine: DecisionEngine) -> None:
 
 
 def _decision_app(engine: DecisionEngine, checkpoint: str) -> FastAPI:
-    """A decision checkpoint on v1's paths, with v1's responses. The engine bounds its own
+    """A model checkpoint on v1's paths, with v1's responses. The engine bounds its own
     concurrency, after its refusals and with a timeout (503), and its backend takes turns on MPS,
     so the app adds no limiter and no lock."""
     app = FastAPI(
