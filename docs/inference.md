@@ -449,7 +449,7 @@ core's `resize_image` and prepared by mlx-vlm's image processor with its resize 
 backend hands the core the final-norm hidden state, and the core applies the readout.
 
 `strands-decider convert-mlx CHECKPOINT OUT [--bits 8|4]` writes an MLX artifact, bf16 without
-`--bits` ([`backends/mlx_convert.py`](../src/strands_decider/backends/mlx_convert.py)). `ask`
+`--bits` ([`backends/mlx_format.py`](../src/strands_decider/backends/mlx_format.py)). `ask`
 and `serve` load it like the checkpoint on `--device mlx` and refuse it on any other device.
 Only the decoder is quantized; the vision and audio encoders and their projections stay bf16,
 and the decision files (`readout.safetensors`, `decision_config.json`, `processor_config.json`,
@@ -485,7 +485,6 @@ top codes.
 
 Limits. mlx-vlm is pinned to the release tested, and the backend refuses another at load,
 because it calls mlx-vlm's internals. The model runs on one worker thread, since MLX arrays
-belong to the thread that made them: `serve --max-concurrency` requests reach it at once
-(default 1), the others wait up to `--queue-timeout` seconds and then get 503, and each request's
-images are decoded on its own thread meanwhile. There is no cache across requests.
+belong to the thread that made them; with `--max-concurrency` above 1, a request's images are
+decoded on its own thread while the worker runs another. There is no cache across requests, and
 `--max-batch` and `--max-batch-tokens` do not apply: questions run one at a time.
