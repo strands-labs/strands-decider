@@ -14,6 +14,7 @@ import threading
 import warnings
 from typing import TYPE_CHECKING, Any, Protocol
 
+from .backends.mlx_format import is_mlx_artifact
 from .core import Backend, DecisionConfig, Request, load_readout, load_tokenizer, read, render
 from .core.config import FILENAME, IMAGE, INTERFACE
 from .modeling import checkpoint_dir
@@ -128,9 +129,8 @@ class DecisionEngine:
         )
 
     def close(self) -> None:
-        """Release the backend's resources, if it holds any (the MLX backend's worker thread)."""
-        close = getattr(self.backend, "close", None)
-        if callable(close):
+        """Release what the backend holds: the MLX backend's worker thread."""
+        if close := getattr(self.backend, "close", None):
             close()
 
     def describe(self) -> dict[str, Any]:
@@ -171,12 +171,8 @@ def load_decision_engine(
     if dtype is not None and dtype not in _DTYPES:
         raise ValueError(f"--dtype is one of {', '.join(_DTYPES)}, not {dtype!r}")
     path = checkpoint_dir(checkpoint, revision)
-    if device != "mlx":
-        from .backends.mlx_format import is_mlx_artifact
-
-        with open(os.path.join(path, "config.json"), encoding="utf-8") as f:
-            if is_mlx_artifact(json.load(f)):  # in mlx-vlm's layout, which only mlx reads
-                raise ValueError(f"{checkpoint} is an MLX artifact: serve it with --device mlx")
+    if device != "mlx" and is_mlx_artifact(path):
+        raise ValueError(f"{checkpoint} is an MLX artifact: serve it with --device mlx")
     config = DecisionConfig.load(path)
     if max_length is not None and max_length > config.max_length_validated:
         warnings.warn(
