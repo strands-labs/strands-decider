@@ -10,12 +10,13 @@ import json
 import time
 from concurrent.futures import ThreadPoolExecutor
 
+import click
 import pytest
 import torch
 from fastapi.testclient import TestClient
 from typer.testing import CliRunner
 
-from decision_support import model_checkpoint, image_b64, request  # isort: skip
+from decision_support import image_b64, model_checkpoint, request  # isort: skip
 
 from strands_decider import cli, modeling, server
 from strands_decider.core import Request, evaluate, load_tokenizer, render
@@ -50,9 +51,10 @@ def _client(path, **kwargs) -> TestClient:
 
 
 def _cli(*args: str) -> tuple[int, str]:
-    """The command's exit code, and its output on one line as rich's panels wrap it."""
+    """The command's exit code, and its output on one line as rich's panels wrap it, without the
+    colors typer forces under GitHub Actions."""
     out = CliRunner().invoke(cli.app, list(args))
-    return out.exit_code, " ".join(out.output.split()).replace("│ ", "")
+    return out.exit_code, " ".join(click.unstyle(out.output).split()).replace("│ ", "")
 
 
 def test_which_checkpoints_take_the_decision_path(ckpt, tmp_path, monkeypatch):
