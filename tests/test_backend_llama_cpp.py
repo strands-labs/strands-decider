@@ -16,7 +16,7 @@ import pytest
 from core_support import FIXTURES, PIXEL_FILES, image_bytes
 
 from strands_decider.backends import llama_cpp
-from strands_decider.backends.llama_cpp import LlamaCppBackend, decode_pixels, prepare_pixels
+from strands_decider.backends.llama_cpp import LlamaCppBackend, image_pixels
 from strands_decider.core import (
     CONTROL_TOKEN_IDS,
     NO_VISION,
@@ -38,15 +38,11 @@ def _image(name: str) -> RenderedImage:
 
 @pytest.mark.parametrize("name", sorted(PIXEL_FILES))
 def test_the_pixels_are_the_goldens(name):
-    """v1's decode, then the core's resize to the processor's size: the bytes of the core's pixel
-    goldens (tests/fixtures/core/image_pixels.json)."""
+    """v1's decode, then the core's resize to the processor's size: the core's pixel goldens
+    (tests/fixtures/core/image_pixels.json)."""
     golden = json.loads((FIXTURES / "image_pixels.json").read_text("utf-8"))["images"][name]
-    decoded = decode_pixels(image_bytes(name))
-    assert [list(decoded.size), hashlib.sha256(decoded.tobytes()).hexdigest()] == [
-        golden["decoded"], golden["decoded_sha256"]
-    ]  # fmt: skip
-    prepared = prepare_pixels(_image(name))
-    assert [list(prepared.size), hashlib.sha256(prepared.tobytes()).hexdigest()] == [
+    pixels = image_pixels(_image(name))
+    assert [list(pixels.size), hashlib.sha256(pixels.tobytes()).hexdigest()] == [
         golden["resized"], golden["resized_sha256"]
     ]  # fmt: skip
 
@@ -92,7 +88,8 @@ class FakeShim:
 
 @pytest.fixture
 def shim(monkeypatch):
-    """A FakeShim behind ctypes.CDLL, whose functions take argtypes and restype as a library's do."""
+    """A FakeShim behind ctypes.CDLL. Its functions are partials, which take argtypes and restype
+    as a library's functions do."""
     fake = FakeShim()
 
     def cdll(path):

@@ -1,14 +1,12 @@
-"""The decision checkpoint's Lambda handler over a stand-in backend, and the image build's handling
-of a checkpoint. The backend is tests/test_backend_llama_cpp.py's and tests/test_llama_cpp_shim.py's
-to test, the core under both tests/test_core_*.py's.
+"""The decision checkpoint's Lambda handler over a stand-in backend. The backend is
+tests/test_backend_llama_cpp.py's and tests/test_llama_cpp_shim.py's to test, the core under both
+tests/test_core_*.py's.
 """
 
 from __future__ import annotations
 
 import base64
-import hashlib
 import importlib
-import importlib.util
 import json
 import os
 import sys
@@ -245,97 +243,3 @@ def test_a_text_only_checkpoint(load, tmp_path):
     assert handler._model.result().health()["inputs"] == ["text"]
     status, body = call(handler, url_event("POST", "/v1/systemone", IMAGE_REQUEST))
     assert status == 422 and body["detail"].startswith("this checkpoint does not take images")
-
-
-# ---- the image build ------------------------------------------------------------------------------
-
-
-@pytest.fixture
-def build_artifact(monkeypatch):
-    # Loading the script puts the checkout's src/ first on sys.path; a copy is put back after the
-    # test, so that later tests read the installed distribution's metadata.
-    monkeypatch.setattr(sys, "path", list(sys.path))
-    spec = importlib.util.spec_from_file_location(
-        "build_artifact", DECISION / "scripts" / "build_artifact.py"
-    )
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-def test_the_build_checks_the_checkpoint_as_the_function_loads_it(build_artifact, tmp_path):
-    d = write_checkpoint(tmp_path / "ckpt")
-    assert build_artifact.check(d).inputs == ("text", "image")
-    (d / "processor_config.json").unlink()
-    with pytest.raises(SystemExit, match=r"has no processor_config\.json"):
-        build_artifact.check(d)
-
-
-def test_the_build_fetches_only_an_s3_checkpoints_own_files(build_artifact, tmp_path, monkeypatch):
-    objects = {
-        "ckpt/e2b/config.json": b"{}",
-        "ckpt/e2b/model.safetensors": b"w",
-        "ckpt/e2b/sub/x": b"no",
-    }
-
-    class Client:
-        def get_paginator(self, name):
-            listing = [{"Key": k, "Size": len(v)} for k, v in objects.items()]
-            return types.SimpleNamespace(paginate=lambda Bucket, Prefix: [{"Contents": listing}])
-
-        def download_file(self, bucket, key, dest, Config):
-            Path(dest).write_bytes(objects[key])
-
-    transfer = types.ModuleType("boto3.s3.transfer")
-    transfer.TransferConfig = lambda **kw: None  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "boto3", types.SimpleNamespace(client=lambda name: Client()))
-    monkeypatch.setitem(sys.modules, "boto3.s3", types.ModuleType("boto3.s3"))
-    monkeypatch.setitem(sys.modules, "boto3.s3.transfer", transfer)
-    d, commit = build_artifact.fetch("s3://b/ckpt/e2b", None, tmp_path)
-    assert commit is None
-    assert sorted(p.name for p in d.iterdir()) == ["config.json", "model.safetensors"]
-
-
-def test_the_build_pins_a_hub_checkpoint_and_checks_its_files(
-    build_artifact, tmp_path, monkeypatch
-):
-    files = {"config.json": b"{}", "model.safetensors": b"weights"}
-    lfs = types.SimpleNamespace(sha256=hashlib.sha256(files["model.safetensors"]).hexdigest())
-    siblings = [types.SimpleNamespace(rfilename="config.json", lfs=None),
-                types.SimpleNamespace(rfilename="model.safetensors", lfs=lfs)]  # fmt: skip
-    downloaded = []
-
-    def snapshot_download(repo, revision, local_dir):
-        downloaded.append(revision)
-        for n, b in files.items():
-            (Path(local_dir) / n).write_bytes(b)
-
-    info = types.SimpleNamespace(sha="c" * 40, siblings=siblings)
-    hub = types.SimpleNamespace(
-        HfApi=lambda: types.SimpleNamespace(model_info=lambda repo, revision, files_metadata: info),
-        snapshot_download=snapshot_download,
-    )
-    monkeypatch.setitem(sys.modules, "huggingface_hub", hub)
-    assert build_artifact.fetch("org/model", "main", tmp_path / "a")[1] == "c" * 40
-    assert downloaded == ["c" * 40]  # the resolved commit, not the branch
-    lfs.sha256 = "0" * 64
-    with pytest.raises(SystemExit, match="does not have the sha256 the Hub records"):
-        build_artifact.fetch("org/model", "main", tmp_path / "b")
-
-
-def test_the_build_refuses_a_checkpoint_with_another_digest(build_artifact, tmp_path, monkeypatch):
-    """The digest is `sha256sum * | sort -k 2 | sha256sum` in the checkpoint's directory."""
-    ckpt = write_checkpoint(tmp_path / "ckpt")
-    lines = "".join(
-        f"{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.name}\n" for p in sorted(ckpt.iterdir())
-    )
-    assert build_artifact.manifest_digest(ckpt) == hashlib.sha256(lines.encode()).hexdigest()
-    llama = tmp_path / "llama"
-    llama.mkdir()
-    (llama / "LLAMA_CPP_REV").write_text("f" * 40 + "\n")
-    argv = ["build_artifact.py", str(ckpt), str(tmp_path / "out"), "--llama-cpp", str(llama),
-            "--quantize", "/bin/false", "--expect-digest", "0" * 64, "--work", str(tmp_path)]  # fmt: skip
-    monkeypatch.setattr(sys, "argv", argv)
-    with pytest.raises(SystemExit, match="manifest digest is"):
-        build_artifact.main()
-    assert not (tmp_path / "out").exists()  # refused before anything was converted

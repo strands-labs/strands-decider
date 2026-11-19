@@ -19,9 +19,9 @@ COPY deploy/lambda/decision/ /opt/decision/
 RUN sh /opt/decision/scripts/build_native.sh /llama /build --lambda && rm -rf /llama/.git
 
 # The model: the checkpoint converted by llama.cpp's own converter (scripts/build_artifact.py),
-# which needs torch, on CPU. Before it, scripts/shim_check.py runs the image's own library against
-# transformers on a tiny random checkpoint: the build fails if the mask, state reuse, image rows or
-# answers are not the reference's.
+# which needs torch, on CPU. Before it, scripts/shim_check.py converts a tiny random checkpoint and
+# runs it in the image's own library against transformers: the build fails if the conversion, the
+# mask, state reuse, image rows or answers are not the reference's.
 FROM ${BASE} AS model
 # llama-quantize, like ggml's CPU backend everywhere, uses OpenMP; the base image has no libgomp.
 RUN dnf -y install libgomp && dnf clean all
@@ -35,10 +35,9 @@ COPY --from=llama /llama /llama
 COPY --from=llama /build/bin/llama-quantize /usr/local/bin/
 COPY --from=llama /build/libdecision.so /opt/libdecision.so
 COPY src /opt/strands-decider/src
-COPY deploy/lambda/decision/scripts /opt/strands-decider/deploy/lambda/decision/scripts
-RUN python /opt/strands-decider/deploy/lambda/decision/scripts/shim_check.py \
-      --llama-cpp /llama --lib /opt/libdecision.so --work /tmp/shim-check \
-    && rm -rf /tmp/shim-check
+COPY deploy/lambda/decision/scripts /opt/scripts
+ENV PYTHONPATH=/opt/strands-decider/src
+RUN python /opt/scripts/shim_check.py --llama-cpp /llama --lib /opt/libdecision.so
 ARG CHECKPOINT
 ARG CHECKPOINT_REVISION=main
 # The sha256 of the checkpoint's manifest (README.md, Decision checkpoints), to refuse any other.
@@ -50,7 +49,7 @@ ARG CHECKPOINT_DIGEST=
 RUN --mount=type=secret,id=aws_container_credentials_uri --mount=type=tmpfs,target=/tmp/gguf \
     if [ -s /run/secrets/aws_container_credentials_uri ]; then \
       export AWS_CONTAINER_CREDENTIALS_RELATIVE_URI="$(cat /run/secrets/aws_container_credentials_uri)"; fi \
-    && python /opt/strands-decider/deploy/lambda/decision/scripts/build_artifact.py "${CHECKPOINT}" /model \
+    && python /opt/scripts/build_artifact.py "${CHECKPOINT}" /model \
       --revision "${CHECKPOINT_REVISION}" --expect-digest "${CHECKPOINT_DIGEST}" --llama-cpp /llama \
       --quantize /usr/local/bin/llama-quantize --work /tmp/build --gguf-tmp /tmp/gguf \
     && rm -rf /tmp/build /tmp/hf \

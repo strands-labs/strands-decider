@@ -1,10 +1,9 @@
-"""llama.cpp as a decision backend.
+"""llama.cpp as a decision backend, through the C shim in deploy/lambda/decision/shim.c.
 
-The decoder is a GGUF and, for images, the vision tower an mmproj GGUF, both run through
-`deploy/lambda/decision/shim.c` (llama.cpp at the pinned commit, with patches/0001). The shim
-decodes the state once, its text and image rows as one non-causal batch, then each question on
-top of it under prefix_bidir with no sliding window, and returns each question's final-norm hidden
-state at its last token. The core's readout does the rest:
+The decoder is a GGUF and, for images, the vision tower an mmproj GGUF. The shim decodes the
+state once, its text and image rows as one non-causal batch, then each question on top of it
+under prefix_bidir with no sliding window, and returns each question's final-norm hidden state at
+its last token for the core's readout:
 
     backend = LlamaCppBackend("libdecision.so", "model.gguf", mmproj="mmproj.gguf")
     evaluate(request, load_tokenizer(ckpt), load_readout(ckpt), DecisionConfig.load(ckpt), backend)
@@ -14,8 +13,8 @@ Torch-free: numpy and, for images, Pillow.
 
 from __future__ import annotations
 
+import base64
 import ctypes
-import io
 import os
 import threading
 import time
@@ -24,14 +23,9 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 
 from ..core.codes import CONTROL_TOKEN_IDS
-from ..core.images import (
-    IMAGE_FORMATS,
-    IMAGE_SOFT,
-    MAX_SOFT_TOKENS,
-    check_decoded_size,
-    resize_image,
-)
+from ..core.images import IMAGE_SOFT, MAX_SOFT_TOKENS, check_decoded_size, resize_image
 from ..core.runtime import NO_VISION
+from ..images import decode_image
 
 if TYPE_CHECKING:
     from PIL import Image
@@ -50,27 +44,11 @@ _SHIM = {
 }
 
 
-def decode_pixels(data: bytes) -> Image.Image:
-    """An image file whose header the core has read, as RGB pixels: the first frame, its EXIF
-    orientation applied, and transparent areas on white, as v1 decodes images. Pixels that don't
-    decode (a truncated file, a malformed EXIF block) are a ValueError: the request's fault."""
-    from PIL import Image, ImageOps
-
-    try:
-        img: Image.Image = Image.open(io.BytesIO(data), formats=IMAGE_FORMATS)
-        img.load()
-        img = ImageOps.exif_transpose(img)
-    except Exception as e:  # Pillow raises more than OSError for a bad file
-        raise ValueError(f"image could not be decoded: {e}") from e
-    if img.mode in ("RGBA", "LA") or (img.mode == "P" and "transparency" in img.info):
-        rgba = img.convert("RGBA")
-        img = Image.alpha_composite(Image.new("RGBA", rgba.size, (255, 255, 255, 255)), rgba)
-    return img.convert("RGB")
-
-
-def prepare_pixels(image: RenderedImage) -> Image.Image:
-    """A request image decoded and resized with the core's `resize_image`: what the vision tower reads."""
-    img = decode_pixels(image.data)
+def image_pixels(image: RenderedImage) -> Image.Image:
+    """What the vision tower reads: the file decoded by v1's decoder, so it gives the same pixels
+    as on v1, then resized with the core's `resize_image`. Pixels that don't decode are a
+    ValueError, the request's fault."""
+    img = decode_image(base64.b64encode(image.data).decode("ascii"))
     return resize_image(img, *check_decoded_size(image, *img.size))
 
 
@@ -84,9 +62,9 @@ def _check(err: bytes | None, what: str) -> None:
 
 
 class LlamaCppBackend:
-    """A decision checkpoint's decoder on llama.cpp. `forward` returns each question's final-norm
-    hidden state at its last token, float32. Without `mmproj` it serves text only. Calls run one
-    at a time, since each uses every thread; `last_timings` holds the last call's milliseconds."""
+    """A decision checkpoint's decoder on llama.cpp; without `mmproj` it serves text only. Calls
+    run one at a time, since each uses every thread. `last_timings` holds the last call's
+    milliseconds."""
 
     def __init__(
         self,
@@ -126,33 +104,6 @@ class LlamaCppBackend:
                 self._lib.sd_free(self._handle)
                 self._handle = None
 
-    def _image_rows(self, images: tuple[RenderedImage, ...]) -> np.ndarray:
-        """The images' soft-token rows end to end, [placeholders, n_embd_inp] float32; an image
-        repeated in the request is encoded once."""
-        rows: dict[str, np.ndarray] = {}
-        timings = []
-        for im in images:
-            if im.sha256 in rows:
-                continue
-            started = time.perf_counter()
-            pixels = prepare_pixels(im)
-            prepared = time.perf_counter()
-            out = np.empty((im.tokens, self._n_embd_inp), dtype=np.float32)
-            err = self._lib.sd_encode_image(
-                self._handle, pixels.tobytes(), pixels.width, pixels.height, im.tokens,
-                out.ctypes.data_as(_F),
-            )  # fmt: skip
-            _check(err, f"the vision tower, on a {pixels.width} x {pixels.height} image")
-            rows[im.sha256] = out
-            timings.append({
-                "size": list(pixels.size),
-                "prepare_ms": (prepared - started) * 1000,
-                "encode_ms": (time.perf_counter() - prepared) * 1000,
-            })  # fmt: skip
-        self.last_timings["images"] = timings
-        ordered = [rows[im.sha256] for im in images]
-        return np.concatenate(ordered) if ordered else np.empty((0, self._n_embd_inp), np.float32)
-
     def forward(
         self,
         state: list[int],
@@ -167,7 +118,7 @@ class LlamaCppBackend:
         with self._lock:
             if not self._handle:
                 raise RuntimeError("the backend is closed")
-            self.last_timings = {}
+            self.last_timings = {"images": []}
             embd = self._image_rows(images)
             out = np.empty((len(questions), self._n_embd), dtype=np.float32)
             ms = (ctypes.c_double * (len(questions) + 2))()
@@ -179,4 +130,33 @@ class LlamaCppBackend:
             )  # fmt: skip
             _check(err, "sd_forward")
             self.last_timings.update(context_ms=ms[0], state_ms=ms[1], question_ms=ms[2:])
+        return out
+
+    def _image_rows(self, images: tuple[RenderedImage, ...]) -> np.ndarray:
+        """The images' soft-token rows end to end, [placeholders, n_embd_inp]; a file the request
+        repeats is encoded once."""
+        if not images:
+            return np.empty((0, self._n_embd_inp), dtype=np.float32)
+        rows: dict[str, np.ndarray] = {}
+        for im in images:
+            if im.sha256 not in rows:
+                rows[im.sha256] = self._encode(im)
+        return np.concatenate([rows[im.sha256] for im in images])
+
+    def _encode(self, image: RenderedImage) -> np.ndarray:
+        """One image through the vision tower: its N soft-token rows."""
+        started = time.perf_counter()
+        pixels = image_pixels(image)
+        prepared = time.perf_counter()
+        out = np.empty((image.tokens, self._n_embd_inp), dtype=np.float32)
+        err = self._lib.sd_encode_image(
+            self._handle, pixels.tobytes(), pixels.width, pixels.height, image.tokens,
+            out.ctypes.data_as(_F),
+        )  # fmt: skip
+        _check(err, f"the vision tower, on a {pixels.width} x {pixels.height} image")
+        self.last_timings["images"].append({
+            "size": list(pixels.size),
+            "prepare_ms": (prepared - started) * 1000,
+            "encode_ms": (time.perf_counter() - prepared) * 1000,
+        })  # fmt: skip
         return out
