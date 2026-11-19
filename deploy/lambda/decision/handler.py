@@ -23,6 +23,7 @@ from strands_decider.backends.llama_cpp import LlamaCppBackend
 from strands_decider.core import (
     DecisionConfig,
     Request,
+    check_image_processor,
     evaluate,
     load_readout,
     load_tokenizer,
@@ -48,26 +49,9 @@ _WARM_UP_IMAGE = (
 _WARM_UP = {"state": "Warm up.", "questions": {"q": {"type": "noul", "instructions": "?"}}}
 
 
-class LimitedBackend:
-    """The backend, refusing a request that forwards more than `max_request_tokens` tokens before
-    it decodes an image or runs a token. None: no limit."""
-
-    def __init__(self, backend: LlamaCppBackend, max_request_tokens: int | None):
-        self.backend = backend
-        self.max_request_tokens = max_request_tokens
-
-    def forward(self, state: list[int], questions: list[list[int]], images: Any = ()) -> Any:
-        n = len(state) + sum(len(q) for q in questions)
-        if self.max_request_tokens and n > self.max_request_tokens:
-            raise ValueError(
-                f"request of {n} tokens (the state's {len(state)} once, then its questions) "
-                f"exceeds the limit of {self.max_request_tokens} tokens per request"
-            )
-        return self.backend.forward(state, questions, images)
-
-
 class Model:
-    """Everything a request needs, loaded once."""
+    """The image's checkpoint, loaded once, and the Backend `evaluate` runs it with: llama.cpp
+    behind the request limit."""
 
     def __init__(self, model_dir: str, max_request_tokens: int | None):
         started = time.perf_counter()
@@ -80,21 +64,18 @@ class Model:
         gguf = os.path.join(model_dir, "model.gguf")
         mmproj = os.path.join(model_dir, "mmproj.gguf")
         vision = IMAGE in self.config.inputs
+        if vision:
+            check_image_processor(model_dir)
         for path in (gguf, mmproj) if vision else (gguf,):
             _prefetch(path)
         log.info("model read in %.1f s", time.perf_counter() - started)
-        backend = LlamaCppBackend(
-            LIBRARY,
-            gguf,
-            mmproj=mmproj if vision else None,
-            processor_config=os.path.join(model_dir, "processor_config.json") if vision else None,
-        )
+        self.llama = LlamaCppBackend(LIBRARY, gguf, mmproj=mmproj if vision else None)
         if vision:
             # mtmd has read the vision tower into its own buffers, so its pages in the page
             # cache, which Lambda counts as memory used, aren't needed.
             _drop_from_page_cache(mmproj)
         # The first forward's one-time costs, paid before the first request, with no limit yet.
-        self.backend = LimitedBackend(backend, None)
+        self.max_request_tokens: int | None = None
         self.evaluate(Request.model_validate(_WARM_UP))
         if vision:
             self.evaluate(Request.model_validate({**_WARM_UP, "images": [_WARM_UP_IMAGE]}))
@@ -102,21 +83,32 @@ class Model:
         # the prefetch those rows come back quickly without the table staying in the page cache.
         for start, end in artifact["lazy_ranges"]:
             _drop_from_page_cache(gguf, start, end - start)
-        self.backend.max_request_tokens = max_request_tokens
+        self.max_request_tokens = max_request_tokens
         log.info("model ready in %.1f s", time.perf_counter() - started)
+
+    def forward(self, state: list[int], questions: list[list[int]], images: Any = ()) -> Any:
+        """llama.cpp's forward, refusing a request that forwards more than `max_request_tokens`
+        tokens before it decodes an image or runs a token."""
+        n = len(state) + sum(map(len, questions))
+        if self.max_request_tokens and n > self.max_request_tokens:
+            raise ValueError(
+                f"request of {n} tokens (the state's {len(state)} once, then its questions) "
+                f"exceeds the limit of {self.max_request_tokens} tokens per request"
+            )
+        return self.llama.forward(state, questions, images)
 
     def evaluate(self, request: Request) -> dict[str, Any]:
         return evaluate(
-            request, self.tokenizer, self.weight, self.config, self.backend, model_name=self.name
+            request, self.tokenizer, self.weight, self.config, self, model_name=self.name
         )
 
     def health(self) -> dict[str, Any]:
         return {
             "status": "ok",
             "model": self.name,
-            "inputs": ["text", "image"] if self.backend.backend.has_vision else ["text"],
+            "inputs": list(self.config.inputs),
             "max_length": self.config.max_length_validated,
-            "max_request_tokens": self.backend.max_request_tokens,
+            "max_request_tokens": self.max_request_tokens,
         }
 
 
@@ -140,12 +132,11 @@ def _prefetch(path: str, readers: int = 32) -> None:
 def _drop_from_page_cache(path: str, offset: int = 0, length: int = 0) -> None:
     """Drop a file's pages, or `length` bytes of them from `offset` (0: to the end), from the page
     cache. Pages a process has mapped and touched stay."""
-    if hasattr(os, "posix_fadvise"):
-        fd = os.open(path, os.O_RDONLY)
-        try:
-            os.posix_fadvise(fd, offset, length, os.POSIX_FADV_DONTNEED)
-        finally:
-            os.close(fd)
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.posix_fadvise(fd, offset, length, os.POSIX_FADV_DONTNEED)
+    finally:
+        os.close(fd)
 
 
 def _load() -> Model:
@@ -194,9 +185,10 @@ def _evaluate(request: Request) -> dict[str, Any]:
         "load_wait_ms": round(waited_ms, 1),
         "input_tokens": payload["usage"]["input_tokens"],
         "questions": payload["usage"]["output_tokens"],
+        "images": len(request.images),
         "cpu_part": _cpu_part(),
         "maxrss_mb": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss // 1024,
-        "timings_ms": model.backend.backend.last_timings,
+        "timings_ms": model.llama.last_timings,
     }
     log.info("request %s", json.dumps(info))
     return payload

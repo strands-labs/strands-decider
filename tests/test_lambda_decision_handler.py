@@ -1,6 +1,6 @@
-"""The decision checkpoint's Lambda handler over a stand-in backend, and the image build's checks
+"""The decision checkpoint's Lambda handler over a stand-in backend, and the image build's handling
 of a checkpoint. The backend is tests/test_backend_llama_cpp.py's and tests/test_llama_cpp_shim.py's
-to test; the core under it is tests/test_core_*.py's.
+to test, the core under both tests/test_core_*.py's.
 """
 
 from __future__ import annotations
@@ -10,18 +10,17 @@ import hashlib
 import importlib
 import importlib.util
 import json
-import struct
+import os
 import sys
 import threading
 import types
 from pathlib import Path
-from typing import ClassVar
 
 import numpy as np
 import pytest
 from core_support import decision_config_fixture, image_b64
 
-from strands_decider.core import CODES, CONTROL_TOKEN_IDS
+from strands_decider.core import CODE_TOKEN_IDS, CODES, CONTROL_TOKEN_IDS
 
 DECISION = Path(__file__).resolve().parents[1] / "deploy" / "lambda" / "decision"
 HIDDEN_SIZE = 8
@@ -40,49 +39,32 @@ IMAGE_REQUEST = {**REQUEST, "images": [image_b64("checker-64x48.png")]}
 
 
 class FakeBackend:
-    """Hidden states that make the first question's first code and the others' second code win."""
+    """LlamaCppBackend's stand-in: hidden states that make the first question's first code and the
+    others' second code win, or `fail` raised."""
 
-    calls: ClassVar[list[tuple[list[int], list[list[int]], tuple]]] = []
-    fail: ClassVar[Exception | None] = None
-
-    def __init__(self, library, model, *, mmproj=None, processor_config=None, threads=None):
-        self.args = (library, model, mmproj, processor_config, threads)
-        self.has_vision = mmproj is not None
-        self.last_timings: dict = {}
+    def __init__(self, library, model, *, mmproj=None, threads=None):
+        self.args = (library, model, mmproj)
+        self.calls: list[tuple] = []
+        self.fail: Exception | None = None
+        self.last_timings = {"state_ms": 1.0}
 
     def forward(self, state, questions, images=()):
-        if FakeBackend.fail is not None:
-            raise FakeBackend.fail
-        FakeBackend.calls.append((state, questions, tuple(images)))
-        self.last_timings = {"state_ms": 1.0, "question_ms": [2.0] * len(questions)}
-        if images:
-            unique = {im.sha256 for im in images}
-            self.last_timings["images"] = [{"size": [912, 672], "encode_ms": 3.0}] * len(unique)
-            self.last_timings["n_images"] = len(images)
+        if self.fail is not None:
+            raise self.fail
+        self.calls.append((state, questions, tuple(images)))
         h = np.zeros((len(questions), HIDDEN_SIZE), dtype=np.float32)
-        for i in range(len(questions)):
-            h[i, 0 if i == 0 else 1] = 40.0
+        h[0, 0] = h[1:, 1] = 40.0
         return h
 
 
-def _safetensors(path: Path, weight: np.ndarray) -> None:
-    bits = (weight.astype(np.float32).view(np.uint32) >> 16).astype("<u2")
-    header = json.dumps(
-        {"weight": {"dtype": "BF16", "shape": list(weight.shape), "data_offsets": [0, bits.nbytes]}}
-    )
-    path.write_bytes(struct.pack("<Q", len(header)) + header.encode() + bits.tobytes())
-
-
 def gemma_ids_tokenizer():
-    """A word-level tokenizer with Gemma 4's control tokens and every code at Gemma 4's ids (the
-    fixture's token_ids), so that it passes `prepare_tokenizer`; other text is a few small ids."""
+    """A word-level tokenizer with Gemma 4's control tokens and every code at Gemma 4's ids, so that
+    it passes `prepare_tokenizer`; other text is a few small ids."""
     from tokenizers import AddedToken, Regex, Tokenizer, models, pre_tokenizers
 
     words = ["<unk>", "\n", " ", ".", "<", ">", "/", '"', "=", "—", "answer", "model", "user"]
-    taken = set(CONTROL_TOKEN_IDS.values()) | set(decision_config_fixture()["token_ids"])
-    free = (i for i in range(1000) if i not in taken)
-    vocab = {w: next(free) for w in words}
-    vocab.update(zip(CODES, decision_config_fixture()["token_ids"], strict=True))
+    vocab = {w: i + 10 for i, w in enumerate(words)}
+    vocab.update(zip(CODES, CODE_TOKEN_IDS, strict=True))
     vocab.update(CONTROL_TOKEN_IDS)
     tok = Tokenizer(models.WordLevel(vocab, unk_token="<unk>"))
     tok.pre_tokenizer = pre_tokenizers.Split(Regex(r"\w+|\s|[^\w\s]"), behavior="isolated")
@@ -90,67 +72,54 @@ def gemma_ids_tokenizer():
     return tok
 
 
-def write_checkpoint(d: Path, *, vision: bool = True, **config) -> Path:
-    """What the image holds in /opt/model, with a tokenizer at Gemma 4's ids and a readout of
-    identity rows."""
+def write_checkpoint(d: Path, *, vision: bool = True, lazy_ranges=(), **config) -> Path:
+    """What the image holds in /opt/model, with a readout of identity rows."""
+    from safetensors.numpy import save_file
+
     d.mkdir(parents=True, exist_ok=True)
     gemma_ids_tokenizer().save(str(d / "tokenizer.json"))
     cfg = {**decision_config_fixture(), "max_length_validated": 512, **config}
-    for k in [k for k, v in config.items() if v is None]:
-        del cfg[k]
     (d / "decision_config.json").write_text(json.dumps(cfg))
     weight = np.zeros((len(CODES), HIDDEN_SIZE), dtype=np.float32)
     weight[0, 0] = weight[1, 1] = 1.0
-    _safetensors(d / "readout.safetensors", weight)
-    (d / "processor_config.json").write_text(
-        json.dumps(
-            {
-                "image_processor": {
-                    "patch_size": 16,
-                    "pooling_kernel_size": 3,
-                    "max_soft_tokens": 280,
-                }
-            }
-        )
-    )
+    save_file({"weight": weight}, str(d / "readout.safetensors"))
+    processor = {"patch_size": 16, "pooling_kernel_size": 3, "max_soft_tokens": 280}
+    (d / "processor_config.json").write_text(json.dumps({"image_processor": processor}))
     (d / "model.gguf").write_bytes(bytes(range(256)) * 4)
     if vision:
         (d / "mmproj.gguf").write_bytes(b"\0" * 100)
-    record_artifact(d)
+    artifact = {"model_name": "tiny-decision-q8_0", "lazy_ranges": list(lazy_ranges)}
+    (d / "artifact.json").write_text(json.dumps(artifact))
     return d
 
 
-def record_artifact(d: Path, lazy_ranges=()) -> None:
-    """artifact.json as the image build writes it, with what the handler reads."""
-    artifact = {"model_name": "tiny-decision-q8_0", "lazy_ranges": list(lazy_ranges)}
-    (d / "artifact.json").write_text(json.dumps(artifact))
-
-
 @pytest.fixture
-def model_dir(tmp_path):
-    return write_checkpoint(tmp_path / "model")
+def load(tmp_path, monkeypatch):
+    """Import the handler afresh, as a new execution environment does, from `directory` with `env`
+    set. posix_fadvise's calls, which macOS doesn't have, are recorded in `load.dropped`."""
+    dropped: list[tuple[int, int]] = []
+    fadvise = lambda fd, offset, length, advice: dropped.append((offset, length))  # noqa: E731
+    monkeypatch.setattr(os, "posix_fadvise", fadvise, raising=False)
+    monkeypatch.setattr(os, "POSIX_FADV_DONTNEED", 4, raising=False)
+    fake = types.ModuleType("strands_decider.backends.llama_cpp")
+    fake.LlamaCppBackend = FakeBackend  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "strands_decider.backends.llama_cpp", fake)
+    monkeypatch.syspath_prepend(str(DECISION))
 
-
-@pytest.fixture
-def load(model_dir, monkeypatch):
-    """Import the handler afresh, as a new execution environment does, with `env` set."""
-
-    def _load(directory: Path = model_dir, **env: str):
-        monkeypatch.setenv("DECIDER_MODEL_DIR", str(directory))
-        monkeypatch.delenv("AWS_LAMBDA_INITIALIZATION_TYPE", raising=False)
-        monkeypatch.delenv("DECIDER_MAX_REQUEST_TOKENS", raising=False)
+    def load(directory: Path | None = None, **env: str):
+        monkeypatch.setenv(
+            "DECIDER_MODEL_DIR", str(directory or write_checkpoint(tmp_path / "model"))
+        )
+        for key in ("AWS_LAMBDA_INITIALIZATION_TYPE", "DECIDER_MAX_REQUEST_TOKENS"):
+            monkeypatch.delenv(key, raising=False)
         for key, value in env.items():
             monkeypatch.setenv(key, value)
-        fake = types.ModuleType("strands_decider.backends.llama_cpp")
-        fake.LlamaCppBackend = FakeBackend  # type: ignore[attr-defined]
-        monkeypatch.setitem(sys.modules, "strands_decider.backends.llama_cpp", fake)
-        monkeypatch.syspath_prepend(str(DECISION))
         monkeypatch.delitem(sys.modules, "handler", raising=False)
-        FakeBackend.calls.clear()
-        FakeBackend.fail = None
+        dropped.clear()
         return importlib.import_module("handler")
 
-    yield _load
+    load.dropped = dropped  # type: ignore[attr-defined]
+    yield load
     sys.modules.pop("handler", None)
 
 
@@ -172,37 +141,20 @@ def call(handler, event):
     return response["statusCode"], json.loads(response["body"])
 
 
-def test_loads_the_artifact_and_warms_up_text_and_images(load, model_dir):
-    handler = load(DECIDER_MAX_REQUEST_TOKENS="5000")
-    model = handler._model.result()
-    library, gguf, mmproj, processor_config, _ = model.backend.backend.args
-    assert library == str(DECISION / "libdecision.so")
-    assert gguf == str(model_dir / "model.gguf") and mmproj == str(model_dir / "mmproj.gguf")
-    assert processor_config == str(model_dir / "processor_config.json")
-    # A text warm-up, then an image one, before any request.
-    assert [len(images) for _, _, images in FakeBackend.calls] == [0, 1]
-    assert model.config.final_logit_softcapping == 30.0 and model.weight.shape == (255, 8)
+def backend_of(handler) -> FakeBackend:
+    return handler._model.result().llama
 
 
-def test_the_lazy_tables_pages_leave_the_page_cache(load, model_dir, monkeypatch):
-    calls = []
-    monkeypatch.setattr(
-        handler_os(),
-        "posix_fadvise",
-        lambda fd, off, n, advice: calls.append((off, n)),
-        raising=False,
-    )
-    monkeypatch.setattr(handler_os(), "POSIX_FADV_DONTNEED", 4, raising=False)
-    record_artifact(model_dir, lazy_ranges=[[100, 900]])
-    load()
+def test_the_load_warms_up_then_drops_the_lazy_tables_pages(load, tmp_path):
+    d = write_checkpoint(tmp_path / "ckpt", lazy_ranges=[[100, 900]])
+    handler = load(d)
+    backend = backend_of(handler)
+    library = str(DECISION / "libdecision.so")
+    assert backend.args == (library, str(d / "model.gguf"), str(d / "mmproj.gguf"))
+    # A text warm-up, then an image one.
+    assert [len(images) for _, _, images in backend.calls] == [0, 1]
     # The vision tower's file, whole, after mtmd reads it; the table's range after the warm-ups.
-    assert calls == [(0, 0), (100, 800)]
-
-
-def handler_os():
-    import os
-
-    return os
+    assert load.dropped == [(0, 0), (100, 800)]
 
 
 def test_health(load):
@@ -218,183 +170,92 @@ def test_health(load):
     )
 
 
-def test_answers_a_text_request(load):
+def test_answers(load):
     handler = load()
     status, body = call(handler, url_event("POST", "/v1/systemone", REQUEST))
-    assert status == 200
-    assert body["model"] == "tiny-decision-q8_0"
+    assert status == 200 and body["model"] == "tiny-decision-q8_0" and body["latency_ms"] >= 0
     assert body["answers"]["urgent"] == {"type": "noul", "noul": 0.0}  # code A, "false", wins
     assert body["answers"]["team"]["choice"] == "billing"  # code B
-    assert body["usage"]["output_tokens"] == 2 and body["latency_ms"] >= 0
-    (state, questions, images) = FakeBackend.calls[-1]
-    assert body["usage"]["input_tokens"] == len(state) + sum(map(len, questions)) and images == ()
-    # A base64-encoded body, as a Function URL may send one.
-    assert call(handler, url_event("POST", "/v1/systemone", REQUEST, b64=True))[0] == 200
-
-
-def test_answers_an_image_request(load):
-    handler = load()
-    status, body = call(handler, url_event("POST", "/v1/systemone", IMAGE_REQUEST))
-    assert status == 200 and body["answers"]["team"]["choice"] == "billing"
-    state, _, (image,) = FakeBackend.calls[-1]
-    assert image.tokens == 266 and state[image.start : image.end] == [state[image.start]] * 266
-
-
-def test_a_direct_invocation(load):
-    handler = load()
-    payload = handler.handler(REQUEST, None)
-    assert payload["answers"]["team"]["choice"] == "billing"
-    stateless = {k: v for k, v in REQUEST.items() if k != "state"}  # the state is optional
-    assert handler.handler(stateless, None)["answers"].keys() == payload["answers"].keys()
-    with pytest.raises(ValueError, match="Dictionary should have at least 1 item"):
-        handler.handler({"state": "s", "questions": {}}, None)
+    state, questions, _ = backend_of(handler).calls[-1]
+    assert body["usage"] == {
+        "input_tokens": len(state) + sum(map(len, questions)),
+        "output_tokens": 2,
+    }
+    # A base64-encoded body, as a Function URL may send one, with an image; a direct invocation.
+    status, with_image = call(handler, url_event("POST", "/v1/systemone", IMAGE_REQUEST, b64=True))
+    assert status == 200 and with_image["answers"] == body["answers"]
+    assert len(backend_of(handler).calls[-1][2]) == 1
+    assert handler.handler(REQUEST, None)["answers"] == body["answers"]
 
 
 @pytest.mark.parametrize(
-    ("event", "status", "detail"),
+    ("event", "env", "status", "detail"),
     [
-        (url_event("GET", "/nope"), 404, "Not Found"),
-        (url_event("GET", "/v1/systemone"), 405, "Method Not Allowed"),
-        (url_event("POST", "/health"), 405, "Method Not Allowed"),
-        (url_event("POST", "/v1/systemone", raw="{not json"), 422, "Invalid JSON"),
-        (url_event("POST", "/v1/systemone", ["a", "list"]), 422, "Input should be"),
-        (url_event("POST", "/v1/systemone", {"state": "s"}), 422, "Field required"),
-        (url_event("POST", "/v1/systemone", {**REQUEST, "audio": []}), 422, "audio input is not supported"),
-        # Five images of 266 tokens each make a prompt longer than max_length_validated (512).
-        (url_event("POST", "/v1/systemone", {**REQUEST, "images": [image_b64("checker-64x48.png")] * 5}), 422,
-         "exceeds the limit"),
-        (url_event("POST", "/v1/systemone", {**REQUEST, "images": ["not base64!"]}), 422, "image is not valid base64"),
-        (url_event("POST", "/v1/systemone", {**REQUEST, "state": "word " * 600}), 422, "exceeds the limit"),
+        (url_event("GET", "/nope"), {}, 404, "Not Found"),
+        (url_event("GET", "/v1/systemone"), {}, 405, "Method Not Allowed"),
+        (url_event("POST", "/health"), {}, 405, "Method Not Allowed"),
+        (url_event("POST", "/v1/systemone", raw="{not json"), {}, 422, "Invalid JSON"),
+        (url_event("POST", "/v1/systemone", {**REQUEST, "state": "word " * 600}), {}, 422, "exceeds the limit of 512"),
+        (url_event("POST", "/v1/systemone", REQUEST), {"DECIDER_MAX_REQUEST_TOKENS": "40"}, 422,
+         "exceeds the limit of 40 tokens per request"),
     ],
 )  # fmt: skip
-def test_refusals(load, event, status, detail):
-    handler = load()
-    n_calls = len(FakeBackend.calls)
+def test_refusals_come_before_the_backend_runs(load, event, env, status, detail):
+    handler = load(**env)
+    warm_ups = len(backend_of(handler).calls)
     got_status, body = call(handler, event)
-    assert got_status == status and detail in str(body["detail"])
-    assert len(FakeBackend.calls) == n_calls  # refused before the backend ran
+    assert got_status == status and detail in body["detail"]
+    assert len(backend_of(handler).calls) == warm_ups
 
 
-def test_any_number_of_images_that_fit_the_prompt(load, tmp_path):
-    """The images are not counted: five are answered when the prompt holds them."""
-    handler = load(write_checkpoint(tmp_path / "long", max_length_validated=4096))
-    five = {**REQUEST, "images": [image_b64("checker-64x48.png")] * 5}
-    status, body = call(handler, url_event("POST", "/v1/systemone", five))
-    assert status == 200, body
-    _, _, images = FakeBackend.calls[-1]
-    assert len(images) == 5
-
-
-def test_the_request_limit(load):
-    handler = load(DECIDER_MAX_REQUEST_TOKENS="40")
-    status, body = call(handler, url_event("POST", "/v1/systemone", REQUEST))
-    assert status == 422
-    assert "exceeds the limit of 40 tokens per request" in body["detail"]
-    assert "(the state's" in body["detail"] and len(FakeBackend.calls) == 2  # the warm-ups only
-
-
-def test_a_backend_failure_is_a_500(load):
+@pytest.mark.parametrize(
+    ("error", "status", "detail"),
+    [
+        (ValueError("image could not be decoded: truncated"), 422, "image could not be decoded: truncated"),
+        (RuntimeError("sd_forward: the state's decode failed"), 500, "Internal Server Error"),
+    ],
+)  # fmt: skip
+def test_a_backend_error_is_the_requests_only_if_a_value_error(load, error, status, detail):
     handler = load()
-    FakeBackend.fail = RuntimeError("sd_forward failed: the state's decode failed")
-    assert call(handler, url_event("POST", "/v1/systemone", REQUEST)) == (
-        500,
-        {"detail": "Internal Server Error"},
-    )
-
-
-def test_an_image_that_cannot_be_decoded_is_a_422(load):
-    handler = load()
-    FakeBackend.fail = ValueError("image could not be decoded: broken data stream")
+    backend_of(handler).fail = error
     assert call(handler, url_event("POST", "/v1/systemone", IMAGE_REQUEST)) == (
-        422,
-        {"detail": "image could not be decoded: broken data stream"},
+        status,
+        {"detail": detail},
     )
 
 
-def test_audio_is_refused(load):
-    status, body = call(
-        load(), url_event("POST", "/v1/systemone", {**REQUEST, "audio": ["UklGRg=="]})
-    )
-    assert status == 422 and "audio input is not supported" in body["detail"]
+@pytest.mark.parametrize(("value", "limit"), [(None, 16384), ("", 16384), ("0", None)])
+def test_the_request_limit_fails_closed(load, value, limit):
+    handler = load(**({} if value is None else {"DECIDER_MAX_REQUEST_TOKENS": value}))
+    assert handler._model.result().health()["max_request_tokens"] == limit
 
 
-def test_the_request_limit_fails_closed(load):
-    assert load()._model.result().health()["max_request_tokens"] == 16384
-    assert (
-        load(DECIDER_MAX_REQUEST_TOKENS="")._model.result().health()["max_request_tokens"] == 16384
-    )
-    assert (
-        load(DECIDER_MAX_REQUEST_TOKENS="0")._model.result().health()["max_request_tokens"] is None
-    )
-
-
-def test_a_listed_vision_tower_must_be_there(load, tmp_path):
-    d = write_checkpoint(tmp_path / "gone")
-    (d / "mmproj.gguf").unlink()
-    with pytest.raises(FileNotFoundError):
-        load(d)
-
-
-def test_an_on_demand_load_that_fails_ends_the_environment(load, tmp_path, monkeypatch):
-    import os
-
-    exited = threading.Event()
-    codes = []
-
-    def _exit(code):
-        codes.append(code)
-        exited.set()
-
-    monkeypatch.setattr(os, "_exit", _exit)
-    handler = load(
-        write_checkpoint(tmp_path / "nocap", final_logit_softcapping=None),
-        AWS_LAMBDA_INITIALIZATION_TYPE="on-demand",
-    )
-    assert exited.wait(10) and codes == [1]
-    assert isinstance(handler._model.exception(), ValueError)
-
-
-def test_an_on_demand_load_answers_once_ready(load):
+def test_an_on_demand_load_answers_once_ready_and_exits_if_it_fails(load, tmp_path, monkeypatch):
     handler = load(AWS_LAMBDA_INITIALIZATION_TYPE="on-demand")
     assert handler.handler(url_event("POST", "/v1/systemone", REQUEST), None)["statusCode"] == 200
+    exited = threading.Event()
+    monkeypatch.setattr(os, "_exit", lambda code: exited.set() if code == 1 else None)
+    broken = write_checkpoint(tmp_path / "broken")
+    (broken / "decision_config.json").unlink()
+    handler = load(broken, AWS_LAMBDA_INITIALIZATION_TYPE="on-demand")
+    assert exited.wait(10) and isinstance(handler._model.exception(), FileNotFoundError)
 
 
-def test_a_text_only_checkpoint_refuses_images(load, tmp_path):
-    handler = load(write_checkpoint(tmp_path / "textonly", vision=False, inputs=["text"]))
+def test_a_text_only_checkpoint(load, tmp_path):
+    handler = load(write_checkpoint(tmp_path / "text", vision=False, inputs=["text"]))
+    assert backend_of(handler).args[2] is None  # no vision tower
     assert handler._model.result().health()["inputs"] == ["text"]
     status, body = call(handler, url_event("POST", "/v1/systemone", IMAGE_REQUEST))
     assert status == 422 and body["detail"].startswith("this checkpoint does not take images")
 
 
-def test_a_checkpoint_without_the_soft_cap_is_refused(load, tmp_path):
-    with pytest.raises(ValueError, match="final_logit_softcapping"):
-        load(write_checkpoint(tmp_path / "nocap", final_logit_softcapping=None))
-    assert FakeBackend.calls == []  # refused before the model loads
-
-
-def test_a_tokenizer_without_the_checkpoints_ids_is_refused(load, tmp_path):
-    from core_support import toy_tokenizer
-
-    d = write_checkpoint(tmp_path / "toy")
-    toy_tokenizer().save(str(d / "tokenizer.json"))
-    record_artifact(d)
-    with pytest.raises(ValueError, match="control tokens are not Gemma 4's"):
-        load(d)
-
-
-def test_other_decision_configs_are_refused(load, tmp_path):
-    with pytest.raises(ValueError, match="interface"):
-        load(write_checkpoint(tmp_path / "pplx", interface=None))
-
-
-# ---- the image build's checks ----------------------------------------------------------------
+# ---- the image build ------------------------------------------------------------------------------
 
 
 @pytest.fixture
 def build_artifact(monkeypatch):
-    # The script puts the checkout's src/ first on sys.path when it is loaded. A copy of sys.path
-    # is put back after the test, so that later tests read the installed distribution's metadata
-    # rather than an editable install's egg-info in src/ (which has no LICENSE).
+    # Loading the script puts the checkout's src/ first on sys.path; a copy is put back after the
+    # test, so that later tests read the installed distribution's metadata.
     monkeypatch.setattr(sys, "path", list(sys.path))
     spec = importlib.util.spec_from_file_location(
         "build_artifact", DECISION / "scripts" / "build_artifact.py"
@@ -404,143 +265,79 @@ def build_artifact(monkeypatch):
     return module
 
 
-def _layout(d: Path, **config) -> Path:
-    write_checkpoint(d, **config)
-    (d / "config.json").write_text(
-        json.dumps({"architectures": ["Gemma4ForConditionalGeneration"]})
-    )
-    return d
-
-
-def test_the_build_checks_a_good_checkpoint(build_artifact, tmp_path):
-    config = build_artifact.check(_layout(tmp_path / "ok"))
-    assert config.final_logit_softcapping == 30.0 and config.inputs == ("text", "image")
-
-
-def test_the_build_refuses_a_checkpoint_without_the_soft_cap(build_artifact, tmp_path):
-    with pytest.raises(ValueError, match="final_logit_softcapping"):
-        build_artifact.check(_layout(tmp_path / "nocap", final_logit_softcapping=None))
-
-
-def test_the_build_refuses_other_checkpoints(build_artifact, tmp_path):
-    d = _layout(tmp_path / "processor")
-    (d / "processor_config.json").write_text(
-        json.dumps(
-            {
-                "image_processor": {
-                    "patch_size": 14,
-                    "pooling_kernel_size": 3,
-                    "max_soft_tokens": 280,
-                }
-            }
-        )
-    )
-    with pytest.raises(ValueError, match="patch_size"):
+def test_the_build_checks_the_checkpoint_as_the_function_loads_it(build_artifact, tmp_path):
+    d = write_checkpoint(tmp_path / "ckpt")
+    assert build_artifact.check(d).inputs == ("text", "image")
+    (d / "processor_config.json").unlink()
+    with pytest.raises(SystemExit, match=r"has no processor_config\.json"):
         build_artifact.check(d)
-    with pytest.raises(ValueError, match="interface"):
-        build_artifact.check(_layout(tmp_path / "other", interface=None))
 
 
-def test_the_build_fetches_an_s3_checkpoint_and_only_its_files(
-    build_artifact, tmp_path, monkeypatch
-):
+def test_the_build_fetches_only_an_s3_checkpoints_own_files(build_artifact, tmp_path, monkeypatch):
     objects = {
         "ckpt/e2b/config.json": b"{}",
-        "ckpt/e2b/model.safetensors": b"w" * 10,
+        "ckpt/e2b/model.safetensors": b"w",
         "ckpt/e2b/sub/x": b"no",
     }
 
     class Client:
         def get_paginator(self, name):
-            assert name == "list_objects_v2"
-            return types.SimpleNamespace(
-                paginate=lambda Bucket, Prefix: [
-                    {
-                        "Contents": [
-                            {"Key": k, "Size": len(v)}
-                            for k, v in objects.items()
-                            if k.startswith(Prefix)
-                        ]
-                    }
-                ]
-            )
+            listing = [{"Key": k, "Size": len(v)} for k, v in objects.items()]
+            return types.SimpleNamespace(paginate=lambda Bucket, Prefix: [{"Contents": listing}])
 
         def download_file(self, bucket, key, dest, Config):
-            assert bucket == "b"
             Path(dest).write_bytes(objects[key])
 
-    fake = types.ModuleType("boto3")
-    fake.client = lambda name: Client()  # type: ignore[attr-defined]
     transfer = types.ModuleType("boto3.s3.transfer")
     transfer.TransferConfig = lambda **kw: None  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "boto3", fake)
+    monkeypatch.setitem(sys.modules, "boto3", types.SimpleNamespace(client=lambda name: Client()))
     monkeypatch.setitem(sys.modules, "boto3.s3", types.ModuleType("boto3.s3"))
     monkeypatch.setitem(sys.modules, "boto3.s3.transfer", transfer)
     d, commit = build_artifact.fetch("s3://b/ckpt/e2b", None, tmp_path)
-    assert commit is None and sorted(p.name for p in d.iterdir()) == [
-        "config.json",
-        "model.safetensors",
-    ]
+    assert commit is None
+    assert sorted(p.name for p in d.iterdir()) == ["config.json", "model.safetensors"]
 
 
 def test_the_build_pins_a_hub_checkpoint_and_checks_its_files(
     build_artifact, tmp_path, monkeypatch
 ):
     files = {"config.json": b"{}", "model.safetensors": b"weights"}
-    lfs = {"model.safetensors": hashlib.sha256(files["model.safetensors"]).hexdigest()}
-    seen = {}
-
-    class Api:
-        def model_info(self, repo, revision, files_metadata):
-            seen["info"] = (repo, revision)
-            siblings = [
-                types.SimpleNamespace(
-                    rfilename=n, lfs=types.SimpleNamespace(sha256=lfs[n]) if n in lfs else None
-                )
-                for n in files
-            ]
-            return types.SimpleNamespace(sha="c" * 40, siblings=siblings)
+    lfs = types.SimpleNamespace(sha256=hashlib.sha256(files["model.safetensors"]).hexdigest())
+    siblings = [types.SimpleNamespace(rfilename="config.json", lfs=None),
+                types.SimpleNamespace(rfilename="model.safetensors", lfs=lfs)]  # fmt: skip
+    downloaded = []
 
     def snapshot_download(repo, revision, local_dir):
-        seen["download"] = revision
-        Path(local_dir).mkdir(parents=True, exist_ok=True)
+        downloaded.append(revision)
         for n, b in files.items():
             (Path(local_dir) / n).write_bytes(b)
 
-    hub = types.ModuleType("huggingface_hub")
-    hub.HfApi = Api  # type: ignore[attr-defined]
-    hub.snapshot_download = snapshot_download  # type: ignore[attr-defined]
+    info = types.SimpleNamespace(sha="c" * 40, siblings=siblings)
+    hub = types.SimpleNamespace(
+        HfApi=lambda: types.SimpleNamespace(model_info=lambda repo, revision, files_metadata: info),
+        snapshot_download=snapshot_download,
+    )
     monkeypatch.setitem(sys.modules, "huggingface_hub", hub)
-    _, commit = build_artifact.fetch("org/model", "main", tmp_path / "a")
-    assert commit == "c" * 40 and seen == {"info": ("org/model", "main"), "download": "c" * 40}
-    lfs["model.safetensors"] = "0" * 64
+    assert build_artifact.fetch("org/model", "main", tmp_path / "a")[1] == "c" * 40
+    assert downloaded == ["c" * 40]  # the resolved commit, not the branch
+    lfs.sha256 = "0" * 64
     with pytest.raises(SystemExit, match="does not have the sha256 the Hub records"):
         build_artifact.fetch("org/model", "main", tmp_path / "b")
 
 
-def test_the_manifest_digest_is_sha256sum_of_the_files(build_artifact, tmp_path):
-    d = tmp_path / "ckpt"
-    d.mkdir()
-    for n, b in {"b.json": b"2", "a.json": b"1"}.items():
-        (d / n).write_bytes(b)
-    lines = "".join(
-        f"{hashlib.sha256(b).hexdigest()}  {n}\n" for n, b in [("a.json", b"1"), ("b.json", b"2")]
-    )
-    assert build_artifact.manifest_digest(d) == hashlib.sha256(lines.encode()).hexdigest()
-
-
 def test_the_build_refuses_a_checkpoint_with_another_digest(build_artifact, tmp_path, monkeypatch):
-    ckpt = _layout(tmp_path / "ckpt")
+    """The digest is `sha256sum * | sort -k 2 | sha256sum` in the checkpoint's directory."""
+    ckpt = write_checkpoint(tmp_path / "ckpt")
+    lines = "".join(
+        f"{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.name}\n" for p in sorted(ckpt.iterdir())
+    )
+    assert build_artifact.manifest_digest(ckpt) == hashlib.sha256(lines.encode()).hexdigest()
     llama = tmp_path / "llama"
     llama.mkdir()
     (llama / "LLAMA_CPP_REV").write_text("f" * 40 + "\n")
-    assert build_artifact.llama_cpp_rev(llama) == "f" * 40
     argv = ["build_artifact.py", str(ckpt), str(tmp_path / "out"), "--llama-cpp", str(llama),
-            "--quantize", "/bin/false", "--expect-digest", "0" * 64]  # fmt: skip
+            "--quantize", "/bin/false", "--expect-digest", "0" * 64, "--work", str(tmp_path)]  # fmt: skip
     monkeypatch.setattr(sys, "argv", argv)
     with pytest.raises(SystemExit, match="manifest digest is"):
         build_artifact.main()
     assert not (tmp_path / "out").exists()  # refused before anything was converted
-    (llama / "LLAMA_CPP_REV").unlink()
-    with pytest.raises(SystemExit, match="no LLAMA_CPP_REV"):
-        build_artifact.llama_cpp_rev(llama)

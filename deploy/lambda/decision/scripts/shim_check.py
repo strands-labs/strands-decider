@@ -8,30 +8,29 @@ sentencepiece, numpy, tokenizers, pydantic and Pillow, and no GPU and no downloa
 a minute after the build. tests/test_llama_cpp_shim.py runs it, and so does the Lambda image
 build, on the image's own library.
 
-It makes, from a fixed seed, a Gemma 4 checkpoint shaped like E2B but tiny: 15 decoder layers,
-four sliding then one full, three times, as E2B alternates them, with KV sharing in the last five,
-so that, as in E2B, two full-attention layers come before the shared ones (llama.cpp runs the
-shared layers on the output row only, so only a full layer before them can show a full layer's
-mask); per-layer embeddings, Gemma 4's whole 262,144-token vocabulary, a vision tower and an audio
-tower, a random readout, and a synthetic tokenizer with Gemma 4's control-token ids. It converts it with the stock
-convert_hf_to_gguf.py (the decoder in f32; --mmproj, then vision_only_mmproj.py), loads it in
-LlamaCppBackend, and runs the same prompts in transformers' Gemma4ForConditionalGeneration in
-float32 with the masks passed per layer type. It checks:
+The checkpoint, from a fixed seed, is shaped like E2B but tiny: 15 decoder layers, four sliding
+then one full, three times, with KV sharing in the last five, so that, as in E2B, two
+full-attention layers come before the shared ones (llama.cpp runs the shared layers on the output
+row only, so only a full layer before them can show a full layer's mask); per-layer embeddings,
+Gemma 4's whole 262,144-token vocabulary, a vision tower and an audio tower, a random readout,
+and a synthetic tokenizer with Gemma 4's control-token and code ids. It is converted as the image
+build converts it (the decoder in f32), loaded in LlamaCppBackend, and the same prompts run in
+transformers' Gemma4ForConditionalGeneration in float32 with the masks passed per layer type:
 
-  convert   the converter's pplx-decider loader leaves a Strands Decider directory, and a Gemma 4
-            one whose decision_config.json is not an object, and still claims its own, a Qwen3.5
-            backbone without a format_id (ggml-org/llama.cpp#32156); the
-            vision-only mmproj has no audio tensor or key left and the vision tower's tensors
-            unchanged; and lazy_ranges finds the per-layer embedding table;
+  convert   the converter's pplx-decider loader claims a Qwen3.5 pplx-decider directory and none
+            of the others (ggml-org/llama.cpp#32156); the vision-only mmproj is the vision tower
+            byte for byte, without the audio tower or its keys, and preprocesses as the image
+            processor does; lazy_ranges finds the per-layer embedding table;
   mask      the shim matches the prefix_bidir reference, and for each question is several times
-            further from each reference that differs from it in one way: a causal state, a causal question, causal throughout, a sliding window
-            (8 tokens, shorter than the prompts), or causal full-attention layers with bidirectional
-            sliding ones, which is what llama.cpp gives without patches/0001 (swa_only);
+            further from each reference that differs in one way: a causal state, a causal
+            question, causal throughout, a sliding window (8 tokens, shorter than the prompts),
+            or causal full-attention layers with bidirectional sliding ones, which is what
+            llama.cpp gives without patches/0001 (swa_only);
   reuse     several questions in one call give, bit for bit, what each gives alone, in any order;
   images    with two images in the state, the shim matches the reference, which places each
             image's vision-tower rows at its span; swapping the images changes the rows;
-  golden    `strands_decider.core.evaluate`, rendering, the shim and the readout, gives the
-            reference's top answer for every question, and probabilities within 0.01.
+  golden    `strands_decider.core.evaluate` on the shim gives the reference's top answer to each
+            question, with probabilities within 0.01.
 """
 
 from __future__ import annotations
@@ -61,11 +60,13 @@ SEED = 20261110
 VOCAB = 262144
 HIDDEN = 64
 # A relative error of the shim's hidden state against the prefix_bidir reference within which
-# the two agree (the KV cache is f16: 0.009 to 0.034 here), and the factor by which, for each
-# question, every other mask's reference must be further away (14 to 31 times for swa_only, the
+# the two agree (the KV cache is f16: 0.007 to 0.026 here), and the factor by which, for each
+# question, every other mask's reference must be further away (18 to 41 times for swa_only, the
 # nearest; a build without patches/0001 is 27 to 35 times nearer swa_only than prefix_bidir).
 AGREE = 0.05
 MISS_FACTOR = 5.0
+GOLDEN_DP = 0.01
+OTHER_MASKS = ("causal_state", "causal_question", "causal", "window_8", "swa_only")
 
 TEXT_CONFIG = {
     "attention_bias": False, "attention_dropout": 0.0, "attention_k_eq_v": False, "bos_token_id": 2,
@@ -108,6 +109,15 @@ PROCESSOR_CONFIG = {
         "resample": 3, "rescale_factor": 1 / 255,
     },
     "image_seq_length": 280, "processor_class": "Gemma4Processor",
+}  # fmt: skip
+GOLDEN = {
+    "state": {"ticket": 4182, "text": "The checkout page fails after the payment step."},
+    "questions": {
+        "urgent": {"type": "noul", "instructions": "Is it urgent?"},
+        "team": {"type": "choice", "instructions": "Which team?",
+                 "criteria": {"billing": "payments", "web": "pages", "mobile": None}},
+        "severity": {"type": "score", "instructions": "How severe?", "criteria": ["low", "medium", "high"]},
+    },
 }  # fmt: skip
 
 
@@ -166,28 +176,18 @@ def make_checkpoint(d: Path) -> Path:
     (d / "tokenizer.json").write_text(json.dumps(tokenizer_json()))
     # The other control tokens are extra special tokens, as in Gemma 4's own tokenizer_config.json,
     # so that the converter types them CONTROL and llama.cpp (and mtmd) match them.
-    extra = [
-        "<mask>",
-        "<|turn>",
-        "<turn|>",
-        "<|image>",
-        "<|image|>",
-        "<image|>",
-        "<|audio>",
-        "<|audio|>",
-        "<audio|>",
-    ]
+    extra = ["<mask>", "<|turn>", "<turn|>", "<|image>", "<|image|>", "<image|>", "<|audio>",
+             "<|audio|>", "<audio|>"]  # fmt: skip
     (d / "tokenizer_config.json").write_text(json.dumps({
         "tokenizer_class": "PreTrainedTokenizerFast", "bos_token": "<bos>", "eos_token": "<eos>",
         "pad_token": "<pad>", "unk_token": "<unk>", "model_max_length": 4096,
         "extra_special_tokens": extra,
     }))  # fmt: skip
-    tok = tokenizer_json()["model"]["vocab"]
     readout = torch.randn(len(CODES), HIDDEN, generator=torch.Generator().manual_seed(SEED)) * 0.5
     save_file({"weight": readout.to(torch.bfloat16)}, str(d / "readout.safetensors"))
     (d / "decision_config.json").write_text(json.dumps({
         "interface": "strands-decider", "format_version": 1, "prompt": "strands-chat",
-        "inputs": ["text", "image"], "codes": list(CODES), "token_ids": [tok[c] for c in CODES],
+        "inputs": ["text", "image"], "codes": list(CODES), "token_ids": list(CODE_TOKEN_IDS),
         "temperature": 1.0, "final_logit_softcapping": 30.0, "attention_mode": "prefix_bidir",
         "pooling": "last", "max_length_validated": 4096,
         "provenance": {"base_model": "google/gemma-4-E2B-it",
@@ -196,25 +196,25 @@ def make_checkpoint(d: Path) -> Path:
     return d
 
 
-def convert(llama_cpp: Path, ckpt: Path, out: Path) -> tuple[Path, Path]:
-    """The stock converter's decoder (f32) and vision-only mmproj (f32)."""
+def convert(llama_cpp: Path, ckpt: Path, out: Path) -> tuple[Path, Path, Path]:
+    """The stock converter's decoder (f32) and full mmproj (f32), and the image build's
+    vision-only copy of it."""
+    from build_artifact import vision_only
+
     out.mkdir(parents=True, exist_ok=True)
-    convert_py = llama_cpp / "convert_hf_to_gguf.py"
     gguf, full, mmproj = out / "model.gguf", out / "mmproj-full.gguf", out / "mmproj.gguf"
     for args in ([ckpt, "--outtype", "f32", "--outfile", gguf],
                  [ckpt, "--mmproj", "--outtype", "f32", "--outfile", full]):  # fmt: skip
         r = subprocess.run(
-            [sys.executable, convert_py, *map(str, args)], capture_output=True, text=True
-        )
+            [sys.executable, llama_cpp / "convert_hf_to_gguf.py", *map(str, args)],
+            capture_output=True, text=True,
+        )  # fmt: skip
         if r.returncode != 0:
             raise RuntimeError(
                 f"convert_hf_to_gguf.py {' '.join(map(str, args[1:]))} failed:\n{r.stderr[-3000:]}"
             )
-    subprocess.run(
-        [sys.executable, HERE / "vision_only_mmproj.py", llama_cpp, full, mmproj], check=True,
-        capture_output=True, text=True,
-    )  # fmt: skip
-    return gguf, mmproj
+    vision_only(full, mmproj)
+    return gguf, full, mmproj
 
 
 # Which directories the converter's pplx-decider loader claims: a config.json naming the backbone
@@ -244,56 +244,6 @@ print(json.dumps(out))
 MATCHES = {"pplx-decider": True, "vllm-d3": False, "strands-decider": False, "not an object": False}
 
 
-def check_conversion(llama_cpp: Path, gguf_path: Path, mmproj: Path) -> dict:
-    """The converter's loader matcher, the vision-only copy against the converter's full mmproj,
-    and the decoder's lazy ranges."""
-    sys.path.insert(0, str(llama_cpp / "gguf-py"))
-    import gguf
-
-    sys.path.insert(0, str(HERE))
-    from build_artifact import lazy_ranges
-
-    failures = []
-    env = {
-        **os.environ,
-        "PYTHONPATH": os.pathsep.join([str(llama_cpp), str(llama_cpp / "gguf-py")]),
-    }
-    r = subprocess.run(
-        [sys.executable, "-c", MATCHER], cwd=llama_cpp, env=env, capture_output=True, text=True
-    )
-    matches = json.loads(r.stdout) if r.returncode == 0 else {"error": r.stderr[-500:]}
-    if matches != MATCHES:
-        failures.append(f"the converter's pplx-decider loader claims {matches}, not {MATCHES}")
-    full, vision = gguf.GGUFReader(mmproj.with_name("mmproj-full.gguf")), gguf.GGUFReader(mmproj)
-    audio_tensors = [t.name for t in vision.tensors if t.name.startswith(("a.", "mm.a."))]
-    audio_keys = [
-        k for k in vision.fields if k.startswith("clip.audio.") or k == "clip.has_audio_encoder"
-    ]
-    full_audio = sum(t.name.startswith(("a.", "mm.a.")) for t in full.tensors)
-    by_name = {t.name: t for t in full.tensors}
-    changed = [
-        t.name
-        for t in vision.tensors
-        if bytes(t.data.tobytes()) != bytes(by_name[t.name].data.tobytes())
-    ]
-    if not full_audio:
-        failures.append("the converter's mmproj has no audio tower to leave out")
-    if audio_tensors or audio_keys:
-        failures.append(f"the vision-only mmproj keeps {audio_tensors[:3]} {audio_keys[:3]}")
-    if changed or len(vision.tensors) != len(full.tensors) - full_audio:
-        failures.append(f"the vision-only mmproj changes the vision tower: {changed[:3]}")
-    ranges = lazy_ranges(llama_cpp, gguf_path)
-    size = gguf_path.stat().st_size
-    if len(ranges) != 1 or not 0 < ranges[0][0] < ranges[0][1] <= size:
-        failures.append(f"lazy_ranges gives {ranges} for a {size}-byte GGUF")
-    return {
-        "matcher": matches,
-        "mmproj_tensors": [len(full.tensors), len(vision.tensors)],
-        "lazy_ranges": ranges,
-        "failures": failures,
-    }
-
-
 # ---- the reference --------------------------------------------------------------------------------
 
 
@@ -313,27 +263,23 @@ class Reference:
         ).eval()
         self.processor = transformers.Gemma4ImageProcessorPil.from_pretrained(ckpt)
 
-    def hidden(self, state, question, *, mask="prefix_bidir", window=None, pixels=()):
+    def hidden(self, state, question, mask="prefix_bidir", pixels=()) -> np.ndarray:
+        """The final-norm hidden state at the prompt's last token under `mask`, prefix_bidir or
+        one of OTHER_MASKS."""
         torch = self.torch
-        ids = list(state) + list(question)
+        ids = [*state, *question]
         n, s = len(ids), len(state)
         i, j = torch.arange(n)[:, None], torch.arange(n)[None, :]
-        state_rows, q_rows = i < s, i >= s
-        if mask == "prefix_bidir":
-            m = (state_rows & (j < s)) | q_rows
-        elif mask == "causal_state":  # the state causal within itself
-            m = (state_rows & (j <= i)) | q_rows
-        elif mask == "causal_question":  # a question causal within itself, seeing the whole state
-            m = (state_rows & (j < s)) | (q_rows & ((j < s) | (j <= i)))
-        elif mask == "causal":
-            m = j <= i
-        elif mask == "swa_only":  # without patches/0001: full layers causal within each decode
-            m = (state_rows & (j < s)) | q_rows
-            full_m = (state_rows & (j <= i)) | (q_rows & ((j < s) | (j <= i)))
-        else:
-            raise ValueError(mask)
-        full = full_m if mask == "swa_only" else m
-        sliding = m & ((i - j).abs() < window) if window else m
+        in_state, causal = i < s, j <= i
+        bidir = (in_state & (j < s)) | ~in_state
+        full, sliding = {  # each mask for the full-attention layers, then the sliding ones
+            "prefix_bidir": (bidir, bidir),
+            "causal_state": ((in_state & causal) | ~in_state,) * 2,
+            "causal_question": ((in_state & (j < s)) | (~in_state & causal),) * 2,
+            "causal": (causal, causal),
+            "window_8": (bidir, bidir & ((i - j).abs() < 8)),
+            "swa_only": (causal, bidir),  # llama.cpp without patches/0001
+        }[mask]
         kw = {}
         if pixels:
             px = self.processor(images=list(pixels), do_resize=False, return_tensors="pt")
@@ -347,14 +293,14 @@ class Reference:
         return out.last_hidden_state[0, -1].float().numpy()
 
 
-# ---- the checks -----------------------------------------------------------------------------------
+# ---- the checks: each measures, and adds to `failures` what misses ---------------------------------
 
 
 def _rel(a, b) -> float:
     return float(np.linalg.norm(np.asarray(a, np.float64) - b) / np.linalg.norm(b))
 
 
-def _png(color, size) -> bytes:
+def _png(color, size) -> str:
     from PIL import Image, ImageDraw
 
     im = Image.new("RGB", size, "white")
@@ -363,139 +309,158 @@ def _png(color, size) -> bytes:
     )
     buf = io.BytesIO()
     im.save(buf, format="PNG")
-    return buf.getvalue()
+    return base64.b64encode(buf.getvalue()).decode()
+
+
+RED, BLUE = ((220, 30, 30), (64, 48)), ((30, 30, 220), (48, 96))
+
+
+def check_conversion(llama_cpp, ckpt, gguf_path, full, mmproj, failures) -> dict:
+    import gguf
+    from build_artifact import check_mmproj, is_audio_key, is_audio_tensor, lazy_ranges
+
+    env = {
+        **os.environ,
+        "PYTHONPATH": os.pathsep.join([str(llama_cpp), str(llama_cpp / "gguf-py")]),
+    }
+    r = subprocess.run(
+        [sys.executable, "-c", MATCHER], cwd=llama_cpp, env=env, capture_output=True, text=True
+    )
+    matches = json.loads(r.stdout) if r.returncode == 0 else {"error": r.stderr[-500:]}
+    if matches != MATCHES:
+        failures.append(f"the converter's pplx-decider loader claims {matches}, not {MATCHES}")
+    converted, vision = gguf.GGUFReader(full), gguf.GGUFReader(mmproj)
+    if not any(is_audio_tensor(t.name) for t in converted.tensors):
+        failures.append("the converter's mmproj has no audio tower to leave out")
+    want = {t.name: t.data.tobytes() for t in converted.tensors if not is_audio_tensor(t.name)}
+    if {t.name: t.data.tobytes() for t in vision.tensors} != want:
+        failures.append("the vision-only mmproj is not the converter's vision tower, byte for byte")
+    if any(is_audio_key(k) for k in vision.fields):
+        failures.append("the vision-only mmproj keeps audio keys")
+    try:
+        check_mmproj(mmproj, ckpt)
+    except SystemExit as e:
+        failures.append(str(e))
+    ranges, size = lazy_ranges(gguf_path), gguf_path.stat().st_size
+    if len(ranges) != 1 or not 0 < ranges[0][0] < ranges[0][1] <= size:
+        failures.append(f"lazy_ranges gives {ranges} for a {size}-byte GGUF")
+    return {
+        "matcher": matches,
+        "mmproj_tensors": [len(converted.tensors), len(vision.tensors)],
+        "lazy_ranges": ranges,
+    }
+
+
+def check_mask(ref, state, questions, rows, failures) -> dict:
+    """The shim's rows against each mask's reference, per question."""
+    errs = {
+        mask: [_rel(h, ref.hidden(state, q, mask)) for q, h in zip(questions, rows, strict=True)]
+        for mask in ("prefix_bidir", *OTHER_MASKS)
+    }
+    if max(errs["prefix_bidir"]) > AGREE:
+        failures.append(
+            f"the shim misses the prefix_bidir reference by {max(errs['prefix_bidir']):.4f}"
+        )
+    for mask in OTHER_MASKS:
+        for i, (other, own) in enumerate(zip(errs[mask], errs["prefix_bidir"], strict=True)):
+            if other < MISS_FACTOR * max(own, 1e-6):
+                failures.append(
+                    f"question {i}: the shim is {other:.4f} from the {mask} reference and "
+                    f"{own:.4f} from prefix_bidir's (under {MISS_FACTOR:g} times further)"
+                )
+    return {k: [round(x, 4) for x in v] for k, v in errs.items()}
+
+
+def check_reuse(backend, state, questions, rows, failures) -> float:
+    """The largest difference between the questions together and each alone, or reversed."""
+    alone = np.stack([backend.forward(state, [q])[0] for q in questions])
+    reverse = backend.forward(state, questions[::-1])[::-1]
+    worst = float(max(np.abs(rows - alone).max(), np.abs(rows - reverse).max()))
+    if worst != 0.0:
+        failures.append(f"questions in one call differ from questions alone by {worst}")
+    return worst
+
+
+def check_images(backend, ref, tok, failures) -> dict:
+    from strands_decider.backends.llama_cpp import prepare_pixels
+    from strands_decider.core import Request, render
+
+    request = {"state": "two pictures", "images": [_png(*RED), _png(*BLUE)],
+               "questions": {"which": {"type": "choice", "instructions": "which?",
+                                       "criteria": {"red": None, "blue": None}}}}  # fmt: skip
+    rendered = render(Request.model_validate(request), tok)
+    state, q = list(rendered.state_ids), list(next(iter(rendered.questions.values())).question_ids)
+    shim = backend.forward(state, [q], rendered.images)[0]
+    want = ref.hidden(state, q, pixels=[prepare_pixels(im) for im in rendered.images])
+    swapped = render(Request.model_validate({**request, "images": request["images"][::-1]}), tok)
+    rel = _rel(shim, want)
+    change = _rel(backend.forward(list(swapped.state_ids), [q], swapped.images)[0], shim)
+    if rel > AGREE:
+        failures.append(f"with images the shim misses the reference by {rel:.4f}")
+    if change < MISS_FACTOR * max(rel, 1e-6):
+        failures.append("swapping the two images barely changes the question's row")
+    return {
+        "spans": [im.span for im in rendered.images],
+        "rel_error": rel,
+        "swap_rel_change": change,
+    }
+
+
+def _probabilities(answer: dict) -> dict[str, float]:
+    return answer.get("probabilities") or {"false": 1 - answer["noul"], "true": answer["noul"]}
+
+
+def check_golden(backend, ref, ckpt, tok, failures) -> dict:
+    from strands_decider.backends.llama_cpp import prepare_pixels
+    from strands_decider.core import DecisionConfig, Request, evaluate, load_readout, read, render
+
+    config, weight = DecisionConfig.load(ckpt), load_readout(ckpt)
+    request = Request.model_validate({**GOLDEN, "images": [_png(*RED)]})
+    got = evaluate(request, tok, weight, config, backend)["answers"]
+    rendered = render(request, tok)
+    pixels = [prepare_pixels(im) for im in rendered.images]
+    rows = [
+        ref.hidden(rendered.state_ids, q.question_ids, pixels=pixels)
+        for q in rendered.questions.values()
+    ]
+    want = read(rows, config, rendered, weight=weight)
+    for name in want:
+        g, w = _probabilities(got[name]), _probabilities(want[name])
+        if max(g, key=g.__getitem__) != max(w, key=w.__getitem__):
+            failures.append(f"golden {name!r}: the top answer is not the reference's, {w}")
+        if max(abs(g[k] - w[k]) for k in w) > GOLDEN_DP:
+            failures.append(f"golden {name!r}: probabilities {g}, the reference's {w}")
+    return {name: {"reference": want[name], "shim": got[name]} for name in want}
 
 
 def run(llama_cpp: Path, lib: Path, work: Path) -> dict:
-    from strands_decider.backends.llama_cpp import LlamaCppBackend, prepare_pixels
-    from strands_decider.core import (
-        DecisionConfig,
-        Request,
-        evaluate,
-        load_readout,
-        load_tokenizer,
-        question_probabilities,
-        render,
-    )
+    """Every check's measurements, and `failures`, empty when the shim passes."""
+    sys.path[:0] = [str(llama_cpp / "gguf-py"), str(HERE)]  # gguf-py, and build_artifact
+    from strands_decider.backends.llama_cpp import LlamaCppBackend
+    from strands_decider.core import load_tokenizer
 
     started = time.time()
+    failures: list[str] = []
     ckpt = make_checkpoint(work / "checkpoint")
-    gguf, mmproj = convert(llama_cpp, ckpt, work / "gguf")
-    timings = {"make_and_convert_s": round(time.time() - started, 1)}
-    res_convert = check_conversion(llama_cpp, gguf, mmproj)
-    backend = LlamaCppBackend(
-        lib, gguf, mmproj=mmproj, processor_config=ckpt / "processor_config.json", threads=4
-    )
-    ref = Reference(ckpt)
-    rng = np.random.default_rng(SEED)
-    res: dict = {
-        "timings": timings,
-        "failures": list(res_convert.pop("failures")),
-        "convert": res_convert,
-    }
-
-    def fail(msg: str) -> None:
-        res["failures"].append(msg)
-
-    # mask: a 40-token state and three 12- to 20-token questions, all longer than the window
-    state = [2, *rng.integers(1000, VOCAB - 4000, 39).tolist()]
-    questions = [rng.integers(1000, VOCAB - 4000, n).tolist() for n in (12, 16, 20)]
-    rows = backend.forward(state, questions)
-    errs: dict[str, list[float]] = {}
-    for q, h in zip(questions, rows, strict=True):
-        for name, kw in {"prefix_bidir": {}, "causal_state": {"mask": "causal_state"},
-                         "causal_question": {"mask": "causal_question"}, "causal": {"mask": "causal"},
-                         "window_8": {"window": 8}, "swa_only": {"mask": "swa_only"}}.items():  # fmt: skip
-            errs.setdefault(name, []).append(_rel(h, ref.hidden(state, q, **kw)))
-    res["mask"] = {k: [round(x, 4) for x in v] for k, v in errs.items()}  # per question
-    agree = max(errs["prefix_bidir"])
-    if agree > AGREE:
-        fail(f"the shim misses the prefix_bidir reference by {agree:.4f} (> {AGREE})")
-    for name in ("causal_state", "causal_question", "causal", "window_8", "swa_only"):
-        for i, (other, own) in enumerate(zip(errs[name], errs["prefix_bidir"], strict=True)):
-            if other < MISS_FACTOR * max(own, 1e-6):
-                fail(
-                    f"question {i}: the shim is {other:.4f} from the {name} reference and {own:.4f}"
-                    f" from prefix_bidir's (under {MISS_FACTOR:g} times further)"
-                )
-
-    # reuse: together, alone, and in reverse order
-    alone = np.stack([backend.forward(state, [q])[0] for q in questions])
-    reverse = backend.forward(state, questions[::-1])[::-1]
-    res["reuse_max_abs"] = float(max(np.abs(rows - alone).max(), np.abs(rows - reverse).max()))
-    if res["reuse_max_abs"] != 0.0:
-        fail(f"questions in one call differ from questions alone by {res['reuse_max_abs']}")
-
-    # images: two images in the state, at their spans
-    tok = load_tokenizer(ckpt)
-    config = DecisionConfig.load(ckpt)
-    files = [_png((220, 30, 30), (64, 48)), _png((30, 30, 220), (48, 96))]
-    request = {
-        "state": "two pictures",
-        "images": [base64.b64encode(f).decode() for f in files],
-        "questions": {
-            "which": {
-                "type": "choice",
-                "instructions": "which?",
-                "criteria": {"red": None, "blue": None},
-            }
-        },
-    }
-    rendered = render(Request.model_validate(request), tok)
-    q = list(next(iter(rendered.questions.values())).question_ids)
-    st = list(rendered.state_ids)
-    h_img = backend.forward(st, [q], rendered.images)[0]
-    pixels = [prepare_pixels(im) for im in rendered.images]
-    h_ref = ref.hidden(st, q, pixels=pixels)
-    res["images"] = {"spans": [im.span for im in rendered.images], "tokens": [im.tokens for im in rendered.images],
-                     "rel_error": _rel(h_img, h_ref)}  # fmt: skip
-    if res["images"]["rel_error"] > AGREE:
-        fail(f"with images the shim misses the reference by {res['images']['rel_error']:.4f}")
-    swapped = render(Request.model_validate({**request, "images": request["images"][::-1]}), tok)
-    h_swap = backend.forward(list(swapped.state_ids), [q], swapped.images)[0]
-    res["images"]["swap_rel_change"] = _rel(h_swap, h_img)
-    if res["images"]["swap_rel_change"] < MISS_FACTOR * max(res["images"]["rel_error"], 1e-6):
-        fail("swapping the two images barely changes the question's row")
-
-    # golden: the whole runtime path against the reference's readout
-    weight = load_readout(ckpt)
-    golden_request = {
-        "state": {"ticket": 4182, "text": "The checkout page fails after the payment step."},
-        "images": [request["images"][0]],
-        "questions": {
-            "urgent": {"type": "noul", "instructions": "Is it urgent?"},
-            "team": {"type": "choice", "instructions": "Which team?",
-                     "criteria": {"billing": "payments", "web": "pages", "mobile": None}},
-            "severity": {"type": "score", "instructions": "How severe?", "criteria": ["low", "medium", "high"]},
-        },
-    }  # fmt: skip
-    golden = Request.model_validate(golden_request)
-    got = evaluate(golden, tok, weight, config, backend)
-    rr = render(golden, tok)
-    pixels = [prepare_pixels(i) for i in rr.images]
-    ref_rows = [
-        ref.hidden(rr.state_ids, q.question_ids, pixels=pixels) for q in rr.questions.values()
-    ]
-    shim_rows = backend.forward(
-        list(rr.state_ids), [list(q.question_ids) for q in rr.questions.values()], rr.images
-    )
-    ref_p = question_probabilities(ref_rows, config, rr, weight=weight)
-    shim_p = question_probabilities(shim_rows, config, rr, weight=weight)
-    res["golden"] = {n: {"reference": [round(float(x), 4) for x in ref_p[n]],
-                         "shim": [round(float(x), 4) for x in shim_p[n]]} for n in rr.questions}  # fmt: skip
-    for n in rr.questions:
-        if int(np.argmax(ref_p[n])) != int(np.argmax(shim_p[n])):
-            fail(
-                f"golden {n!r}: top answer {int(np.argmax(shim_p[n]))}, the reference's {int(np.argmax(ref_p[n]))}"
-            )
-        if float(np.abs(ref_p[n] - shim_p[n]).max()) > 0.01:
-            fail(
-                f"golden {n!r}: probabilities differ by {float(np.abs(ref_p[n] - shim_p[n]).max()):.4f}"
-            )
-    res["golden_answers"] = got["answers"]
-    backend.close()
-    timings["total_s"] = round(time.time() - started, 1)
-    return res
+    gguf, full, mmproj = convert(llama_cpp, ckpt, work / "gguf")
+    report: dict = {"convert": check_conversion(llama_cpp, ckpt, gguf, full, mmproj, failures)}
+    backend = LlamaCppBackend(lib, gguf, mmproj=mmproj, threads=4)
+    try:
+        ref, tok = Reference(ckpt), load_tokenizer(ckpt)
+        # A 40-token state and three 12- to 20-token questions, all longer than the window.
+        rng = np.random.default_rng(SEED)
+        state = [2, *rng.integers(1000, VOCAB - 4000, 39).tolist()]
+        questions = [rng.integers(1000, VOCAB - 4000, n).tolist() for n in (12, 16, 20)]
+        rows = backend.forward(state, questions)
+        report["mask"] = check_mask(ref, state, questions, rows, failures)
+        report["reuse_max_abs"] = check_reuse(backend, state, questions, rows, failures)
+        report["images"] = check_images(backend, ref, tok, failures)
+        report["golden"] = check_golden(backend, ref, ckpt, tok, failures)
+    finally:
+        backend.close()
+    report["seconds"] = round(time.time() - started, 1)
+    report["failures"] = failures
+    return report
 
 
 def main() -> None:
