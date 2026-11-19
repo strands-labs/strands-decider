@@ -2,13 +2,13 @@
 pixels into the core's number of placeholders.
 
 The plugin's server resizes each image to the core's W x H (``resize_image``) and turns the image
-processor's own resize off (``do_resize=False``). vLLM 0.33 would not follow it in two places:
+processor's own resize off (``do_resize=False``). vLLM 0.34 would not follow it in two places:
 
 - vLLM counts an image's placeholders by its own formula, which assumes the processor resizes: on an
   image already at W x H it misses the core's count for 1,827 of 4,906 sizes. The plugin counts one
   per 48 x 48 pixels (patch size times pooling kernel), what the processor gives with its resize off.
   vLLM's startup profiling keeps the resize on, and vLLM's count.
-- transformers 5.20 resolves ``Gemma4ImageProcessor`` to its torchvision backend, which converts
+- transformers 5.22 resolves ``Gemma4ImageProcessor`` to its torchvision backend, which converts
   pixels to floating point differently from ``Gemma4ImageProcessorPil``, the reference's for E2B,
   E4B, 26B-A4B and 31B. The plugin loads the PIL one. (``--mm-processor-kwargs '{"backend": "pil"}'``
   can't select it: the video processor, which has no PIL backend, gets it too.) The 12B's
@@ -33,7 +33,7 @@ from vllm.multimodal.parse import ImageProcessorItems
 from vllm.multimodal.processing import PromptReplacement, PromptUpdate, PromptUpdateDetails
 
 
-class PilProcessingInfo(Gemma4ProcessingInfo):
+class _PilProcessingInfo(Gemma4ProcessingInfo):
     def get_hf_processor(self, **kwargs: object) -> Any:
         from transformers import Gemma4ImageProcessorPil
 
@@ -46,7 +46,7 @@ class PilProcessingInfo(Gemma4ProcessingInfo):
         return processor
 
 
-class ResizedImageProcessor(Gemma4MultiModalProcessor):
+class _ResizedImageProcessor(Gemma4MultiModalProcessor):
     def _get_prompt_updates(
         self, mm_items: Any, hf_processor_mm_kwargs: Mapping[str, Any], out_mm_kwargs: Any
     ) -> Sequence[PromptUpdate]:
@@ -70,8 +70,8 @@ class ResizedImageProcessor(Gemma4MultiModalProcessor):
 
 
 register_multimodal = MULTIMODAL_REGISTRY.register_processor(
-    ResizedImageProcessor, info=PilProcessingInfo, dummy_inputs=Gemma4DummyInputsBuilder
+    _ResizedImageProcessor, info=_PilProcessingInfo, dummy_inputs=Gemma4DummyInputsBuilder
 )
 register_unified = MULTIMODAL_REGISTRY.register_processor(
-    ResizedImageProcessor, info=Gemma4UnifiedProcessingInfo, dummy_inputs=Gemma4DummyInputsBuilder
+    _ResizedImageProcessor, info=Gemma4UnifiedProcessingInfo, dummy_inputs=Gemma4DummyInputsBuilder
 )

@@ -1,14 +1,12 @@
-"""``strands-decider-vllm serve``: the plugin's server (``server``; README, Serving)."""
+"""``strands-decider-vllm serve``: the plugin's System One server (``server``; README, Serving)."""
 
 from __future__ import annotations
 
 import argparse
 import os
 
-#: What vLLM reads from the environment when it starts: Model Runner V2, which the mask needs, and
-#: its internal sockets on loopback, whatever address the HTTP server binds.
-ENVIRONMENT = {
-    "VLLM_USE_V2_MODEL_RUNNER": "1",
+#: vLLM's internal sockets on loopback, whatever address the HTTP server binds.
+_LOOPBACK = {
     "VLLM_HOST_IP": "127.0.0.1",
     "GLOO_SOCKET_IFNAME": "lo",
     "NCCL_SOCKET_IFNAME": "lo",
@@ -35,23 +33,11 @@ def parser() -> argparse.ArgumentParser:
         help="refuse longer prompts (default: decision_config.json's max_length_validated)",
     )
     s.add_argument(
-        "--max-model-len", type=int, help="the engine's context (default: --max-length + 1)"
-    )
-    s.add_argument(
-        "--max-num-batched-tokens", type=int, help="the step's budget (at least --max-model-len)"
+        "--max-num-batched-tokens", type=int, help="the step's budget (default: --max-length + 1)"
     )
     s.add_argument("--max-num-seqs", type=int)
     s.add_argument("--gpu-memory-utilization", type=float, default=0.90)
     s.add_argument("--tensor-parallel-size", type=int, default=1)
-    s.add_argument("--no-enable-prefix-caching", dest="enable_prefix_caching", action="store_false")
-    s.add_argument("--block-size", type=int)
-    s.add_argument(
-        "--dtype",
-        choices=("bfloat16", "float32"),
-        default="bfloat16",
-        help="float32 only on a CPU build of vLLM, for tests",
-    )
-    s.add_argument("--enforce-eager", action="store_true")
     s.add_argument(
         "--max-body-mb",
         type=float,
@@ -86,9 +72,9 @@ def parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> None:
-    a = parser().parse_args(argv)
-    for key, value in ENVIRONMENT.items():
+    args = parser().parse_args(argv)
+    for key, value in _LOOPBACK.items():
         os.environ.setdefault(key, value)
     from .server import serve
 
-    serve(a)
+    serve(args)

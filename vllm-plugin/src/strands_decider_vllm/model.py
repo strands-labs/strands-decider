@@ -1,5 +1,5 @@
 """The plugin's architectures: vLLM's Gemma 4 classes with the trained readout in place of the LM
-head, and every attention layer under the prefix_bidir mask (``model_state``), with no window.
+head, and every layer under the prefix_bidir mask (``attention``), with no window.
 
 - ``StrandsDeciderForConditionalGeneration`` (E2B, E4B, 26B-A4B, 31B) and
   ``StrandsDeciderUnifiedForConditionalGeneration`` (12B): the base model's multimodal layout, with
@@ -15,7 +15,7 @@ log-softmax over its codes.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 
 import torch
@@ -27,37 +27,28 @@ from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
 from vllm.model_executor.models.gemma4 import Gemma4ForCausalLM
 from vllm.model_executor.models.gemma4_mm import Gemma4ForConditionalGeneration
 from vllm.model_executor.models.gemma4_unified import Gemma4UnifiedForConditionalGeneration
+from vllm.transformers_utils.repo_utils import get_hf_file_to_dict
 
 from . import logger
-from .attention import CPUImpl, FlashImpl
-from .model_state import PrefixBidirModelState
+from .attention import PrefixBidirModelState
 from .processing import register_multimodal, register_unified
 
-READOUT_FILE = "readout.safetensors"
+_READOUT_FILE = "readout.safetensors"
 #: The readout's tensor ``weight``, as its own weight source hands it to ``load_weights``.
-READOUT_WEIGHT = "readout.weight"
+_READOUT_WEIGHT = "readout.weight"
 
 
-def check_config(vllm_config: VllmConfig) -> None:
+def _check_config(vllm_config: VllmConfig) -> None:
     """Refuses the engine settings under which the mask or the answers would be served wrongly."""
-    from vllm.platforms import current_platform
-
     mc, sc, cc = vllm_config.model_config, vllm_config.scheduler_config, vllm_config.cache_config
     pc = vllm_config.parallel_config
-    # bf16, as the readout is defined and parity was measured; float32 for the CPU tier's tests.
-    dtypes = (torch.bfloat16, torch.float32) if current_platform.is_cpu() else (torch.bfloat16,)
     checks = [
         (
             mc.is_mm_prefix_lm,
             "vLLM's multimodal PrefixLM mode is on (the 12B, 26B-A4B and 31B bases set "
             'use_bidirectional_attention "vision"), which prefix_bidir replaces: add '
             '"use_bidirectional_attention": null to --hf-overrides, under "text_config" for the '
-            "multimodal layout",
-        ),
-        # vLLM 0.34 removed Model Runner V1, and this attribute with it.
-        (
-            not getattr(vllm_config, "use_v2_model_runner", True),
-            "prefix_bidir is a Model Runner V2 model state: set VLLM_USE_V2_MODEL_RUNNER=1",
+            "multimodal layouts",
         ),
         # A prompt must be computed whole in one step: its tokens attend to keys a later step computes.
         (sc.enable_chunked_prefill, "chunked prefill is on: pass --no-enable-chunked-prefill"),
@@ -65,10 +56,6 @@ def check_config(vllm_config: VllmConfig) -> None:
             (sc.max_num_scheduled_tokens or mc.max_model_len) < mc.max_model_len,
             f"--max-num-scheduled-tokens {sc.max_num_scheduled_tokens} < --max-model-len {mc.max_model_len}: "
             "a longer prompt would never be scheduled",
-        ),
-        (
-            0 < sc.long_prefill_token_threshold < mc.max_model_len,
-            f"--long-prefill-token-threshold {sc.long_prefill_token_threshold} cuts longer prompts into chunks",
         ),
         (
             pc.data_parallel_size > 1 and (pc.enable_dbo or pc.ubatch_size > 1),
@@ -82,7 +69,8 @@ def check_config(vllm_config: VllmConfig) -> None:
             mc.logprobs_mode not in PROCESSED_LOGPROBS_MODES,
             f"--logprobs-mode {mc.logprobs_mode}: the codes' probabilities are the processed logprobs",
         ),
-        (mc.dtype not in dtypes, f"--dtype {mc.dtype}: only bfloat16 is served"),
+        # bf16, as the readout is defined and parity was measured.
+        (mc.dtype != torch.bfloat16, f"--dtype {mc.dtype}: only bfloat16 is served"),
         (
             mc.quantization is not None,
             f"--quantization {mc.quantization}: only bf16 weights are served",
@@ -118,21 +106,17 @@ def check_config(vllm_config: VllmConfig) -> None:
 
 
 @contextmanager
-def _sliding_windows_cut_nothing(max_model_len: int):
-    """Builds Gemma 4's sliding-window layers with a window of max_model_len tokens, which cuts
-    nothing, since the mask applies on them too. Their KV-cache groups then keep every token, one
-    per layer shape as for stock Gemma 4. (Built without a window, both head sizes share one
-    group, which vLLM 0.33 can't combine with E2B and E4B's KV-shared layers; vLLM #64095.)"""
+def _without_sliding_windows() -> Iterator[None]:
+    """Builds Gemma 4's sliding-window layers without a window, as full-attention layers: the mask
+    applies on them too. (Their config field can't be overridden: transformers types it as an int.)"""
     import vllm.model_executor.models.gemma4 as gemma4
 
     attention = gemma4.Attention
 
-    def attention_with_full_window(*args, **kwargs):
-        if kwargs.get("per_layer_sliding_window") is not None:
-            kwargs["per_layer_sliding_window"] = max_model_len
-        return attention(*args, **kwargs)
+    def attention_without_window(*args, **kwargs):
+        return attention(*args, **{**kwargs, "per_layer_sliding_window": None})
 
-    gemma4.Attention = attention_with_full_window
+    gemma4.Attention = attention_without_window
     try:
         yield
     finally:
@@ -142,20 +126,14 @@ def _sliding_windows_cut_nothing(max_model_len: int):
 class _Decider:
     """What the three architectures share: the readout, compute_logits and the model state."""
 
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
-        from vllm.transformers_utils.repo_utils import get_hf_file_to_dict
+    #: What the parent class's loader expects in front of a checkpoint weight's name.
+    _weight_prefix = ""
 
-        check_config(vllm_config)
-        mc = vllm_config.model_config
-        with _sliding_windows_cut_nothing(mc.max_model_len):
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
+        _check_config(vllm_config)
+        with _without_sliding_windows():
             super().__init__(vllm_config=vllm_config, prefix=prefix)
-        for module in self.modules():
-            impl = getattr(module, "impl", None)
-            if getattr(module, "sliding_window", None) is not None and isinstance(
-                impl, (FlashImpl, CPUImpl)
-            ):
-                # The kernel's own window: a non-causal call with one would still cut keys.
-                impl.sliding_window = impl.no_window
+        mc = vllm_config.model_config
         # decision_config.json is read as vLLM reads a model's other config files: from the local
         # directory, the Hugging Face cache or the Hub.
         dc = get_hf_file_to_dict("decision_config.json", mc.model, mc.revision)
@@ -167,8 +145,6 @@ class _Decider:
         self.temperature = dc["temperature"]
         self.vocab_size = text.vocab_size
         self.register_buffer("code_ids", torch.tensor(dc["token_ids"]), persistent=False)
-        # A bf16 GEMM whatever the decoder runs in (a float32 model on the CPU tier too), as the
-        # core's readout is defined.
         self.readout = nn.Linear(
             text.hidden_size, len(dc["token_ids"]), bias=False, dtype=torch.bfloat16
         )
@@ -179,7 +155,7 @@ class _Decider:
                 revision=mc.revision,
                 prefix="readout.",
                 fall_back_to_pt=False,
-                allow_patterns_overrides=[READOUT_FILE],
+                allow_patterns_overrides=[_READOUT_FILE],
             )
         ]
         logger.info(
@@ -194,7 +170,7 @@ class _Decider:
         return PrefixBidirModelState
 
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        z = self.readout(hidden_states.to(torch.bfloat16)).float()
+        z = self.readout(hidden_states).float()
         z = torch.tanh(z / self.softcap) * self.softcap / self.temperature
         logits = torch.full(
             (hidden_states.shape[0], self.vocab_size),
@@ -205,38 +181,30 @@ class _Decider:
         logits[:, self.code_ids] = z
         return logits
 
-    @staticmethod
-    def checkpoint_name(name: str) -> str:
-        """A checkpoint weight's name for the parent class's loader."""
-        return name
-
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         readout = []
 
         def model_weights():
             for name, w in weights:
-                if name == READOUT_WEIGHT:
+                if name == _READOUT_WEIGHT:
                     readout.append(w)
                 # Without an index file, readout.safetensors is read as a model file too.
                 elif name != "weight":
-                    yield self.checkpoint_name(name), w
+                    yield self._weight_prefix + name, w
 
         loaded = super().load_weights(model_weights())
         if len(readout) != 1:
             raise ValueError(
-                f"strands-decider: {READOUT_FILE} was not loaded; serve with vLLM's default loader "
+                f"strands-decider: {_READOUT_FILE} was not loaded; serve with vLLM's default loader "
                 "(--load-format auto or safetensors), which reads it as a second weight source"
             )
         with torch.no_grad():
             self.readout.weight.copy_(readout[0])
-        return loaded | {READOUT_WEIGHT}
+        return loaded | {_READOUT_WEIGHT}
 
 
 class StrandsDeciderForCausalLM(_Decider, Gemma4ForCausalLM):
-    @staticmethod
-    def checkpoint_name(name: str) -> str:
-        # A bare decoder's keys (embed_tokens.*, layers.*, norm.*) under vLLM's model.*.
-        return name if name.startswith("model.") else "model." + name
+    _weight_prefix = "model."  # a bare decoder's keys (embed_tokens.*, layers.*, norm.*)
 
 
 @register_multimodal

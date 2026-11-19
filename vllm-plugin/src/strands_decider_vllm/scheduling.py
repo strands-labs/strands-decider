@@ -1,67 +1,41 @@
-"""A prompt with images is scheduled whole or not at all, and one held back is not overtaken.
+"""Once vLLM holds an image prompt back for a step, later image prompts wait out that step too.
 
-The mask needs each prompt computed whole in one step. With chunked prefill off and a step budget of
-at least ``--max-model-len``, vLLM 0.33 still cuts a prompt when the encoder's budget or cache can't
-take one of its images this step: ``Scheduler._try_schedule_encoder_inputs`` schedules the tokens in
-front of that image. Under load this happens, since an image's cache entry is released only once the
-step that used it is processed, and with asynchronous scheduling the next step is planned before.
-
-For engines that serve the plugin's architectures, such a request is scheduled not at all this step
-(vLLM's own outcome when nothing in front of the image can run): the encoder-cache references the
-attempt took are released, and vLLM puts it back at the head of the queue. For the rest of the step,
-later requests with an image in what they would compute wait too, so smaller image requests don't
-keep taking the room it needs; text requests run as usual. Once the steps in flight are processed the
-whole cache is free, and it holds a prompt's images (``--max-num-batched-tokens`` embeddings, at
-least ``--max-model-len``), so the request is scheduled then. vLLM 0.34 defers such a request whole
-itself (vLLM #65399).
+With chunked prefill off, vLLM 0.34 schedules a prompt with images whole or not at all (vLLM
+#65399): when its images don't fit the encoder's budget or cache, it waits for a later step. With
+asynchronous scheduling, vLLM's default, the cache still holds the images of the step in flight, so
+a steady stream of smaller image prompts would keep taking the room and the held one would never
+fit. A step that schedules no new images frees the cache for it. Text prompts run as usual.
 """
 
 from __future__ import annotations
 
 from .engine import serves_decider
 
-#: Set on the scheduler for the rest of one ``schedule()`` once a request is held back: vLLM's
-#: return value for it, whose shape later held-back requests' "nothing" takes.
-_HELD = "_strands_decider_held"
-
-
-def _nothing(out: tuple, encoder_compute_budget: int) -> tuple:
-    """vLLM's "none of this request this step", in the shape of its return value ``out``."""
-    return ([], 0, encoder_compute_budget, *(type(x)() for x in out[3:]))
+#: The scheduler's step in which it last held an image prompt back.
+_HELD_AT = "_strands_decider_held_at"
 
 
 def install() -> None:
     from vllm.v1.core.sched.scheduler import Scheduler
 
-    original_try, original_schedule = Scheduler._try_schedule_encoder_inputs, Scheduler.schedule
+    schedule_encoder_inputs = Scheduler._try_schedule_encoder_inputs
 
     def _try_schedule_encoder_inputs(
-        self, request, num_computed_tokens, num_new_tokens, encoder_compute_budget, *args, **kwargs
+        self, request, num_computed_tokens, num_new_tokens, encoder_compute_budget, **kwargs
     ):
-        call = (request, num_computed_tokens, num_new_tokens, encoder_compute_budget, *args)
+        args = (request, num_computed_tokens, num_new_tokens, encoder_compute_budget)
         if not serves_decider(self.vllm_config):
-            return original_try(self, *call, **kwargs)
-        held = self.__dict__.get(_HELD)
+            return schedule_encoder_inputs(self, *args, **kwargs)
         end = num_computed_tokens + num_new_tokens
-        if held is not None and any(
+        if getattr(self, _HELD_AT, None) == self.current_step and any(
             f.mm_position.offset < end
             and f.mm_position.offset + f.mm_position.length > num_computed_tokens
             for f in request.mm_features or ()
         ):
-            return _nothing(held, encoder_compute_budget)
-        ecm = self.encoder_cache_manager
-        before = set(ecm.get_cached_input_ids(request))
-        out = original_try(self, *call, **kwargs)
-        if out[1] == num_new_tokens:
-            return out
-        for input_id in set(ecm.get_cached_input_ids(request)) - before:
-            ecm.free_encoder_input(request, input_id)
-        self.__dict__.setdefault(_HELD, tuple(out))
-        return _nothing(out, encoder_compute_budget)
-
-    def schedule(self, *args, **kwargs):
-        self.__dict__.pop(_HELD, None)  # a request is held back for one step
-        return original_schedule(self, *args, **kwargs)
+            return [], 0, encoder_compute_budget, [], []  # vLLM's "none of it this step"
+        out = schedule_encoder_inputs(self, *args, **kwargs)
+        if out[1] < num_new_tokens:  # vLLM holds the prompt back rather than cut it
+            setattr(self, _HELD_AT, self.current_step)
+        return out
 
     Scheduler._try_schedule_encoder_inputs = _try_schedule_encoder_inputs
-    Scheduler.schedule = schedule
