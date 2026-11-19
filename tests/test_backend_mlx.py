@@ -24,7 +24,7 @@ pytest.importorskip("mlx.core")
 pytest.importorskip("mlx_vlm")
 
 from core_support import PIXELS, PIXELS_DIR
-from decision_support import GEMMA4, KINDS, UNIFIED, model_checkpoint, image_b64, request
+from decision_support import GEMMA4, KINDS, UNIFIED, image_b64, model_checkpoint, request
 from fastapi.testclient import TestClient
 from typer.testing import CliRunner
 

@@ -62,7 +62,7 @@ def _default_device(checkpoint: str, revision: str | None) -> str:
         return "mlx"
     if device == "mps":
         typer.echo(
-            "note: on Apple silicon, model checkpoints are validated on MLX, not MPS: "
+            "note: on Apple silicon, this checkpoint is validated on MLX, not MPS: "
             "pip install 'strands-decider[mlx]', then pass --device mlx or no --device",
             err=True,
         )
@@ -90,8 +90,8 @@ def serve_cmd(
         None,
         "--device",
         help="cuda, mps or cpu (torch), or mlx (Apple silicon, needs the mlx extra). "
-        "Auto-detected when omitted: cuda > mps > cpu, and for a model checkpoint "
-        "cuda > mlx (with the mlx extra) > mps > cpu.",
+        "Auto-detected when omitted: cuda > mps > cpu for v1 model checkpoints, and "
+        "cuda > mlx (with the mlx extra) > mps > cpu for other model checkpoints.",
     ),
     no_prefix_cache: bool = typer.Option(
         False,
@@ -218,8 +218,8 @@ def ask_cmd(
         None,
         "--device",
         help="cuda, mps or cpu (torch), or mlx (Apple silicon, needs the mlx extra). "
-        "Auto-detected when omitted: cuda > mps > cpu, and for a model checkpoint "
-        "cuda > mlx (with the mlx extra) > mps > cpu.",
+        "Auto-detected when omitted: cuda > mps > cpu for v1 model checkpoints, and "
+        "cuda > mlx (with the mlx extra) > mps > cpu for other model checkpoints.",
     ),
     as_json: bool = typer.Option(False, "--json", help="Print the raw API response."),
     revision: str | None = typer.Option(
@@ -321,7 +321,9 @@ def _print_answers(response: SystemOneResponse) -> None:
 
 @app.command("convert-mlx")
 def convert_mlx_cmd(
-    checkpoint: str = typer.Argument(..., help="A model checkpoint: a directory or a Hub id."),
+    checkpoint: str = typer.Argument(
+        ..., help="A model checkpoint, a directory or a Hub id; not a v1 model checkpoint."
+    ),
     out: str = typer.Argument(..., help="The new directory to write the MLX artifact to."),
     bits: int | None = typer.Option(
         None,
