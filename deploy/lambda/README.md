@@ -277,10 +277,9 @@ text answers to within 0.004. An `f32` vision tower with the Q8_0 decoder is slo
 ## Decision checkpoints
 
 `-c decision=true` deploys a decision checkpoint instead: the Strands Decider v2 format, a
-Gemma 4 model in its base's multimodal layout with a trained readout beside it, which the
-torch-free core ([src/strands_decider/core](../../src/strands_decider/core)) defines. The function answers the same `POST /v1/systemone`, with images, and
-`GET /health`, behind the same IAM-authenticated Function URL, and takes the request as a direct
-invocation too.
+Gemma 4 model in its base's multimodal layout with a trained readout beside it. The function
+answers the same `POST /v1/systemone`, with images, and `GET /health`, behind the same
+IAM-authenticated Function URL, and takes the request as a direct invocation too.
 
 ```bash
 npx cdk deploy -c decision=true -c checkpoint=<Hub id, or s3://bucket/prefix/> \
@@ -290,15 +289,11 @@ npx cdk deploy -c decision=true -c checkpoint=<Hub id, or s3://bucket/prefix/> \
 Lambda serves E2B, with text and images. E4B does not fit with its vision tower: its text model
 alone fills the 10,240 MB function, so the build refuses a model over 6 GB.
 
-The request is rendered, checked and read by the torch-free core
-([src/strands_decider/core](../../src/strands_decider/core)), and the decoder and the vision tower
-run in llama.cpp through `strands_decider.backends.llama_cpp`: the state, its text tokens and image
-rows together, is decoded once as one non-causal batch, and each question on top of it, under the
-`prefix_bidir` mask with no sliding window. An image is decoded as v1 decodes it, resized by the
-core's `resize_image` (Pillow's bicubic resampling) to the size the image processor gives it, and run through the base
-model's own vision tower. The readout and its soft-cap come from the checkpoint's
-`readout.safetensors` and `decision_config.json`; a checkpoint without the soft-cap there is
-refused.
+The torch-free core ([src/strands_decider/core](../../src/strands_decider/core)) renders, checks
+and reads each request. The decoder and the base model's vision tower run in llama.cpp through
+`strands_decider.backends.llama_cpp`: the state, its text tokens and image rows together, is
+decoded once as one non-causal batch, then each question on top of it, under the `prefix_bidir`
+mask with no sliding window.
 
 The GGUF Q8_0 decoder meets the parity bar of at least 98% top-1 agreement and a mean |Δp| of at
 most 0.02: at E2B, through this runtime on x86, 99.08% and 0.0104 on 1,200 prompts.
@@ -309,10 +304,10 @@ most 0.02: at E2B, through this runtime on x86, 99.08% and 0.0104 on 1,200 promp
 (release b12383), checks and applies the patch in `decision/patches`, which lets the shim make
 Gemma 4's full-attention layers non-causal, stopping if it does not apply, and builds it and
 `decision/shim.c` for Graviton2 and later; the build fails if the library is not arm64 or holds an
-instruction Graviton2 lacks (i8mm, bf16, SVE). `decision/scripts/
-shim_check.py` then runs that library against transformers on a tiny random Gemma 4 checkpoint
-(tests/test_llama_cpp_shim.py runs the same check), and the build fails unless the `prefix_bidir`
-mask, state reuse, the image rows and the answers are the reference's.
+instruction Graviton2 lacks (i8mm, bf16, SVE). `decision/scripts/shim_check.py` then runs that
+library against transformers on a tiny random Gemma 4 checkpoint (tests/test_llama_cpp_shim.py
+runs the same check), and the build fails unless the `prefix_bidir` mask, state reuse, the image
+rows and the answers are the reference's.
 
 The build then reads the checkpoint, from the Hugging Face Hub at the commit `checkpoint_revision`
 resolves to, each LFS file checked against the sha256 the Hub records, or, for an `s3://` URI,
@@ -325,9 +320,9 @@ the function will, then converts it with llama.cpp's own `convert_hf_to_gguf.py`
 - the decoder to BF16, then Q8_0 with `llama-quantize`, the lowest type that keeps the
   reference's answers: 4.95 GB for E2B;
 - the vision tower and its projection with `--mmproj`, at Q8_0, without the audio tower, which
-  would not fit beside them: 0.23 GB. On Graviton the Q8_0 tower encodes an image about three
-  times as fast as the f16 one (8.7 s against 25 s on Graviton2), and answers as closely to the
-  reference.
+  would not fit beside them: 0.23 GB. The build fails if its pixel normalisation or patch size is
+  not the image processor's. On Graviton the Q8_0 tower encodes an image about three times as
+  fast as the f16 one (8.7 s against 25 s on Graviton2), and answers as closely to the reference.
 
 The arm64 build's files are byte-identical to an x86 build's. The build takes about 10 minutes.
 `artifact.json` in the image records each file's size and sha256, the checkpoint and its manifest
@@ -358,9 +353,10 @@ assumes the environment read the files itself.
   16,384 by default, and the function applies the same limit when `DECIDER_MAX_REQUEST_TOKENS` is
   unset; `0` lifts it. That keeps the slowest request measured inside the 15-minute timeout on
   Graviton2, the slowest host Lambda gives: 4 images and an 8,000-token state, then 137 questions
-  up to the limit, took 549 to 557 s there, and with the shortest questions, 121 of them, 499 s on
-  Graviton3, about 640 s on Graviton2. A question after a long state costs about as much as 50 state tokens, so v1's
-  24,576 is too many here: the same request at 24,540 tokens ran past the timeout on Graviton2.
+  up to the limit, took 549 to 557 s there; with the shortest questions, 121 of them, it took
+  499 s on Graviton3, about 640 s on Graviton2. A question after a long state costs about as much
+  as 50 state tokens, so the v1 stack's 24,576 is too many here: the same request at 24,540 tokens
+  ran past the timeout on Graviton2.
 - Every limit is checked before any image is decoded or any token is run. A request that breaks one,
   or carries an image that cannot be read, gets a 422 that says why; anything else is a 500.
 - A Function URL request is at most 6 MB, base64 images included.
@@ -381,7 +377,7 @@ Q8_0 decoder and Q8_0 vision tower the build makes. Warm requests, server-side m
 A request costs $0.000133 per second it runs (10 GB of arm64 at $0.0000133334 per GB-second). Each
 image takes 8.8 s to encode on Graviton2 and 6.3 s on Graviton3, before its 250 to 280 state
 tokens. Graviton4 hosts, which Lambda also gives, ran 250 tokens in 1.5 s and one photo with three
-questions in 8.1 s. As with v1, ask several questions in one request: the state is decoded once.
+questions in 8.1 s. Ask several questions in one request: the state is decoded once.
 
 Max Memory Used, which counts the page cache, was 8,388 MB on every one of 75 requests, the
 16,384-token ones and those with four images included: 1.8 GB under the 10,240 MB limit. That
@@ -400,12 +396,9 @@ pixels) and with the same files on x86:
 | 40 photos in 35 requests: one to four images, PNG, JPEG, WebP and GIF, strips 640 x 40 and 30 x 371, an empty state, long states | 104 | 104 | 0.008 | 104 |
 
 Both differences from the reference are near-ties, a gap of at most 0.007 between its top two
-answers. The text rows include the f16 tower's deploy; the decoder, and so the text answers, are
-the same.
-
-A later deploy agreed as closely: 53 of 53 text
-questions and 104 of 104 image questions gave the reference's top answer, with mean largest
-probability differences of 0.008 and 0.008.
+answers. The text rows came partly from a deploy with the f16 vision tower, whose decoder is the
+same; a deploy of this build gave the reference's top answer to 53 of 53 text questions and 104 of
+104 image questions, mean largest probability differences 0.008 and 0.008.
 
 The log has a line per request with the host CPU, the wait for the load (above 0 on a new
 environment), and the images', the state's and each question's milliseconds.
