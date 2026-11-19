@@ -48,6 +48,10 @@ class DecisionBackend(Backend, Protocol):
         """What the health check reports of it: `backend`, `device` and `dtype` at least."""
         ...
 
+    def close(self) -> None:
+        """Releases what it holds, such as the MLX backend's worker thread."""
+        ...
+
 
 def is_model_checkpoint(checkpoint: str, *, revision: str | None = None) -> bool:
     """Whether `checkpoint`, a directory or a Hub repo, has a decision_config.json of this
@@ -129,9 +133,8 @@ class DecisionEngine:
         )
 
     def close(self) -> None:
-        """Release what the backend holds: the MLX backend's worker thread."""
-        if close := getattr(self.backend, "close", None):
-            close()
+        """Releases what the backend holds; `serve` calls it at shutdown."""
+        self.backend.close()
 
     def describe(self) -> dict[str, Any]:
         """What `serve`'s health check reports."""
@@ -165,7 +168,8 @@ def load_decision_engine(
 ) -> DecisionEngine:
     """The model checkpoint `checkpoint`, a directory or a Hub repo, on `device`. Its interface
     files are read and checked before the backend loads the weights. `reuse_state=False` runs each
-    question as one full prompt; on CUDA in bfloat16 that is the reference."""
+    question as one full prompt; on CUDA in bfloat16 that is the reference. An MLX artifact
+    (`convert-mlx`) runs on mlx alone."""
     if device.split(":", 1)[0] not in _DEVICES:
         raise ValueError(f"model checkpoints run on {', '.join(_DEVICES)}, not {device!r}")
     if dtype is not None and dtype not in _DTYPES:
@@ -182,18 +186,22 @@ def load_decision_engine(
             stacklevel=2,
         )
     tokenizer, weight = load_tokenizer(path), load_readout(path)
-    if device == "mlx":
-        from .backends.mlx import load_backend
+    backend: DecisionBackend
+    if device == "mlx":  # questions run one at a time: max_batch and max_batch_tokens don't apply
+        from .backends.mlx import load_backend as load_mlx_backend
+
+        backend = load_mlx_backend(path, dtype=dtype, reuse_state=reuse_state)
     else:
         from .backends.transformers import load_backend
-    backend = load_backend(
-        path,
-        device=device,
-        dtype=dtype,
-        reuse_state=reuse_state,
-        max_batch=max_batch,
-        max_batch_tokens=max_batch_tokens,
-    )
+
+        backend = load_backend(
+            path,
+            device=device,
+            dtype=dtype,
+            reuse_state=reuse_state,
+            max_batch=max_batch,
+            max_batch_tokens=max_batch_tokens,
+        )
     engine = DecisionEngine(
         backend,
         tokenizer,
