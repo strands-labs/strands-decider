@@ -57,8 +57,6 @@ def load_backend(
     config.audio_config = None
     if processor is None:
         config.vision_config = None
-    # Gemma 4's bidirectional image blocks are replaced by the prefix_bidir mask in any case.
-    config.get_text_config().use_bidirectional_attention = None
     torch_dtype = getattr(torch, dtype) if dtype else _DEVICE_DTYPES[torch.device(device).type]
     model = _from_pretrained(_ARCHITECTURES[config.model_type], path, config, torch_dtype)
     use_prefix_bidir(model)
