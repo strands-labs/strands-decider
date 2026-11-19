@@ -1,7 +1,7 @@
-"""`strands-decider serve` and `ask` on decision checkpoints (src/strands_decider/decision.py),
-with tiny random-weight checkpoints made in the test (tests/decision_support.py): which
-checkpoints take the decision path, the HTTP API with text and images, and the refusals. v1
-checkpoints keep v1's path; tests/test_server.py and tests/test_cli_exit.py cover it."""
+"""`strands-decider serve` and `ask` on decision checkpoints, with tiny random-weight checkpoints
+(tests/decision_support.py): which checkpoints take the decision path, the HTTP API with text
+and images, and its refusals. v1 checkpoints keep v1's path; tests/test_server.py and
+tests/test_cli_exit.py cover it."""
 
 from __future__ import annotations
 
@@ -12,21 +12,16 @@ from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 import pytest
+import torch
 from fastapi.testclient import TestClient
 from typer.testing import CliRunner
 
 from decision_support import GEMMA4, decision_checkpoint, image_b64, request  # isort: skip
 
 from strands_decider import cli, decision, server
-from strands_decider.core import Request, evaluate, render
-from strands_decider.decision import (
-    DECISION,
-    INTERMEDIATE,
-    DecisionEngine,
-    checkpoint_dir,
-    checkpoint_kind,
-    load_decision_engine,
-)
+from strands_decider.backends import transformers as tb
+from strands_decider.core import Request, evaluate, load_tokenizer, render
+from strands_decider.decision import is_decision_checkpoint, load_decision_engine
 from strands_decider.schema import SystemOneResponse
 
 
@@ -35,13 +30,10 @@ def ckpt(tmp_path_factory):
     return decision_checkpoint(tmp_path_factory.mktemp("decision") / "ckpt", GEMMA4)
 
 
-@pytest.fixture
-def intermediate(tmp_path):
-    """A directory with a decision_config.json from before the `interface` field."""
-    path = tmp_path / "mid"
-    path.mkdir()
-    (path / "decision_config.json").write_text(json.dumps({"format_version": 1, "token_ids": []}))
-    return path
+@pytest.fixture(scope="module")
+def text_only(tmp_path_factory):
+    path = tmp_path_factory.mktemp("text") / "ckpt"
+    return decision_checkpoint(path, GEMMA4, decision={"inputs": ["text"]})
 
 
 @pytest.fixture(autouse=True)
@@ -54,26 +46,23 @@ def _ask(*args):
 
 
 def _client(path, **kwargs) -> TestClient:
-    return TestClient(server.create_app(str(path), device="cpu", **{"warmup": False, **kwargs}))
+    return TestClient(server.create_app(str(path), **{"device": "cpu", "warmup": False, **kwargs}))
 
 
 # ---- which checkpoints take the decision path ----------------------------------------------
 
 
-def test_checkpoint_kind(ckpt, tmp_path, intermediate):
-    assert checkpoint_kind(str(ckpt)) == DECISION
-    assert checkpoint_kind(str(intermediate)) == INTERMEDIATE
-    assert checkpoint_kind(str(tmp_path / "x")) is None  # no such path: v1 reports it
-    other = tmp_path / "other"
-    other.mkdir()
-    assert checkpoint_kind(str(other)) is None  # no decision_config.json: v1
-    (other / "decision_config.json").write_text(json.dumps({"format_id": "another-format"}))
-    assert checkpoint_kind(str(other)) is None  # another decision model's file
-
-
-def test_a_hub_repo_is_its_snapshot(ckpt, monkeypatch):
+def test_which_checkpoints_take_the_decision_path(ckpt, tmp_path, monkeypatch):
     import huggingface_hub
     from huggingface_hub.errors import RepositoryNotFoundError
+
+    assert is_decision_checkpoint(str(ckpt))
+    assert not is_decision_checkpoint(str(tmp_path / "x"))  # no such path: v1 reports it
+    other = tmp_path / "other"
+    other.mkdir()
+    assert not is_decision_checkpoint(str(other))  # no decision_config.json
+    (other / "decision_config.json").write_text(json.dumps({"format_id": "another-format"}))
+    assert not is_decision_checkpoint(str(other))  # another decision model's
 
     calls = []
 
@@ -86,27 +75,12 @@ def test_a_hub_repo_is_its_snapshot(ckpt, monkeypatch):
         return str(ckpt)
 
     monkeypatch.setattr(huggingface_hub, "snapshot_download", snapshot)
-    assert checkpoint_kind("org/decision", revision="v2") == DECISION
-    assert checkpoint_dir("org/missing") is None  # v1's loader reports it
+    assert is_decision_checkpoint("org/decision", revision="v2")  # a Hub repo is its snapshot
+    assert not is_decision_checkpoint("org/missing")
     assert calls == [("org/decision", "v2"), ("org/missing", None)]
 
 
-def test_a_mistyped_path_keeps_v1s_message(tmp_path):
-    out = _ask(str(tmp_path / "no" / "such"), "--state", "x", "--noul", "y?", "--device", "cpu")
-    assert out.exit_code != 0 and "not a local directory" in str(out.exception)
-
-
 # ---- the engine ----------------------------------------------------------------------------
-
-
-def test_the_engine_answers_requests(ckpt):
-    engine = load_decision_engine(str(ckpt), device="cpu", model_name="tiny")
-    assert isinstance(engine, DecisionEngine) and engine.image_problem is None
-    out = engine.evaluate(Request.model_validate(request([image_b64(64, 48)])))
-    assert isinstance(out, SystemOneResponse) and out.model == "tiny"
-    assert set(out.answers) == {"late", "team", "mood"} and out.usage.output_tokens == 3
-    assert out.answers["team"].type == "choice" and out.answers["mood"].type == "score"
-    assert out.usage.input_tokens > 266 + 3 * 20  # the state once, then each question
 
 
 def test_the_engine_answers_as_the_core_does(ckpt):
@@ -119,70 +93,48 @@ def test_the_engine_answers_as_the_core_does(ckpt):
         assert engine.evaluate(req) == SystemOneResponse.model_validate(want)
 
 
-def test_options_are_checked():
-    decision.check_options("cuda:1", "bfloat16")
-    with pytest.raises(ValueError, match="decision checkpoints run on cpu, cuda, mps, not 'tpu'"):
-        decision.check_options("tpu", None)
-    with pytest.raises(ValueError, match="--dtype is one of float32, bfloat16"):
-        decision.check_options("cpu", "float16")
-
-
 # ---- serve ---------------------------------------------------------------------------------
 
 
-def test_serve_routes_a_decision_checkpoint(ckpt):
+def test_serve_answers_a_decision_checkpoint(ckpt):
     app = server.create_app(str(ckpt), device="cpu", model_name="tiny")  # warm-up included
     with TestClient(app) as client:
         health = client.get("/health").json()
         assert health["status"] == "ok" and health["checkpoint"] == str(ckpt)
+        assert health["model"] == "tiny" and health["images"] is True
         assert (health["backend"], health["device"], health["dtype"]) == (
             "transformers",
             "cpu",
             "float32",
         )
-        assert health["images"] is True and health["reuse_state"] is True
-        assert health["model"] == "tiny"
+        assert (health["reuse_state"], health["max_concurrency"]) == (True, 1)
         r = client.post("/v1/systemone", json=request([image_b64(50, 90, "JPEG")]))
         assert r.status_code == 200, r.text
         body = r.json()
         assert body["model"] == "tiny" and "latency_ms" in body
         assert set(body["answers"]["team"]["probabilities"]) == {"billing", "shipping", "sales"}
-        bad = client.post("/v1/systemone", json=request(["not base64!"]))
-        assert bad.status_code == 422 and "base64" in bad.json()["detail"]
+        assert body["usage"]["output_tokens"] == 3
         assert client.post("/invocations", json=request()).status_code == 200
 
 
-def test_no_prefix_cache_runs_full_passes(ckpt):
-    with _client(ckpt, use_prefix_cache=False) as client:
-        assert client.get("/health").json()["reuse_state"] is False
-        assert client.post("/v1/systemone", json=request()).status_code == 200
-
-
-def test_serve_takes_a_dtype(ckpt):
-    with _client(ckpt, dtype="bfloat16") as client:
-        assert client.get("/health").json()["dtype"] == "bfloat16"
-
-
-def test_serve_refusals_over_http(ckpt, tmp_path):
-    """Any audio but null and images on a text-only checkpoint are refused with 422. The number
-    of images isn't checked: five are answered, and the prompt's length bounds how many fit."""
+def test_serve_refuses_what_the_interface_refuses(ckpt, text_only):
+    """Any audio but null, a body that isn't an object, and images on a text-only checkpoint get
+    422. A request may omit its state (the core's request model, not v1's). The number of images
+    isn't checked: the prompt's length bounds it."""
     img = image_b64(64, 48)
     with _client(ckpt) as client:
         for audio in (["UklGRiQAAABXQVZF"], []):
             r = client.post("/v1/systemone", json={**request(), "audio": audio})
             assert r.status_code == 422 and "audio input is not supported" in r.json()["detail"]
         assert client.post("/v1/systemone", json={**request(), "audio": None}).status_code == 200
+        assert client.post("/v1/systemone", json=[request()]).status_code == 422
+        bad = client.post("/v1/systemone", json=request(["not base64!"]))
+        assert bad.status_code == 422 and "base64" in bad.json()["detail"]
+        body = request()
+        empty = client.post("/v1/systemone", json={**body, "state": ""}).json()
+        del body["state"]
+        assert client.post("/v1/systemone", json=body).json()["answers"] == empty["answers"]
         assert client.post("/v1/systemone", json=request([img] * 5)).status_code == 200
-        r = client.post("/v1/systemone", json=[request()])
-        assert r.status_code == 422  # not a JSON object
-    engine = load_decision_engine(str(ckpt), device="cpu")
-    rendered = render(Request.model_validate(request([img] * 5)), engine.tokenizer)
-    limit = max(len(q.ids) for q in rendered.questions.values()) - 1
-    with _client(ckpt, max_length=limit) as client:
-        r = client.post("/v1/systemone", json=request([img] * 5))
-        assert r.status_code == 422 and f"exceeds the limit of {limit} tokens" in r.json()["detail"]
-        assert client.post("/v1/systemone", json=request([img] * 4)).status_code == 200
-    text_only = decision_checkpoint(tmp_path / "t", GEMMA4, decision={"inputs": ["text"]})
     with _client(text_only) as client:
         r = client.post("/v1/systemone", json=request([img]))
         assert r.status_code == 422
@@ -190,35 +142,37 @@ def test_serve_refusals_over_http(ckpt, tmp_path):
         assert client.get("/health").json()["images"] is False
 
 
-def test_a_request_needs_no_state(ckpt):
-    """The core's request model, not v1's: a request without a state is one with an empty one."""
-    body = request()
-    with _client(ckpt) as client:
-        empty = client.post("/v1/systemone", json={**body, "state": ""})
-        del body["state"]
-        r = client.post("/v1/systemone", json=body)
-        assert r.status_code == 200, r.text
-        assert r.json()["answers"] == empty.json()["answers"]
+@pytest.mark.parametrize("cause", ["refused-settings", "unreadable"])
+def test_a_processor_that_fails_refuses_images_only_and_names_no_path(tmp_path, monkeypatch, cause):
+    """An image processor the core refuses, or one that can't be built, refuses image requests
+    with a fixed reason; the error, which may name local paths, is only in the warning."""
+    if cause == "refused-settings":
+        path = decision_checkpoint(tmp_path / "p", GEMMA4, processor={"max_soft_tokens": 560})
+        match = "max_soft_tokens"
+    else:
+        path = decision_checkpoint(tmp_path / "p", GEMMA4)
 
+        def unreadable(p, unified):
+            raise OSError(f"{p}/processor_config.json: permission denied")
 
-def test_a_422_never_names_a_local_path(tmp_path, monkeypatch):
-    from strands_decider.backends import transformers as tb
-
-    path = decision_checkpoint(tmp_path / "leak", GEMMA4)
-
-    def unreadable(p, unified):
-        raise OSError(f"{p}/processor_config.json: permission denied")
-
-    monkeypatch.setattr(tb, "load_image_processor", unreadable)
-    with pytest.warns(UserWarning, match="permission denied"), _client(path) as client:
+        monkeypatch.setattr(tb, "load_image_processor", unreadable)
+        match = "permission denied"
+    with pytest.warns(UserWarning, match=match), _client(path) as client:
         r = client.post("/v1/systemone", json=request([image_b64(64, 48)]))
+        assert client.post("/v1/systemone", json=request()).status_code == 200
     assert r.status_code == 422 and r.json()["detail"] == tb.NO_IMAGE_PROCESSOR
     assert str(tmp_path) not in r.text
 
 
-def test_serve_reports_a_runtime_failure_as_500(ckpt, monkeypatch):
+def test_refusals_are_422_and_runtime_faults_500(ckpt, monkeypatch):
+    """A file whose header reads but whose pixels don't, refused only when the backend decodes
+    it, is still the caller's; any other failure answering an accepted request is the server's."""
+    good = base64.b64decode(image_b64(64, 48))
+    broken = base64.b64encode(good[:40] + b"\x00" * 64 + good[-12:]).decode()  # IHDR intact
     app = server.create_app(str(ckpt), device="cpu", warmup=False)
     with TestClient(app, raise_server_exceptions=False) as client:
+        r = client.post("/v1/systemone", json=request([broken]))
+        assert r.status_code == 422 and "image could not be" in r.json()["detail"]
 
         def fails(*_a, **_k):
             raise ValueError("an internal check")
@@ -227,10 +181,21 @@ def test_serve_reports_a_runtime_failure_as_500(ckpt, monkeypatch):
         assert client.post("/v1/systemone", json=request()).status_code == 500
 
 
-def test_serve_answers_concurrent_requests_alike(ckpt):
+@pytest.mark.parametrize(
+    "device",
+    [
+        "cpu",
+        pytest.param(
+            "mps",
+            marks=pytest.mark.skipif(not torch.backends.mps.is_available(), reason="needs MPS"),
+        ),
+    ],
+)
+def test_concurrent_requests_get_the_same_answers(ckpt, device):
+    """Three requests at once on the backend; on MPS, where Metal aborts the process when two
+    threads use it at once, the backend's calls take turns."""
     body = request([image_b64(64, 48)])
-    with _client(ckpt) as client:
-        assert client.get("/health").json()["max_concurrency"] == 1
+    with _client(ckpt, device=device, max_concurrency=3) as client:
         with ThreadPoolExecutor(max_workers=6) as pool:
             got = list(pool.map(lambda _: client.post("/v1/systemone", json=body), range(6)))
     assert all(r.status_code == 200 for r in got)
@@ -251,12 +216,8 @@ class _SlowBackend:
         return np.zeros((len(questions), 64), dtype=np.float32)
 
 
-def _slow_loader(path, **settings):
-    return _SlowBackend(path, **settings)
-
-
 def test_a_full_engine_answers_503_and_refusals_do_not_wait(ckpt, monkeypatch):
-    monkeypatch.setitem(decision.BACKENDS, "slow", "test_decision_serving:_slow_loader")
+    monkeypatch.setitem(decision.BACKENDS, "slow", "test_decision_serving:_SlowBackend")
     app = server.create_app(str(ckpt), device="slow", warmup=False, queue_timeout=0.1)
     with TestClient(app) as client:
         assert client.get("/health").json()["backend"] == "slow"
@@ -273,94 +234,64 @@ def test_a_full_engine_answers_503_and_refusals_do_not_wait(ckpt, monkeypatch):
             assert team == {"billing": 0.3333, "shipping": 0.3333, "sales": 0.3333}
 
 
-@pytest.mark.skipif(not __import__("torch").backends.mps.is_available(), reason="needs Apple's MPS")
-def test_serve_on_mps_answers_concurrent_requests_alike(ckpt):
-    body = request([image_b64(64, 48)])
-    app = server.create_app(str(ckpt), device="mps", warmup=False, max_concurrency=3)
-    with TestClient(app) as client:
-        with ThreadPoolExecutor(max_workers=6) as pool:
-            got = list(pool.map(lambda _: client.post("/v1/systemone", json=body), range(6)))
-    assert all(r.status_code == 200 for r in got)
-    assert len({json.dumps(r.json()["answers"], sort_keys=True) for r in got}) == 1
-
-
-def test_serve_refuses_an_intermediate_checkpoint_and_a_device_map(ckpt, intermediate):
-    with pytest.raises(ValueError, match="predates the decision interface"):
-        server.create_app(str(intermediate), device="cpu")
-    with pytest.raises(ValueError, match="device-map"):
-        server.create_app(str(ckpt), device="cuda", device_map="auto")
-
-
-def test_flags_that_do_not_apply_are_named(ckpt, tmp_path):
-    with pytest.warns(UserWarning, match="--vision is for v1"):
-        server.create_app(str(ckpt), device="cpu", vision=True, warmup=False)
-    with pytest.raises(ValueError, match="decision checkpoints run on cpu, cuda, mps"):
-        server.create_app(str(ckpt), device="mlx")
-    with pytest.raises(ValueError, match="--dtype is for decision checkpoints"):
-        server.create_app(str(tmp_path), device="cpu", dtype="bfloat16")
-
-
-def test_serve_command_options(ckpt, tmp_path, intermediate, monkeypatch):
-    """`serve` takes --dtype, --max-concurrency and --queue-timeout for decision checkpoints,
-    refuses --dtype and --revision for v1 ones, and refuses an intermediate checkpoint, each
-    before anything is announced."""
+def test_serve_command_options(ckpt, tmp_path, monkeypatch):
+    """`serve` takes --dtype, --no-prefix-cache, --max-concurrency and --queue-timeout for a
+    decision checkpoint; options for the other kind of checkpoint are refused, each before
+    anything is announced, and --vision warns."""
     import uvicorn
 
     started = []
     monkeypatch.setattr(uvicorn, "run", lambda app, **kw: started.append((app, kw)))
     args = ["serve", str(ckpt), "--device", "cpu", "--no-warmup", "--dtype", "bfloat16",
-            "--max-concurrency", "2", "--queue-timeout", "5"]  # fmt: skip
+            "--no-prefix-cache", "--max-concurrency", "2", "--queue-timeout", "5",
+            "--max-length", "1000"]  # fmt: skip
     out = CliRunner().invoke(cli.app, args)
     assert out.exit_code == 0, out.output
     [(app, kw)] = started
     assert kw == {"host": "127.0.0.1", "port": 8000, "workers": 1}
     with TestClient(app) as client:
         health = client.get("/health").json()
-    assert (health["dtype"], health["max_concurrency"], health["queue_timeout"]) == (
-        "bfloat16",
-        2,
-        5.0,
-    )
+        assert client.post("/v1/systemone", json=request()).status_code == 200
+    keys = ("dtype", "reuse_state", "max_concurrency", "queue_timeout", "max_length")
+    assert [health[k] for k in keys] == ["bfloat16", False, 2, 5.0, 1000]
     for bad, hint in (
-        ([str(tmp_path), "--device", "cpu", "--dtype", "bfloat16"], "--dtype is for decision"),
-        ([str(tmp_path), "--device", "cpu", "--revision", "main"], "--revision is for decision"),
-        ([str(intermediate), "--device", "cpu"], "predates the decision interface"),
-        ([str(ckpt), "--device", "cpu", "--dtype", "float16"], "--dtype is one of"),
-        ([str(ckpt), "--device", "cpu", "--max-length", "0"], "greater than or equal to 1"),
+        ([str(tmp_path), "--dtype", "bfloat16"], "--dtype is for decision"),
+        ([str(tmp_path), "--revision", "main"], "--revision is for decision"),
+        ([str(tmp_path), "--max-length", "100"], "--max-length is for decision"),
+        ([str(ckpt), "--dtype", "float16"], "--dtype is one of"),
+        ([str(ckpt), "--max-length", "0"], "greater than or equal to 1"),
+        ([str(ckpt), "--device-map", "auto"], "--device-map is for v1"),
+        ([str(ckpt), "--device", "tpu"], "decision checkpoints run on cpu, cuda, mps"),
     ):
-        out = CliRunner().invoke(cli.app, ["serve", *bad])
+        out = CliRunner().invoke(
+            cli.app, ["serve", *bad] + ["--device", "cpu"] * ("tpu" not in bad)
+        )
         assert out.exit_code == 2 and "serving" not in out.output, out.output
         assert hint in " ".join(out.output.split()).replace("│ ", ""), out.output
-    assert len(started) == 1
+    with pytest.warns(UserWarning, match="--vision is for v1"):
+        CliRunner().invoke(cli.app, ["serve", str(ckpt), "--device", "cpu", "--vision"])
+    assert len(started) == 2
 
 
-def test_serve_takes_a_max_length(ckpt, monkeypatch, capsys):
+def test_serve_takes_a_max_length(ckpt, capsys):
     """`--max-length` is the longest prompt served, in place of max_length_validated (4096
-    here): a prompt of that many tokens is answered and a longer one refused with 422, never
-    truncated; a value past the validated length warns; and a value below the warm-up prompts'
-    length skips them rather than fail the start."""
-    import uvicorn
-
-    engine = load_decision_engine(str(ckpt), device="cpu")
-    rendered = render(Request.model_validate(request()), engine.tokenizer)
+    here): a prompt of that many tokens is answered and a longer one refused, never truncated,
+    images included; a value past the validated length warns; and one below the warm-up
+    prompts' length skips them rather than fail the start."""
+    req = request([image_b64(64, 48)] * 2)
+    rendered = render(Request.model_validate(req), load_tokenizer(ckpt))
     longest = max(len(q.ids) for q in rendered.questions.values())
-    started = []
-    monkeypatch.setattr(uvicorn, "run", lambda app, **kw: started.append(app))
     for limit, status in ((longest, 200), (longest - 1, 422)):
-        args = ["serve", str(ckpt), "--device", "cpu", "--no-warmup", "--max-length", str(limit)]
-        out = CliRunner().invoke(cli.app, args)
-        assert out.exit_code == 0, out.output
-        with TestClient(started[-1]) as client:
-            assert client.get("/health").json()["max_length"] == limit
-            got = client.post("/v1/systemone", json=request())
-        assert got.status_code == status, got.text
+        with _client(ckpt, max_length=limit) as client:
+            r = client.post("/v1/systemone", json=req)
+        assert r.status_code == status, r.text
         if status == 422:
-            assert f"exceeds the limit of {limit} tokens" in got.json()["detail"]
+            assert f"exceeds the limit of {limit} tokens" in r.json()["detail"]
     with pytest.warns(UserWarning, match="past the 4096 the checkpoint was validated at"):
         with _client(ckpt, max_length=8192):
             pass
-    with TestClient(server.create_app(str(ckpt), device="cpu", max_length=8)) as client:
-        assert client.get("/health").json()["max_length"] == 8
+    with TestClient(server.create_app(str(ckpt), device="cpu", max_length=8)):
+        pass
     assert "a warm-up request was skipped" in capsys.readouterr().err
 
 
@@ -371,7 +302,7 @@ def test_ask_on_a_decision_checkpoint(ckpt, tmp_path):
     img = tmp_path / "x.png"
     img.write_bytes(base64.b64decode(image_b64(64, 48)))
     out = _ask(str(ckpt), "--state", "a b c", "--noul", "a b?", "--choice", "which?=billing,sales",
-               "--image", str(img), "--device", "cpu", "--json")  # fmt: skip
+               "--image", str(img), "--device", "cpu", "--dtype", "bfloat16", "--json")  # fmt: skip
     assert out.exit_code == 0, out.output
     answers = json.loads(out.stdout)["answers"]
     assert set(answers) == {"noul_0", "choice_0"}
@@ -379,17 +310,14 @@ def test_ask_on_a_decision_checkpoint(ckpt, tmp_path):
     assert cli._exit_fast
 
 
-def test_ask_refusals_are_usage_errors(ckpt, tmp_path, intermediate):
+def test_ask_refusals_are_usage_errors(ckpt, text_only, tmp_path):
     img = tmp_path / "x.png"
     img.write_bytes(base64.b64decode(image_b64(64, 48)))
-    text_only = decision_checkpoint(tmp_path / "t", GEMMA4, decision={"inputs": ["text"]})
     for args, hint in (
-        ([str(intermediate), "--device", "cpu"], "predates the decision interface"),
         ([str(text_only), "--image", str(img), "--device", "cpu"], "does not take images"),
-        ([str(ckpt), "--device", "mlx"], "decision checkpoints run on"),
+        ([str(ckpt), "--device", "tpu"], "decision checkpoints run on"),
         ([str(ckpt), "--device", "cpu", "--dtype", "float16"], "--dtype is one of"),
+        ([str(tmp_path), "--device", "cpu", "--dtype", "bfloat16"], "--dtype is for decision"),
     ):
         out = _ask(*args[:1], "--state", "x", "--noul", "y?", *args[1:])
         assert out.exit_code == 2 and hint in " ".join(out.output.split()), out.output
-    out = _ask(str(ckpt), "--state", "x", "--noul", "y?", "--device", "cpu", "--dtype", "bfloat16")
-    assert out.exit_code == 0, out.output

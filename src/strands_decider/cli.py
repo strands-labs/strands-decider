@@ -224,26 +224,16 @@ def ask_cmd(
         raise typer.BadParameter("ask at least one --noul / --choice / --score question")
 
     selected_device = resolve_device(device)
-    from .decision import DECISION, INTERMEDIATE, checkpoint_kind, refuse_intermediate
+    from .decision import is_decision_checkpoint, load_decision_engine
 
-    kind = checkpoint_kind(checkpoint, revision=revision)
-    if kind == INTERMEDIATE:
-        raise typer.BadParameter(str(refuse_intermediate(checkpoint)))
-    if kind == DECISION:
-        # A decision checkpoint: images go in the request, and the checkpoint's
-        # decision_config.json says whether it takes them.
-        from .decision import check_options, load_decision_engine
-
+    if is_decision_checkpoint(checkpoint, revision=revision):
+        # Images go in the request; the checkpoint's decision_config.json says if it takes them.
         try:
-            check_options(selected_device, dtype)
-        except ValueError as e:
-            raise typer.BadParameter(str(e)) from e
-        engine = load_decision_engine(
-            checkpoint, device=selected_device, dtype=dtype, revision=revision
-        )
-        try:
+            engine = load_decision_engine(
+                checkpoint, device=selected_device, dtype=dtype, revision=revision
+            )
             response = engine.ask(state, questions, _base64_files(image))
-        except ValueError as e:  # the request's fault: an image or a prompt it refuses
+        except ValueError as e:  # a device or dtype, an image or a prompt it refuses
             raise typer.BadParameter(str(e)) from e
     elif dtype is not None or revision is not None:
         flag = "--dtype" if dtype is not None else "--revision"

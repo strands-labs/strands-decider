@@ -18,19 +18,15 @@ from typing import Any
 import anyio
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
-from pydantic import ValidationError
 
 from . import __version__
 from .core import Request as DecisionRequest
 from .decision import (
-    DECISION,
-    INTERMEDIATE,
     DecisionEngine,
     EngineBusy,
     check_options,
-    checkpoint_kind,
+    is_decision_checkpoint,
     load_decision_engine,
-    refuse_intermediate,
 )
 from .infer import EngineConfig, SystemOneEngine, load_mlx
 from .modeling import StrandsDeciderModel, refuse_token_readout
@@ -93,10 +89,6 @@ def _warm_up_image(engine: SystemOneEngine, state: str, question: Question) -> N
     engine.evaluate(SystemOneRequest(state=state, questions={"q": question}, images=[image]))
 
 
-# Either kind of engine: v1's, or a decision checkpoint's.
-Engine = SystemOneEngine | DecisionEngine
-
-
 def create_app(
     checkpoint: str,
     *,
@@ -112,55 +104,52 @@ def create_app(
     build_engine: Callable[[], SystemOneEngine] | None = None,
     max_concurrency: int | None = None,
     dtype: str | None = None,
-    queue_timeout: float | None = 60.0,
+    queue_timeout: float = 60.0,
     revision: str | None = None,
     max_length: int | None = None,
 ) -> FastAPI:
     if max_concurrency is not None and max_concurrency < 1:
         raise ValueError("--max-concurrency must be at least 1")
-    # A decision checkpoint is served by the core and a decision backend; anything else takes
-    # v1's path below, unchanged. Tests inject `build_engine` and skip this.
-    kind = checkpoint_kind(checkpoint, revision=revision) if build_engine is None else None
-    if kind == INTERMEDIATE:
-        raise refuse_intermediate(checkpoint)
-    decision = kind == DECISION
-    if decision:
+
+    # Identify the response's `model` by the checkpoint served, so multiple servers
+    # on the same host cannot be confused. HF repo ids ("org/name") collapse to `name`.
+    resolved_name = model_name or os.path.basename(checkpoint.rstrip("/")) or checkpoint
+
+    # A decision checkpoint gets its own app; anything else takes v1's path below, unchanged.
+    # Tests that inject a v1 engine (`build_engine`) skip the check.
+    if build_engine is None and is_decision_checkpoint(checkpoint, revision=revision):
         if device_map:
             raise ValueError(
                 "--device-map is for v1 checkpoints; a decision checkpoint runs on one device"
             )
-        check_options(device, dtype)
         if vision:
             warnings.warn(
                 "--vision is for v1 checkpoints: a decision checkpoint takes images when its "
                 "decision_config.json inputs list them",
                 stacklevel=2,
             )
-        if attn_implementation:
-            warnings.warn(
-                "attn_implementation is for v1 checkpoints: a decision checkpoint runs SDPA",
-                stacklevel=2,
-            )
-    elif build_engine is None:
-        # v1's engines take none of these.
-        for flag, value in (
-            ("--dtype", dtype),
-            ("--revision", revision),
-            ("--max-length", max_length),
-        ):
-            if value is not None:
-                raise ValueError(f"{flag} is for decision checkpoints")
-    if not decision:
-        if device_map and (vision or not device.startswith("cuda")):
-            raise ValueError(
-                "--device-map splits the text torso across CUDA GPUs: use it with cuda"
-            )
-        if vision and device == "mlx":
-            raise ValueError("--vision runs on torch devices (cuda, mps, cpu), not mlx")
-
-    # Identify the response's `model` by the checkpoint served, so multiple servers
-    # on the same host cannot be confused. HF repo ids ("org/name") collapse to `name`.
-    resolved_name = model_name or os.path.basename(checkpoint.rstrip("/")) or checkpoint
+        check_options(device, dtype)
+        return _decision_app(
+            checkpoint,
+            warmup=warmup,
+            device=device,
+            model_name=resolved_name,
+            reuse_state=use_prefix_cache,
+            max_batch=max_batch,
+            max_batch_tokens=max_batch_tokens,
+            dtype=dtype,
+            max_concurrency=max_concurrency or 1,
+            queue_timeout=queue_timeout,
+            revision=revision,
+            max_length=max_length,
+        )
+    for flag, value in (("--dtype", dtype), ("--revision", revision), ("--max-length", max_length)):
+        if value is not None:
+            raise ValueError(f"{flag} is for decision checkpoints")
+    if device_map and (vision or not device.startswith("cuda")):
+        raise ValueError("--device-map splits the text torso across CUDA GPUs: use it with cuda")
+    if vision and device == "mlx":
+        raise ValueError("--vision runs on torch devices (cuda, mps, cpu), not mlx")
 
     config = EngineConfig(
         device=device,
@@ -170,23 +159,7 @@ def create_app(
         max_batch_tokens=max_batch_tokens,
     )
 
-    def _default_build_engine() -> Engine:
-        if decision:
-            # Images follow the checkpoint's decision_config.json `inputs`, not --vision;
-            # --no-prefix-cache runs each question as one full prompt (the reference).
-            return load_decision_engine(
-                checkpoint,
-                device=device,
-                model_name=resolved_name,
-                reuse_state=use_prefix_cache,
-                max_batch=max_batch,
-                max_batch_tokens=max_batch_tokens,
-                dtype=dtype,
-                max_concurrency=max_concurrency or 1,
-                queue_timeout=queue_timeout,
-                revision=revision,
-                max_length=max_length,
-            )
+    def _default_build_engine() -> SystemOneEngine:
         if vision:
             from .vision import load_vision_engine
 
@@ -207,19 +180,13 @@ def create_app(
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         engine = build()
         app.state.engine = engine
-        # None: requests share anyio's default worker pool (40 threads), as sync handlers do. A
-        # decision engine bounds its own concurrency, after its refusals and with a timeout.
-        app.state.limiter = None
-        if max_concurrency and not isinstance(engine, DecisionEngine):
-            app.state.limiter = anyio.CapacityLimiter(max_concurrency)
+        # None: requests share anyio's default worker pool (40 threads), as sync handlers do.
+        app.state.limiter = anyio.CapacityLimiter(max_concurrency) if max_concurrency else None
         try:
             # Listener binds only after lifespan startup returns, so /health (/ping)
             # fails until this is done.
             if warmup:
-                if isinstance(engine, DecisionEngine):
-                    engine.warm_up()
-                else:
-                    warm_up(engine, max_batch, vision=vision)
+                warm_up(engine, max_batch, vision=vision)
             yield
         finally:
             # The MLX engine owns a worker thread (see mlx_engine.MLXEngine); other engines
@@ -240,8 +207,8 @@ def create_app(
     guard = engine_lock if _needs_serialisation(device) else contextlib.nullcontext()
 
     # async, like /ping below: FastAPI runs a sync dependency in the worker thread pool too.
-    async def get_engine(request: Request) -> Engine:
-        engine: Engine = request.app.state.engine
+    async def get_engine(request: Request) -> SystemOneEngine:
+        engine: SystemOneEngine = request.app.state.engine
         return engine
 
     # SageMaker and AgentCore Runtime call /ping and /invocations; each is the same
@@ -250,9 +217,7 @@ def create_app(
     # health check 2 s.
     @app.get("/health")
     @app.get("/ping")
-    async def health(eng: Engine = Depends(get_engine)) -> dict:
-        if isinstance(eng, DecisionEngine):
-            return {"status": "ok", "checkpoint": checkpoint, **eng.describe()}
+    async def health(eng: SystemOneEngine = Depends(get_engine)) -> dict:
         return {
             "status": "ok",
             "model": eng.cfg.model_name,
@@ -265,24 +230,22 @@ def create_app(
             "vision": vision,
         }
 
-    def evaluate(eng: Engine, request: Any) -> SystemOneResponse:
-        # A decision engine bounds its own concurrency and its backend takes turns on MPS, so
-        # its refusals never wait behind the server's lock.
-        lock = contextlib.nullcontext() if isinstance(eng, DecisionEngine) else guard
-        with lock:
+    def evaluate(eng: SystemOneEngine, request: SystemOneRequest) -> SystemOneResponse:
+        with guard:
             return eng.evaluate(request)
 
     # The engine runs in a worker thread. With --max-concurrency N, at most N requests run at
-    # once: for a v1 engine the rest wait on the event loop, holding no thread and no GPU
-    # memory; a decision engine queues them for at most --queue-timeout.
-    async def answer(eng: Engine, request: Any, http: Request) -> JSONResponse:
+    # once and the rest wait on the event loop, holding no thread and no GPU memory.
+    @app.post("/v1/systemone", response_model=SystemOneResponse)
+    @app.post("/invocations", response_model=SystemOneResponse)
+    async def systemone(
+        request: SystemOneRequest, http: Request, eng: SystemOneEngine = Depends(get_engine)
+    ) -> JSONResponse:
         started = time.perf_counter()
         try:
             response = await anyio.to_thread.run_sync(
                 evaluate, eng, request, limiter=http.app.state.limiter
             )
-        except EngineBusy as exc:
-            raise HTTPException(status_code=503, detail=str(exc)) from exc
         except ValueError as exc:
             # Malformed permutation, etc. -- caller error.
             raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -291,70 +254,49 @@ def create_app(
         payload["latency_ms"] = round(elapsed_ms, 2)
         return JSONResponse(content=payload)
 
-    if decision:
-        # The body goes to the core's request model, parsed by pydantic's JSON parser: v1's
-        # model would drop `audio`, which the core refuses, and require a `state`.
-        @app.post("/v1/systemone", response_model=SystemOneResponse)
-        @app.post("/invocations", response_model=SystemOneResponse)
-        async def systemone_decision(
-            http: Request, eng: Engine = Depends(get_engine)
-        ) -> JSONResponse:
-            try:
-                request = DecisionRequest.model_validate_json(await http.body())
-            except ValidationError as exc:
-                raise HTTPException(status_code=422, detail=str(exc)) from exc
-            return await answer(eng, request, http)
-
-    else:
-
-        @app.post("/v1/systemone", response_model=SystemOneResponse)
-        @app.post("/invocations", response_model=SystemOneResponse)
-        async def systemone(
-            request: SystemOneRequest,
-            http: Request,
-            eng: Engine = Depends(get_engine),
-        ) -> JSONResponse:
-            return await answer(eng, request, http)
-
     return app
 
 
-def serve(
-    checkpoint: str,
-    *,
-    host: str = "127.0.0.1",
-    port: int = 8000,
-    device: str = "cuda",
-    use_prefix_cache: bool = True,
-    model_name: str | None = None,
-    max_batch: int = 32,
-    vision: bool = False,
-    max_batch_tokens: int | None = None,
-    device_map: str | None = None,
-    warmup: bool = True,
-    max_concurrency: int | None = None,
-    dtype: str | None = None,
-    queue_timeout: float | None = 60.0,
-    revision: str | None = None,
-    max_length: int | None = None,
-) -> None:
-    import uvicorn
+def _decision_app(checkpoint: str, *, warmup: bool, **engine_options: Any) -> FastAPI:
+    """The app for a decision checkpoint, on the paths and with the responses of v1's. The engine
+    bounds its own concurrency, after its refusals and with a timeout (503), and its backend takes
+    turns on MPS, so the app adds no limiter and no lock."""
 
-    app = create_app(
-        checkpoint,
-        device=device,
-        use_prefix_cache=use_prefix_cache,
-        model_name=model_name,
-        max_batch=max_batch,
-        vision=vision,
-        max_batch_tokens=max_batch_tokens,
-        device_map=device_map,
-        warmup=warmup,
-        max_concurrency=max_concurrency,
-        dtype=dtype,
-        queue_timeout=queue_timeout,
-        revision=revision,
-        max_length=max_length,
+    @contextlib.asynccontextmanager
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        app.state.engine = load_decision_engine(checkpoint, **engine_options)
+        if warmup:  # the listener binds only after this returns
+            app.state.engine.warm_up()
+        yield
+
+    app = FastAPI(
+        title="strands-decider System One",
+        version=__version__,
+        description="Typed, calibrated answers. Choice, Score and Noul over one state.",
+        lifespan=lifespan,
     )
-    # Single worker: the model owns the GPU, and forking more would just duplicate it.
-    uvicorn.run(app, host=host, port=port, workers=1)
+
+    @app.get("/health")
+    @app.get("/ping")
+    async def health(http: Request) -> dict:
+        return {"status": "ok", "checkpoint": checkpoint, **http.app.state.engine.describe()}
+
+    @app.post("/v1/systemone", response_model=SystemOneResponse)
+    @app.post("/invocations", response_model=SystemOneResponse)
+    async def systemone(http: Request) -> JSONResponse:
+        engine: DecisionEngine = http.app.state.engine
+        try:
+            # The core's request model, not v1's: v1's would drop `audio`, which the core
+            # refuses, and require a `state`.
+            request = DecisionRequest.model_validate_json(await http.body())
+            started = time.perf_counter()
+            response = await anyio.to_thread.run_sync(engine.evaluate, request)
+        except EngineBusy as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except ValueError as exc:  # pydantic's ValidationError, or a RequestRefused
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        payload = response.model_dump()
+        payload["latency_ms"] = round((time.perf_counter() - started) * 1000, 2)
+        return JSONResponse(content=payload)
+
+    return app

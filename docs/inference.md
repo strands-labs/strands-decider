@@ -321,7 +321,7 @@ when `decision_config.json` lists `image` in `inputs`, with the `vision` extra i
 (`pip install "strands-decider[vision]"`; the 12B's image processor needs torchvision). A
 request whose `audio` is anything but null is refused with 422.
 
-Options that apply to decision checkpoints only:
+The serving options, as a decision checkpoint takes them:
 
 - `--no-prefix-cache`: one full pass per question, the reference on CUDA in bf16.
 - `--max-batch`, `--max-batch-tokens`: bound the questions of one pass over a state.
@@ -333,9 +333,7 @@ Options that apply to decision checkpoints only:
 - `--revision`: the branch, tag or commit of a checkpoint on the Hub.
 
 `--vision` and `--device-map` are for v1 checkpoints. `/health` reports the backend, device,
-dtype, longest prompt served, whether images are served, and the concurrency. A checkpoint from
-before the interface, whose `decision_config.json` has no `interface` field, is refused: export
-it as a decision checkpoint first.
+dtype, longest prompt served, whether images are served, and the concurrency.
 
 ## Asking many questions is nearly free
 

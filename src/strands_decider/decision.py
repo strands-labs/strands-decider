@@ -27,10 +27,7 @@ if TYPE_CHECKING:
     import numpy as np
     from tokenizers import Tokenizer
 
-    from .core import Backend, RenderedRequest
-
-DECISION = "decision"  # decision_config.json names the interface
-INTERMEDIATE = "intermediate"  # decision_config.json from before the `interface` field
+    from .core import Backend
 
 # The backend for each device kind ("cuda" in "cuda:1"), imported when first used. A loader is
 # called as loader(path, device=, dtype=, reuse_state=, max_batch=, max_batch_tokens=).
@@ -69,27 +66,15 @@ def checkpoint_dir(checkpoint: str, revision: str | None = None) -> str | None:
         return None
 
 
-def checkpoint_kind(checkpoint: str, *, revision: str | None = None) -> str | None:
-    """DECISION, INTERMEDIATE, or None for anything else (a v1 checkpoint, or another decision
-    model's decision_config.json)."""
+def is_decision_checkpoint(checkpoint: str, *, revision: str | None = None) -> bool:
+    """Whether `checkpoint` has a decision_config.json of this interface. Other decision models
+    ship a file of that name too; theirs, like a v1 checkpoint, take v1's path."""
     path = checkpoint_dir(checkpoint, revision)
-    file = os.path.join(path, FILENAME) if path is not None else None
-    if file is None or not os.path.isfile(file):
-        return None
+    if path is None or not os.path.isfile(file := os.path.join(path, FILENAME)):
+        return False
     with open(file, encoding="utf-8") as f:
-        dc = json.load(f)
-    if not isinstance(dc, dict):
-        return None
-    if dc.get("interface") == INTERFACE:
-        return DECISION
-    return INTERMEDIATE if "interface" not in dc and "token_ids" in dc else None
-
-
-def refuse_intermediate(checkpoint: str) -> ValueError:
-    return ValueError(
-        f'{checkpoint}: its {FILENAME} predates the decision interface (it has no "interface" '
-        "field), so it names no prompt: export it as a decision checkpoint first"
-    )
+        config = json.load(f)
+    return isinstance(config, dict) and config.get("interface") == INTERFACE
 
 
 def check_options(device: str, dtype: str | None) -> None:
@@ -119,7 +104,7 @@ class DecisionEngine:
         model_name: str,
         max_length: int | None = None,
         max_concurrency: int = 1,
-        queue_timeout: float | None = 60.0,
+        queue_timeout: float = 60.0,
     ):
         self.backend = backend
         self.tokenizer = tokenizer
@@ -140,35 +125,29 @@ class DecisionEngine:
         problem: str | None = getattr(self.backend, "image_problem", None)
         return problem
 
-    def _render(self, request: Request) -> RenderedRequest:
+    def evaluate(self, request: Request) -> SystemOneResponse:
         if request.images and (problem := self.image_problem):
             raise RequestRefused(problem)
         try:
-            return render(request, self.tokenizer, max_length=self.max_length)
+            rendered = render(request, self.tokenizer, max_length=self.max_length)
         except ValueError as e:
             raise RequestRefused(str(e)) from e
-
-    def evaluate(self, request: Request) -> SystemOneResponse:
-        rendered = self._render(request)
         questions = [list(q.question_ids) for q in rendered.questions.values()]
         if not self._slots.acquire(timeout=self.queue_timeout):
             raise EngineBusy(
                 f"the engine is busy: no slot came free in {self.queue_timeout:g} s "
                 f"({self.max_concurrency} request(s) at a time)"
             )
-        # A ValueError past this point is the runtime's, not the caller's: a 500, not a 422.
+        # From here a ValueError is the runtime's, not the caller's: a 500, not a 422.
         try:
             rows = self.backend.forward(list(rendered.state_ids), questions, rendered.images)
+            answers = read(rows, self.config, rendered, weight=self.weight)
         except RequestRefused:
             raise  # an image file the backend cannot decode
         except ValueError as e:
             raise RuntimeError(f"answering an accepted request failed: {e}") from e
         finally:
             self._slots.release()
-        try:
-            answers = read(rows, self.config, rendered, weight=self.weight)
-        except ValueError as e:
-            raise RuntimeError(f"reading the answers of an accepted request failed: {e}") from e
         return SystemOneResponse.model_validate(
             {
                 "model": self.model_name,
@@ -210,7 +189,7 @@ class DecisionEngine:
         """One request with a question of each kind, and one with an image if images are served,
         so that the first requests don't pay for lazy initialisation."""
         started = time.perf_counter()
-        for request in warm_up_requests(images=self.image_problem is None):
+        for request in _warm_up_requests(images=self.image_problem is None):
             try:
                 self.evaluate(request)
             except RequestRefused as e:  # a served length shorter than the warm-up prompt
@@ -218,7 +197,7 @@ class DecisionEngine:
         print(f"[strands-decider] warmed up in {time.perf_counter() - started:.1f} s")
 
 
-def warm_up_requests(*, images: bool) -> list[Request]:
+def _warm_up_requests(*, images: bool) -> list[Request]:
     state = "A warm-up request, answered before the server accepts requests."
     questions: dict[str, Any] = {
         "noul": {"type": "noul", "instructions": "Is this a warm-up?"},
@@ -252,7 +231,7 @@ def load_decision_engine(
     max_length: int | None = None,
     dtype: str | None = None,
     max_concurrency: int = 1,
-    queue_timeout: float | None = 60.0,
+    queue_timeout: float = 60.0,
     revision: str | None = None,
 ) -> DecisionEngine:
     """A decision checkpoint on `device`, through its backend (`BACKENDS`). The interface's
