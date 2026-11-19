@@ -15,7 +15,7 @@ import torch
 import transformers
 
 # The name the attention function is registered under in transformers; the vision encoder keeps
-# transformers' SDPA.
+# transformers' scaled dot-product attention (SDPA).
 ATTENTION = "strands_decider_prefix_bidir"
 
 
@@ -38,18 +38,19 @@ class StateSplit:
         raise TypeError(f"a StateSplit keeps every token; it cannot be indexed by {index!r}")
 
 
-def _sdpa(
+def _scaled_dot_product_attention(
     query: torch.Tensor,
     key: torch.Tensor,
     value: torch.Tensor,
     mask: torch.Tensor | None,
     scale: float | None,
 ) -> torch.Tensor:
-    """SDPA, never causal, for queries [rows, heads, n, head_dim] over keys and values [rows,
-    kv heads, keys, head_dim]. Grouped keys go to SDPA as they are only with no mask and
-    head_dim at most 256, on CPU or on CUDA in 16 bits: in float32, torch 2.7's CUDA SDPA takes
-    them only in its math kernel, with an n x keys matrix per head. Otherwise each is repeated
-    per query head, as transformers' SDPA attention does; MPS always repeats them."""
+    """torch's scaled dot-product attention, never causal, for queries [rows, heads, n, head_dim]
+    over keys and values [rows, kv heads, keys, head_dim]. Grouped keys go to SDPA as they are
+    only with no mask and head_dim at most 256, on CPU or on CUDA in 16 bits: in float32, torch
+    2.7's CUDA SDPA takes them only in its math kernel, with an n x keys matrix per head.
+    Otherwise each is repeated per query head, as transformers' SDPA attention does; MPS always
+    repeats them."""
     groups = query.shape[1] // key.shape[1]
     gqa = (
         groups > 1
@@ -79,15 +80,18 @@ def _attention(
     question's over every key. Returns [rows, tokens, heads, head_dim] and no attention weights."""
     scale = kwargs.get("scaling")
     if not isinstance(attention_mask, StateSplit):
-        return _sdpa(query, key, value, attention_mask, scale).transpose(1, 2).contiguous(), None
+        out = _scaled_dot_product_attention(query, key, value, attention_mask, scale)
+        return out.transpose(1, 2).contiguous(), None
     s = attention_mask.length
     rows, heads, n, dim = query.shape
     out = query.new_empty(rows, n, heads, dim)
-    out[:, :s] = _sdpa(query[:, :, :s], key[:, :, :s], value[:, :, :s], None, scale).transpose(1, 2)
+    out[:, :s] = _scaled_dot_product_attention(
+        query[:, :, :s], key[:, :, :s], value[:, :, :s], None, scale
+    ).transpose(1, 2)
     # torch 2.7's CUDA SDPA gets 64k+1 queries over a longer run of keys wrong with one key/value
     # head (E2B): such a question also takes the state's last query, whose row is dropped.
     first = s - 1 if (n - s) % 64 == 1 else s
-    rest = _sdpa(query[:, :, first:], key, value, None, scale)
+    rest = _scaled_dot_product_attention(query[:, :, first:], key, value, None, scale)
     out[:, s:] = rest[:, :, s - first :].transpose(1, 2)
     return out, None
 

@@ -216,7 +216,7 @@ def test_serve_command_options(ckpt, tmp_path, monkeypatch):
     assert len(started) == 2
 
 
-def test_serve_takes_a_max_length(ckpt, capsys):
+def test_serve_takes_a_max_length(ckpt, caplog):
     """`--max-length` is the longest prompt served, in place of max_length_validated (8192
     here): a prompt of that many tokens is answered and a longer one refused, never truncated,
     images included; a value past the validated length warns; and one below the warm-up
@@ -232,7 +232,7 @@ def test_serve_takes_a_max_length(ckpt, capsys):
     with pytest.warns(UserWarning, match="past the 8192 the checkpoint was validated at"):
         server.create_app(str(ckpt), device="cpu", warmup=False, max_length=10000)
     server.create_app(str(ckpt), device="cpu", max_length=8)
-    assert "a warm-up request was skipped" in capsys.readouterr().err
+    assert "a warm-up request was skipped" in caplog.text
 
 
 def test_ask_on_a_decision_checkpoint(ckpt, text_only, tmp_path):

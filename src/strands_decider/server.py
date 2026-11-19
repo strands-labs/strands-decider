@@ -10,8 +10,8 @@ from __future__ import annotations
 import base64
 import contextlib
 import io
+import logging
 import os
-import sys
 import threading
 import time
 import warnings
@@ -36,6 +36,8 @@ from .schema import (
     SystemOneRequest,
     SystemOneResponse,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def _needs_serialisation(device: str) -> bool:
@@ -285,8 +287,8 @@ def _warm_up_decision(engine: DecisionEngine) -> None:
         try:
             engine.evaluate(DecisionRequest.model_validate(body))
         except RequestRefused as e:
-            print(f"[strands-decider] a warm-up request was skipped: {e}", file=sys.stderr)
-    print(f"[strands-decider] warmed up in {time.perf_counter() - started:.1f} s")
+            logger.warning("a warm-up request was skipped: %s", e)
+    logger.debug("warmed up in %.1f s", time.perf_counter() - started)
 
 
 def _decision_app(engine: DecisionEngine, checkpoint: str) -> FastAPI:

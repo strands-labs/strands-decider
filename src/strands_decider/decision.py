@@ -8,8 +8,8 @@ unchanged.
 from __future__ import annotations
 
 import json
+import logging
 import os
-import sys
 import threading
 import warnings
 from typing import TYPE_CHECKING, Any, Protocol
@@ -23,6 +23,8 @@ from .schema import SystemOneResponse
 if TYPE_CHECKING:
     import numpy as np
     from tokenizers import Tokenizer
+
+logger = logging.getLogger(__name__)
 
 _DEVICES = ("cpu", "cuda", "mps")
 _DTYPES = ("float32", "bfloat16")
@@ -193,10 +195,12 @@ def load_decision_engine(
         queue_timeout=queue_timeout,
     )
     d = backend.describe()
-    print(
-        f"[strands-decider] decision checkpoint: {d['backend']} on {d['device']} in {d['dtype']}, "
-        f"images {'refused' if engine.image_problem else 'served'}, "
-        + ("state encoded once per request" if reuse_state else "one full pass per question"),
-        file=sys.stderr,
+    logger.debug(
+        "decision checkpoint: %s on %s in %s, images %s, %s",
+        d["backend"],
+        d["device"],
+        d["dtype"],
+        "refused" if engine.image_problem else "served",
+        "state encoded once per request" if reuse_state else "one full pass per question",
     )
     return engine
