@@ -20,7 +20,7 @@ from typing import Any
 
 import numpy as np
 
-from ..core import NO_VISION, RenderedImage, attention_mask
+from ..core import RenderedImage, attention_mask
 from ..core.images import PROCESSOR_CONFIG_FILE
 from .images import image_pixels, load_image_processor
 from .mlx_format import MLX_EXTRA, load_mlx_model, model_config
@@ -144,8 +144,6 @@ class MLXBackend:
     ) -> np.ndarray:
         """Each question after the shared state under prefix_bidir, seeing no other question:
         the final-norm hidden state at each question's last token, float32, [questions, hidden]."""
-        if images and self.image_processor is None:
-            raise ValueError(NO_VISION)
         pixels = [self.image_processor(image_pixels(im))[0] for im in images]
         rows: np.ndarray = self._worker.submit(self._run, state, questions, images, pixels).result()
         return rows
