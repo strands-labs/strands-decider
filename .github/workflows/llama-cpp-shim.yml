@@ -14,6 +14,7 @@ on:
       - 'deploy/lambda/**'
       - 'src/strands_decider/backends/**'
       - 'src/strands_decider/core/**'
+      - 'src/strands_decider/images.py'
       - 'tests/test_llama_cpp_shim.py'
       - '.github/workflows/llama-cpp-shim.yml'
 

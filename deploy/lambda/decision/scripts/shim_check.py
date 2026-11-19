@@ -1,31 +1,18 @@
-"""The llama.cpp shim, built, against transformers on a tiny random Gemma 4 decision checkpoint.
+"""The llama.cpp shim, built, held to transformers on a tiny random Gemma 4 decision checkpoint.
 
-    python shim_check.py --llama-cpp SRC --lib LIB [--work DIR] [--json OUT]
+    python shim_check.py --llama-cpp SRC --lib LIB
 
 SRC is the patched llama.cpp source (its convert_hf_to_gguf.py and gguf-py), LIB the shim
-(`libdecision.so`) built against it. The check needs torch, transformers, safetensors,
-sentencepiece, numpy, tokenizers, pydantic and Pillow, and no GPU and no download; it takes about
-a minute after the build. tests/test_llama_cpp_shim.py runs it, and so does the Lambda image
-build, on the image's own library.
+(`libdecision.so`) built against it. It needs torch, transformers, safetensors, sentencepiece and
+Pillow, and no GPU or download, and takes about a minute. The Lambda image build runs it on the
+image's own library; tests/test_llama_cpp_shim.py runs it too.
 
-The checkpoint, from a fixed seed, is shaped like E2B but tiny: 15 decoder layers, four sliding
-then one full, three times, with KV sharing in the last five, so that, as in E2B, two
-full-attention layers come before the shared ones (llama.cpp runs the shared layers on the output
-row only, so only a full layer before them can show a full layer's mask); per-layer embeddings,
-Gemma 4's whole 262,144-token vocabulary, a vision tower and an audio tower, a random readout,
-and a synthetic tokenizer with Gemma 4's control-token and code ids. It is converted as the image
-build converts it (the decoder in f32), loaded in LlamaCppBackend, and the same prompts run in
-transformers' Gemma4ForConditionalGeneration in float32 with the masks passed per layer type:
+The checkpoint (tiny_checkpoint.py) is converted as the image build converts it, and the
+conversion checked (conversion_check.py). Then LlamaCppBackend runs it, against transformers in
+float32 on the same prompts:
 
-  convert   the converter's pplx-decider loader claims a Qwen3.5 pplx-decider directory and none
-            of the others (ggml-org/llama.cpp#32156); the vision-only mmproj is the vision tower
-            byte for byte, without the audio tower or its keys, and preprocesses as the image
-            processor does; lazy_ranges finds the per-layer embedding table;
   mask      the shim matches the prefix_bidir reference, and for each question is several times
-            further from each reference that differs in one way: a causal state, a causal
-            question, causal throughout, a sliding window (8 tokens, shorter than the prompts),
-            or causal full-attention layers with bidirectional sliding ones, which is what
-            llama.cpp gives without patches/0001 (swa_only);
+            further from the reference under each other mask (tiny_checkpoint.MASKS);
   reuse     several questions in one call give, bit for bit, what each gives alone, in any order;
   images    with two images in the state, the shim matches the reference, which places each
             image's vision-tower rows at its span; swapping the images changes the rows;
@@ -39,78 +26,35 @@ import argparse
 import base64
 import io
 import json
-import os
-import subprocess
 import sys
 import tempfile
 import time
 from pathlib import Path
 
-for _parent in Path(__file__).resolve().parents:
-    if (_parent / "src" / "strands_decider").is_dir():
-        sys.path.insert(0, str(_parent / "src"))
-        break
+import numpy as np
+from conversion_check import check_conversion, convert
+from tiny_checkpoint import MASKS, SEED, VOCAB, Reference, make_checkpoint
 
-import numpy as np  # noqa: E402
+from strands_decider.backends.llama_cpp import LlamaCppBackend, image_pixels
+from strands_decider.core import (
+    DecisionConfig,
+    Request,
+    evaluate,
+    load_readout,
+    load_tokenizer,
+    read,
+    render,
+)
 
-from strands_decider.core import CODE_TOKEN_IDS, CODES, CONTROL_TOKEN_IDS  # noqa: E402
-
-HERE = Path(__file__).resolve().parent
-SEED = 20261110
-VOCAB = 262144
-HIDDEN = 64
 # A relative error of the shim's hidden state against the prefix_bidir reference within which
 # the two agree (the KV cache is f16: 0.007 to 0.026 here), and the factor by which, for each
 # question, every other mask's reference must be further away (18 to 41 times for swa_only, the
 # nearest; a build without patches/0001 is 27 to 35 times nearer swa_only than prefix_bidir).
-AGREE = 0.05
-MISS_FACTOR = 5.0
-GOLDEN_DP = 0.01
-OTHER_MASKS = ("causal_state", "causal_question", "causal", "window_8", "swa_only")
-
-TEXT_CONFIG = {
-    "attention_bias": False, "attention_dropout": 0.0, "attention_k_eq_v": False, "bos_token_id": 2,
-    "enable_moe_block": False, "eos_token_id": 1, "final_logit_softcapping": 30.0, "global_head_dim": 32,
-    "head_dim": 16, "hidden_activation": "gelu_pytorch_tanh", "hidden_size": HIDDEN,
-    "hidden_size_per_layer_input": 16, "initializer_range": 0.1, "intermediate_size": 128,
-    "layer_types": (["sliding_attention"] * 4 + ["full_attention"]) * 3,
-    "max_position_embeddings": 4096, "model_type": "gemma4_text", "num_attention_heads": 2,
-    "num_hidden_layers": 15, "num_key_value_heads": 1, "num_kv_shared_layers": 5, "pad_token_id": 0,
-    "rms_norm_eps": 1e-6,
-    "rope_parameters": {
-        "full_attention": {"partial_rotary_factor": 0.25, "rope_theta": 1000000.0, "rope_type": "proportional"},
-        "sliding_attention": {"rope_theta": 10000.0, "rope_type": "default"},
-    },
-    "sliding_window": 8, "tie_word_embeddings": True, "use_bidirectional_attention": None,
-    "use_double_wide_mlp": True, "vocab_size": VOCAB, "vocab_size_per_layer_input": VOCAB,
-}  # fmt: skip
-VISION_CONFIG = {
-    "attention_bias": False, "attention_dropout": 0.0, "default_output_length": 280, "global_head_dim": 16,
-    "head_dim": 16, "hidden_activation": "gelu_pytorch_tanh", "hidden_size": 32, "initializer_range": 0.1,
-    "intermediate_size": 64, "max_position_embeddings": 4096, "model_type": "gemma4_vision",
-    "num_attention_heads": 2, "num_hidden_layers": 2, "num_key_value_heads": 2, "patch_size": 16,
-    "pooling_kernel_size": 3, "position_embedding_size": 10240, "rms_norm_eps": 1e-6,
-    "rope_parameters": {"rope_theta": 100.0, "rope_type": "default"}, "standardize": False,
-    "use_clipped_linears": True,
-}  # fmt: skip
-AUDIO_CONFIG = {
-    "attention_chunk_size": 12, "attention_context_left": 13, "attention_context_right": 0,
-    "attention_invalid_logits_value": -1e9, "attention_logit_cap": 50.0, "conv_kernel_size": 5,
-    "gradient_clipping": 1e10, "hidden_act": "silu", "hidden_size": 32, "initializer_range": 0.1,
-    "model_type": "gemma4_audio", "num_attention_heads": 2, "num_hidden_layers": 1,
-    "output_proj_dims": HIDDEN, "residual_weight": 0.5, "rms_norm_eps": 1e-6,
-    "subsampling_conv_channels": [8, 4], "use_clipped_linears": True,
-}  # fmt: skip
-PROCESSOR_CONFIG = {
-    "image_processor": {
-        "do_convert_rgb": True, "do_normalize": False, "do_rescale": True, "do_resize": True,
-        "image_mean": [0.0, 0.0, 0.0], "image_processor_type": "Gemma4ImageProcessor", "image_seq_length": 280,
-        "image_std": [1.0, 1.0, 1.0], "max_soft_tokens": 280, "patch_size": 16, "pooling_kernel_size": 3,
-        "resample": 3, "rescale_factor": 1 / 255,
-    },
-    "image_seq_length": 280, "processor_class": "Gemma4Processor",
-}  # fmt: skip
-GOLDEN = {
+_AGREE = 0.05
+_MISS_FACTOR = 5.0
+_GOLDEN_DP = 0.01
+_RED, _BLUE = ((220, 30, 30), (64, 48)), ((30, 30, 220), (48, 96))  # (colour, size)
+_GOLDEN = {
     "state": {"ticket": 4182, "text": "The checkout page fails after the payment step."},
     "questions": {
         "urgent": {"type": "noul", "instructions": "Is it urgent?"},
@@ -121,257 +65,43 @@ GOLDEN = {
 }  # fmt: skip
 
 
-# ---- the tiny checkpoint ------------------------------------------------------------------------
-
-
-def tokenizer_json() -> dict:
-    """A byte-fallback BPE tokenizer of Gemma 4's size with its special tokens and its answer codes
-    at Gemma 4's ids (two-letter codes by merges), and the printable ASCII characters. The core
-    refuses a checkpoint whose code token ids are not Gemma 4's."""
-    specials = {"<pad>": 0, "<eos>": 1, "<bos>": 2, "<unk>": 3, "<mask>": 4, "<|turn>": 105,
-                "<turn|>": 106, "<|image>": 255999, "<|audio>": 256000, "<|image|>": 258880,
-                "<|audio|>": 258881, "<image|>": 258882, "<audio|>": 258883}  # fmt: skip
-    assert all(specials[k] == v for k, v in CONTROL_TOKEN_IDS.items())
-    vocab: dict[str, int] = dict(specials)
-    vocab.update(zip(CODES, CODE_TOKEN_IDS, strict=True))
-    reserved = set(vocab.values())
-    ids = iter(i for i in range(VOCAB) if i not in reserved)
-    for b in range(256):
-        vocab[f"<0x{b:02X}>"] = next(ids)
-    for c in [chr(i) for i in range(32, 127)] + ["\n"]:
-        if c not in vocab:
-            vocab[c] = next(ids)
-    merges = [[code[0], code[1]] for code in CODES if len(code) == 2]
-    for i in ids:
-        vocab[f"<unused{i}>"] = i
-    assert len(vocab) == VOCAB and sorted(vocab.values()) == list(range(VOCAB))
-    added = [{"id": i, "content": t, "single_word": False, "lstrip": False, "rstrip": False,
-              "normalized": False, "special": True} for t, i in specials.items()]  # fmt: skip
-    return {
-        "version": "1.0", "truncation": None, "padding": None, "added_tokens": added,
-        "normalizer": None, "pre_tokenizer": None, "post_processor": None,
-        "decoder": {"type": "Sequence", "decoders": [{"type": "ByteFallback"}, {"type": "Fuse"}]},
-        "model": {"type": "BPE", "dropout": None, "unk_token": "<unk>", "continuing_subword_prefix": None,
-                  "end_of_word_suffix": None, "fuse_unk": False, "byte_fallback": True,
-                  "ignore_merges": False, "vocab": vocab, "merges": merges},
-    }  # fmt: skip
-
-
-def make_checkpoint(d: Path) -> Path:
-    """The tiny checkpoint in a decision checkpoint's layout."""
-    import torch
-    import transformers
-    from safetensors.torch import save_file
-
-    d.mkdir(parents=True, exist_ok=True)
-    torch.manual_seed(SEED)
-    config = transformers.Gemma4Config(
-        text_config=TEXT_CONFIG, vision_config=VISION_CONFIG, audio_config=AUDIO_CONFIG,
-        boi_token_id=255999, eoi_token_id=258882, image_token_id=258880, boa_token_id=256000,
-        eoa_token_id=258883, audio_token_id=258881, initializer_range=0.1, tie_word_embeddings=True,
-    )  # fmt: skip
-    model = transformers.Gemma4ForConditionalGeneration(config).eval()
-    model.save_pretrained(d, safe_serialization=True)
-    (d / "processor_config.json").write_text(json.dumps(PROCESSOR_CONFIG, indent=1))
-    (d / "tokenizer.json").write_text(json.dumps(tokenizer_json()))
-    # The other control tokens are extra special tokens, as in Gemma 4's own tokenizer_config.json,
-    # so that the converter types them CONTROL and llama.cpp (and mtmd) match them.
-    extra = ["<mask>", "<|turn>", "<turn|>", "<|image>", "<|image|>", "<image|>", "<|audio>",
-             "<|audio|>", "<audio|>"]  # fmt: skip
-    (d / "tokenizer_config.json").write_text(json.dumps({
-        "tokenizer_class": "PreTrainedTokenizerFast", "bos_token": "<bos>", "eos_token": "<eos>",
-        "pad_token": "<pad>", "unk_token": "<unk>", "model_max_length": 4096,
-        "extra_special_tokens": extra,
-    }))  # fmt: skip
-    readout = torch.randn(len(CODES), HIDDEN, generator=torch.Generator().manual_seed(SEED)) * 0.5
-    save_file({"weight": readout.to(torch.bfloat16)}, str(d / "readout.safetensors"))
-    (d / "decision_config.json").write_text(json.dumps({
-        "interface": "strands-decider", "format_version": 1, "prompt": "strands-chat",
-        "inputs": ["text", "image"], "codes": list(CODES), "token_ids": list(CODE_TOKEN_IDS),
-        "temperature": 1.0, "final_logit_softcapping": 30.0, "attention_mode": "prefix_bidir",
-        "pooling": "last", "max_length_validated": 4096,
-        "provenance": {"base_model": "google/gemma-4-E2B-it",
-                       "base_revision": "3e22461f65e89153144f8adb70e3b8c2cc9845a7"},
-    }))  # fmt: skip
-    return d
-
-
-def convert(llama_cpp: Path, ckpt: Path, out: Path) -> tuple[Path, Path, Path]:
-    """The stock converter's decoder (f32) and full mmproj (f32), and the image build's
-    vision-only copy of it."""
-    from build_artifact import vision_only
-
-    out.mkdir(parents=True, exist_ok=True)
-    gguf, full, mmproj = out / "model.gguf", out / "mmproj-full.gguf", out / "mmproj.gguf"
-    for args in ([ckpt, "--outtype", "f32", "--outfile", gguf],
-                 [ckpt, "--mmproj", "--outtype", "f32", "--outfile", full]):  # fmt: skip
-        r = subprocess.run(
-            [sys.executable, llama_cpp / "convert_hf_to_gguf.py", *map(str, args)],
-            capture_output=True, text=True,
-        )  # fmt: skip
-        if r.returncode != 0:
-            raise RuntimeError(
-                f"convert_hf_to_gguf.py {' '.join(map(str, args[1:]))} failed:\n{r.stderr[-3000:]}"
-            )
-    vision_only(full, mmproj)
-    return gguf, full, mmproj
-
-
-# Which directories the converter's pplx-decider loader claims: a config.json naming the backbone
-# and a decision_config.json in each, beside a readout. The loader claims a Qwen3.5 backbone only.
-# Run in llama.cpp's tree, as its own tests import it.
-MATCHER = """
-import json, sys, tempfile
-from pathlib import Path
-from conversion.pplx_decider import _is_pplx_decider_checkpoint
-qwen, gemma = {"model_type": "qwen3_5"}, {"model_type": "gemma4"}
-cases = {"pplx-decider": (qwen, {"format_version": 1, "temperature": 1.0}),
-         "vllm-d3": (qwen, {"format_id": "d3-code-readout-v1", "format_version": 1}),
-         "strands-decider": (gemma, {"interface": "strands-decider", "format_version": 1}),
-         "not an object": (gemma, [1, 2])}
-out = {}
-for name, (config, decision) in cases.items():
-    with tempfile.TemporaryDirectory() as d:
-        for f, text in (("config.json", json.dumps(config)),
-                        ("decision_config.json", json.dumps(decision)), ("readout.safetensors", "")):
-            (Path(d) / f).write_text(text)
-        try:
-            out[name] = _is_pplx_decider_checkpoint(Path(d))
-        except Exception as e:
-            out[name] = repr(e)
-print(json.dumps(out))
-"""
-MATCHES = {"pplx-decider": True, "vllm-d3": False, "strands-decider": False, "not an object": False}
-
-
-# ---- the reference --------------------------------------------------------------------------------
-
-
-class Reference:
-    """transformers' Gemma4ForConditionalGeneration on the tiny checkpoint, float32 on CPU, one
-    prompt per pass, with the attention mask given per layer type (which bypasses Gemma 4's own)."""
-
-    def __init__(self, ckpt: Path):
-        import torch
-        import transformers
-
-        self.torch = torch
-        conf = transformers.AutoConfig.from_pretrained(ckpt)
-        conf.audio_config = None
-        self.model = transformers.Gemma4ForConditionalGeneration.from_pretrained(
-            ckpt, config=conf, dtype=torch.float32, attn_implementation="sdpa"
-        ).eval()
-        self.processor = transformers.Gemma4ImageProcessorPil.from_pretrained(ckpt)
-
-    def hidden(self, state, question, mask="prefix_bidir", pixels=()) -> np.ndarray:
-        """The final-norm hidden state at the prompt's last token under `mask`, prefix_bidir or
-        one of OTHER_MASKS."""
-        torch = self.torch
-        ids = [*state, *question]
-        n, s = len(ids), len(state)
-        i, j = torch.arange(n)[:, None], torch.arange(n)[None, :]
-        in_state, causal = i < s, j <= i
-        bidir = (in_state & (j < s)) | ~in_state
-        full, sliding = {  # each mask for the full-attention layers, then the sliding ones
-            "prefix_bidir": (bidir, bidir),
-            "causal_state": ((in_state & causal) | ~in_state,) * 2,
-            "causal_question": ((in_state & (j < s)) | (~in_state & causal),) * 2,
-            "causal": (causal, causal),
-            "window_8": (bidir, bidir & ((i - j).abs() < 8)),
-            "swa_only": (causal, bidir),  # llama.cpp without patches/0001
-        }[mask]
-        kw = {}
-        if pixels:
-            px = self.processor(images=list(pixels), do_resize=False, return_tensors="pt")
-            kw = {k: v for k, v in px.items() if k != "num_soft_tokens_per_image"}
-        with torch.inference_mode():
-            out = self.model.model(
-                input_ids=torch.tensor([ids]),
-                attention_mask={"full_attention": full[None, None], "sliding_attention": sliding[None, None]},
-                use_cache=False, return_dict=True, **kw,
-            )  # fmt: skip
-        return out.last_hidden_state[0, -1].float().numpy()
-
-
-# ---- the checks: each measures, and adds to `failures` what misses ---------------------------------
-
-
 def _rel(a, b) -> float:
     return float(np.linalg.norm(np.asarray(a, np.float64) - b) / np.linalg.norm(b))
 
 
-def _png(color, size) -> str:
+def _png(colour, size) -> str:
+    """A base64 PNG: a rectangle of `colour` on white."""
     from PIL import Image, ImageDraw
 
     im = Image.new("RGB", size, "white")
     ImageDraw.Draw(im).rectangle(
-        (size[0] // 4, size[1] // 4, 3 * size[0] // 4, 3 * size[1] // 4), fill=color
+        (size[0] // 4, size[1] // 4, 3 * size[0] // 4, 3 * size[1] // 4), fill=colour
     )
     buf = io.BytesIO()
     im.save(buf, format="PNG")
     return base64.b64encode(buf.getvalue()).decode()
 
 
-RED, BLUE = ((220, 30, 30), (64, 48)), ((30, 30, 220), (48, 96))
-
-
-def check_conversion(llama_cpp, ckpt, gguf_path, full, mmproj, failures) -> dict:
-    import gguf
-    from build_artifact import check_mmproj, is_audio_key, is_audio_tensor, lazy_ranges
-
-    env = {
-        **os.environ,
-        "PYTHONPATH": os.pathsep.join([str(llama_cpp), str(llama_cpp / "gguf-py")]),
-    }
-    r = subprocess.run(
-        [sys.executable, "-c", MATCHER], cwd=llama_cpp, env=env, capture_output=True, text=True
-    )
-    matches = json.loads(r.stdout) if r.returncode == 0 else {"error": r.stderr[-500:]}
-    if matches != MATCHES:
-        failures.append(f"the converter's pplx-decider loader claims {matches}, not {MATCHES}")
-    converted, vision = gguf.GGUFReader(full), gguf.GGUFReader(mmproj)
-    if not any(is_audio_tensor(t.name) for t in converted.tensors):
-        failures.append("the converter's mmproj has no audio tower to leave out")
-    want = {t.name: t.data.tobytes() for t in converted.tensors if not is_audio_tensor(t.name)}
-    if {t.name: t.data.tobytes() for t in vision.tensors} != want:
-        failures.append("the vision-only mmproj is not the converter's vision tower, byte for byte")
-    if any(is_audio_key(k) for k in vision.fields):
-        failures.append("the vision-only mmproj keeps audio keys")
-    try:
-        check_mmproj(mmproj, ckpt)
-    except SystemExit as e:
-        failures.append(str(e))
-    ranges, size = lazy_ranges(gguf_path), gguf_path.stat().st_size
-    if len(ranges) != 1 or not 0 < ranges[0][0] < ranges[0][1] <= size:
-        failures.append(f"lazy_ranges gives {ranges} for a {size}-byte GGUF")
-    return {
-        "matcher": matches,
-        "mmproj_tensors": [len(converted.tensors), len(vision.tensors)],
-        "lazy_ranges": ranges,
-    }
-
-
-def check_mask(ref, state, questions, rows, failures) -> dict:
+def _check_mask(ref, state, questions, rows, failures) -> dict:
     """The shim's rows against each mask's reference, per question."""
     errs = {
         mask: [_rel(h, ref.hidden(state, q, mask)) for q, h in zip(questions, rows, strict=True)]
-        for mask in ("prefix_bidir", *OTHER_MASKS)
+        for mask in MASKS
     }
-    if max(errs["prefix_bidir"]) > AGREE:
-        failures.append(
-            f"the shim misses the prefix_bidir reference by {max(errs['prefix_bidir']):.4f}"
-        )
-    for mask in OTHER_MASKS:
-        for i, (other, own) in enumerate(zip(errs[mask], errs["prefix_bidir"], strict=True)):
-            if other < MISS_FACTOR * max(own, 1e-6):
+    bidir = errs["prefix_bidir"]
+    if max(bidir) > _AGREE:
+        failures.append(f"the shim misses the prefix_bidir reference by {max(bidir):.4f}")
+    for mask in MASKS[1:]:
+        for i, (other, err) in enumerate(zip(errs[mask], bidir, strict=True)):
+            if other < _MISS_FACTOR * max(err, 1e-6):
                 failures.append(
                     f"question {i}: the shim is {other:.4f} from the {mask} reference and "
-                    f"{own:.4f} from prefix_bidir's (under {MISS_FACTOR:g} times further)"
+                    f"{err:.4f} from prefix_bidir's (under {_MISS_FACTOR:g} times further)"
                 )
     return {k: [round(x, 4) for x in v] for k, v in errs.items()}
 
 
-def check_reuse(backend, state, questions, rows, failures) -> float:
+def _check_reuse(backend, state, questions, rows, failures) -> float:
     """The largest difference between the questions together and each alone, or reversed."""
     alone = np.stack([backend.forward(state, [q])[0] for q in questions])
     reverse = backend.forward(state, questions[::-1])[::-1]
@@ -381,44 +111,38 @@ def check_reuse(backend, state, questions, rows, failures) -> float:
     return worst
 
 
-def check_images(backend, ref, tok, failures) -> dict:
-    from strands_decider.backends.llama_cpp import prepare_pixels
-    from strands_decider.core import Request, render
-
-    request = {"state": "two pictures", "images": [_png(*RED), _png(*BLUE)],
+def _check_images(backend, ref, tok, failures) -> dict:
+    """Two images in the state: the shim's row against the reference's, and against its own with
+    the images swapped."""
+    request = {"state": "two pictures", "images": [_png(*_RED), _png(*_BLUE)],
                "questions": {"which": {"type": "choice", "instructions": "which?",
                                        "criteria": {"red": None, "blue": None}}}}  # fmt: skip
     rendered = render(Request.model_validate(request), tok)
     state, q = list(rendered.state_ids), list(next(iter(rendered.questions.values())).question_ids)
     shim = backend.forward(state, [q], rendered.images)[0]
-    want = ref.hidden(state, q, pixels=[prepare_pixels(im) for im in rendered.images])
+    want = ref.hidden(state, q, pixels=[image_pixels(im) for im in rendered.images])
     swapped = render(Request.model_validate({**request, "images": request["images"][::-1]}), tok)
     rel = _rel(shim, want)
     change = _rel(backend.forward(list(swapped.state_ids), [q], swapped.images)[0], shim)
-    if rel > AGREE:
+    if rel > _AGREE:
         failures.append(f"with images the shim misses the reference by {rel:.4f}")
-    if change < MISS_FACTOR * max(rel, 1e-6):
+    if change < _MISS_FACTOR * max(rel, 1e-6):
         failures.append("swapping the two images barely changes the question's row")
-    return {
-        "spans": [im.span for im in rendered.images],
-        "rel_error": rel,
-        "swap_rel_change": change,
-    }
+    spans = [im.span for im in rendered.images]
+    return {"spans": spans, "rel_error": rel, "swap_rel_change": change}
 
 
 def _probabilities(answer: dict) -> dict[str, float]:
     return answer.get("probabilities") or {"false": 1 - answer["noul"], "true": answer["noul"]}
 
 
-def check_golden(backend, ref, ckpt, tok, failures) -> dict:
-    from strands_decider.backends.llama_cpp import prepare_pixels
-    from strands_decider.core import DecisionConfig, Request, evaluate, load_readout, read, render
-
+def _check_golden(backend, ref, ckpt, tok, failures) -> dict:
+    """`evaluate`'s answers on the shim against the core's reading of the reference's rows."""
     config, weight = DecisionConfig.load(ckpt), load_readout(ckpt)
-    request = Request.model_validate({**GOLDEN, "images": [_png(*RED)]})
+    request = Request.model_validate({**_GOLDEN, "images": [_png(*_RED)]})
     got = evaluate(request, tok, weight, config, backend)["answers"]
     rendered = render(request, tok)
-    pixels = [prepare_pixels(im) for im in rendered.images]
+    pixels = [image_pixels(im) for im in rendered.images]
     rows = [
         ref.hidden(rendered.state_ids, q.question_ids, pixels=pixels)
         for q in rendered.questions.values()
@@ -428,17 +152,14 @@ def check_golden(backend, ref, ckpt, tok, failures) -> dict:
         g, w = _probabilities(got[name]), _probabilities(want[name])
         if max(g, key=g.__getitem__) != max(w, key=w.__getitem__):
             failures.append(f"golden {name!r}: the top answer is not the reference's, {w}")
-        if max(abs(g[k] - w[k]) for k in w) > GOLDEN_DP:
+        if max(abs(g[k] - w[k]) for k in w) > _GOLDEN_DP:
             failures.append(f"golden {name!r}: probabilities {g}, the reference's {w}")
     return {name: {"reference": want[name], "shim": got[name]} for name in want}
 
 
 def run(llama_cpp: Path, lib: Path, work: Path) -> dict:
-    """Every check's measurements, and `failures`, empty when the shim passes."""
-    sys.path[:0] = [str(llama_cpp / "gguf-py"), str(HERE)]  # gguf-py, and build_artifact
-    from strands_decider.backends.llama_cpp import LlamaCppBackend
-    from strands_decider.core import load_tokenizer
-
+    """Every check's measurements, and `failures`, empty when the shim passes. llama.cpp's
+    gguf-py must be importable."""
     started = time.time()
     failures: list[str] = []
     ckpt = make_checkpoint(work / "checkpoint")
@@ -452,10 +173,10 @@ def run(llama_cpp: Path, lib: Path, work: Path) -> dict:
         state = [2, *rng.integers(1000, VOCAB - 4000, 39).tolist()]
         questions = [rng.integers(1000, VOCAB - 4000, n).tolist() for n in (12, 16, 20)]
         rows = backend.forward(state, questions)
-        report["mask"] = check_mask(ref, state, questions, rows, failures)
-        report["reuse_max_abs"] = check_reuse(backend, state, questions, rows, failures)
-        report["images"] = check_images(backend, ref, tok, failures)
-        report["golden"] = check_golden(backend, ref, ckpt, tok, failures)
+        report["mask"] = _check_mask(ref, state, questions, rows, failures)
+        report["reuse_max_abs"] = _check_reuse(backend, state, questions, rows, failures)
+        report["images"] = _check_images(backend, ref, tok, failures)
+        report["golden"] = _check_golden(backend, ref, ckpt, tok, failures)
     finally:
         backend.close()
     report["seconds"] = round(time.time() - started, 1)
@@ -469,20 +190,15 @@ def main() -> None:
     )
     ap.add_argument("--llama-cpp", type=Path, required=True)
     ap.add_argument("--lib", type=Path, required=True)
-    ap.add_argument("--work", type=Path, default=None)
-    ap.add_argument("--json", type=Path, default=None)
     a = ap.parse_args()
-    with tempfile.TemporaryDirectory() as tmp:
-        res = run(a.llama_cpp, a.lib, a.work or Path(tmp))
-    text = json.dumps(res, indent=1, default=str)
-    if a.json:
-        a.json.write_text(text)
-    print(text)
-    if res["failures"]:
-        raise SystemExit("shim check FAILED:\n  " + "\n  ".join(res["failures"]))
+    sys.path.insert(0, str(a.llama_cpp / "gguf-py"))
+    with tempfile.TemporaryDirectory() as work:
+        report = run(a.llama_cpp, a.lib, Path(work))
+    print(json.dumps(report, indent=1, default=str))
+    if report["failures"]:
+        raise SystemExit("shim check FAILED:\n  " + "\n  ".join(report["failures"]))
     print("shim check OK")
 
 
 if __name__ == "__main__":
-    os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
     main()
