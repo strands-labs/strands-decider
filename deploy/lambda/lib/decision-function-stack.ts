@@ -17,7 +17,7 @@ import * as logs from "aws-cdk-lib/aws-logs";
 import { Construct } from "constructs";
 import { ContainerImageBuild } from "@cdklabs/deploy-time-build";
 import { createHash } from "crypto";
-import { stackNameFor } from "./decider-function-stack";
+import { flag, stackNameFor } from "./decider-function-stack";
 
 const REPO_ROOT = path.join(__dirname, "..", "..", "..");
 
@@ -35,10 +35,9 @@ const ASSET_EXCLUDE = [
 ];
 
 /**
- * The most tokens a request may forward by default, the state once plus every question. The
- * slowest request measured under it, 4 images and an 8,000-token state with the shortest questions
- * after it, takes about 640 s on Graviton2, inside the 15-minute timeout; at 24,576 it does not
- * finish (README.md, Decision checkpoints, Limits).
+ * The most tokens a request may forward by default, the state once plus every question: the
+ * slowest request measured under it stays inside the 15-minute timeout on Graviton2, and one at
+ * 24,576 does not (README.md, Decision checkpoints, Limits).
  */
 export const DECISION_MAX_REQUEST_TOKENS = 16384;
 
@@ -70,14 +69,6 @@ export function decisionStackName(checkpoint: string): string {
   if (!trimmed.startsWith("s3://")) return stackNameFor(trimmed);
   const hash = createHash("sha256").update(trimmed).digest("hex").slice(0, 8);
   return stackNameFor(`${trimmed.split("/").pop()}-${hash}`);
-}
-
-/** A true or false context value, from cdk.json or `-c key=value`. */
-function flag(value: unknown, key: string): boolean {
-  if (String(value) !== "true" && String(value) !== "false") {
-    throw new Error(`${key} must be true or false, not ${JSON.stringify(value)}`);
-  }
-  return String(value) === "true";
 }
 
 /**

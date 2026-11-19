@@ -24,7 +24,7 @@ export function stackNameFor(model: string): string {
 }
 
 /** A true or false context value, from cdk.json or `-c key=value`. */
-function flag(value: unknown, key: string): boolean {
+export function flag(value: unknown, key: string): boolean {
   if (String(value) !== "true" && String(value) !== "false") {
     throw new Error(`${key} must be true or false, not ${JSON.stringify(value)}`);
   }
