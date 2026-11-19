@@ -62,7 +62,7 @@ def _check(err: bytes | None, what: str) -> None:
 
 
 class LlamaCppBackend:
-    """A decision checkpoint's decoder on llama.cpp; without `mmproj` it serves text only. Calls
+    """A model checkpoint's decoder on llama.cpp; without `mmproj` it serves text only. Calls
     run one at a time, since each uses every thread. `last_timings` holds the last call's
     milliseconds."""
 

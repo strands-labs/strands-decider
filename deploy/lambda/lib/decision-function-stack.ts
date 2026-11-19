@@ -17,7 +17,7 @@ import * as logs from "aws-cdk-lib/aws-logs";
 import { Construct } from "constructs";
 import { ContainerImageBuild } from "@cdklabs/deploy-time-build";
 import { createHash } from "crypto";
-import { flag, stackNameFor } from "./decider-function-stack";
+import { stackNameFor } from "./decider-function-stack";
 
 const REPO_ROOT = path.join(__dirname, "..", "..", "..");
 
@@ -37,11 +37,13 @@ const ASSET_EXCLUDE = [
 /**
  * The most tokens a request may forward by default, the state once plus every question: the
  * slowest request measured under it stays inside the 15-minute timeout on Graviton2, and one at
- * 24,576 does not (README.md, Decision checkpoints, Limits).
+ * 24,576 does not (README.md, Model checkpoints with a decision_config.json, Limits).
  */
 const DECISION_MAX_REQUEST_TOKENS = 16384;
 
-const CHECKPOINT_NEEDED = "set the decision checkpoint: -c checkpoint=<Hub id or s3://bucket/prefix/>";
+const MODEL_NEEDED = "set the model: -c model=<Hub id, or s3://bucket/prefix/>";
+// The settings only v1's stack reads.
+const V1_SETTINGS = ["snapstart", "vision", "image_long_side", "decoder_precision", "vision_precision"];
 
 /**
  * An s3:// checkpoint's bucket and its key prefix, ending in "/", or undefined for a Hub id. The
@@ -60,12 +62,12 @@ export function parseS3Checkpoint(checkpoint: string): { bucket: string; prefix:
 }
 
 /**
- * A decision checkpoint's stack name: a Hub id's, as for a v1 model (stackNameFor); an s3://
- * checkpoint's last path part with 8 hex digits of the full URI's sha256, so that checkpoints of
- * the same name under different prefixes or buckets get stacks of their own.
+ * The stack name for a model checkpoint with a decision_config.json: a Hub id's, as for a v1 one
+ * (stackNameFor); an s3:// checkpoint's last path part with 8 hex digits of the full URI's sha256,
+ * so that checkpoints of the same name under different prefixes or buckets get stacks of their own.
  */
 export function decisionStackName(checkpoint: string): string {
-  if (!checkpoint) throw new Error(CHECKPOINT_NEEDED);
+  if (!checkpoint) throw new Error(MODEL_NEEDED);
   const trimmed = checkpoint.replace(/\/+$/, "");
   if (!trimmed.startsWith("s3://")) return stackNameFor(trimmed);
   const hash = createHash("sha256").update(trimmed).digest("hex").slice(0, 8);
@@ -73,26 +75,26 @@ export function decisionStackName(checkpoint: string): string {
 }
 
 /**
- * A decision checkpoint as a Lambda function (README.md, Decision checkpoints): the
- * image, built from the checkpoint with its decoder and vision tower converted for llama.cpp, the
- * function, its `live` alias and that alias's IAM-authenticated Function URL. Settings are CDK
- * context values (cdk.json, or -c key=value): `checkpoint`, a Hugging Face Hub id or an s3:// URI
- * of a checkpoint directory; `checkpoint_revision`; `checkpoint_digest`, the checkpoint's manifest
+ * A model checkpoint with a decision_config.json as a Lambda function (README.md, Model
+ * checkpoints): the image, built from the checkpoint with its decoder and vision tower converted
+ * for llama.cpp, the function, its `live` alias and that alias's IAM-authenticated Function URL.
+ * Settings are CDK context values (cdk.json, or -c key=value): `model`, a Hugging Face Hub id or an
+ * s3:// URI of a checkpoint directory; `model_revision`; `model_digest`, the checkpoint's manifest
  * digest, to refuse any other; and `max_request_tokens`, the most tokens one request may forward
- * (DECISION_MAX_REQUEST_TOKENS by default). SnapStart is not offered: it was not measured for a
- * decision checkpoint, whose load reads 5 GB from a lazily loaded image.
+ * (DECISION_MAX_REQUEST_TOKENS by default). v1's settings are refused, SnapStart among them: it
+ * was not measured for these checkpoints, whose load reads 5 GB from a lazily loaded image.
  */
 export class DecisionFunctionStack extends Stack {
   constructor(scope: Construct, id: string, props?: StackProps) {
     super(scope, id, props);
     const ctx = (key: string) => this.node.tryGetContext(key);
-    const checkpoint = String(ctx("checkpoint") ?? "");
-    if (!checkpoint) throw new Error(CHECKPOINT_NEEDED);
-    if (flag(ctx("snapstart") ?? false, "snapstart")) {
-      throw new Error("snapstart=true is not supported for a decision checkpoint: it has not been measured");
+    const checkpoint = String(ctx("model") ?? "");
+    if (!checkpoint) throw new Error(MODEL_NEEDED);
+    for (const key of V1_SETTINGS) {
+      if (ctx(key) !== undefined) throw new Error(`${key} is only supported for v1 model checkpoints`);
     }
-    const digest = String(ctx("checkpoint_digest") ?? "");
-    if (digest && !/^[0-9a-f]{64}$/.test(digest)) throw new Error(`checkpoint_digest must be a sha256, not ${digest}`);
+    const digest = String(ctx("model_digest") ?? "");
+    if (digest && !/^[0-9a-f]{64}$/.test(digest)) throw new Error(`model_digest must be a sha256, not ${digest}`);
     const s3 = parseS3Checkpoint(checkpoint);
     // An empty value is a mistake, not "no limit": Number("") is 0, which would lift the limit.
     const rawMaxRequestTokens = ctx("max_request_tokens") ?? DECISION_MAX_REQUEST_TOKENS;
@@ -108,9 +110,9 @@ export class DecisionFunctionStack extends Stack {
     // an ECR repository that belongs to the stack. The build downloads the checkpoint and converts
     // it with llama.cpp's own converter, so the image holds the model.
     const buildArgs = {
-      CHECKPOINT: checkpoint,
-      CHECKPOINT_REVISION: String(ctx("checkpoint_revision") ?? "main"),
-      CHECKPOINT_DIGEST: digest,
+      MODEL: checkpoint,
+      MODEL_REVISION: String(ctx("model_revision") ?? "main"),
+      MODEL_DIGEST: digest,
     };
     const image = new ContainerImageBuild(this, "Image", {
       directory: REPO_ROOT,

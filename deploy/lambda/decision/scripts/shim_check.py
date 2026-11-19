@@ -1,4 +1,4 @@
-"""The llama.cpp shim, built, held to transformers on a tiny random Gemma 4 decision checkpoint.
+"""The llama.cpp shim, built, held to transformers on a tiny random Gemma 4 model checkpoint.
 
     python shim_check.py --llama-cpp SRC --lib LIB
 

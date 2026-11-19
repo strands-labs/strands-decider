@@ -1,5 +1,5 @@
-"""The decision checkpoint's Lambda handler, over a stand-in for the llama.cpp backend, which
-tests/test_backend_llama_cpp.py and tests/test_llama_cpp_shim.py test.
+"""The Lambda handler for a model checkpoint with a decision_config.json, over a stand-in for the
+llama.cpp backend, which tests/test_backend_llama_cpp.py and tests/test_llama_cpp_shim.py test.
 """
 
 from __future__ import annotations

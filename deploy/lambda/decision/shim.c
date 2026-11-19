@@ -1,5 +1,5 @@
 // A flat C API over libllama and mtmd for strands_decider.backends.llama_cpp, which calls it
-// through ctypes. It runs the Gemma 4 decoder of a decision checkpoint under the prefix_bidir mask
+// through ctypes. It runs the Gemma 4 decoder of a model checkpoint under the prefix_bidir mask
 // and copies out the final-norm hidden state at each question's last token, which the core's
 // readout reads. With a vision tower loaded (sd_load_vision), the state may hold images, whose
 // rows take the place of their placeholders. A call that can fail returns NULL on success, or what

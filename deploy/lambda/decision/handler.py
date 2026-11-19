@@ -1,4 +1,5 @@
-"""A decision checkpoint's System One API as an AWS Lambda function (README.md, Decision checkpoints).
+"""The System One API of a model checkpoint with a decision_config.json, as an AWS Lambda function
+(README.md, Model checkpoints with a decision_config.json).
 
 A Function URL request gets GET /health and POST /v1/systemone. A direct invocation passes a System
 One request as the event and gets the response back. The core renders and reads each request; the

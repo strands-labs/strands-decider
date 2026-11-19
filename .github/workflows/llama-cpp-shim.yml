@@ -2,7 +2,7 @@ name: llama.cpp shim
 
 # The llama.cpp backend's native library, built and run on CPU: llama.cpp at the pinned commit with
 # deploy/lambda/decision/patches, the shim against it, and tests/test_llama_cpp_shim.py, which holds
-# it to transformers on a tiny random Gemma 4 decision checkpoint (deploy/lambda/decision/scripts/
+# it to transformers on a tiny random Gemma 4 model checkpoint (deploy/lambda/decision/scripts/
 # shim_check.py). Also the Lambda stacks' CDK assertions. Optional: it runs on pull requests that
 # touch these paths and by hand, and no other check waits for it. No GPU and no secrets.
 

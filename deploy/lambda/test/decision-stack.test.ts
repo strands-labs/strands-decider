@@ -1,5 +1,6 @@
-// The decision checkpoint's stack, synthesized: its Function URL's auth, the build role's S3 grant,
-// the request limit, and the refusals (README.md, Decision checkpoints). Run: npm test.
+// DecisionFunctionStack, synthesized: its Function URL's auth, the build role's S3 grant,
+// the request limit, and the refusals (README.md, Model checkpoints with a decision_config.json).
+// Run: npm test.
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
 import { App } from "aws-cdk-lib";
@@ -14,7 +15,7 @@ function synth(context: Record<string, unknown>): Template {
   return Template.fromStack(new DecisionFunctionStack(app, "decision-test", { env: ENV }));
 }
 
-const S3 = { checkpoint: "s3://my-bucket/models/e2b/" };
+const S3 = { model: "s3://my-bucket/models/e2b/" };
 
 test("the Function URL needs SigV4 and grants no one access", () => {
   const t = synth(S3);
@@ -57,7 +58,7 @@ test("the build pushes only to the stack's own repository", () => {
 });
 
 test("a Hub checkpoint's build gets no credentials and no S3 grant", () => {
-  const t = synth({ checkpoint: "StrandsAgents/example-e2b" });
+  const t = synth({ model: "StrandsAgents/example-e2b" });
   const build = Object.values(t.findResources("Custom::CDKContainerImageBuild"))[0] as any;
   assert.doesNotMatch(build.Properties.buildCommand, /--secret/);
   assert.doesNotMatch(JSON.stringify(t.findResources("AWS::IAM::Policy")), /StrandsAgents/);
@@ -74,15 +75,22 @@ test("the request limit is 16,384 by default, and set by max_request_tokens", ()
 
 test("the checkpoint digest goes to the build", () => {
   const digest = "a".repeat(64);
-  synth({ ...S3, checkpoint_digest: digest }).hasResourceProperties("Custom::CDKContainerImageBuild", {
-    buildCommand: Match.stringLikeRegexp(`CHECKPOINT_DIGEST=${digest}`),
+  synth({ ...S3, model_digest: digest }).hasResourceProperties("Custom::CDKContainerImageBuild", {
+    buildCommand: Match.stringLikeRegexp(`MODEL_DIGEST=${digest}`),
   });
-  assert.throws(() => synth({ ...S3, checkpoint_digest: "abc" }), /checkpoint_digest must be a sha256/);
+  assert.throws(() => synth({ ...S3, model_digest: "abc" }), /model_digest must be a sha256/);
 });
 
-test("SnapStart is refused", () => {
-  assert.throws(() => synth({ ...S3, snapstart: true }), /snapstart=true is not supported/);
-  synth({ ...S3, snapstart: false });
+test("v1's settings are refused, whatever their value", () => {
+  for (const [key, value] of Object.entries({
+    snapstart: false,
+    vision: false,
+    image_long_side: 448,
+    decoder_precision: "q8_0",
+    vision_precision: "f16",
+  })) {
+    assert.throws(() => synth({ ...S3, [key]: value }), new RegExp(`${key} is only supported for v1 model checkpoints`));
+  }
 });
 
 test("an s3:// checkpoint needs a real bucket and prefix", () => {
@@ -91,7 +99,7 @@ test("an s3:// checkpoint needs a real bucket and prefix", () => {
   for (const bad of ["s3://my-bucket", "s3://my-bucket/", "s3://my-bucket//", "s3://my-bucket/a*", "s3://my-bucket/a?b", "s3://My_Bucket/a", "s3://b/a"]) {
     assert.throws(() => parseS3Checkpoint(bad), Error, bad);
   }
-  assert.throws(() => synth({}), /set the decision checkpoint/);
+  assert.throws(() => synth({}), /set the model/);
 });
 
 test("checkpoints of one name in different places get different stacks", () => {
@@ -103,19 +111,15 @@ test("checkpoints of one name in different places get different stacks", () => {
   assert.equal(decisionStackName("StrandsAgents/strands-decider-E2B-gemma4-v2"), "strands-decider-e2b-gemma4-v2-lambda");
 });
 
-test("v1's stack keeps its defaults", () => {
-  // cdk.json's v1 settings, which App does not read.
-  const v1 = {
-    model: "StrandsAgents/strands-decider-2B-qwen3.5-v1-2610",
-    model_revision: "main",
-    snapstart: false,
-    vision: false,
-    image_long_side: 448,
-    decoder_precision: "q8_0",
-    vision_precision: "f16",
-  };
-  const app = new App({ context: v1 });
-  const t = Template.fromStack(new DeciderFunctionStack(app, "v1-test", { env: ENV }));
+test("v1's stack keeps its defaults, and refuses model_digest", () => {
+  const v1 = (context: Record<string, unknown>) =>
+    Template.fromStack(new DeciderFunctionStack(new App({ context }), "v1-test", { env: ENV }));
+  const model = "StrandsAgents/strands-decider-2B-qwen3.5-v1-2610";
+  assert.throws(() => v1({ model, model_digest: "a".repeat(64) }), /model_digest is not supported for v1 model checkpoints/);
+  const t = v1({ model });
+  t.hasResourceProperties("Custom::CDKContainerImageBuild", {
+    buildCommand: Match.stringLikeRegexp("VISION=false.*DECODER_PRECISION=q8_0.*VISION_PRECISION=f16"),
+  });
   t.hasResourceProperties("AWS::Lambda::Function", { Environment: { Variables: { DECIDER_MAX_REQUEST_TOKENS: "24576" } } });
   t.hasResourceProperties("AWS::Lambda::Url", { AuthType: "AWS_IAM" });
 });

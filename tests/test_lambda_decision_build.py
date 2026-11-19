@@ -1,5 +1,5 @@
-"""The decision checkpoint's image build (deploy/lambda/decision/scripts/build_artifact.py): what it
-fetches, and the checkpoints it refuses before converting anything."""
+"""The Lambda image build for a model checkpoint with a decision_config.json
+(deploy/lambda/decision/scripts/build_artifact.py): what it fetches, and the checkpoints it refuses before converting anything."""
 
 from __future__ import annotations
 

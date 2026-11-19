@@ -65,11 +65,12 @@ export class DeciderFunctionStack extends Stack {
   constructor(scope: Construct, id: string, props?: StackProps) {
     super(scope, id, props);
     const ctx = (key: string) => this.node.tryGetContext(key);
+    if (ctx("model_digest") !== undefined) throw new Error("model_digest is not supported for v1 model checkpoints");
     // Off by default. SnapStart's snapshot is billed for as long as the stack exists, about
     // $39.50 a month at 10 GB with no traffic at all, which is not what a serverless deploy
     // should cost at rest. It cuts a new environment's first answer from up to 30 s to about 6 s;
     // README.md, What it costs, says when to turn it on.
-    const snapStart = flag(ctx("snapstart"), "snapstart");
+    const snapStart = flag(ctx("snapstart") ?? false, "snapstart");
     // Keeps every request inside the function's 15-minute timeout: a larger one gets a 422
     // naming its size before any work, not a timeout after 15 billed minutes.
     const maxRequestTokens = Number(ctx("max_request_tokens") ?? 24576);
@@ -78,7 +79,7 @@ export class DeciderFunctionStack extends Stack {
     }
     // The longest side an image is scaled to before the processor's 32-pixel grid: 448 is
     // serve --vision's, 196 tokens for a square image; 768 is 576 (README.md, Images).
-    const imageLongSide = Number(ctx("image_long_side"));
+    const imageLongSide = Number(ctx("image_long_side") ?? 448);
     if (!Number.isInteger(imageLongSide) || imageLongSide < 32) {
       throw new Error(`image_long_side must be a whole number of pixels, 32 or more, not ${ctx("image_long_side")}`);
     }
@@ -90,10 +91,10 @@ export class DeciderFunctionStack extends Stack {
     // images; without it, they get a 422.
     const buildArgs = {
       MODEL: ctx("model"),
-      MODEL_REVISION: ctx("model_revision"),
-      VISION: String(flag(ctx("vision"), "vision")),
-      DECODER_PRECISION: choice(ctx("decoder_precision"), "decoder_precision", ["q8_0", "f16"]),
-      VISION_PRECISION: choice(ctx("vision_precision"), "vision_precision", ["f16", "f32"]),
+      MODEL_REVISION: ctx("model_revision") ?? "main",
+      VISION: String(flag(ctx("vision") ?? false, "vision")),
+      DECODER_PRECISION: choice(ctx("decoder_precision") ?? "q8_0", "decoder_precision", ["q8_0", "f16"]),
+      VISION_PRECISION: choice(ctx("vision_precision") ?? "f16", "vision_precision", ["f16", "f32"]),
     };
     const image = new ContainerImageBuild(this, "Image", {
       directory: REPO_ROOT,

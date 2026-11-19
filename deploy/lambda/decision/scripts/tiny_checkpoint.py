@@ -1,4 +1,4 @@
-"""A tiny random Gemma 4 decision checkpoint, and transformers' hidden states on it under any mask:
+"""A tiny random Gemma 4 model checkpoint, and transformers' hidden states on it under any mask:
 the reference shim_check.py holds the shim to.
 
 The checkpoint, from a fixed seed, is shaped like E2B but tiny: 15 decoder layers, four sliding
@@ -103,7 +103,7 @@ def _tokenizer_json() -> dict:
 
 
 def make_checkpoint(d: Path) -> Path:
-    """The tiny checkpoint in a decision checkpoint's layout, in `d`."""
+    """The tiny checkpoint in a model checkpoint's layout, in `d`."""
     import torch
     import transformers
     from safetensors.torch import save_file
