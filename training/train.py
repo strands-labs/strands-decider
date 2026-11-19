@@ -28,6 +28,7 @@ import typer
 from torch.utils.data import DataLoader, Dataset
 
 from strands_decider import core
+from strands_decider.decision import is_model_checkpoint
 from strands_decider.modeling import (
     HEAD_TYPES,
     StrandsDeciderConfig,
@@ -130,7 +131,9 @@ class TrainConfig:
     # (INIT_FROM_ARCH): leave those fields out, as a config that sets one to another value
     # than the checkpoint's is refused. max_length is the checkpoint's unless set. Fitted
     # temperatures are reset to 1: calibrate the result. freeze_torso: true trains the head
-    # alone on the checkpoint's frozen adapter.
+    # alone on the checkpoint's frozen adapter. A model checkpoint (a released v2 model, or the
+    # directory that training.export_v2 writes) has no adapter: a new one trains on its merged
+    # weights, and its readout trains on from its own values (`_init_from_model_checkpoint`).
     init_from: str | None = None
     # Continue a stopped run from a `resume-<step>.pt` that save_every wrote in its output_dir
     # (the last two are kept): trained weights, optimizer, schedule, step, data position and
@@ -261,6 +264,34 @@ def _given(cfg: TrainConfig, name: str) -> bool:
     f = TrainConfig.__dataclass_fields__[name]
     default = f.default_factory() if f.default_factory is not MISSING else f.default
     return name in getattr(cfg, "yaml_keys", ()) or getattr(cfg, name) != default
+
+
+def _init_from_model_checkpoint(cfg: TrainConfig) -> str:
+    """Sets the model checkpoint `cfg.init_from` (training.export_v2, a released v2 model) as
+    the base of `cfg`, a token readout under prefix_bidir, and returns its directory, which
+    holds the readout that training starts from. A config that sets one of these fields to
+    another value than the checkpoint's is refused, as `_init_from` refuses it."""
+    init = cfg.init_from or ""
+    path = checkpoint_dir(init)
+    theirs = {
+        "base_model": core.DecisionConfig.load(path).provenance.base_model,
+        "head_type": "token_readout",
+        "attention_mode": "prefix_bidir",
+    }
+    conflicts = [n for n, v in theirs.items() if _given(cfg, n) and getattr(cfg, n) != v]
+    if conflicts:
+        sets = "; ".join(
+            f"the config sets {n}={getattr(cfg, n)!r}, not {theirs[n]!r}" for n in conflicts
+        )
+        raise ValueError(
+            f"init_from {init}: {sets}. Remove {', '.join(conflicts)} from the config."
+        )
+    print(f"[strands-decider] continuing from {init}")
+    # A directory by its absolute path, so that the result loads from any directory; a Hub id
+    # as it is, so that it loads on any host.
+    cfg.base_model = os.path.abspath(init) if os.path.isdir(init) else init
+    cfg.head_type, cfg.attention_mode = "token_readout", "prefix_bidir"
+    return path
 
 
 def _init_from(cfg: TrainConfig) -> StrandsDeciderModel:
@@ -582,7 +613,10 @@ def train(cfg: TrainConfig) -> str:
     # and math kernels give finite gradients on the same rows; only the kernel choice changes.
     torch.backends.cuda.enable_cudnn_sdp(False)
 
-    if cfg.init_from:
+    readout_from = None
+    if cfg.init_from and is_model_checkpoint(cfg.init_from):
+        readout_from = _init_from_model_checkpoint(cfg)
+    if cfg.init_from and not readout_from:
         model = _init_from(cfg)
     else:
         _readout_defaults(cfg)
@@ -613,6 +647,8 @@ def train(cfg: TrainConfig) -> str:
         model = StrandsDeciderModel.from_pretrained_base(
             model_cfg, attn_implementation=cfg.attn_implementation
         )
+        if readout_from:  # in place of the base's LM head rows
+            model.set_readout(readout_from)
         if cfg.freeze_torso:
             model.freeze_torso()
     # After _init_from, which sets head_type from the checkpoint.

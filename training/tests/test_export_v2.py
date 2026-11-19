@@ -519,3 +519,72 @@ def test_a_merged_decoder_exports_as_the_checkpoint_of_its_adapters(tmp_path, mo
         with pytest.raises(ValueError, match=message):
             X.export_merged(merged(case, tensors, readout), str(tmp_path / f"out-{case}"), **kw)
         assert not (tmp_path / f"out-{case}").exists()
+
+
+# ---- an exported model as the start of a fine-tune ------------------------------------------
+
+
+def test_an_exported_model_evaluates_calibrates_fine_tunes_and_exports_again(tmp_path):
+    """The directory that the export writes loads as a model with its own readout and
+    temperature. `calibrate` writes its one temperature and no other file. `init_from` trains
+    a new adapter on it from its readout, and the result exports with the same base model."""
+    import training.evaluate as E
+    from strands_decider.modeling import StrandsDeciderConfig, config_path
+
+    base = tmp_path / "base"
+    _base(base, gemma4_file("tokenizer.json"))
+    src, data = tmp_path / "v2.jsonl", tmp_path / "train.jsonl"
+    src.write_text("".join(json.dumps(r) + "\n" for r in _v2_rows(24)), encoding="utf-8")
+    strands_v2.main([str(src), str(data)])
+    released = tmp_path / "released"
+    export_v2(str(_train(tmp_path, base, data, 1)), str(released), base_model=HUB_ID)
+
+    model = StrandsDeciderModel.load(str(released))
+    assert torch.equal(model.head.proj.weight, _readout(released).float())  # not a new readout
+    assert (model.config.attention_mode, model.config.use_lora) == ("prefix_bidir", False)
+
+    rows = load_examples([str(data)])
+    fitted = E.calibrate_checkpoint(str(released), rows, device="cpu")["temperature"]
+    assert set(os.listdir(released)) == LAYOUT
+    assert core.DecisionConfig.load(released).temperature == pytest.approx(fitted)
+    assert E.evaluate_checkpoint(str(released), rows, device="cpu")["temperature"] == fitted
+
+    def tune(**over):
+        kw = dict(
+            train_files=[str(data)],
+            val_files=[str(data)],
+            init_from=os.path.relpath(released),
+            lora_targets=E2B_TARGETS,
+            lora_r=4,
+            lora_alpha=8,
+            lr=1e-2,
+            head_lr=0.0,  # the readout stays where the run starts it
+            micro_batch_size=4,
+            grad_accum=1,
+            max_steps=3,
+            max_length=512,
+            eval_every=0,
+            output_dir=str(tmp_path / "tuned"),
+        )
+        T.train(T.TrainConfig(**{**kw, **over}))
+        return tmp_path / "tuned"
+
+    # A config that names another base is refused before the model loads.
+    with pytest.raises(ValueError, match="Remove base_model from the config"):
+        tune(base_model="google/gemma-4-E4B-it")
+
+    tuned = tune(base_model=HUB_ID)  # the base that the export recorded: accepted
+    saved = StrandsDeciderConfig.from_json(config_path(str(tuned)))
+    assert saved.base_model == str(released.resolve())  # loads from any directory
+    with pytest.raises(ValueError, match="leave --base-model out"):
+        export_v2(str(tuned), str(tmp_path / "x"), base_model="some-org/another-model")
+    out = tmp_path / "out"
+    export_v2(str(tuned), str(out))  # the base's Hub id and revision are the exported model's
+    assert set(os.listdir(out)) == LAYOUT
+    assert _loads(out).provenance == core.DecisionConfig.load(released).provenance
+    mine, theirs = _tensors(out), _tensors(released)
+    assert any(not torch.equal(mine[k], theirs[k]) for k in mine if k.startswith(DECODER))
+    assert all(torch.equal(mine[k], theirs[k]) for k in mine if not k.startswith(DECODER))
+    # The adapter trained, and the readout did not move: the run started from the exported
+    # readout, not from a new one.
+    assert torch.equal(_readout(out), _readout(released))
