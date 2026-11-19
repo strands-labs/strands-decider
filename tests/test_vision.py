@@ -467,6 +467,33 @@ def test_image_only_request_and_refusals(engines):
 def test_load_vision_engine_keeps_the_server_settings(ckpt):
     eng = load_vision_engine(ckpt, EngineConfig(device="cpu", max_batch=3, model_name="vd-test"))
     assert (eng.cfg.max_batch, eng.cfg.model_name) == (3, "vd-test")
+    assert eng.vcfg.image_long_side == 448
+
+
+@pytest.mark.parametrize(
+    ("limits", "sizes", "message"),
+    [
+        ({"max_images": 1}, [(32, 32), (32, 32)], "at most 1$"),
+        ({"max_image_pixels": 1024}, [(33, 32)], "at most 1,024 pixels are accepted"),
+    ],
+)
+def test_load_vision_engine_enforces_configured_image_limits(ckpt, limits, sizes, message):
+    eng = load_vision_engine(ckpt, VisionEngineConfig(device="cpu", **limits))
+    request = SystemOneRequest(
+        state="", questions={"signed": QUESTIONS["signed"]}, images=[_b64(32, 32, 0)]
+    )
+    eng.evaluate(request)
+    with pytest.raises(ValueError, match=message):
+        eng.evaluate(request.model_copy(update={"images": [_b64(w, h, 0) for w, h in sizes]}))
+
+
+@pytest.mark.parametrize("image_long_side", [None, 0, 96])
+def test_load_vision_engine_keeps_configured_image_size_unless_overridden(ckpt, image_long_side):
+    config = VisionEngineConfig(device="cpu", image_long_side=64)
+    overrides = {} if image_long_side is None else {"image_long_side": image_long_side}
+    eng = load_vision_engine(ckpt, config, **overrides)
+    assert eng.vcfg.image_long_side == (64 if image_long_side is None else image_long_side)
+    assert config.image_long_side == 64
 
 
 def test_server_routes_images(ckpt):
