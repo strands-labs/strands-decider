@@ -112,17 +112,21 @@ Every setting is a CDK context value. Change it in `cdk.json`, or pass `-c key=v
 | --- | --- | --- |
 | `model` | `StrandsAgents/strands-decider-2B-qwen3.5-v1-2610` | The strands-decider model, a Hugging Face Hub id. Any Qwen3.5 model with a pointer head works. It names the stack. |
 | `model_revision` | `main` | The model's revision. Use a release's date tag (`YYMMDD`) to pin it ([docs/inference.md, Model artifact](../../docs/inference.md#model-artifact)). |
-| `snapstart` | `false` | `true` turns SnapStart on: new execution environments answer in about 6 s instead of up to 30 s, for about $39.50 a month while the stack exists ([What it costs](#what-it-costs)). Not for a decision checkpoint. |
-| `vision` | `false` | `true` adds the base model's vision tower, for requests with images ([Images](#images)). Not for a decision checkpoint, which takes images when its `inputs` list them. |
-| `image_long_side` | `448` | The longest side, in pixels, an image is scaled to, as for `serve --vision`; `768` makes a square image 576 tokens instead of 196 ([Image size](#image-size)). Not for a decision checkpoint. |
-| `decoder_precision` | `q8_0` | `f16` keeps the decoder unquantized: closer to the torch engine, and slower ([Precision](#precision)). Not for a decision checkpoint, whose decoder is Q8_0. |
-| `vision_precision` | `f16` | `f32` for the vision tower ([Precision](#precision)). Not for a decision checkpoint, whose vision tower is Q8_0. |
+| `snapstart` | `false` | `true` turns SnapStart on: new execution environments answer in about 6 s instead of up to 30 s, for about $39.50 a month while the stack exists ([What it costs](#what-it-costs)) |
+| `vision` | `false` | `true` adds the base model's vision tower, for requests with images ([Images](#images)) |
+| `image_long_side` | `448` | The longest side, in pixels, an image is scaled to, as for `serve --vision`; `768` makes a square image 576 tokens instead of 196 ([Image size](#image-size)) |
+| `decoder_precision` | `q8_0` | `f16` keeps the decoder unquantized: closer to the torch engine, and slower ([Precision](#precision)) |
+| `vision_precision` | `f16` | `f32` for the vision tower ([Precision](#precision)) |
 | `max_request_tokens` | `24576`, `16384` for a decision checkpoint | The most tokens one request may forward, the state once plus every question; `0` for no limit ([Limits](#limits)) |
 | `decision` | `false` | `true` deploys a decision checkpoint, `checkpoint`, instead of `model` ([Decision checkpoints](#decision-checkpoints)) |
 | `checkpoint` | none | The decision checkpoint: a Hugging Face Hub id, or an `s3://bucket/prefix/` URI of a checkpoint directory in the same account. It names the stack. |
 | `checkpoint_revision` | `main` | The checkpoint's Hub revision; the build resolves it to a commit and records it |
 | `checkpoint_digest` | none | The checkpoint's manifest digest ([What the build does](#what-the-build-does)); the build refuses a checkpoint with another |
 | `stack_name` | from the model | The stack's name, instead of one made from `model` or `checkpoint` (an `s3://` checkpoint's name gets 8 hex digits of its URI's sha256, so checkpoints of one name in different places get stacks of their own) |
+
+A decision checkpoint reads `checkpoint`, `checkpoint_revision`, `checkpoint_digest`,
+`max_request_tokens` and `stack_name`. The other settings are the v1 model's, and
+`snapstart=true` is refused.
 
 ## What it costs
 
@@ -304,10 +308,11 @@ most 0.02: at E2B, through this runtime on x86, 99.08% and 0.0104 on 1,200 promp
 (release b12383), checks and applies the patch in `decision/patches`, which lets the shim make
 Gemma 4's full-attention layers non-causal, stopping if it does not apply, and builds it and
 `decision/shim.c` for Graviton2 and later; the build fails if the library is not arm64 or holds an
-instruction Graviton2 lacks (i8mm, bf16, SVE). `decision/scripts/shim_check.py` then runs that
-library against transformers on a tiny random Gemma 4 checkpoint (tests/test_llama_cpp_shim.py
-runs the same check), and the build fails unless the `prefix_bidir` mask, state reuse, the image
-rows and the answers are the reference's.
+instruction Graviton2 lacks (i8mm, bf16, SVE). `decision/scripts/shim_check.py` then converts a
+tiny random Gemma 4 checkpoint as the build converts a real one and runs it in that library
+against transformers (tests/test_llama_cpp_shim.py runs the same check). The build fails unless
+the conversion, the `prefix_bidir` mask, state reuse, the image rows and the answers are the
+reference's.
 
 The build then reads the checkpoint, from the Hugging Face Hub at the commit `checkpoint_revision`
 resolves to, each LFS file checked against the sha256 the Hub records, or, for an `s3://` URI,
