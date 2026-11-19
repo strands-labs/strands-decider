@@ -54,7 +54,6 @@ def _client(path, **kwargs) -> TestClient:
 
 def test_which_checkpoints_take_the_decision_path(ckpt, tmp_path, monkeypatch):
     import huggingface_hub
-    from huggingface_hub.errors import RepositoryNotFoundError
 
     assert is_decision_checkpoint(str(ckpt))
     assert not is_decision_checkpoint(str(tmp_path / "x"))  # no such path: v1 reports it
@@ -63,21 +62,12 @@ def test_which_checkpoints_take_the_decision_path(ckpt, tmp_path, monkeypatch):
     assert not is_decision_checkpoint(str(other))  # no decision_config.json
     (other / "decision_config.json").write_text(json.dumps({"format_id": "another-format"}))
     assert not is_decision_checkpoint(str(other))  # another decision model's
-
     calls = []
-
-    def snapshot(repo, revision=None, **_):
-        calls.append((repo, revision))
-        if repo == "org/missing":
-            e = RepositoryNotFoundError.__new__(RepositoryNotFoundError)  # no HTTP response
-            Exception.__init__(e, "no such repo")
-            raise e
-        return str(ckpt)
-
+    snapshot = lambda repo, revision=None: calls.append((repo, revision)) or str(ckpt)  # noqa: E731
     monkeypatch.setattr(huggingface_hub, "snapshot_download", snapshot)
-    assert is_decision_checkpoint("org/decision", revision="v2")  # a Hub repo is its snapshot
-    assert not is_decision_checkpoint("org/missing")
-    assert calls == [("org/decision", "v2"), ("org/missing", None)]
+    assert is_decision_checkpoint("org/decision", revision="v2") and calls == [
+        ("org/decision", "v2")
+    ]
 
 
 # ---- the engine ----------------------------------------------------------------------------

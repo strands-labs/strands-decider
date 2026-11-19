@@ -306,9 +306,8 @@ class TransformersBackend:
         max_batch_tokens: int = MAX_BATCH_TOKENS,
     ):
         self.model = model
-        self.decoder: Any = (
-            model.model
-        )  # Gemma4Model or Gemma4UnifiedModel, with the vision encoder
+        # Gemma4Model or Gemma4UnifiedModel, with the vision encoder
+        self.decoder: Any = model.model
         self.device = device
         self.image_processor = image_processor
         self.image_problem = None if image_processor is not None else image_problem

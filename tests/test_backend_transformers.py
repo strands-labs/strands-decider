@@ -297,7 +297,8 @@ def test_state_reuse_is_the_full_pass(backends, parts, kind, images):
 
 def test_no_pass_over_the_state_is_64k_plus_1_wide(backends, parts, recorder):
     """The torch 2.7 CUDA workaround, where CI runs: a batch whose longest question is 65 tokens
-    runs 66 wide, one more masked column, and a full pass takes the state's last query too."""
+    runs 66 wide, one more masked column, and a full pass takes the state's last query too. This
+    is its guard: with it removed, the CUDA tests pass on torch 2.7.1+cu126 on an H100."""
     full, reuse = backends
     _, state, _ = _rendered(parts, request())
     s, vocab = len(state), parts[0].get_vocab_size()
