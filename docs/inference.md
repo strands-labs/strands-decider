@@ -331,8 +331,8 @@ The serving options, as a model checkpoint takes them:
   longer prompt gets 422 and is never truncated; a value above the validated length warns.
 - `--revision`: the branch, tag or commit of a checkpoint on the Hub.
 
-`--vision` and `--device-map` are for v1 checkpoints. `/health` reports the backend, device,
-dtype, longest prompt served, whether images are served, and the concurrency.
+`--vision` and `--device-map` are only supported for v1 model checkpoints. `/health` reports the
+backend, device, dtype, longest prompt served, whether images are served, and the concurrency.
 
 ## Asking many questions is nearly free
 

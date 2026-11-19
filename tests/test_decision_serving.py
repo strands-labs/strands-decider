@@ -201,17 +201,26 @@ def test_serve_command_options(ckpt, tmp_path, monkeypatch):
     keys = ("dtype", "reuse_state", "max_concurrency", "queue_timeout", "max_length")
     assert [health[k] for k in keys] == ["bfloat16", False, 2, 5.0, 1000]
     for args, hint in (
-        ([str(tmp_path), "--dtype", "bfloat16"], "--dtype is for model checkpoints"),
-        ([str(tmp_path), "--revision", "main"], "--revision is for model checkpoints"),
-        ([str(tmp_path), "--max-length", "100"], "--max-length is for model checkpoints"),
+        (
+            [str(tmp_path), "--dtype", "bfloat16"],
+            "--dtype is not supported for v1 model checkpoints",
+        ),
+        (
+            [str(tmp_path), "--revision", "main"],
+            "--revision is not supported for v1 model checkpoints",
+        ),
+        (
+            [str(tmp_path), "--max-length", "100"],
+            "--max-length is not supported for v1 model checkpoints",
+        ),
         ([str(ckpt), "--dtype", "float16"], "--dtype is one of"),
         ([str(ckpt), "--max-length", "0"], "greater than or equal to 1"),
-        ([str(ckpt), "--device-map", "auto"], "--device-map is for v1"),
+        ([str(ckpt), "--device-map", "auto"], "--device-map is only supported for v1"),
         ([str(ckpt), "--device", "tpu"], "model checkpoints run on cpu, cuda, mps"),
     ):
         code, out = _cli("serve", *args)
         assert code == 2 and "serving" not in out and hint in out, out
-    with pytest.warns(UserWarning, match="--vision is for v1"):
+    with pytest.warns(UserWarning, match="--vision is only supported for v1"):
         _cli("serve", str(ckpt), "--device", "cpu", "--no-warmup", "--vision")
     assert len(started) == 2
 
@@ -250,7 +259,7 @@ def test_ask_on_a_model_checkpoint(ckpt, text_only, tmp_path):
         ([str(text_only), "--image", str(img), "--device", "cpu"], "does not take images"),
         (
             [str(tmp_path), "--device", "cpu", "--dtype", "bfloat16"],
-            "--dtype is for model checkpoints",
+            "--dtype is not supported for v1 model checkpoints",
         ),
     ):
         code, out = _cli("ask", args[0], "--state", "x", "--noul", "y?", *args[1:])

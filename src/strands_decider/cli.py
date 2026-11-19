@@ -68,8 +68,8 @@ def serve_cmd(
     no_prefix_cache: bool = typer.Option(
         False,
         "--no-prefix-cache",
-        help="Encode each question with its own copy of the state; for a model checkpoint, "
-        "one full pass per question (the reference, on CUDA in bfloat16).",
+        help="Encode each question with its own copy of the state on v1 model checkpoints, and in "
+        "one full pass on other model checkpoints (the reference, on CUDA in bfloat16).",
     ),
     model_name: str | None = typer.Option(
         None,
@@ -79,8 +79,9 @@ def serve_cmd(
     vision: bool = typer.Option(
         False,
         "--vision",
-        help="Keep Qwen3.5's vision tower so requests may carry `images` (docs/vision.md). A "
-        "model checkpoint takes images when its decision_config.json lists them.",
+        help="v1 model checkpoints: keep Qwen3.5's vision tower so requests may carry `images` "
+        "(docs/vision.md). Other model checkpoints take images when their decision_config.json "
+        "lists them.",
     ),
     max_batch: int = typer.Option(
         32,
@@ -102,33 +103,35 @@ def serve_cmd(
         None,
         "--max-concurrency",
         min=1,
-        help="Run at most N requests on the model at once; the rest wait. v1 checkpoints: no cap "
-        "beyond the 40-thread worker pool by default, and a waiting request holds no thread or GPU "
-        "memory. Model checkpoints: 1 by default, and a request waits up to --queue-timeout.",
+        help="Run at most N requests on the model at once; the rest wait. v1 model checkpoints: no "
+        "cap beyond the 40-thread worker pool by default, and a waiting request holds no thread or "
+        "GPU memory. Other model checkpoints: 1 by default, and a request waits up to "
+        "--queue-timeout.",
     ),
     dtype: str | None = typer.Option(
         None,
         "--dtype",
-        help="Model checkpoints: float32 or bfloat16. Default: float32 on cpu, bfloat16 on "
-        "cuda and mps.",
+        help="float32 or bfloat16. Default: float32 on cpu, bfloat16 on cuda and mps. Not "
+        "supported for v1 model checkpoints.",
     ),
     queue_timeout: float = typer.Option(
         60.0,
         "--queue-timeout",
-        help="Model checkpoints: seconds a request waits for the model before a 503.",
+        help="Seconds a request waits for the model before a 503. Not supported for v1 model "
+        "checkpoints.",
     ),
     revision: str | None = typer.Option(
         None,
         "--revision",
-        help="Model checkpoints on the Hub: the branch, tag or commit to load.",
+        help="The Hub branch, tag or commit to load. Not supported for v1 model checkpoints.",
     ),
     max_length: int | None = typer.Option(
         None,
         "--max-length",
         min=1,
-        help="Model checkpoints: refuse prompts longer than this many tokens (default: "
-        "decision_config.json's max_length_validated). Raising it past the validated length is "
-        "the operator's decision.",
+        help="Refuse prompts longer than this many tokens (default: decision_config.json's "
+        "max_length_validated). Raising it past the validated length is the operator's decision. "
+        "Not supported for v1 model checkpoints.",
     ),
     warmup: bool = typer.Option(
         True,
@@ -193,13 +196,13 @@ def ask_cmd(
     revision: str | None = typer.Option(
         None,
         "--revision",
-        help="Model checkpoints on the Hub: the branch, tag or commit to load.",
+        help="The Hub branch, tag or commit to load. Not supported for v1 model checkpoints.",
     ),
     dtype: str | None = typer.Option(
         None,
         "--dtype",
-        help="Model checkpoints: float32 or bfloat16. Default: float32 on cpu, bfloat16 on "
-        "cuda and mps.",
+        help="float32 or bfloat16. Default: float32 on cpu, bfloat16 on cuda and mps. Not "
+        "supported for v1 model checkpoints.",
     ),
 ) -> None:
     """Ask one state a set of typed questions from the command line."""
@@ -248,7 +251,7 @@ def ask_cmd(
     elif dtype is not None or revision is not None:
         flag = "--dtype" if dtype is not None else "--revision"
         raise typer.BadParameter(
-            f"{flag} is for model checkpoints, not v1 checkpoints", param_hint=flag
+            f"{flag} is not supported for v1 model checkpoints", param_hint=flag
         )
     elif images:
         from .vision import load_vision_engine

@@ -120,11 +120,11 @@ def create_app(
     if build_engine is None and is_model_checkpoint(checkpoint, revision=revision):
         if device_map:
             raise ValueError(
-                "--device-map is for v1 checkpoints; a model checkpoint runs on one device"
+                "--device-map is only supported for v1 model checkpoints; this one runs on one device"
             )
         if vision:
             warnings.warn(
-                "--vision is for v1 checkpoints: a model checkpoint takes images when its "
+                "--vision is only supported for v1 model checkpoints; this one takes images when its "
                 "decision_config.json inputs list them",
                 stacklevel=2,
             )
@@ -146,7 +146,7 @@ def create_app(
         return _decision_app(engine, checkpoint)
     for flag, value in (("--dtype", dtype), ("--revision", revision), ("--max-length", max_length)):
         if value is not None:
-            raise ValueError(f"{flag} is for model checkpoints, not v1 checkpoints")
+            raise ValueError(f"{flag} is not supported for v1 model checkpoints")
     if device_map and (vision or not device.startswith("cuda")):
         raise ValueError("--device-map splits the text torso across CUDA GPUs: use it with cuda")
     if vision and device == "mlx":
