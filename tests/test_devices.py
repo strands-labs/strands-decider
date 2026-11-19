@@ -105,22 +105,32 @@ def test_the_server_builds_the_mlx_engine_for_device_mlx(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("cuda", "mlx", "mps", "expected"),
+    ("decision", "cuda", "mlx", "mps", "expected"),
     [
-        (True, True, True, "cuda"),
-        (False, True, True, "mlx"),  # a model checkpoint on a Mac with the extra: MLX
-        (False, False, True, "mps"),  # without it: MPS, with a note on stderr
-        (False, False, False, "cpu"),
+        (True, True, True, True, "cuda"),
+        (True, False, True, True, "mlx"),  # a model checkpoint on a Mac with the extra: MLX
+        (True, False, False, True, "mps"),  # without it: MPS, with a note on stderr
+        (True, False, False, False, "cpu"),
+        (False, False, True, True, "mps"),  # a v1 checkpoint: MLX stays opt-in
     ],
 )
-def test_model_checkpoints_default_to_mlx_on_a_mac_with_the_extra(
-    monkeypatch, capsys, cuda, mlx, mps, expected
+def test_serve_runs_a_model_checkpoint_on_mlx_on_a_mac_with_the_extra(
+    tmp_path, monkeypatch, decision, cuda, mlx, mps, expected
 ):
+    import uvicorn
+    from typer.testing import CliRunner
+
+    from strands_decider import server
+
+    if decision:
+        (tmp_path / "decision_config.json").write_text('{"interface": "strands-decider"}')
     monkeypatch.setattr(torch.cuda, "is_available", lambda: cuda)
-    monkeypatch.setattr(cli, "_decision_mlx_available", lambda: mlx)
+    monkeypatch.setattr(cli, "_mlx_vlm_available", lambda: mlx)
     monkeypatch.setattr(torch.backends.mps, "is_available", lambda: mps)
-    assert cli.resolve_device(None, decision=True) == expected
-    assert cli.resolve_device("cpu", decision=True) == "cpu"
-    captured = capsys.readouterr()
-    assert ("strands-decider[mlx]" in captured.err) == (expected == "mps")
-    assert captured.out == ""
+    devices = []
+    monkeypatch.setattr(server, "create_app", lambda _, *, device, **__: devices.append(device))
+    monkeypatch.setattr(uvicorn, "run", lambda *_, **__: None)
+    out = CliRunner().invoke(cli.app, ["serve", str(tmp_path)])
+    assert out.exit_code == 0, out.output
+    assert devices == [expected]
+    assert ("strands-decider[mlx]" in out.stderr) == (decision and expected == "mps")

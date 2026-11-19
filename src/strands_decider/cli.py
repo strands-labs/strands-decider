@@ -39,8 +39,8 @@ def _auto_device() -> str:
     return "cpu"
 
 
-def _decision_mlx_available() -> bool:
-    """Apple silicon with the mlx extra, mlx-vlm included."""
+def _mlx_vlm_available() -> bool:
+    """Apple silicon with the mlx extra, mlx-vlm included: what the MLX backend runs on."""
     import importlib.util
 
     from .infer import mlx_available
@@ -48,15 +48,18 @@ def _decision_mlx_available() -> bool:
     return mlx_available() and importlib.util.find_spec("mlx_vlm") is not None
 
 
-def _auto_decision_device() -> str:
-    """A model checkpoint's default: cuda, then mlx with the mlx extra, then mps, then cpu.
-    On mps it notes that MLX is the Mac backend they are validated on: on stderr, so that
-    `ask --json` stays JSON, and as plain text, which rich would read "[mlx]" in as markup."""
-    if torch.cuda.is_available():
-        return "cuda"
-    if _decision_mlx_available():
-        return "mlx"
+def _default_device(checkpoint: str, revision: str | None) -> str:
+    """`_auto_device`'s choice, except that a model checkpoint, validated on MLX rather than
+    MPS, gets mlx without CUDA where the MLX backend runs. On mps without it, a note says what to
+    install: on stderr, so that `ask --json` stays JSON, in plain text, as rich would read "[mlx]"
+    as markup."""
+    from .decision import is_model_checkpoint
+
     device = _auto_device()
+    if device == "cuda" or not is_model_checkpoint(checkpoint, revision=revision):
+        return device
+    if _mlx_vlm_available():
+        return "mlx"
     if device == "mps":
         typer.echo(
             "note: on Apple silicon, model checkpoints are validated on MLX, not MPS: "
@@ -71,15 +74,11 @@ def _configure_inference_logging(device: str) -> None:
         logging.getLogger("transformers.integrations.hub_kernels").setLevel(logging.ERROR)
 
 
-def resolve_device(device: str | None, *, decision: bool = False) -> str:
-    """Pick the device and silence the hub_kernels noise it would otherwise emit. `decision`
-    picks the default for a model checkpoint (`_auto_decision_device`)."""
-    selected = device or (_auto_decision_device() if decision else _auto_device())
+def resolve_device(device: str | None) -> str:
+    """Pick the torch device and silence the hub_kernels noise it would otherwise emit."""
+    selected = device or _auto_device()
     _configure_inference_logging(selected)
     return selected
-
-
-# ---------------------------------------------------------------- serve / ask
 
 
 @app.command("serve")
@@ -171,12 +170,9 @@ def serve_cmd(
     """Serve POST /v1/systemone. JevBench's typesafe adapter runs against it unchanged."""
     import uvicorn
 
-    from .decision import is_model_checkpoint
     from .server import create_app
 
-    selected_device = resolve_device(
-        device, decision=is_model_checkpoint(checkpoint, revision=revision)
-    )
+    selected_device = resolve_device(device or _default_device(checkpoint, revision))
     try:  # before anything is announced: the arguments' checks, and a model checkpoint's load
         app_ = create_app(
             checkpoint,
@@ -261,12 +257,11 @@ def ask_cmd(
     if not questions:
         raise typer.BadParameter("ask at least one --noul / --choice / --score question")
 
+    selected_device = resolve_device(device or _default_device(checkpoint, revision))
     images = [base64.b64encode(Path(p).read_bytes()).decode("ascii") for p in image or []]
     from .decision import is_model_checkpoint, load_decision_engine
 
-    decision = is_model_checkpoint(checkpoint, revision=revision)
-    selected_device = resolve_device(device, decision=decision)
-    if decision:
+    if is_model_checkpoint(checkpoint, revision=revision):
         # Images go in the request; the checkpoint's decision_config.json says if it takes them.
         from .core import Request
 
