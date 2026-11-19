@@ -5,6 +5,7 @@ STRANDS_DECIDER_TEST_CHECKPOINT, a model checkpoint."""
 from __future__ import annotations
 
 import contextlib
+import json
 import math
 import os
 import warnings
@@ -18,7 +19,7 @@ from decision_support import GEMMA4, KINDS, model_checkpoint, image_b64, request
 
 from strands_decider.backends.images import image_pixels
 from strands_decider.backends.transformers import TransformersBackend, load_backend
-from strands_decider.backends.transformers_attention import ATTENTION
+from strands_decider.backends.transformers_attention import ATTENTION, StateCache, StateSplit
 from strands_decider.core import (
     DecisionConfig,
     Request,
@@ -178,6 +179,39 @@ def test_full_passes_are_the_cores_dense_mask_with_e2bs_heads(e2b):
     """Keys and values repeated per query head, head_dim 512; float32 (3e-5 at most with torch
     2.7's CPU kernels)."""
     _check_against_the_dense_mask(e2b, load_backend(str(e2b), reuse_state=False), request(), 1e-4)
+
+
+def test_a_checkpoint_the_backend_cannot_run_is_refused(tmp_path):
+    """Another architecture is refused by name, and a missing tensor rather than initialised at
+    random, as transformers would."""
+    from safetensors.torch import load_file, save_file
+
+    other = model_checkpoint(tmp_path / "other", decision={"inputs": ["text"]})
+    (other / "config.json").write_text(json.dumps({"model_type": "llama"}))
+    with pytest.raises(ValueError, match="not a Gemma 4 model checkpoint"):
+        load_backend(str(other))
+    short = model_checkpoint(tmp_path / "short", decision={"inputs": ["text"]})
+    tensors = load_file(short / "model.safetensors")
+    del tensors[next(k for k in tensors if k.endswith("norm.weight"))]
+    save_file(tensors, short / "model.safetensors", metadata={"format": "pt"})
+    with pytest.raises(ValueError, match="the checkpoint lacks 1 tensors"):
+        load_backend(str(short))
+
+
+def test_a_state_split_and_cache_keep_the_whole_state():
+    """transformers 5.23 slices each layer's mask whole, and a slice that dropped tokens would
+    shift the split; the cache serves the state's keys and values ahead of each question batch."""
+    split = StateSplit(3)
+    assert split[:, :, 0:, :] is split
+    with pytest.raises(TypeError, match="keeps every token"):
+        split[:, :, 1:, :]
+    cache, state = StateCache(), torch.randn(1, 2, 3, 4)
+    assert cache.update(state, state, 0) == (state, state)
+    cache.freeze(3)
+    question = torch.randn(5, 2, 1, 4)
+    keys, _ = cache.update(question, question, 0)
+    assert keys.shape == (5, 2, 4, 4) and torch.equal(keys[:, :, :3], state.expand(5, -1, -1, -1))
+    assert cache.get_seq_length() == 3
 
 
 def test_a_model_that_keeps_transformers_sdpa_is_refused(e2b, monkeypatch):

@@ -373,6 +373,13 @@ def test_device_map_needs_the_text_engine_on_cuda(kwargs):
         server.create_app("checkpoints/strands-decider-test", device_map="auto", **kwargs)
 
 
+def test_vision_is_refused_on_mlx():
+    from strands_decider import server
+
+    with pytest.raises(ValueError, match="--vision runs on torch devices"):
+        server.create_app("checkpoints/strands-decider-test", device="mlx", vision=True)
+
+
 def test_ping_answers_while_every_worker_thread_is_busy():
     """/ping must not queue behind /invocations: with more requests in flight than the
     thread pool has threads, a health check still answers within SageMaker's 2 s."""

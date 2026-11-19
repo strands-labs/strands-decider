@@ -19,7 +19,7 @@ import torch
 import transformers
 from transformers.utils import logging as hf_logging
 
-from ..core import NO_VISION, RenderedImage
+from ..core import RenderedImage
 from .images import image_pixels, load_image_processor
 from .transformers_attention import StateCache, StateSplit, use_prefix_bidir
 
@@ -156,8 +156,6 @@ class TransformersBackend:
         The model refuses an image whose vectors don't fill its placeholders."""
         if not images:
             return {}
-        if self.image_processor is None:
-            raise ValueError(NO_VISION)
         out = self.image_processor(
             images=[image_pixels(im) for im in images], do_resize=False, return_tensors="pt"
         )
