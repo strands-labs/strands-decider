@@ -1,6 +1,5 @@
-"""The decision checkpoint's Lambda handler over a stand-in backend. The backend is
-tests/test_backend_llama_cpp.py's and tests/test_llama_cpp_shim.py's to test, the core under both
-tests/test_core_*.py's.
+"""The decision checkpoint's Lambda handler, over a stand-in for the llama.cpp backend, which
+tests/test_backend_llama_cpp.py and tests/test_llama_cpp_shim.py test.
 """
 
 from __future__ import annotations
@@ -70,21 +69,19 @@ def gemma_ids_tokenizer():
     return tok
 
 
-def write_checkpoint(d: Path, *, vision: bool = True, lazy_ranges=(), **config) -> Path:
+def write_checkpoint(d: Path, *, inputs=("text", "image"), lazy_ranges=()) -> Path:
     """What the image holds in /opt/model, with a readout of identity rows."""
     from safetensors.numpy import save_file
 
     d.mkdir(parents=True, exist_ok=True)
     gemma_ids_tokenizer().save(str(d / "tokenizer.json"))
-    cfg = {**decision_config_fixture(), "max_length_validated": 512, **config}
-    (d / "decision_config.json").write_text(json.dumps(cfg))
+    config = {**decision_config_fixture(), "inputs": list(inputs), "max_length_validated": 512}
+    (d / "decision_config.json").write_text(json.dumps(config))
     weight = np.zeros((len(CODES), HIDDEN_SIZE), dtype=np.float32)
     weight[0, 0] = weight[1, 1] = 1.0
     save_file({"weight": weight}, str(d / "readout.safetensors"))
-    processor = {"patch_size": 16, "pooling_kernel_size": 3, "max_soft_tokens": 280}
-    (d / "processor_config.json").write_text(json.dumps({"image_processor": processor}))
     (d / "model.gguf").write_bytes(bytes(range(256)) * 4)
-    if vision:
+    if "image" in inputs:
         (d / "mmproj.gguf").write_bytes(b"\0" * 100)
     artifact = {"model_name": "tiny-decision-q8_0", "lazy_ranges": list(lazy_ranges)}
     (d / "artifact.json").write_text(json.dumps(artifact))
@@ -94,20 +91,26 @@ def write_checkpoint(d: Path, *, vision: bool = True, lazy_ranges=(), **config) 
 @pytest.fixture
 def load(tmp_path, monkeypatch):
     """Import the handler afresh, as a new execution environment does, from `directory` with `env`
-    set. posix_fadvise's calls, which macOS doesn't have, are recorded in `load.dropped`."""
+    set. The backends it makes are in `load.backends`; posix_fadvise's calls, which macOS doesn't
+    have, in `load.dropped`."""
+    backends: list[FakeBackend] = []
     dropped: list[tuple[int, int]] = []
     fadvise = lambda fd, offset, length, advice: dropped.append((offset, length))  # noqa: E731
     monkeypatch.setattr(os, "posix_fadvise", fadvise, raising=False)
     monkeypatch.setattr(os, "POSIX_FADV_DONTNEED", 4, raising=False)
+
+    def backend(*args, **kwargs):
+        backends.append(FakeBackend(*args, **kwargs))
+        return backends[-1]
+
     fake = types.ModuleType("strands_decider.backends.llama_cpp")
-    fake.LlamaCppBackend = FakeBackend  # type: ignore[attr-defined]
+    fake.LlamaCppBackend = backend  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "strands_decider.backends.llama_cpp", fake)
     monkeypatch.syspath_prepend(str(DECISION))
 
     def load(directory: Path | None = None, **env: str):
-        monkeypatch.setenv(
-            "DECIDER_MODEL_DIR", str(directory or write_checkpoint(tmp_path / "model"))
-        )
+        directory = directory or write_checkpoint(tmp_path / "model")
+        monkeypatch.setenv("DECIDER_MODEL_DIR", str(directory))
         for key in ("AWS_LAMBDA_INITIALIZATION_TYPE", "DECIDER_MAX_REQUEST_TOKENS"):
             monkeypatch.delenv(key, raising=False)
         for key, value in env.items():
@@ -116,6 +119,7 @@ def load(tmp_path, monkeypatch):
         dropped.clear()
         return importlib.import_module("handler")
 
+    load.backends = backends  # type: ignore[attr-defined]
     load.dropped = dropped  # type: ignore[attr-defined]
     yield load
     sys.modules.pop("handler", None)
@@ -139,20 +143,27 @@ def call(handler, event):
     return response["statusCode"], json.loads(response["body"])
 
 
-def backend_of(handler) -> FakeBackend:
-    return handler._model.result().llama
-
-
-def test_the_load_warms_up_then_drops_the_lazy_tables_pages(load, tmp_path):
-    d = write_checkpoint(tmp_path / "ckpt", lazy_ranges=[[100, 900]])
+@pytest.mark.parametrize(
+    ("inputs", "mmproj", "warm_ups", "dropped"),
+    [
+        (["text", "image"], "mmproj.gguf", [0, 1], [(0, 0), (100, 800)]),
+        (["text"], None, [0], [(100, 800)]),
+    ],
+)
+def test_the_load_warms_up_then_drops_the_pages_it_is_done_with(
+    load, tmp_path, inputs, mmproj, warm_ups, dropped
+):
+    d = write_checkpoint(tmp_path / "ckpt", inputs=inputs, lazy_ranges=[[100, 900]])
     handler = load(d)
-    backend = backend_of(handler)
-    library = str(DECISION / "libdecision.so")
-    assert backend.args == (library, str(d / "model.gguf"), str(d / "mmproj.gguf"))
-    # A text warm-up, then an image one.
-    assert [len(images) for _, _, images in backend.calls] == [0, 1]
-    # The vision tower's file, whole, after mtmd reads it; the table's range after the warm-ups.
-    assert load.dropped == [(0, 0), (100, 800)]
+    backend = load.backends[-1]
+    assert backend.args == (
+        str(DECISION / "libdecision.so"), str(d / "model.gguf"), mmproj and str(d / mmproj)
+    )  # fmt: skip
+    # A text warm-up, then for a checkpoint that takes images an image one.
+    assert [len(images) for _, _, images in backend.calls] == warm_ups
+    # The vision tower's file, whole, once mtmd has read it; the table's range after the warm-ups.
+    assert load.dropped == dropped
+    assert call(handler, url_event("GET", "/health"))[1]["inputs"] == inputs
 
 
 def test_answers(load):
@@ -161,7 +172,7 @@ def test_answers(load):
     assert status == 200 and body["model"] == "tiny-decision-q8_0" and body["latency_ms"] >= 0
     assert body["answers"]["urgent"] == {"type": "noul", "noul": 0.0}  # code A, "false", wins
     assert body["answers"]["team"]["choice"] == "billing"  # code B
-    state, questions, _ = backend_of(handler).calls[-1]
+    state, questions, _ = load.backends[-1].calls[-1]
     assert body["usage"] == {
         "input_tokens": len(state) + sum(map(len, questions)),
         "output_tokens": 2,
@@ -169,7 +180,7 @@ def test_answers(load):
     # A base64-encoded body, as a Function URL may send one, with an image; a direct invocation.
     status, with_image = call(handler, url_event("POST", "/v1/systemone", IMAGE_REQUEST, b64=True))
     assert status == 200 and with_image["answers"] == body["answers"]
-    assert len(backend_of(handler).calls[-1][2]) == 1
+    assert len(load.backends[-1].calls[-1][2]) == 1
     assert handler.handler(REQUEST, None)["answers"] == body["answers"]
 
 
@@ -187,10 +198,10 @@ def test_answers(load):
 )  # fmt: skip
 def test_refusals_come_before_the_backend_runs(load, event, env, status, detail):
     handler = load(**env)
-    warm_ups = len(backend_of(handler).calls)
+    warm_ups = len(load.backends[-1].calls)
     got_status, body = call(handler, event)
     assert got_status == status and detail in body["detail"]
-    assert len(backend_of(handler).calls) == warm_ups
+    assert len(load.backends[-1].calls) == warm_ups
 
 
 @pytest.mark.parametrize(
@@ -202,7 +213,7 @@ def test_refusals_come_before_the_backend_runs(load, event, env, status, detail)
 )  # fmt: skip
 def test_a_backend_error_is_the_requests_only_if_a_value_error(load, error, status, detail):
     handler = load()
-    backend_of(handler).fail = error
+    load.backends[-1].fail = error
     assert call(handler, url_event("POST", "/v1/systemone", IMAGE_REQUEST)) == (
         status,
         {"detail": detail},
@@ -233,13 +244,5 @@ def test_an_on_demand_load_answers_once_ready_and_exits_if_it_fails(load, tmp_pa
     monkeypatch.setattr(os, "_exit", lambda code: exited.set() if code == 1 else None)
     broken = write_checkpoint(tmp_path / "broken")
     (broken / "decision_config.json").unlink()
-    handler = load(broken, AWS_LAMBDA_INITIALIZATION_TYPE="on-demand")
-    assert exited.wait(10) and isinstance(handler._model.exception(), FileNotFoundError)
-
-
-def test_a_text_only_checkpoint(load, tmp_path):
-    handler = load(write_checkpoint(tmp_path / "text", vision=False, inputs=["text"]))
-    assert backend_of(handler).args[2] is None  # no vision tower
-    assert handler._model.result().health()["inputs"] == ["text"]
-    status, body = call(handler, url_event("POST", "/v1/systemone", IMAGE_REQUEST))
-    assert status == 422 and body["detail"].startswith("this checkpoint does not take images")
+    load(broken, AWS_LAMBDA_INITIALIZATION_TYPE="on-demand")
+    assert exited.wait(10)

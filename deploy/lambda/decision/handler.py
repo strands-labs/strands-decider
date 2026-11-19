@@ -19,74 +19,76 @@ import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Any
 
+import numpy as np
+
 from strands_decider.backends.llama_cpp import LlamaCppBackend
 from strands_decider.core import (
     DecisionConfig,
+    RenderedImage,
     Request,
-    check_image_processor,
     evaluate,
     load_readout,
     load_tokenizer,
 )
 from strands_decider.core.config import IMAGE
 
-log = logging.getLogger("decider")
-log.setLevel(logging.INFO)
+_log = logging.getLogger("decider")
+_log.setLevel(logging.INFO)
 
-MODEL_DIR = os.environ.get("DECIDER_MODEL_DIR", "/opt/model")  # the Dockerfile's, unless set
-LIBRARY = os.path.join(os.path.dirname(os.path.abspath(__file__)), "libdecision.so")
-ROUTES = {"/health": "GET", "/v1/systemone": "POST"}
+_MODEL_DIR = os.environ.get("DECIDER_MODEL_DIR", "/opt/model")  # the Dockerfile's, unless set
+_LIBRARY = os.path.join(os.path.dirname(os.path.abspath(__file__)), "libdecision.so")
+_ROUTES = {"/health": "GET", "/v1/systemone": "POST"}
 # The most tokens a request may forward, the state once plus every question, unless
 # DECIDER_MAX_REQUEST_TOKENS sets it (0: no limit). The slowest request measured at this limit,
 # 4 images and an 8,000-token state, took 549 s of Lambda's 900 s on Graviton2.
-DEFAULT_MAX_REQUEST_TOKENS = 16384
-READ_CHUNK = 16 << 20
+_DEFAULT_MAX_REQUEST_TOKENS = 16384
+_READ_CHUNK = 16 << 20
+_WARM_UP = {"state": "Warm up.", "questions": {"q": {"type": "noul", "instructions": "?"}}}
 # A 64x64 white PNG, for the image warm-up.
 _WARM_UP_IMAGE = (
     "iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAATUlEQVR42u3PQQ0AAAgEILV/5zOFDzdoQCepz6aeEx"
     "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQELi3cqoDfaKuZM4AAAAASUVORK5CYII="
 )
-_WARM_UP = {"state": "Warm up.", "questions": {"q": {"type": "noul", "instructions": "?"}}}
 
 
-class Model:
-    """The image's checkpoint, loaded once, and the Backend `evaluate` runs it with: llama.cpp
-    behind the request limit."""
+class _Model:
+    """The image's checkpoint, loaded once, and the Backend `evaluate` runs: llama.cpp behind the
+    request limit."""
 
     def __init__(self, model_dir: str, max_request_tokens: int | None):
         started = time.perf_counter()
         with open(os.path.join(model_dir, "artifact.json"), encoding="utf-8") as f:
             artifact = json.load(f)
-        self.name = str(artifact["model_name"])
+        self.name = artifact["model_name"]
         self.config = DecisionConfig.load(model_dir)
         self.weight = load_readout(model_dir)
         self.tokenizer = load_tokenizer(model_dir)
+        self.max_request_tokens = max_request_tokens
         gguf = os.path.join(model_dir, "model.gguf")
-        mmproj = os.path.join(model_dir, "mmproj.gguf")
-        vision = IMAGE in self.config.inputs
-        if vision:
-            check_image_processor(model_dir)
-        for path in (gguf, mmproj) if vision else (gguf,):
-            _prefetch(path)
-        log.info("model read in %.1f s", time.perf_counter() - started)
-        self.llama = LlamaCppBackend(LIBRARY, gguf, mmproj=mmproj if vision else None)
-        if vision:
+        mmproj = os.path.join(model_dir, "mmproj.gguf") if IMAGE in self.config.inputs else None
+        for path in (gguf, mmproj):
+            if path:
+                _prefetch(path)
+        _log.info("model read in %.1f s", time.perf_counter() - started)
+        self.llama = LlamaCppBackend(_LIBRARY, gguf, mmproj=mmproj)
+        if mmproj:
             # mtmd has read the vision tower into its own buffers, so its pages in the page
             # cache, which Lambda counts as memory used, aren't needed.
             _drop_from_page_cache(mmproj)
-        # The first forward's one-time costs, paid before the first request, with no limit yet.
-        self.max_request_tokens: int | None = None
-        self.evaluate(Request.model_validate(_WARM_UP))
-        if vision:
-            self.evaluate(Request.model_validate({**_WARM_UP, "images": [_WARM_UP_IMAGE]}))
+        # The first forward's one-time costs, paid before the first request, outside the limit.
+        warm_ups = [_WARM_UP, {**_WARM_UP, "images": [_WARM_UP_IMAGE]}] if mmproj else [_WARM_UP]
+        for warm_up in warm_ups:
+            request = Request.model_validate(warm_up)
+            evaluate(request, self.tokenizer, self.weight, self.config, self.llama)
         # The per-layer embedding table, 2.5 GB of E2B's file, is read a few rows at a time; after
         # the prefetch those rows come back quickly without the table staying in the page cache.
         for start, end in artifact["lazy_ranges"]:
             _drop_from_page_cache(gguf, start, end - start)
-        self.max_request_tokens = max_request_tokens
-        log.info("model ready in %.1f s", time.perf_counter() - started)
+        _log.info("model ready in %.1f s", time.perf_counter() - started)
 
-    def forward(self, state: list[int], questions: list[list[int]], images: Any = ()) -> Any:
+    def forward(
+        self, state: list[int], questions: list[list[int]], images: tuple[RenderedImage, ...] = ()
+    ) -> np.ndarray:
         """llama.cpp's forward, refusing a request that forwards more than `max_request_tokens`
         tokens before it decodes an image or runs a token."""
         n = len(state) + sum(map(len, questions))
@@ -113,24 +115,25 @@ class Model:
 
 
 def _prefetch(path: str, readers: int = 32) -> None:
-    """Read a file into the page cache, many chunks at once. Lambda loads an image's files lazily,
-    so read in order, as llama.cpp reads it, a model takes minutes to load in a new environment."""
+    """Reads a file into the page cache with many readers at once: Lambda fetches an image's files
+    lazily, and read in order, as llama.cpp reads them, E2B takes minutes to load in a new
+    environment."""
     fd = os.open(path, os.O_RDONLY)
 
     def read(start: int) -> None:  # in 4 MiB blocks, each dropped once read
-        for offset in range(start, min(start + READ_CHUNK, size), 4 << 20):
+        for offset in range(start, min(start + _READ_CHUNK, size), 4 << 20):
             os.pread(fd, 4 << 20, offset)
 
     try:
         size = os.fstat(fd).st_size
         with ThreadPoolExecutor(readers) as pool:
-            list(pool.map(read, range(0, size, READ_CHUNK)))
+            list(pool.map(read, range(0, size, _READ_CHUNK)))
     finally:
         os.close(fd)
 
 
 def _drop_from_page_cache(path: str, offset: int = 0, length: int = 0) -> None:
-    """Drop a file's pages, or `length` bytes of them from `offset` (0: to the end), from the page
+    """Drops a file's pages, or `length` bytes of them from `offset` (0: to the end), from the page
     cache. Pages a process has mapped and touched stay."""
     fd = os.open(path, os.O_RDONLY)
     try:
@@ -139,16 +142,16 @@ def _drop_from_page_cache(path: str, offset: int = 0, length: int = 0) -> None:
         os.close(fd)
 
 
-def _load() -> Model:
+def _load() -> _Model:
     raw = os.environ.get("DECIDER_MAX_REQUEST_TOKENS", "").strip()
-    limit = int(raw) if raw else DEFAULT_MAX_REQUEST_TOKENS
-    return Model(MODEL_DIR, limit or None)
+    limit = int(raw) if raw else _DEFAULT_MAX_REQUEST_TOKENS
+    return _Model(_MODEL_DIR, limit or None)
 
 
 def _exit_if_failed(future: Future) -> None:
     # Every invocation would fail; exit, and Lambda replaces the environment.
     if future.exception() is not None:
-        log.error("model load failed", exc_info=future.exception())
+        _log.error("model load failed", exc_info=future.exception())
         os._exit(1)
 
 
@@ -172,6 +175,9 @@ def _cpu_part() -> str:
         return "?"
 
 
+_CPU_PART = _cpu_part()
+
+
 def _evaluate(request: Request) -> dict[str, Any]:
     """The response, logged with the request's timings."""
     started = time.perf_counter()
@@ -186,11 +192,11 @@ def _evaluate(request: Request) -> dict[str, Any]:
         "input_tokens": payload["usage"]["input_tokens"],
         "questions": payload["usage"]["output_tokens"],
         "images": len(request.images),
-        "cpu_part": _cpu_part(),
+        "cpu_part": _CPU_PART,
         "maxrss_mb": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss // 1024,
         "timings_ms": model.llama.last_timings,
     }
-    log.info("request %s", json.dumps(info))
+    _log.info("request %s", json.dumps(info))
     return payload
 
 
@@ -204,9 +210,9 @@ def _response(status: int, body: Any) -> dict[str, Any]:
 
 def _http(event: dict[str, Any]) -> dict[str, Any]:
     path, method = event["rawPath"], event["requestContext"]["http"]["method"]
-    if path not in ROUTES:
+    if path not in _ROUTES:
         return _response(404, {"detail": "Not Found"})
-    if method != ROUTES[path]:
+    if method != _ROUTES[path]:
         return _response(405, {"detail": "Method Not Allowed"})
     if path == "/health":
         return _response(200, _model.result().health())
@@ -216,10 +222,10 @@ def _http(event: dict[str, Any]) -> dict[str, Any]:
             body = base64.b64decode(body)
         return _response(200, _evaluate(Request.model_validate_json(body)))
     except ValueError as e:  # pydantic's ValidationError is one
-        log.info("refused: %s", e)
+        _log.info("refused: %s", e)
         return _response(422, {"detail": str(e)})
     except Exception:
-        log.exception("request failed")
+        _log.exception("request failed")
         return _response(500, {"detail": "Internal Server Error"})
 
 
