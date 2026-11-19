@@ -133,6 +133,9 @@ class TransformersBackend:
             "reuse_state": self.reuse_state,
         }
 
+    def close(self) -> None:
+        """Nothing to release: the model goes with the backend."""
+
     def forward(
         self, state: list[int], questions: list[list[int]], images: Sequence[RenderedImage] = ()
     ) -> np.ndarray:

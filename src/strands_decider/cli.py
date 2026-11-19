@@ -337,9 +337,9 @@ def convert_mlx_cmd(
     group_size: int = typer.Option(64, "--group-size", help="Quantization group size."),
 ) -> None:
     """Write the MLX artifact of a model checkpoint, for `--device mlx`."""
-    try:
-        from .backends.mlx_convert import convert
+    from .backends.mlx_format import convert
 
+    try:
         artifact = convert(checkpoint, out, bits=bits, group_size=group_size)
     except (ImportError, ValueError, OSError, RuntimeError) as e:
         typer.echo(f"error: {e}", err=True)  # plain text, as rich would read "[mlx]" as markup
