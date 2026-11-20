@@ -82,12 +82,16 @@ level and overall confidence.
 
 ### Image input
 
-Decider can also answer questions about images when loaded with `--vision`
-(Qwen3.5 models only). Pass up to four base64 images alongside the state;
-the model reads them through its vision tower and answers the same three
-question types. The [Quickstart](quickstart.md#ask-about-an-image) has a
-runnable example; [designs/images](../designs/images.md) has the full
+Decider can also answer questions about images: pass up to four base64
+images alongside the state, and the model reads them through its vision
+tower and answers the same three question types. Every v2 model accepts
+images out of the box. The [Quickstart](quickstart.md#ask-about-an-image)
+has a runnable example; [designs/images](../designs/images.md) has the full
 request shape and vision benchmark results.
+
+> Note: on the v1 Qwen3.5 checkpoint, load the server with `serve --vision`
+> (or `ask --image …`) to attach the vision tower. v2 Gemma 4 models don't
+> need the flag. The other v1 Gemma 4 checkpoints don't support images.
 
 ## Next steps
 

@@ -60,8 +60,9 @@ Metal through mlx-lm.
 
 ## Flags worth knowing
 
-- `--vision` keeps the vision tower so requests may carry base64 `images`. See
-  [designs/images](../designs/images.md).
+- `--vision` loads the vision tower on the v1 Qwen3.5 checkpoint so requests
+  may carry base64 `images`. v2 Gemma 4 models accept images without this
+  flag. See [designs/images](../designs/images.md).
 - `--max-concurrency N` caps in-flight requests. Each request runs to
   completion before another picks it up on the engine.
 - `--max-batch N` sets the per-request question budget.
