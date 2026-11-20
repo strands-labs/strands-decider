@@ -1,20 +1,27 @@
 /**
- * Download a strands-decider model and the base model it loads, laid out for SageMaker.
+ * Download a strands-decider model, laid out for SageMaker.
  *
  *     npx tsx scripts/fetch-model.ts MODEL REVISION OUT_DIR
  *
  * MODEL is a Hugging Face Hub id. The script writes:
  *
- *     OUT_DIR/<model name>/  the model, at REVISION, with its config pointing at BASE_DIR
- *     OUT_DIR/base           the base model, at the revision the model records
+ *     OUT_DIR/<model name>/  the model, at REVISION
+ *     OUT_DIR/base           (v1 only) the base model, at the revision the model records
  *
  * SageMaker copies OUT_DIR to /opt/ml/model (the stack's ModelDataSource), so the container loads
- * both without network access. Both repos download to the Hugging Face cache (HF_HUB_CACHE).
- * OUT_DIR/base links to the base model's cached snapshot, which `aws s3 sync` follows, so its
- * weights (up to about 52 GB) are not copied a second time on the build machine.
+ * everything without network access. Repos download to the Hugging Face cache (HF_HUB_CACHE).
  *
- * It repeats the base-revision rule of strands_decider.modeling.base_revision, so it needs only
- * @huggingface/hub.
+ * v1 checkpoints (strands_decider_config.json / hobson_config.json) ship only the fine-tuned
+ * parts, so the script also downloads the base model and rewrites the config to point at
+ * BASE_DIR. OUT_DIR/base symlinks the base's cached snapshot, which `aws s3 sync` follows, so
+ * its weights (up to about 52 GB) are not copied a second time on the build machine.
+ *
+ * v2 checkpoints (decision_config.json) are self-contained — they ship every weight the runtime
+ * loads — so the base is metadata only and the script neither downloads it nor rewrites the
+ * config.
+ *
+ * For v1, it repeats the base-revision rule of strands_decider.modeling.base_revision, so it
+ * needs only @huggingface/hub.
  */
 import { existsSync } from "node:fs";
 import { cp, mkdir, readFile, symlink, writeFile } from "node:fs/promises";
@@ -22,16 +29,24 @@ import * as path from "node:path";
 import { snapshotDownload } from "@huggingface/hub";
 
 const BASE_DIR = "/opt/ml/model/base";
-const CONFIG_NAMES = ["strands_decider_config.json", "hobson_config.json"];
+const DECISION_CONFIG = "decision_config.json";
+const V1_CONFIG_NAMES = ["strands_decider_config.json", "hobson_config.json"];
+const CONFIG_NAMES = [DECISION_CONFIG, ...V1_CONFIG_NAMES];
 
-interface DeciderConfig {
+interface V1Config {
   base_model: string;
   base_revision?: string | null;
   [key: string]: unknown;
 }
 
+interface V2Config {
+  interface: "strands-decider";
+  provenance: { base_model: string; base_revision: string };
+  [key: string]: unknown;
+}
+
 /** The config's base revision, else the one provenance.json records for the same base. */
-async function baseRevision(checkpointDir: string, config: DeciderConfig): Promise<string | undefined> {
+async function baseRevision(checkpointDir: string, config: V1Config): Promise<string | undefined> {
   if (config.base_revision) return config.base_revision;
   const prov = path.join(checkpointDir, "provenance.json");
   if (!existsSync(prov)) return undefined;
@@ -47,7 +62,15 @@ async function main(model: string, revision: string, outDir: string): Promise<vo
 
   const configPath = CONFIG_NAMES.map((n) => path.join(checkpointDir, n)).find((p) => existsSync(p));
   if (!configPath) throw new Error(`${model}: no ${CONFIG_NAMES.join(" or ")}`);
-  const config: DeciderConfig = JSON.parse(await readFile(configPath, "utf8"));
+
+  if (path.basename(configPath) === DECISION_CONFIG) {
+    const config: V2Config = JSON.parse(await readFile(configPath, "utf8"));
+    const { base_model, base_revision } = config.provenance;
+    console.error(`v2 model ${model}@${path.basename(snapshot)}; base ${base_model}@${base_revision}`);
+    return;
+  }
+
+  const config: V1Config = JSON.parse(await readFile(configPath, "utf8"));
   const base = config.base_model;
   const baseRev = await baseRevision(checkpointDir, config);
   console.error(`model ${model}@${path.basename(snapshot)}; base model ${base}@${baseRev ?? "main"}`);
