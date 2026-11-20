@@ -198,7 +198,11 @@ def test_train_two_seeds_soup_export_and_load_with_the_core(tmp_path):
     assert core.load_readout(out).shape == (core.MAX_CODES, 32)
     core.load_tokenizer(out)
     core.check_image_processor(out)
-    assert cfg.provenance.model_dump() == {"base_model": HUB_ID, "base_revision": REVISION}
+    assert cfg.provenance.model_dump() == {
+        "base_model": HUB_ID,
+        "base_revision": REVISION,
+        "release": None,
+    }
     assert cfg.max_length_validated == 512
     assert json.loads((out / "config.json").read_text())["architectures"] == [
         "Gemma4ForConditionalGeneration"
