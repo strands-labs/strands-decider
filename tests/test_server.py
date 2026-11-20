@@ -196,6 +196,17 @@ def test_malformed_question_is_rejected(client):
     assert r.status_code == 422  # choice needs >= 2 options
 
 
+def test_token_budgets_are_refused_for_v1_checkpoints(client):
+    """v1 sizes images by image_long_side, so a token budget is refused rather than ignored."""
+    base = {"state": "x", "questions": {"q": {"type": "noul", "instructions": "y?"}}}
+    for extra, message in (
+        ({"images": [{"data": "aGk=", "token_budget": 70}]}, "token_budget is not supported"),
+        ({"image_token_budget": 70}, "image_token_budget is not supported"),
+    ):
+        r = client.post("/v1/systemone", json={**base, **extra})
+        assert r.status_code == 422 and message in r.text, r.text
+
+
 def test_empty_questions_rejected(client):
     r = client.post("/v1/systemone", json={"state": "x", "questions": {}})
     assert r.status_code == 422
