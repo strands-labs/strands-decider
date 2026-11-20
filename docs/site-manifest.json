@@ -6,58 +6,264 @@
   },
   "pages": [
     {
-      "id": "overview",
-      "source": "docs/overview.md",
+      "id": "landing",
+      "source": "docs/landing.md",
       "slug": "overview",
       "title": "Overview",
-      "description": "Understand what Strands Decider is, when to use it, and how to run your first decision.",
+      "description": "Strands Decider is a top-performing System One decision model from the Strands Agents team and AWS.",
       "nav": {
         "group": "Get started",
         "order": 1
       }
     },
     {
-      "id": "inference",
-      "source": "docs/inference.md",
-      "slug": "inference",
-      "title": "Inference",
-      "description": "Install Strands Decider, ask typed questions, serve the HTTP API, and choose an inference device.",
+      "id": "quickstart",
+      "source": "docs/quickstart.md",
+      "slug": "quickstart",
+      "title": "Quickstart",
+      "description": "Install Strands Decider, serve it, and use it as a model router inside a Strands agent.",
       "nav": {
-        "group": "Using Decider",
-        "order": 1
-      }
-    },
-    {
-      "id": "vision",
-      "source": "docs/vision.md",
-      "slug": "images",
-      "title": "Images",
-      "description": "Use image inputs and understand supported models, limits, implementation, and measurements.",
-      "nav": {
-        "group": "Using Decider",
+        "group": "Get started",
         "order": 2
       }
     },
     {
-      "id": "architecture",
-      "source": "docs/architecture.md",
-      "slug": "architecture",
-      "title": "Architecture",
-      "description": "Understand the pointer-head architecture, question types, training objective, and design decisions.",
+      "id": "overview",
+      "source": "docs/overview.md",
+      "slug": "introduction",
+      "title": "Introduction",
+      "description": "Understand System One models and the three question types Strands Decider supports.",
       "nav": {
-        "group": "Concepts",
-        "order": 1
+        "group": "Get started",
+        "order": 3
       }
     },
     {
-      "id": "naming",
-      "source": "docs/naming.md",
-      "slug": "model-names",
-      "title": "Model names",
-      "description": "Understand released model identifiers, version fields, and release tag conventions.",
+      "id": "inference",
+      "source": "docs/inference.md",
+      "slug": "inference",
+      "title": "Inference server",
+      "description": "Serve Strands Decider over HTTP: install, endpoints, devices, and request shapes.",
       "nav": {
-        "group": "Reference",
-        "order": 1
+        "group": "Models",
+        "order": 2
+      }
+    },
+    {
+      "id": "deployment-local",
+      "source": "docs/deployment/local.md",
+      "slug": "deployment/local",
+      "title": "Local",
+      "description": "Run Strands Decider on your own machine or an on-prem box.",
+      "nav": {
+        "group": "Deployment",
+        "order": 4
+      }
+    },
+    {
+      "id": "deployment-sagemaker",
+      "source": "docs/deployment/sagemaker.md",
+      "slug": "deployment/sagemaker",
+      "title": "SageMaker",
+      "description": "Host Strands Decider behind a SageMaker model endpoint.",
+      "nav": {
+        "group": "Deployment",
+        "order": 5
+      }
+    },
+    {
+      "id": "deployment-lambda",
+      "source": "docs/deployment/lambda.md",
+      "slug": "deployment/lambda",
+      "title": "Lambda",
+      "description": "Deploy Strands Decider behind an AWS Lambda function.",
+      "nav": {
+        "group": "Deployment",
+        "order": 6
+      }
+    },
+    {
+      "id": "deployment-terraform",
+      "source": "docs/deployment/terraform.md",
+      "slug": "deployment/terraform",
+      "title": "Terraform",
+      "description": "Deploy Strands Decider with Terraform (AWS, GCP, Azure, bare metal).",
+      "nav": {
+        "group": "Deployment",
+        "order": 8
+      }
+    },
+    {
+      "id": "models",
+      "source": "docs/models.md",
+      "slug": "models",
+      "title": "Models",
+      "description": "Compare the Strands Decider v2 and v1 models and pick the right one.",
+      "nav": {
+        "group": "Models",
+        "order": 3
+      }
+    },
+    {
+      "id": "model-e2b-gemma4-v2",
+      "source": "docs/models/e2b-gemma4-v2.md",
+      "slug": "models/e2b-gemma4-v2",
+      "title": "E2B-gemma4 v2",
+      "description": "The v2 model on Gemma 4 E2B.",
+      "nav": {
+        "group": [
+          "Models",
+          "V2 Models"
+        ],
+        "order": 4
+      }
+    },
+    {
+      "id": "model-e4b-gemma4-v2",
+      "source": "docs/models/e4b-gemma4-v2.md",
+      "slug": "models/e4b-gemma4-v2",
+      "title": "E4B-gemma4 v2",
+      "description": "The v2 model on Gemma 4 E4B.",
+      "nav": {
+        "group": [
+          "Models",
+          "V2 Models"
+        ],
+        "order": 5
+      }
+    },
+    {
+      "id": "model-12b-gemma4-v2",
+      "source": "docs/models/12b-gemma4-v2.md",
+      "slug": "models/12b-gemma4-v2",
+      "title": "12B-gemma4 v2",
+      "description": "The v2 model on Gemma 4 12B.",
+      "nav": {
+        "group": [
+          "Models",
+          "V2 Models"
+        ],
+        "order": 6
+      }
+    },
+    {
+      "id": "model-26b-a4b-gemma4-v2",
+      "source": "docs/models/26b-a4b-gemma4-v2.md",
+      "slug": "models/26b-a4b-gemma4-v2",
+      "title": "26B-A4B-gemma4 v2",
+      "description": "The v2 model on Gemma 4 26B-A4B.",
+      "nav": {
+        "group": [
+          "Models",
+          "V2 Models"
+        ],
+        "order": 7
+      }
+    },
+    {
+      "id": "model-31b-gemma4-v2",
+      "source": "docs/models/31b-gemma4-v2.md",
+      "slug": "models/31b-gemma4-v2",
+      "title": "31B-gemma4 v2",
+      "description": "The v2 model on Gemma 4 31B.",
+      "nav": {
+        "group": [
+          "Models",
+          "V2 Models"
+        ],
+        "order": 8
+      }
+    },
+    {
+      "id": "model-2b-qwen3-5",
+      "source": "docs/models/2b-qwen3-5.md",
+      "slug": "models/2b-qwen3-5",
+      "title": "2B-qwen3.5",
+      "description": "The Qwen3.5-2B-based v1 checkpoint, the only v1 model with image support.",
+      "nav": {
+        "group": [
+          "Models",
+          "V1 Models"
+        ],
+        "order": 9
+      }
+    },
+    {
+      "id": "model-e2b-gemma4",
+      "source": "docs/models/e2b-gemma4.md",
+      "slug": "models/e2b-gemma4",
+      "title": "E2B-gemma4",
+      "description": "The smallest Gemma 4 v1 checkpoint.",
+      "nav": {
+        "group": [
+          "Models",
+          "V1 Models"
+        ],
+        "order": 10
+      }
+    },
+    {
+      "id": "model-e4b-gemma4",
+      "source": "docs/models/e4b-gemma4.md",
+      "slug": "models/e4b-gemma4",
+      "title": "E4B-gemma4",
+      "description": "The mid-size Gemma 4 v1 checkpoint.",
+      "nav": {
+        "group": [
+          "Models",
+          "V1 Models"
+        ],
+        "order": 11
+      }
+    },
+    {
+      "id": "model-12b-gemma4",
+      "source": "docs/models/12b-gemma4.md",
+      "slug": "models/12b-gemma4",
+      "title": "12B-gemma4",
+      "description": "The dense Gemma 4 12B v1 checkpoint.",
+      "nav": {
+        "group": [
+          "Models",
+          "V1 Models"
+        ],
+        "order": 12
+      }
+    },
+    {
+      "id": "model-26b-a4b-gemma4",
+      "source": "docs/models/26b-a4b-gemma4.md",
+      "slug": "models/26b-a4b-gemma4",
+      "title": "26B-A4B-gemma4",
+      "description": "The mixture-of-experts Gemma 4 v1 checkpoint; highest JevBench.",
+      "nav": {
+        "group": [
+          "Models",
+          "V1 Models"
+        ],
+        "order": 13
+      }
+    },
+    {
+      "id": "understanding",
+      "source": "docs/understanding.md",
+      "slug": "understanding",
+      "title": "Understanding Strands Decider",
+      "description": "The shape of Decider: three question types, the v2 token readout and the v1 pointer head, calibration, and what the models train on.",
+      "nav": {
+        "group": "Training",
+        "order": 9
+      }
+    },
+    {
+      "id": "training",
+      "source": "docs/training.md",
+      "slug": "training",
+      "title": "Train a model",
+      "description": "Train a v2 model in three steps: convert your rows, train one config, and export the result.",
+      "nav": {
+        "group": "Training",
+        "order": 10
       }
     }
   ]

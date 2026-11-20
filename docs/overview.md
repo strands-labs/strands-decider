@@ -1,67 +1,99 @@
-# Overview
+# Introduction
 
-Strands Decider is a small, fast decision model for agentic AI. It answers typed
-questions about a state instead of generating text. Use it when your application
-already knows the valid outputs and needs a choice, a yes-or-no probability, or a
-score with a calibrated measure of confidence.
+System One models understand natural language and make a decision based on
+that information. They do not generate text — they return a typed answer
+from a known output space along with a calibrated confidence. The output
+space is fixed before the request and the model produces a single output
+token, so Decider is cheaper and faster than asking an LLM to decide.
 
-Decider runs on a local CPU, an Apple-silicon Mac, or an NVIDIA GPU. You can call
-it from the command line, serve it over HTTP, or place it inside a Strands agent.
-
-## What Decider returns
-
-Decider supports three question types:
-
-| Type | Use it to | Result |
-| --- | --- | --- |
-| `noul` | Ask a yes-or-no question | The probability that the answer is true |
-| `choice` | Pick one option from a set | The selected option, every option's probability, and confidence |
-| `score` | Rate something on an ordered scale | The expected score, the distribution across levels, and confidence |
-
-One request can ask several questions about the same state. Decider encodes the
-shared state once, then evaluates each question independently. This keeps
-multi-question decisions fast without letting one question influence another.
+Strands Decider is a System One model. It takes a **state** — the text (and
+optionally images) you want a decision about — and one or more typed
+questions, and answers each one. Three question types are supported:
+**Choice**, **Noul** (yes/no), and **Score**.
 
 ## When to use Decider
 
-Use Decider when the output space is known before the request and the same kind
-of decision happens repeatedly. Common uses inside agentic workflows include:
+Reach for Decider when the output space is known before the request and the
+same kind of decision happens repeatedly: classification, yes/no, and
+ranked scoring are the archetypes. Common uses:
 
-- routing a request to a model, tool, team, or queue;
-- checking tool arguments, grounding, safety, or policy compliance;
-- scoring model responses for evaluation;
-- handling routine decisions in a hybrid agent while an LLM handles harder,
-  open-ended work.
+- **Replacing LLM decisions with Decider.** LLMs are good at decisions but
+  costly and slow for the job. Decider often responds in under one second
+  and, because it produces a single output token, you don't pay for output
+  tokens. See [Amazon saves millions replacing Sonnet with Strands
+  Decider](https://strandsagents.com/blog/amazon-saves-millions-replacing-sonnet-with-strands-decider/).
+- **Model routing.** Route an incoming question to the right-size model —
+  Haiku for easy, Opus for hard. See [Decision models in the Strands
+  SDK](https://strandsagents.com/docs/user-guide/sdk/decision-models/).
+- **Interventions.** Decide whether a human should review an agent's next
+  action before it happens.
+- **Filtering.** Inside a graph, decide whether a request should go to an
+  LLM (expensive) or be skipped.
+- **Non-agentic classification.** Score support tickets, triage incoming
+  email, or tag documents into fixed categories without wiring up an agent.
 
-Use an LLM when the task needs generated text, conversation, coding,
-summarization, or complex reasoning. Decider classifies and scores; it does not
-generate a response.
+Use an LLM, not Decider, when the task needs generated text, conversation,
+coding, summarization, or complex reasoning. Decider classifies and scores;
+it does not generate a response.
 
-## Try one decision
+## Question types
 
-Install the package and ask the published 2B model to route a support request:
+### Choice
 
-```bash
-pip install strands-decider
+Given a list of options, pick one.
 
-strands-decider ask StrandsAgents/strands-decider-2B-qwen3.5-v1-2610 \
-  --state "Help! My payouts have been failing for 3 days." \
-  --choice "Which team should handle this?=billing,technical,sales"
-```
+> **Example**
+>
+> _State:_ "What color is this fruit: Banana"
+>
+> _Choices:_ Red, Yellow, or Blue?
+>
+> _Strands Decider:_ **Yellow**
 
-The result names the selected option, reports a probability for every option,
-and includes a confidence for the choice. See [Inference](inference.md) for the
-complete installation, device, command-line, and HTTP server guide.
+### Noul (yes / no)
 
-## Explore Decider
+Ask a yes-or-no question. **Noul** stands for *null-or-one*: Decider returns
+a single probability in `[0, 1]` that the answer is yes. Read it as "yes"
+above a threshold you pick for the task (0.5 is the natural default; raise
+it when a false yes is costly, lower it when a false no is).
 
-- [Inference](inference.md): install Decider, ask questions, and serve the HTTP
-  API.
-- [Images](vision.md): ask questions about image inputs with supported models.
-- [Architecture](architecture.md): understand the pointer head, question types,
-  calibration, and shared-prefix cache.
-- [Model names](naming.md): choose and interpret a published model identifier.
-- [Strands Agents example](../examples/strands/README.md): gate a tool call with
-  Decider inside a Strands agent.
+> **Example**
+>
+> _State:_ "Help! My payouts have been failing for 3 days."
+>
+> _Question:_ Is this request urgent?
+>
+> _Strands Decider:_ `noul = 0.94` → yes
 
-New to Decider? Continue with [Inference](inference.md) to run the model locally.
+### Score
+
+Rate something on an ordered scale. Decider returns an expected value along
+the scale — a continuous number, not a label — plus the probability of each
+level and overall confidence.
+
+> **Example**
+>
+> _State:_ "Order #4421 never arrived and the tracking link is broken."
+>
+> _Scale:_ low (0), medium (1), high (2), critical (3)
+>
+> _Strands Decider:_ **1.71** (between medium and high), high the most
+> likely level at 0.31.
+
+### Image input
+
+Decider can also answer questions about images: pass up to four base64
+images alongside the state, and the model reads them through its vision
+tower and answers the same three question types. Every v2 model accepts
+images out of the box. The [Quickstart](quickstart.md#ask-about-an-image)
+has a runnable example; [designs/images](../designs/images.md) has the full
+request shape and vision benchmark results.
+
+> Note: on the v1 Qwen3.5 checkpoint, load the server with `serve --vision`
+> (or `ask --image …`) to attach the vision tower. v2 Gemma 4 models don't
+> need the flag. The other v1 Gemma 4 checkpoints don't support images.
+
+## Next steps
+
+**Try it:** head to the [Quickstart](quickstart.md) to install, serve, and
+run your first decision in a few minutes.
