@@ -320,11 +320,13 @@ def image_processors() -> dict[str, object]:
     }
 
 
-def processor_soft_tokens(processor, width: int, height: int) -> int:
-    """N as the real processor reports it, for a solid image of that size."""
+def processor_soft_tokens(processor, width: int, height: int, budget: int | None = None) -> int:
+    """N as the real processor reports it, for a solid image of that size, at `budget` soft
+    tokens at most (the processor's own when None)."""
     from PIL import Image
 
-    out = processor(images=[Image.new("RGB", (width, height), (17, 120, 230))])
+    image = Image.new("RGB", (width, height), (17, 120, 230))
+    out = processor(images=[image], **({} if budget is None else {"max_soft_tokens": budget}))
     return int(out["num_soft_tokens_per_image"][0])
 
 
