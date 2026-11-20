@@ -1,0 +1,47 @@
+# The vLLM plugin's unit tests (vllm-plugin/tests), on vLLM's CPU wheel with no GPU. Its GPU tests
+# are run by a maintainer before a release (vllm-plugin/README.md, Tests).
+name: vllm-plugin
+
+on:
+  push:
+    branches: [main, staging]
+    paths:
+      - 'vllm-plugin/**'
+      - 'src/strands_decider/core/**'
+      - '.github/workflows/vllm-plugin.yml'
+  pull_request:
+    branches: [main, staging]
+    paths:
+      - 'vllm-plugin/**'
+      - 'src/strands_decider/core/**'
+      - '.github/workflows/vllm-plugin.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    name: vllm-plugin (py3.12)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      HF_HUB_OFFLINE: "1"
+      # vLLM's x86 CPU wheel from its GitHub release, pinned by hash: PyPI's wheel brings CUDA.
+      VLLM_CPU_WHEEL: "https://github.com/vllm-project/vllm/releases/download/v0.34.0/vllm-0.34.0%2Bcpu-cp38-abi3-manylinux_2_39_x86_64.whl#sha256=47fc0adfbbb00168d5a755b08a4b5fbde7e180c91c0a065221e7a253b8bbb5ff"
+      TORCH_CPU_INDEX: https://download.pytorch.org/whl/cpu
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.12"
+      - run: python -m pip install "vllm @ $VLLM_CPU_WHEEL" --extra-index-url "$TORCH_CPU_INDEX"
+      # The core from this checkout, then the plugin.
+      - run: python -m pip install ".[vision]" "./vllm-plugin[test]" --extra-index-url "$TORCH_CPU_INDEX"
+      - run: python -m pytest -q
+        working-directory: vllm-plugin

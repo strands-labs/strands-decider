@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "strands-decider-vllm"
+dynamic = ["version"]
+description = "Serve Strands Decider checkpoints (Gemma 4 under prefix_bidir attention, with the trained readout, text and images) on stock vLLM 0.34"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = ["vllm>=0.34,<0.35"]
+
+[project.optional-dependencies]
+# The server renders requests with the core, strands_decider.core, which no release has yet: the
+# floor is the development version of PR #129's head (a checkout installs as 0.3.1.devN).
+serve = ["strands-decider>=0.3.1.dev106,<0.5", "pillow>=13"]
+test = ["pytest", "httpx"]
+
+[project.scripts]
+strands-decider-vllm = "strands_decider_vllm.cli:main"
+
+[project.entry-points."vllm.general_plugins"]
+strands_decider = "strands_decider_vllm:register"
+
+[tool.setuptools.dynamic]
+version = { attr = "strands_decider_vllm.__version__" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-m 'not gpu'"
+markers = ["gpu: starts vLLM servers on a CUDA GPU (README, Tests); run with -m gpu"]
+
+[tool.ruff]
+extend = "../pyproject.toml"
+
+[tool.ruff.lint.per-file-ignores]
+# The plugin works through vLLM internals that have no public API (README, Limits).
+"**/*.py" = ["SLF001"]
