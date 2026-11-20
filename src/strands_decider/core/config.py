@@ -28,6 +28,8 @@ class Provenance(BaseModel):
 
     base_model: str  # its Hub id, such as google/gemma-4-E2B-it
     base_revision: str = Field(pattern=r"^[0-9a-f]{40}$")
+    # The release this checkpoint was part of, as published; v2 checkpoints ship it.
+    release: str | None = None
 
 
 class DecisionConfig(BaseModel):

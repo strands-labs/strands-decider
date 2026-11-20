@@ -10,5 +10,5 @@
   "attention_mode": "prefix_bidir",
   "pooling": "last",
   "max_length_validated": 8192,
-  "provenance": {"base_model": "google/gemma-4-E2B-it", "base_revision": "3e22461f65e89153144f8adb70e3b8c2cc9845a7"}
+  "provenance": {"base_model": "google/gemma-4-E2B-it", "base_revision": "3e22461f65e89153144f8adb70e3b8c2cc9845a7", "release": "StrandsAgents/strands-decider-E2B-gemma4-v2"}
 }
