@@ -56,7 +56,7 @@ jobs:
           # Install the CPU torch wheel first — the default Linux wheel also drags in several GB of CUDA libraries.
           python -m venv "$WORK/venv"
           "$WORK/venv/bin/pip" install --upgrade pip
-          "$WORK/venv/bin/pip" install torch --index-url https://download.pytorch.org/whl/cpu
+          "$WORK/venv/bin/pip" install torch torchvision --index-url https://download.pytorch.org/whl/cpu
           "$WORK/venv/bin/pip" install "$WHEEL"
 
       - name: Import and run the CLI from outside the source tree

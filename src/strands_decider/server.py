@@ -7,19 +7,27 @@ Compatibility with the Jev API itself is not verified.
 
 from __future__ import annotations
 
+import base64
 import contextlib
+import io
+import logging
 import os
 import threading
 import time
+import warnings
 from collections.abc import AsyncIterator, Callable
 
 import anyio
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
+from pydantic import ValidationError
 
 from . import __version__
+from .core import Request as DecisionRequest
+from .decision import DecisionEngine, is_model_checkpoint, load_decision_engine
 from .infer import EngineConfig, SystemOneEngine, load_mlx
 from .modeling import StrandsDeciderModel, refuse_token_readout
+from .refusals import EngineBusy, RequestRefused
 from .schema import (
     ChoiceQuestion,
     NoulQuestion,
@@ -28,6 +36,8 @@ from .schema import (
     SystemOneRequest,
     SystemOneResponse,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def _needs_serialisation(device: str) -> bool:
@@ -93,17 +103,54 @@ def create_app(
     warmup: bool = True,
     build_engine: Callable[[], SystemOneEngine] | None = None,
     max_concurrency: int | None = None,
+    dtype: str | None = None,
+    queue_timeout: float = 60.0,
+    revision: str | None = None,
+    max_length: int | None = None,
 ) -> FastAPI:
-    if device_map and (vision or not device.startswith("cuda")):
-        raise ValueError("--device-map splits the text torso across CUDA GPUs: use it with cuda")
-    if vision and device == "mlx":
-        raise ValueError("--vision runs on torch devices (cuda, mps, cpu), not mlx")
     if max_concurrency is not None and max_concurrency < 1:
         raise ValueError("--max-concurrency must be at least 1")
 
     # Identify the response's `model` by the checkpoint served, so multiple servers
     # on the same host cannot be confused. HF repo ids ("org/name") collapse to `name`.
     resolved_name = model_name or os.path.basename(checkpoint.rstrip("/")) or checkpoint
+
+    # A model checkpoint gets its own app; anything else takes v1's path below, unchanged.
+    # Tests that inject a v1 engine (`build_engine`) skip the check.
+    if build_engine is None and is_model_checkpoint(checkpoint, revision=revision):
+        if device_map:
+            raise ValueError(
+                "--device-map is only supported for v1 model checkpoints; this one runs on one device"
+            )
+        if vision:
+            warnings.warn(
+                "--vision is only supported for v1 model checkpoints; this one takes images when its "
+                "decision_config.json inputs list them",
+                stacklevel=2,
+            )
+        engine = load_decision_engine(
+            checkpoint,
+            device=device,
+            dtype=dtype,
+            reuse_state=use_prefix_cache,
+            max_batch=max_batch,
+            max_batch_tokens=max_batch_tokens,
+            max_length=max_length,
+            model_name=resolved_name,
+            max_concurrency=max_concurrency or 1,
+            queue_timeout=queue_timeout,
+            revision=revision,
+        )
+        if warmup:  # before uvicorn binds the listener
+            _warm_up_decision(engine)
+        return _decision_app(engine, checkpoint)
+    for flag, value in (("--dtype", dtype), ("--revision", revision), ("--max-length", max_length)):
+        if value is not None:
+            raise ValueError(f"{flag} is not supported for v1 model checkpoints")
+    if device_map and (vision or not device.startswith("cuda")):
+        raise ValueError("--device-map splits the text torso across CUDA GPUs: use it with cuda")
+    if vision and device == "mlx":
+        raise ValueError("--vision runs on torch devices (cuda, mps, cpu), not mlx")
 
     config = EngineConfig(
         device=device,
@@ -211,34 +258,73 @@ def create_app(
     return app
 
 
-def serve(
-    checkpoint: str,
-    *,
-    host: str = "127.0.0.1",
-    port: int = 8000,
-    device: str = "cuda",
-    use_prefix_cache: bool = True,
-    model_name: str | None = None,
-    max_batch: int = 32,
-    vision: bool = False,
-    max_batch_tokens: int | None = None,
-    device_map: str | None = None,
-    warmup: bool = True,
-    max_concurrency: int | None = None,
-) -> None:
-    import uvicorn
+def _warm_up_decision(engine: DecisionEngine) -> None:
+    """A request with a question of each kind, and one with an image if images are served, so
+    that the first requests don't pay for lazy initialisation. A warm-up prompt longer than the
+    served length is skipped."""
+    state = "A warm-up request, answered before the server accepts requests."
+    questions = {
+        "noul": {"type": "noul", "instructions": "Is this a warm-up?"},
+        "choice": {
+            "type": "choice",
+            "instructions": "Pick one.",
+            "criteria": {"a": None, "b": None},
+        },
+        "score": {"type": "score", "instructions": "How warm is it?", "criteria": ["cold", "warm"]},
+    }
+    requests = [{"state": state, "questions": questions}]
+    if engine.image_problem is None:
+        from PIL import Image
 
-    app = create_app(
-        checkpoint,
-        device=device,
-        use_prefix_cache=use_prefix_cache,
-        model_name=model_name,
-        max_batch=max_batch,
-        vision=vision,
-        max_batch_tokens=max_batch_tokens,
-        device_map=device_map,
-        warmup=warmup,
-        max_concurrency=max_concurrency,
+        buf = io.BytesIO()
+        Image.new("RGB", (64, 64), (128, 128, 128)).save(buf, "PNG")
+        image = base64.b64encode(buf.getvalue()).decode("ascii")
+        requests.append(
+            {"state": state, "questions": {"noul": questions["noul"]}, "images": [image]}
+        )
+    started = time.perf_counter()
+    for body in requests:
+        try:
+            engine.evaluate(DecisionRequest.model_validate(body))
+        except RequestRefused as e:
+            logger.warning("a warm-up request was skipped: %s", e)
+    logger.debug("warmed up in %.1f s", time.perf_counter() - started)
+
+
+def _decision_app(engine: DecisionEngine, checkpoint: str) -> FastAPI:
+    """A model checkpoint on v1's paths, with v1's responses. The engine bounds its own
+    concurrency, after its refusals and with a timeout (503), and its backend takes turns on MPS,
+    so the app adds no limiter and no lock."""
+    app = FastAPI(
+        title="strands-decider System One",
+        version=__version__,
+        description="Typed, calibrated answers. Choice, Score and Noul over one state.",
     )
-    # Single worker: the model owns the GPU, and forking more would just duplicate it.
-    uvicorn.run(app, host=host, port=port, workers=1)
+    app.state.engine = engine
+
+    @app.get("/health")
+    @app.get("/ping")
+    async def health() -> dict:
+        return {"status": "ok", "checkpoint": checkpoint, **engine.describe()}
+
+    @app.post("/v1/systemone", response_model=SystemOneResponse)
+    @app.post("/invocations", response_model=SystemOneResponse)
+    async def systemone(http: Request) -> JSONResponse:
+        try:
+            # The core's request model, not v1's: v1's would drop `audio`, which the core
+            # refuses, and require a `state`.
+            request = DecisionRequest.model_validate_json(await http.body())
+        except ValidationError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        started = time.perf_counter()
+        try:
+            response = await anyio.to_thread.run_sync(engine.evaluate, request)
+        except RequestRefused as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except EngineBusy as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        payload = response.model_dump()
+        payload["latency_ms"] = round((time.perf_counter() - started) * 1000, 2)
+        return JSONResponse(content=payload)
+
+    return app

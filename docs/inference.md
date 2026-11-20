@@ -19,6 +19,8 @@ CPU), so they report the numbers serving returns. `--device mlx` is refused.
 - [Model artifact](#model-artifact): what a checkpoint holds, and the Hugging Face export.
 - [Ask](#ask): one command, with recorded v19 output and how to read its confidence.
 - [Serve](#serve): `POST /v1/systemone` and `/health`, on `127.0.0.1` with no authentication.
+- [Model checkpoints](#model-checkpoints): checkpoints of the decision interface
+  (`strands_decider.core`), with images, on the transformers backend.
 - [Asking many questions is nearly free](#asking-many-questions-is-nearly-free): the shared-prefix cache.
 - [Serving on a Mac](#serving-on-a-mac): MPS, and the one kernel that had to be replaced.
 - [Serving on a Mac with MLX](#serving-on-a-mac-with-mlx): `--device mlx`, measured against MPS.
@@ -298,6 +300,39 @@ the GPU on every task, with probabilities within 0.05 (0.13 for the 26B-A4B). CP
 took 4.9 s (E2B), 7.2 s (E4B), 13.5 s (12B) and 7.8 s (26B-A4B). The 26B-A4B is faster than the 12B
 there, because it computes with 4B of its parameters per token. On one H100, the median is
 102 ms, 139 ms, 136 ms and 245 ms.
+
+## Model checkpoints
+
+A model checkpoint is the base Gemma 4 model's multimodal checkpoint with the fine-tuning
+merged in, beside `readout.safetensors` and a `decision_config.json` that says
+`"interface": "strands-decider"` ([architecture.md](architecture.md#the-cores-runtime-interface)).
+`ask` and `serve` take one like any other checkpoint, a local directory or a Hub id.
+
+```bash
+strands-decider ask path/to/model-checkpoint --state "A photo sent with a claim." \
+  --image photo.jpg --choice "What does the photo show?=a car,a bicycle,a house"
+strands-decider serve path/to/model-checkpoint --port 8000
+```
+
+The core renders each request and the transformers backend (`backends/transformers.py`) runs
+the model, encoding the state once when a request asks several questions. CPU runs float32, and
+CUDA and MPS bf16; `--dtype float32` or `--dtype bfloat16` chooses. A request may carry images
+when `decision_config.json` lists `image` in `inputs`. A request whose `audio` is anything but
+null is refused with 422.
+
+The serving options, as a model checkpoint takes them:
+
+- `--no-prefix-cache`: one full pass per question, the reference on CUDA in bf16.
+- `--max-batch`, `--max-batch-tokens`: bound the questions of one pass over a state.
+- `--max-concurrency` (default 1) and `--queue-timeout` (default 60 s): requests past the
+  limit wait, then get 503, so a burst of long or image requests can't hold several states on
+  the GPU at once. A refused request is answered without waiting.
+- `--max-length N`: serve prompts of up to N tokens instead of `max_length_validated`. A
+  longer prompt gets 422 and is never truncated; a value above the validated length warns.
+- `--revision`: the branch, tag or commit of a checkpoint on the Hub.
+
+`--vision` and `--device-map` are only supported for v1 model checkpoints. `/health` reports the
+backend, device, dtype, longest prompt served, whether images are served, and the concurrency.
 
 ## Asking many questions is nearly free
 
