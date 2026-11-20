@@ -22,3 +22,11 @@ Serverless, on arm64 CPUs: no GPU, no instance to reserve, nothing standing betw
 One CDK stack builds an image with the 2B Qwen3.5 model in it, quantized for llama.cpp, in AWS
 CodeBuild, and creates a function behind an IAM-authenticated Function URL; requests take
 seconds. With `-c vision=true`, it answers over images too. See [lambda/README.md](lambda/README.md).
+
+## AWS Lambda Managed Instances GPU (preview)
+
+Serverless on GPU-accelerated Lambda (G4dn/G5/G6/G6e/G6f/Gr6/Gr6f). One CDK stack builds a torch
++ CUDA image with the model baked in, publishes it to an ECR repository in the stack, creates a
+Lambda capacity provider, and attaches it to a GPU-accelerated Event Function (direct `Invoke`,
+SQS, SNS, S3, EventBridge — no Function URL). Preview access and an EC2 GPU vCPU quota are
+required. See [lambda-gpu/README.md](lambda-gpu/README.md).
