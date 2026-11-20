@@ -29,7 +29,7 @@ commands are written for WSL2; on native Linux, skip the `wsl.exe` line and the 
 - [`../data/README.md`](../data/README.md): what the recipe downloads, and what is committed.
 
 Evaluation is in [evaluation/README.md](../evaluation/README.md), serving in
-[docs/inference.md](../docs/inference.md). Paths are relative to the repository root
+[designs/inference.md](../designs/inference.md). Paths are relative to the repository root
 unless they are links.
 
 ## Two training routes
@@ -55,7 +55,7 @@ Frozen targets attach to corpus rows by position, so `recipe.sh` checks the corp
 Two environments for training, one per torso family. Both need an NVIDIA GPU. Development
 used one RTX 3090 (24 GiB), and the recipe also runs on 8-GPU AWS hosts
 ([Running the recipe on AWS](aws/README.md)). Serving also runs on an Apple-silicon Mac
-([Serving on a Mac](../docs/inference.md#serving-on-a-mac)).
+([Serving on a Mac](../designs/inference.md#serving-on-a-mac)).
 
 **Qwen3 torsos (v7 and earlier): Windows or Linux.** Python 3.11, PyTorch 2.6 + CUDA 12.4 at
 the time. The package now needs PyTorch 2.7 or later:
@@ -135,7 +135,7 @@ The frozen option-number readout and the teacher labeller apply Gemma's final lo
 soft-cap, so both read the model's own distribution. At serving time, a 32,768-token
 window with several long questions in one forward can run a Gemma torso out of memory:
 `strands-decider serve --max-batch-tokens N` caps the tokens of one forward
-([Serve](../docs/inference.md#serve)).
+([Serve](../designs/inference.md#serve)).
 
 ### Training on several GPUs
 
@@ -323,7 +323,7 @@ four Gemma 4 configs differ only in `base_model` and `output_dir`
 
 `configs/v2/` holds one training config for each Gemma 4 size: E2B, E4B, 12B, 26B-A4B and
 31B. Each one trains a token readout with the `strands-chat` prompt and `prefix_bidir`
-attention ([docs/architecture.md](../docs/architecture.md#opt-in-the-token-readout)). The
+attention ([docs/architecture.md](../designs/architecture.md#opt-in-the-token-readout)). The
 v2 training data is not in this repository. The steps are:
 
 1. Convert the v2 rows (`train.jsonl`, `dev.jsonl`) into training rows. The converter drops

@@ -1,6 +1,6 @@
 # Image evaluation
 
-The measurements behind [docs/vision.md](../../docs/vision.md#how-well-it-does).
+The measurements behind [designs/images.md](../../designs/images.md#how-well-it-does).
 
 | File | What it does |
 | --- | --- |
@@ -11,7 +11,7 @@ Every model and dataset is downloaded at a pinned revision, and each run's `summ
 records the revisions and library versions it used.
 
 ```bash
-pip install -e . pandas pyarrow jinja2
+pip install -e ".[vision]" torchvision pandas pyarrow jinja2   # torchvision: the mapika system
 python evaluation/vision/run.py --out results --systems strands,qwen,mapika \
     --nb-groups 300 --pope 600 --ijb-jsonl ijb_preview.jsonl
 ```

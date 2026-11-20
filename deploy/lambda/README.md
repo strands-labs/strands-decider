@@ -5,7 +5,7 @@ deploys the 2B Qwen3.5 strands decider as an AWS Lambda function in your AWS acc
 CPUs. Lambda starts execution environments as requests arrive, runs as many side by side as the
 traffic needs, and you pay per request. One AWS CDK stack builds the image and creates the
 function. The function serves `strands-decider serve`'s `POST /v1/systemone` and `GET /health`
-([docs/inference.md, Serve](../../docs/inference.md#serve)) behind an IAM-authenticated
+([designs/inference.md, Serve](../../designs/inference.md#serve)) behind an IAM-authenticated
 Function URL, and takes the same request as a direct invocation too.
 
 The torso runs in [llama.cpp](https://github.com/ggml-org/llama.cpp), quantized to Q8_0 by default ([Precision](#precision)), and the
@@ -107,7 +107,7 @@ Every setting is a CDK context value. Change it in `cdk.json`, or pass `-c key=v
 | Setting | Default | Meaning |
 | --- | --- | --- |
 | `model` | `StrandsAgents/strands-decider-2B-qwen3.5-v1-2610` | The strands-decider model, a Hugging Face Hub id. Any Qwen3.5 model with a pointer head works. It names the stack. |
-| `model_revision` | `main` | The model's revision. Use a release's date tag (`YYMMDD`) to pin it ([docs/inference.md, Model artifact](../../docs/inference.md#model-artifact)). |
+| `model_revision` | `main` | The model's revision. Use a release's date tag (`YYMMDD`) to pin it ([designs/inference.md, Model artifact](../../designs/inference.md#model-artifact)). |
 | `snapstart` | `false` | `true` turns SnapStart on: new execution environments answer in about 6 s instead of up to 30 s, for about $39.50 a month while the stack exists ([What it costs](#what-it-costs)) |
 | `vision` | `false` | `true` adds the base model's vision tower, for requests with images ([Images](#images)) |
 | `image_long_side` | `448` | The longest side, in pixels, an image is scaled to, as for `serve --vision`; `768` makes a square image 576 tokens instead of 196 ([Image size](#image-size)) |
@@ -174,7 +174,7 @@ went from 0.495 to 0.505. The quantization to Q8_0 accounts for most of that. Re
 
 The 2B Qwen3.5 decider can answer over images: its base model is multimodal, and with the base
 model's vision tower beside it, the published checkpoint reads images with no image training
-([docs/vision.md](../../docs/vision.md)). Deploy with the vision tower:
+([designs/images.md](../../designs/images.md)). Deploy with the vision tower:
 
 ```bash
 npx cdk deploy -c vision=true
@@ -230,7 +230,7 @@ At 768 the function's answers were within 0.016 of `VisionEngine`'s at the same 
 same token counts, and memory stayed at 6.6 GB. But the size changes what the model sees, not only
 what it costs: `serve --vision`'s own answers moved by up to 0.21 from 448 to 768 on these images,
 and one yes/no answer crossed 0.5. The published measurements are all at 448 px
-([docs/vision.md](../../docs/vision.md)); whether 768 answers better has not been measured.
+([designs/images.md](../../designs/images.md)); whether 768 answers better has not been measured.
 
 ## Precision
 
@@ -256,7 +256,7 @@ text answers to within 0.004. An `f32` vision tower with the Q8_0 decoder is slo
 
 - The state and the longest question must fit the model's window (`max_length`, 4,096 tokens for
   the v1 release). A prompt over it is handled as `serve` handles one
-  ([docs/inference.md](../../docs/inference.md)), with a 422 where `serve` refuses it.
+  ([designs/inference.md](../../designs/inference.md)), with a 422 where `serve` refuses it.
 - A request may forward at most `max_request_tokens` tokens, the state once plus every question.
   The default, 24,576, stays well inside the 15-minute timeout; a larger request is refused with
   a 422 before any work is done.
