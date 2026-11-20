@@ -12,25 +12,9 @@ the repository root.
 
 ## The architecture
 
-```
-                    ┌─────────────────────────────────────────┐
-  gen (discarded)   │            strands-decider              │
-  ┌────────────┐    │          one logit per option           │
-  │   output   │    │                   ▲                     │
-  └────────────┘    │            ┌──────┴───────┐             │
-  ┌────────────┐    │            │ pointer head │             │
-  │ LLM torso  │ ─► │            └──────▲───────┘             │
-  └────────────┘    │       ┌────────┬──┴─────┬──────────┐    │
-  ┌────────────┐    │    h(opt 1) h(opt 2) h(opt 3)  h(answer)│
-  │   input    │    │       └────────┴────────┴──────────┘    │
-  └────────────┘    │               ┌────────────┐            │
-                    │               │ LLM torso  │            │
-                    │               └────────────┘            │
-                    │               ┌────────────┐            │
-                    │               │   input    │            │
-                    │               └────────────┘            │
-                    └─────────────────────────────────────────┘
-```
+![Strands Decider architecture, v1 and v2. In both versions a prompt goes through a pretrained LLM torso once, and the model gives one probability for each option without text generation. v1 reads the hidden states of the options and of the answer position into a pointer head. v2 reads the hidden state at the last token of the prompt into a token readout with one row for each of 255 codes.](../designs/figures/architecture.png)
+
+The picture shows the two versions. This section describes the v1 pointer head, and [Opt-in: the token readout](#opt-in-the-token-readout) describes the v2 readout.
 
 Take a pretrained decoder LLM, **discard its language-modelling head**, and score each
 option by comparing the question's answer position against that option's own hidden

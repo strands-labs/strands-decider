@@ -1,0 +1,143 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg viewBox="0 0 960 860" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="decider-architecture-title decider-architecture-desc">
+      <title id="decider-architecture-title">Strands Decider architecture: the v1 pointer head and the v2 token readout</title>
+      <desc id="decider-architecture-desc">Two versions of the model, each with a prompt that goes through a pretrained LLM torso once and gives one probability for each option, with no text generation. In v1, the hidden states at the last token of each option line and at the answer position go to a pointer head. In v2, the options have the codes A, B and C, and a token readout with one row for each of 255 codes reads the hidden state at the last token of the prompt.</desc>
+      <defs>
+        <style>@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@400;500;600&amp;display=swap');</style>
+        <marker id="arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#5d5e63"/></marker>
+        <marker id="arrow-soft" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#6f7076"/></marker>
+      </defs>
+      <rect width="960" height="860" rx="16" fill="#fcfcfb"/>
+      <text x="40" y="56" fill="#007a3d" font-size="12" font-family="'JetBrains Mono', ui-monospace, monospace" style="font-variant-ligatures:none" font-weight="500" letter-spacing="0.14em">STRANDS DECIDER · ARCHITECTURE</text>
+      <text x="40" y="88" fill="#17181c" font-size="20" font-weight="600" font-family="'Space Grotesk', system-ui, sans-serif" letter-spacing="-0.01em">One pass, a probability for each option</text>
+      <!-- arrows first, then the nodes -->
+      <line x1="240" y1="236" x2="272" y2="236" stroke="#5d5e63" stroke-width="1.2" marker-end="url(#arrow)"/>
+      <line x1="424" y1="196" x2="456" y2="196" stroke="#6f7076" stroke-width="1" stroke-dasharray="4,3" marker-end="url(#arrow-soft)"/>
+      <line x1="424" y1="300" x2="456" y2="300" stroke="#5d5e63" stroke-width="1.2" marker-end="url(#arrow)"/>
+      <line x1="568" y1="300" x2="624" y2="300" stroke="#5d5e63" stroke-width="1.2" marker-end="url(#arrow)"/>
+      <line x1="424" y1="332" x2="456" y2="332" stroke="#5d5e63" stroke-width="1.2" marker-end="url(#arrow)"/>
+      <line x1="568" y1="332" x2="624" y2="332" stroke="#5d5e63" stroke-width="1.2" marker-end="url(#arrow)"/>
+      <line x1="424" y1="364" x2="456" y2="364" stroke="#5d5e63" stroke-width="1.2" marker-end="url(#arrow)"/>
+      <line x1="568" y1="364" x2="624" y2="364" stroke="#5d5e63" stroke-width="1.2" marker-end="url(#arrow)"/>
+      <line x1="424" y1="404" x2="456" y2="404" stroke="#5d5e63" stroke-width="1.2" marker-end="url(#arrow)"/>
+      <line x1="568" y1="404" x2="624" y2="404" stroke="#5d5e63" stroke-width="1.2" marker-end="url(#arrow)"/>
+      <line x1="760" y1="352" x2="792" y2="352" stroke="#5d5e63" stroke-width="1.2" marker-end="url(#arrow)"/>
+      <rect x="576" y="276" width="40" height="16" rx="2" fill="#fcfcfb"/>
+      <text x="596" y="288" fill="#6f7076" font-size="12" font-family="'JetBrains Mono', ui-monospace, monospace" style="font-variant-ligatures:none" text-anchor="middle" letter-spacing="0.06em">KEYS</text>
+      <rect x="572" y="380" width="48" height="16" rx="2" fill="#fcfcfb"/>
+      <text x="596" y="392" fill="#6f7076" font-size="12" font-family="'JetBrains Mono', ui-monospace, monospace" style="font-variant-ligatures:none" text-anchor="middle" letter-spacing="0.06em">QUERY</text>
+      <line x1="240" y1="596" x2="272" y2="596" stroke="#5d5e63" stroke-width="1.2" marker-end="url(#arrow)"/>
+      <line x1="424" y1="556" x2="456" y2="556" stroke="#6f7076" stroke-width="1" stroke-dasharray="4,3" marker-end="url(#arrow-soft)"/>
+      <line x1="424" y1="764" x2="456" y2="764" stroke="#5d5e63" stroke-width="1.2" marker-end="url(#arrow)"/>
+      <line x1="568" y1="764" x2="624" y2="764" stroke="#5d5e63" stroke-width="1.2" marker-end="url(#arrow)"/>
+      <line x1="760" y1="712" x2="792" y2="712" stroke="#5d5e63" stroke-width="1.2" marker-end="url(#arrow)"/>
+      <text x="40" y="140" fill="#007a3d" font-size="12" font-family="'JetBrains Mono', ui-monospace, monospace" style="font-variant-ligatures:none" font-weight="500" letter-spacing="0.14em">V1 · POINTER HEAD</text>
+      <line x1="208" y1="136" x2="920" y2="136" stroke="rgba(23,24,28,0.12)" stroke-width="1"/>
+      <rect x="40" y="156" width="200" height="276" rx="8" fill="#f1f1ee"/>
+      <text x="56" y="180" fill="#6f7076" font-size="12" font-family="'JetBrains Mono', ui-monospace, monospace" style="font-variant-ligatures:none" font-weight="500" letter-spacing="0.14em">PROMPT</text>
+      <text x="56" y="204" fill="#5d5e63" font-size="12" font-family="'JetBrains Mono', ui-monospace, monospace" style="font-variant-ligatures:none">&lt;state&gt;</text>
+      <text x="56" y="224" fill="#17181c" font-size="12" font-family="'JetBrains Mono', ui-monospace, monospace" style="font-variant-ligatures:none">Help! My payouts have…</text>
+      <text x="56" y="248" fill="#5d5e63" font-size="12" font-family="'JetBrains Mono', ui-monospace, monospace" style="font-variant-ligatures:none">&lt;question&gt;</text>
+      <text x="56" y="268" fill="#17181c" font-size="12" font-family="'JetBrains Mono', ui-monospace, monospace" style="font-variant-ligatures:none">Which team handles it?</text>
+      <rect x="48" y="288" width="184" height="24" rx="4" fill="#ffffff" stroke="rgba(23,24,28,0.12)" stroke-width="1"/>
+      <text x="56" y="304" fill="#17181c" font-size="12" font-family="'JetBrains Mono', ui-monospace, monospace" style="font-variant-ligatures:none">1. billing</text>
+      <circle cx="220" cy="300" r="3" fill="#17181c"/>
+      <rect x="48" y="320" width="184" height="24" rx="4" fill="#ffffff" stroke="rgba(23,24,28,0.12)" stroke-width="1"/>
+      <text x="56" y="336" fill="#17181c" font-size="12" font-family="'JetBrains Mono', ui-monospace, monospace" style="font-variant-ligatures:none">2. technical</text>
+      <circle cx="220" cy="332" r="3" fill="#17181c"/>
+      <rect x="48" y="352" width="184" height="24" rx="4" fill="#ffffff" stroke="rgba(23,24,28,0.12)" stroke-width="1"/>
+      <text x="56" y="368" fill="#17181c" font-size="12" font-family="'JetBrains Mono', ui-monospace, monospace" style="font-variant-ligatures:none">3. sales</text>
+      <circle cx="220" cy="364" r="3" fill="#17181c"/>
+      <rect x="48" y="392" width="184" height="24" rx="4" fill="#ffffff" stroke="rgba(23,24,28,0.12)" stroke-width="1"/>
+      <text x="56" y="408" fill="#5d5e63" font-size="12" font-family="'JetBrains Mono', ui-monospace, monospace" style="font-variant-ligatures:none">&lt;answer&gt;</text>
+      <circle cx="220" cy="404" r="3" fill="#17181c"/>
+      <rect x="272" y="156" width="152" height="276" rx="8" fill="#fcfcfb"/>
+      <rect x="272" y="156" width="152" height="276" rx="8" fill="#ffffff" stroke="#17181c" stroke-width="1.2"/>
+      <text x="348" y="288" fill="#17181c" font-size="16" font-weight="600" font-family="'Space Grotesk', system-ui, sans-serif" text-anchor="middle">LLM torso</text>
+      <text x="348" y="312" fill="#5d5e63" font-size="12" font-family="'JetBrains Mono', ui-monospace, monospace" style="font-variant-ligatures:none" text-anchor="middle">pretrained decoder</text>
+      <text x="348" y="332" fill="#5d5e63" font-size="12" font-family="'JetBrains Mono', ui-monospace, monospace" style="font-variant-ligatures:none" text-anchor="middle">causal attention</text>
+      <rect x="456" y="172" width="304" height="48" rx="8" fill="#fcfcfb"/>
+      <rect x="456" y="172" width="304" height="48" rx="8" fill="rgba(23,24,28,0.02)" stroke="rgba(23,24,28,0.30)" stroke-width="1" stroke-dasharray="4,3"/>
+      <text x="608" y="192" fill="#5d5e63" font-size="16" font-weight="600" font-family="'Space Grotesk', system-ui, sans-serif" text-anchor="middle">Language-modelling head</text>
+      <text x="608" y="212" fill="#5d5e63" font-size="12" font-family="'JetBrains Mono', ui-monospace, monospace" style="font-variant-ligatures:none" text-anchor="middle">discarded: no text generation</text>
+      <text x="456" y="268" fill="#6f7076" font-size="12" font-family="'JetBrains Mono', ui-monospace, monospace" style="font-variant-ligatures:none" font-weight="500" letter-spacing="0.14em">HIDDEN STATES</text>
+      <rect x="456" y="288" width="112" height="24" rx="4" fill="#f1f1ee" stroke="rgba(93,94,99,0.50)" stroke-width="1"/>
+      <text x="512" y="304" fill="#17181c" font-size="12" font-family="'JetBrains Mono', ui-monospace, monospace" style="font-variant-ligatures:none" text-anchor="middle">h(option 1)</text>
+      <rect x="456" y="320" width="112" height="24" rx="4" fill="#f1f1ee" stroke="rgba(93,94,99,0.50)" stroke-width="1"/>
+      <text x="512" y="336" fill="#17181c" font-size="12" font-family="'JetBrains Mono', ui-monospace, monospace" style="font-variant-ligatures:none" text-anchor="middle">h(option 2)</text>
+      <rect x="456" y="352" width="112" height="24" rx="4" fill="#f1f1ee" stroke="rgba(93,94,99,0.50)" stroke-width="1"/>
+      <text x="512" y="368" fill="#17181c" font-size="12" font-family="'JetBrains Mono', ui-monospace, monospace" style="font-variant-ligatures:none" text-anchor="middle">h(option 3)</text>
+      <rect x="456" y="392" width="112" height="24" rx="4" fill="#f1f1ee" stroke="rgba(93,94,99,0.50)" stroke-width="1"/>
+      <text x="512" y="408" fill="#17181c" font-size="12" font-family="'JetBrains Mono', ui-monospace, monospace" style="font-variant-ligatures:none" text-anchor="middle">h(answer)</text>
+      <rect x="624" y="288" width="136" height="128" rx="8" fill="#fcfcfb"/>
+      <rect x="624" y="288" width="136" height="128" rx="8" fill="rgba(2,164,53,0.10)" stroke="#02a435" stroke-width="1.2"/>
+      <text x="692" y="344" fill="#17181c" font-size="16" font-weight="600" font-family="'Space Grotesk', system-ui, sans-serif" text-anchor="middle">Pointer head</text>
+      <text x="692" y="364" fill="#007a3d" font-size="12" font-family="'JetBrains Mono', ui-monospace, monospace" style="font-variant-ligatures:none" text-anchor="middle">query × keys</text>
+      <text x="692" y="384" fill="#007a3d" font-size="12" font-family="'JetBrains Mono', ui-monospace, monospace" style="font-variant-ligatures:none" text-anchor="middle">~1M parameters</text>
+      <text x="792" y="268" fill="#6f7076" font-size="12" font-family="'JetBrains Mono', ui-monospace, monospace" style="font-variant-ligatures:none" font-weight="500" letter-spacing="0.14em">PROBABILITIES</text>
+      <rect x="792" y="288" width="128" height="128" rx="8" fill="#f1f1ee"/>
+      <text x="804" y="312" fill="#17181c" font-size="12" font-family="'JetBrains Mono', ui-monospace, monospace" style="font-variant-ligatures:none">billing</text>
+      <text x="908" y="312" fill="#17181c" font-size="12" font-family="'JetBrains Mono', ui-monospace, monospace" style="font-variant-ligatures:none" text-anchor="end" font-weight="600">0.91</text>
+      <rect x="804" y="320" width="104" height="4" rx="2" fill="#e3e2dc"/>
+      <rect x="804" y="320" width="96" height="4" rx="2" fill="#02a435"/>
+      <text x="804" y="352" fill="#17181c" font-size="12" font-family="'JetBrains Mono', ui-monospace, monospace" style="font-variant-ligatures:none">technical</text>
+      <text x="908" y="352" fill="#17181c" font-size="12" font-family="'JetBrains Mono', ui-monospace, monospace" style="font-variant-ligatures:none" text-anchor="end">0.07</text>
+      <rect x="804" y="360" width="104" height="4" rx="2" fill="#e3e2dc"/>
+      <rect x="804" y="360" width="8" height="4" rx="2" fill="#8fd9a8"/>
+      <text x="804" y="392" fill="#17181c" font-size="12" font-family="'JetBrains Mono', ui-monospace, monospace" style="font-variant-ligatures:none">sales</text>
+      <text x="908" y="392" fill="#17181c" font-size="12" font-family="'JetBrains Mono', ui-monospace, monospace" style="font-variant-ligatures:none" text-anchor="end">0.02</text>
+      <rect x="804" y="400" width="104" height="4" rx="2" fill="#e3e2dc"/>
+      <rect x="804" y="400" width="4" height="4" rx="2" fill="#8fd9a8"/>
+      <circle cx="44" cy="456" r="3" fill="#17181c"/>
+      <text x="56" y="460" fill="#5d5e63" font-size="12" font-family="'JetBrains Mono', ui-monospace, monospace" style="font-variant-ligatures:none">The hidden state is read at the last token of each option line and at &lt;answer&gt;.</text>
+      <text x="40" y="500" fill="#007a3d" font-size="12" font-family="'JetBrains Mono', ui-monospace, monospace" style="font-variant-ligatures:none" font-weight="500" letter-spacing="0.14em">V2 · TOKEN READOUT</text>
+      <line x1="216" y1="496" x2="920" y2="496" stroke="rgba(23,24,28,0.12)" stroke-width="1"/>
+      <rect x="40" y="516" width="200" height="276" rx="8" fill="#f1f1ee"/>
+      <text x="56" y="540" fill="#6f7076" font-size="12" font-family="'JetBrains Mono', ui-monospace, monospace" style="font-variant-ligatures:none" font-weight="500" letter-spacing="0.14em">PROMPT</text>
+      <text x="56" y="564" fill="#5d5e63" font-size="12" font-family="'JetBrains Mono', ui-monospace, monospace" style="font-variant-ligatures:none">&lt;state&gt;</text>
+      <text x="56" y="584" fill="#17181c" font-size="12" font-family="'JetBrains Mono', ui-monospace, monospace" style="font-variant-ligatures:none">Help! My payouts have…</text>
+      <text x="56" y="608" fill="#5d5e63" font-size="12" font-family="'JetBrains Mono', ui-monospace, monospace" style="font-variant-ligatures:none">&lt;question&gt;</text>
+      <text x="56" y="628" fill="#17181c" font-size="12" font-family="'JetBrains Mono', ui-monospace, monospace" style="font-variant-ligatures:none">Which team handles it?</text>
+      <rect x="48" y="648" width="184" height="24" rx="4" fill="#ffffff" stroke="rgba(23,24,28,0.12)" stroke-width="1"/>
+      <text x="56" y="664" fill="#17181c" font-size="12" font-family="'JetBrains Mono', ui-monospace, monospace" style="font-variant-ligatures:none">A. billing</text>
+      <rect x="48" y="680" width="184" height="24" rx="4" fill="#ffffff" stroke="rgba(23,24,28,0.12)" stroke-width="1"/>
+      <text x="56" y="696" fill="#17181c" font-size="12" font-family="'JetBrains Mono', ui-monospace, monospace" style="font-variant-ligatures:none">B. technical</text>
+      <rect x="48" y="712" width="184" height="24" rx="4" fill="#ffffff" stroke="rgba(23,24,28,0.12)" stroke-width="1"/>
+      <text x="56" y="728" fill="#17181c" font-size="12" font-family="'JetBrains Mono', ui-monospace, monospace" style="font-variant-ligatures:none">C. sales</text>
+      <rect x="48" y="752" width="184" height="24" rx="4" fill="#ffffff" stroke="rgba(23,24,28,0.12)" stroke-width="1"/>
+      <text x="56" y="768" fill="#5d5e63" font-size="12" font-family="'JetBrains Mono', ui-monospace, monospace" style="font-variant-ligatures:none">&lt;|turn&gt;model</text>
+      <circle cx="220" cy="764" r="3" fill="#17181c"/>
+      <rect x="272" y="516" width="152" height="276" rx="8" fill="#fcfcfb"/>
+      <rect x="272" y="516" width="152" height="276" rx="8" fill="#ffffff" stroke="#17181c" stroke-width="1.2"/>
+      <text x="348" y="648" fill="#17181c" font-size="16" font-weight="600" font-family="'Space Grotesk', system-ui, sans-serif" text-anchor="middle">LLM torso</text>
+      <text x="348" y="672" fill="#5d5e63" font-size="12" font-family="'JetBrains Mono', ui-monospace, monospace" style="font-variant-ligatures:none" text-anchor="middle">pretrained Gemma 4</text>
+      <text x="348" y="692" fill="#5d5e63" font-size="12" font-family="'JetBrains Mono', ui-monospace, monospace" style="font-variant-ligatures:none" text-anchor="middle">bidirectional state</text>
+      <rect x="456" y="532" width="304" height="48" rx="8" fill="#fcfcfb"/>
+      <rect x="456" y="532" width="304" height="48" rx="8" fill="rgba(23,24,28,0.02)" stroke="rgba(23,24,28,0.30)" stroke-width="1" stroke-dasharray="4,3"/>
+      <text x="608" y="552" fill="#5d5e63" font-size="16" font-weight="600" font-family="'Space Grotesk', system-ui, sans-serif" text-anchor="middle">Rest of the LM head</text>
+      <text x="608" y="572" fill="#5d5e63" font-size="12" font-family="'JetBrains Mono', ui-monospace, monospace" style="font-variant-ligatures:none" text-anchor="middle">dropped: no text generation</text>
+      <text x="456" y="732" fill="#6f7076" font-size="12" font-family="'JetBrains Mono', ui-monospace, monospace" style="font-variant-ligatures:none" font-weight="500" letter-spacing="0.14em">HIDDEN STATE</text>
+      <rect x="456" y="752" width="112" height="24" rx="4" fill="#f1f1ee" stroke="rgba(93,94,99,0.50)" stroke-width="1"/>
+      <text x="512" y="768" fill="#17181c" font-size="12" font-family="'JetBrains Mono', ui-monospace, monospace" style="font-variant-ligatures:none" text-anchor="middle">h(last token)</text>
+      <rect x="624" y="648" width="136" height="128" rx="8" fill="#fcfcfb"/>
+      <rect x="624" y="648" width="136" height="128" rx="8" fill="rgba(2,164,53,0.10)" stroke="#02a435" stroke-width="1.2"/>
+      <text x="692" y="704" fill="#17181c" font-size="16" font-weight="600" font-family="'Space Grotesk', system-ui, sans-serif" text-anchor="middle">Token readout</text>
+      <text x="692" y="724" fill="#007a3d" font-size="12" font-family="'JetBrains Mono', ui-monospace, monospace" style="font-variant-ligatures:none" text-anchor="middle">255 code rows</text>
+      <text x="692" y="744" font-size="12" font-family="'JetBrains Mono', ui-monospace, monospace" style="font-variant-ligatures:none" text-anchor="middle"><tspan fill="#007a3d" font-weight="600">A B C</tspan><tspan fill="#5d5e63"> D … IV</tspan></text>
+      <text x="792" y="628" fill="#6f7076" font-size="12" font-family="'JetBrains Mono', ui-monospace, monospace" style="font-variant-ligatures:none" font-weight="500" letter-spacing="0.14em">PROBABILITIES</text>
+      <rect x="792" y="648" width="128" height="128" rx="8" fill="#f1f1ee"/>
+      <text x="804" y="672" fill="#17181c" font-size="12" font-family="'JetBrains Mono', ui-monospace, monospace" style="font-variant-ligatures:none">billing</text>
+      <text x="908" y="672" fill="#17181c" font-size="12" font-family="'JetBrains Mono', ui-monospace, monospace" style="font-variant-ligatures:none" text-anchor="end" font-weight="600">0.91</text>
+      <rect x="804" y="680" width="104" height="4" rx="2" fill="#e3e2dc"/>
+      <rect x="804" y="680" width="96" height="4" rx="2" fill="#02a435"/>
+      <text x="804" y="712" fill="#17181c" font-size="12" font-family="'JetBrains Mono', ui-monospace, monospace" style="font-variant-ligatures:none">technical</text>
+      <text x="908" y="712" fill="#17181c" font-size="12" font-family="'JetBrains Mono', ui-monospace, monospace" style="font-variant-ligatures:none" text-anchor="end">0.07</text>
+      <rect x="804" y="720" width="104" height="4" rx="2" fill="#e3e2dc"/>
+      <rect x="804" y="720" width="8" height="4" rx="2" fill="#8fd9a8"/>
+      <text x="804" y="752" fill="#17181c" font-size="12" font-family="'JetBrains Mono', ui-monospace, monospace" style="font-variant-ligatures:none">sales</text>
+      <text x="908" y="752" fill="#17181c" font-size="12" font-family="'JetBrains Mono', ui-monospace, monospace" style="font-variant-ligatures:none" text-anchor="end">0.02</text>
+      <rect x="804" y="760" width="104" height="4" rx="2" fill="#e3e2dc"/>
+      <rect x="804" y="760" width="4" height="4" rx="2" fill="#8fd9a8"/>
+      <circle cx="44" cy="816" r="3" fill="#17181c"/>
+      <text x="56" y="820" fill="#5d5e63" font-size="12" font-family="'JetBrains Mono', ui-monospace, monospace" style="font-variant-ligatures:none">The hidden state is read at the last token of the prompt. A, B and C are the codes of the options.</text>
+    </svg>
