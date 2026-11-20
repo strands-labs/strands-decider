@@ -14,7 +14,7 @@ pip install strands-decider
 **2. Ask a simple choice question**
 
 ```bash
-strands-decider ask StrandsAgents/strands-decider-E2B-gemma4-v1-2610 \
+strands-decider ask StrandsAgents/strands-decider-E2B-gemma4-v2-2611 \
   --state "Help! My payouts have been failing for 3 days." \
   --choice "team=billing,technical,sales"
 ```
@@ -37,7 +37,7 @@ confidence score.
 **3. Serve the model on a local HTTP server**
 
 ```bash
-strands-decider serve StrandsAgents/strands-decider-E2B-gemma4-v1-2610 --port 8000
+strands-decider serve StrandsAgents/strands-decider-E2B-gemma4-v2-2611 --port 8000
 ```
 
 **4. Curl the server for a response**
@@ -64,7 +64,7 @@ curl -s localhost:8000/v1/systemone -H 'content-type: application/json' -d '{
 
 ```json
 {
-  "model": "strands-decider-E2B-gemma4-v1-2610",
+  "model": "strands-decider-E2B-gemma4-v2-2611",
   "answers": {
     "team": {
       "type": "choice",
@@ -86,11 +86,10 @@ curl -s localhost:8000/v1/systemone -H 'content-type: application/json' -d '{
 
 ## Ask about an image
 
-Install the vision extra and load a vision-capable model with `--vision`:
+v2 Gemma 4 models accept images directly — no extra install or flag needed:
 
 ```bash
-pip install "strands-decider[vision]"
-strands-decider ask StrandsAgents/strands-decider-2B-qwen3.5-v1-2610 \
+strands-decider ask StrandsAgents/strands-decider-E2B-gemma4-v2-2611 \
   --state "What is the state of this checkout screen?" \
   --image screen.png \
   --choice "status=paid,retry,cart,empty"
