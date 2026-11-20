@@ -29,20 +29,23 @@ PORT = os.environ.get("DECIDER_SERVER_PORT", "8000")
 BASE_URL = f"http://127.0.0.1:{PORT}"
 
 
+def _record_body(record: dict[str, Any]) -> bytes:
+    """A System One request as JSON bytes, for a single SQS/SNS record."""
+    body = record.get("body") or record.get("Sns", {}).get("Message")
+    if isinstance(body, str):
+        return body.encode()
+    if isinstance(body, dict):
+        return json.dumps(body).encode()
+    raise ValueError(f"record has no usable body: keys={sorted(record)}")
+
+
 def _request_body(event: Any) -> bytes:
-    """A System One request as JSON bytes, for every event shape the function accepts."""
+    """A System One request as JSON bytes, for non-Records event shapes."""
     if isinstance(event, (bytes, bytearray)):
         return bytes(event)
     if isinstance(event, str):
         return event.encode()
     if isinstance(event, dict):
-        if event.get("Records"):
-            record = event["Records"][0]
-            body = record.get("body") or record.get("Sns", {}).get("Message")
-            if isinstance(body, str):
-                return body.encode()
-            if isinstance(body, dict):
-                return json.dumps(body).encode()
         if "detail" in event and isinstance(event["detail"], dict):
             return json.dumps(event["detail"]).encode()
     return json.dumps(event).encode()
@@ -72,4 +75,26 @@ def handler(event: Any, context: Any) -> dict[str, Any]:
     # past the point where Lambda will terminate the invocation anyway.
     remaining = getattr(context, "get_remaining_time_in_millis", lambda: 900_000)() / 1000
     timeout = max(1.0, remaining - 1.0)
-    return _forward(_request_body(event), timeout=timeout)
+
+    records = event.get("Records") if isinstance(event, dict) else None
+    if not records:
+        return _forward(_request_body(event), timeout=timeout)
+
+    # SQS/SNS batch: process every record and report per-record failures so successful
+    # records are deleted and only the failed ones are retried. Requires ReportBatchItemFailures
+    # on the event-source mapping.
+    failures: list[dict[str, str]] = []
+    results: list[dict[str, Any]] = []
+    for record in records:
+        item_id = record.get("messageId") or record.get("messageID")
+        try:
+            results.append(_forward(_record_body(record), timeout=timeout))
+        except Exception:
+            log.exception("record %s failed", item_id)
+            if item_id:
+                failures.append({"itemIdentifier": item_id})
+            else:
+                raise
+    if failures:
+        return {"batchItemFailures": failures}
+    return {"results": results}
