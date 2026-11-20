@@ -54,7 +54,8 @@ A recipe makes one pass over the rows, with rows of up to 16,384 tokens. It
 uses no teacher model: the target of each row is all that a run trains
 toward.
 
-The configs are sized for the v2 data mix of 17.48 million rows. One optimizer step
+The configs are sized for the v2 data mix of 17.48 million rows, which the
+[data card](data-card.md) describes. One optimizer step
 takes about 2,700 rows whatever the number of GPUs, and a run evaluates and
 saves every 100 steps. For a smaller data mix, lower `grad_accum` (the number
 of micro-batches that one step adds up), so that the run has enough steps.
