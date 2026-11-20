@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 import numpy as np
 
 from .config import IMAGE, DecisionConfig
+from .images import DEFAULT_TOKEN_BUDGET
 from .prompt import RenderedImage, render
 from .readout import read
 from .request import Request
@@ -53,14 +54,23 @@ def evaluate(
     *,
     model_name: str = "strands-decider",
     max_length: int | None = None,
+    token_budget: int = DEFAULT_TOKEN_BUDGET,
+    max_token_budget: int | None = None,
     ordinal_smoothing: float = 0.0,
 ) -> dict[str, Any]:
     """One `POST /v1/systemone` request, answered as its response JSON. Prompts longer than
-    `config.max_length_validated` are refused unless `max_length` raises the limit. `weight` is the
-    readout weight, or None for a backend whose rows are already probabilities."""
+    `config.max_length_validated` are refused unless `max_length` raises the limit. Images get
+    token budgets as `render` gives them. `weight` is the readout weight, or None for a backend
+    whose rows are already probabilities."""
     if request.images and IMAGE not in config.inputs:
         raise ValueError("this checkpoint does not take images")
-    rendered = render(request, tokenizer, max_length=max_length or config.max_length_validated)
+    rendered = render(
+        request,
+        tokenizer,
+        max_length=max_length or config.max_length_validated,
+        token_budget=token_budget,
+        max_token_budget=max_token_budget,
+    )
     questions = [list(q.question_ids) for q in rendered.questions.values()]
     rows = backend.forward(list(rendered.state_ids), questions, images=rendered.images)
     answers = read(rows, config, rendered, weight=weight, ordinal_smoothing=ordinal_smoothing)

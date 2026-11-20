@@ -10,6 +10,8 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, model_validator
 
+from .images import TokenBudget
+
 NoulKey = Literal["false", "true"]
 NOUL_KEYS: tuple[NoulKey, NoulKey] = ("false", "true")
 # What a noul's options say when its criteria don't describe them: v1's defaults.
@@ -109,13 +111,30 @@ AnyQuestion = Annotated[
 ]
 
 
+class ImageInput(_Model):
+    """A request image: base64, or a data URI, and the most soft tokens it may take, its token
+    budget. Gemini and OpenAI also let a request size each image (`resolution` and `detail`)."""
+
+    data: str
+    token_budget: TokenBudget | None = None
+
+
+def _image_object(image: Any) -> Any:
+    return {"data": image} if isinstance(image, str) else image
+
+
 class Request(_Model):
-    """A System One request. `images` stay base64 until `render` checks them (`images.decode_image`)."""
+    """A System One request. `images` stay base64 until `render` checks them (`images.decode_image`).
+    An image is a base64 string, as in v1, or an `ImageInput`; one without a token budget gets
+    `image_token_budget`, or the server's default when the request gives none."""
 
     state: Content = ""
     questions: dict[str, AnyQuestion] = Field(min_length=1)
     model: str = "strands-decider-latest"
-    images: list[str] = Field(default_factory=list)
+    images: list[Annotated[ImageInput, BeforeValidator(_image_object)]] = Field(
+        default_factory=list
+    )
+    image_token_budget: TokenBudget | None = None
 
     @model_validator(mode="before")
     @classmethod
