@@ -337,6 +337,13 @@ The serving options, as a model checkpoint takes them:
 - `--max-length N`: serve prompts of up to N tokens instead of `max_length_validated`. A
   longer prompt gets 422 and is never truncated; a value above the validated length warns.
 - `--revision`: the branch, tag or commit of a checkpoint on the Hub.
+- `--max-image-token-budget N`: the largest token budget a request may give an image, 70, 140,
+  280, 560 or 1120 soft tokens (default: the checkpoint's, `max_soft_tokens` in its
+  `processor_config.json`, 280 in every base). A request gives one image a budget as
+  `{"data": "<base64>", "token_budget": 560}` in `images`, or all of them with
+  `image_token_budget`; an image over the limit gets 422. A limit below the checkpoint's budget
+  lowers the default too, and one above it warns
+  ([architecture.md, Image token budgets](architecture.md#image-token-budgets)).
 
 `--vision` and `--device-map` are only supported for v1 model checkpoints. `/health` reports the
 backend, device, dtype, longest prompt served, whether images are served, and the concurrency.

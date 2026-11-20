@@ -15,8 +15,19 @@ import warnings
 from typing import TYPE_CHECKING, Any, Protocol
 
 from .backends.mlx_format import is_mlx_artifact
-from .core import Backend, DecisionConfig, Request, load_readout, load_tokenizer, read, render
+from .core import (
+    TOKEN_BUDGETS,
+    Backend,
+    DecisionConfig,
+    Request,
+    check_image_processor,
+    load_readout,
+    load_tokenizer,
+    read,
+    render,
+)
 from .core.config import FILENAME, IMAGE, INTERFACE
+from .core.images import DEFAULT_TOKEN_BUDGET
 from .modeling import checkpoint_dir
 from .refusals import EngineBusy, RequestRefused
 from .schema import SystemOneResponse
@@ -83,6 +94,8 @@ class DecisionEngine:
         *,
         model_name: str,
         max_length: int | None = None,
+        token_budget: int = DEFAULT_TOKEN_BUDGET,
+        max_token_budget: int | None = None,
         max_concurrency: int = 1,
         queue_timeout: float = 60.0,
     ):
@@ -92,6 +105,8 @@ class DecisionEngine:
         self.weight = weight
         self.model_name = model_name
         self.max_length = max_length or config.max_length_validated
+        self.token_budget = token_budget
+        self.max_token_budget = max_token_budget or token_budget
         self.max_concurrency = max_concurrency
         self.queue_timeout = queue_timeout
         self._slots = threading.BoundedSemaphore(max_concurrency)
@@ -110,7 +125,13 @@ class DecisionEngine:
         if request.images and (problem := self.image_problem):
             raise RequestRefused(problem)
         try:
-            rendered = render(request, self.tokenizer, max_length=self.max_length)
+            rendered = render(
+                request,
+                self.tokenizer,
+                max_length=self.max_length,
+                token_budget=self.token_budget,
+                max_token_budget=self.max_token_budget,
+            )
         except ValueError as e:
             raise RequestRefused(str(e)) from e
         questions = [list(q.question_ids) for q in rendered.questions.values()]
@@ -146,6 +167,8 @@ class DecisionEngine:
             "max_length": self.max_length,
             "temperature": self.config.temperature,
             "images": self.image_problem is None,
+            "token_budget": min(self.token_budget, self.max_token_budget),
+            "max_token_budget": self.max_token_budget,
             "max_concurrency": self.max_concurrency,
             "queue_timeout": self.queue_timeout,
             **self.backend.describe(),
@@ -161,6 +184,7 @@ def load_decision_engine(
     max_batch: int = 32,
     max_batch_tokens: int | None = None,
     max_length: int | None = None,
+    max_token_budget: int | None = None,
     model_name: str | None = None,
     max_concurrency: int = 1,
     queue_timeout: float = 60.0,
@@ -169,11 +193,15 @@ def load_decision_engine(
     """The model checkpoint `checkpoint`, a directory or a Hub repo, on `device`. Its interface
     files are read and checked before the backend loads the weights. `reuse_state=False` runs each
     question as one full prompt; on CUDA in bfloat16 that is the reference. An MLX artifact
-    (`convert-mlx`) runs on mlx alone."""
+    (`convert-mlx`) runs on mlx alone. Images get the checkpoint's token budget unless a request
+    gives one, at most `max_token_budget`."""
     if device.split(":", 1)[0] not in _DEVICES:
         raise ValueError(f"model checkpoints run on {', '.join(_DEVICES)}, not {device!r}")
     if dtype is not None and dtype not in _DTYPES:
         raise ValueError(f"--dtype is one of {', '.join(_DTYPES)}, not {dtype!r}")
+    if max_token_budget is not None and max_token_budget not in TOKEN_BUDGETS:
+        budgets = ", ".join(map(str, TOKEN_BUDGETS))
+        raise ValueError(f"--max-image-token-budget is one of {budgets}, not {max_token_budget}")
     path = checkpoint_dir(checkpoint, revision)
     if device != "mlx" and is_mlx_artifact(path):
         raise ValueError(f"{checkpoint} is an MLX artifact: serve it with --device mlx")
@@ -183,6 +211,13 @@ def load_decision_engine(
             f"serving prompts of up to {max_length} tokens, past the "
             f"{config.max_length_validated} the checkpoint was validated at "
             "(decision_config.json max_length_validated)",
+            stacklevel=2,
+        )
+    token_budget = _token_budget(path, config)
+    if max_token_budget is not None and max_token_budget > token_budget:
+        warnings.warn(
+            f"serving images at up to {max_token_budget} tokens each, past the checkpoint's "
+            f"{token_budget} (processor_config.json max_soft_tokens)",
             stacklevel=2,
         )
     tokenizer, weight = load_tokenizer(path), load_readout(path)
@@ -209,6 +244,8 @@ def load_decision_engine(
         weight,
         model_name=model_name or os.path.basename(checkpoint.rstrip("/")) or checkpoint,
         max_length=max_length,
+        token_budget=token_budget,
+        max_token_budget=max_token_budget,
         max_concurrency=max_concurrency,
         queue_timeout=queue_timeout,
     )
@@ -222,3 +259,14 @@ def load_decision_engine(
         "state encoded once per request" if reuse_state else "one full pass per question",
     )
     return engine
+
+
+def _token_budget(path: str, config: DecisionConfig) -> int:
+    """The checkpoint's image token budget, its images' default. A checkpoint whose images are
+    refused (`load_image_processor`) keeps Gemma 4's default, which no image then uses."""
+    if IMAGE not in config.inputs:
+        return DEFAULT_TOKEN_BUDGET
+    try:
+        return check_image_processor(path)
+    except (OSError, ValueError):
+        return DEFAULT_TOKEN_BUDGET

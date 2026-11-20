@@ -161,6 +161,13 @@ def serve_cmd(
         "max_length_validated). Raising it past the validated length is the operator's decision. "
         "Not supported for v1 model checkpoints.",
     ),
+    max_image_token_budget: int | None = typer.Option(
+        None,
+        "--max-image-token-budget",
+        help="The largest token budget a request may give an image: 70, 140, 280, 560 or 1120 "
+        "(default: the checkpoint's, processor_config.json's max_soft_tokens). Not supported for "
+        "v1 model checkpoints.",
+    ),
     warmup: bool = typer.Option(
         True,
         "--warmup/--no-warmup",
@@ -189,6 +196,7 @@ def serve_cmd(
             queue_timeout=queue_timeout,
             revision=revision,
             max_length=max_length,
+            max_image_token_budget=max_image_token_budget,
         )
     except ValueError as e:
         raise typer.BadParameter(str(e)) from e

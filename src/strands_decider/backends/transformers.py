@@ -154,13 +154,17 @@ class TransformersBackend:
         return out
 
     def _image_inputs(self, images: Sequence[RenderedImage]) -> dict[str, torch.Tensor]:
-        """The vision encoder's inputs: each image's pixels (`image_pixels`) through the image
-        processor with its own resize off, so every backend gives the encoder the same pixels.
-        The model refuses an image whose vectors don't fill its placeholders."""
+        """The vision encoder's inputs: each image's pixels (`image_pixels`, at its own token
+        budget) through the image processor with its own resize off, so every backend gives the
+        encoder the same pixels, padded to the largest budget. The model refuses an image whose
+        vectors don't fill its placeholders."""
         if not images:
             return {}
         out = self.image_processor(
-            images=[image_pixels(im) for im in images], do_resize=False, return_tensors="pt"
+            images=[image_pixels(im) for im in images],
+            do_resize=False,
+            max_soft_tokens=max(im.token_budget for im in images),
+            return_tensors="pt",
         )
         return {
             "pixel_values": out["pixel_values"].to(self.model.dtype),
