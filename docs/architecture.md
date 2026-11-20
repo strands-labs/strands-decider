@@ -332,6 +332,32 @@ each question's result is what it would be alone.
 `render` needs a tokenizer that encodes request text with special-token matching off, so the text
 can never become a control token. `load_tokenizer` and `prepare_tokenizer` set it up that way.
 
+### Image token budgets
+
+Each image takes at most its token budget of soft tokens, one of Gemma 4's five: 70, 140, 280,
+560 and 1120. Gemma 4's [model card](https://gemma.ai/models/gemma-4/model-card/) calls it the
+visual token budget and suggests lower budgets for classification and captioning and higher ones
+for OCR and small text. Gemma's processor keeps the aspect ratio and makes each side a multiple of
+48 pixels, so a budget of N covers about N × 48 × 48 pixels:
+
+| Budget | 70 | 140 | 280 | 560 | 1120 |
+| --- | --- | --- | --- | --- | --- |
+| A square photo becomes | 384 × 384 | 528 × 528 | 768 × 768 | 1,104 × 1,104 | 1,584 × 1,584 |
+| Its tokens | 64 | 121 | 256 | 529 | 1,089 |
+
+A request sets the budget per image, as Gemini (`resolution`,
+[media resolution](https://aistudio.google.com/docs/media-resolution)) and OpenAI (`detail`,
+[image detail level](https://developers.openai.com/api/docs/guides/images-vision#choose-an-image-detail-level))
+do. An entry of `images` is a base64 string, as in v1, or an object such as
+`{"data": "<base64>", "token_budget": 560}`. An image without a budget gets the request's
+`image_token_budget`, else the server's default: the checkpoint's, `max_soft_tokens` in its
+`processor_config.json` (280 in every base), which `check_image_processor` returns. `render`
+takes that default as `token_budget` and the server's limit as `max_token_budget`, which is the
+default unless the operator raises it. An image over the limit is refused, and a limit below the
+default lowers the default to it. A runtime resizes each image with `resized_size` at its budget
+and passes the budget to its image processor, which takes it per call. v1 model checkpoints
+size images by `image_long_side` and refuse a token budget.
+
 ## Layout
 
 ```
@@ -346,12 +372,20 @@ src/strands_decider/              -- published package (inference only)
   cpu_kernels.py  the Gated DeltaNet depthwise causal conv for CPU inference
   mlx_engine.py   serving with the torso on MLX (--device mlx); the engine otherwise infer.py's
   server.py       FastAPI, POST /v1/systemone
-  cli.py          the strands-decider command (ask / serve / info)
+  cli.py          the strands-decider command (ask / serve / convert-mlx / info)
   hf_export.py    a checkpoint as a Hugging Face model folder (safetensors, card, manifest)
   naming.py       release naming helpers (used by hf_export and release scripts)
   vision.py       Qwen3.5 vision-tower engine (`serve --vision`, `ask --image`)
   core/           the decision interface without torch: prompt rendering, the code
                   readout, decision_config.json, the runtime contract
+  backends/       runtimes for model checkpoints: transformers.py runs them on PyTorch
+                  (CPU, CUDA, MPS) and is the reference runtime, transformers_attention.py
+                  its prefix_bidir attention, images.py the pixels every backend encodes;
+                  mlx.py runs them on Apple silicon through mlx-vlm (--device mlx), and
+                  mlx_format.py loads them into mlx-vlm and writes their MLX artifacts
+                  (convert-mlx)
+  decision.py     model checkpoints behind ask and serve: the core and a backend
+  refusals.py     the request errors serve maps to 422 and 503
 
 training/                         -- not published; run as `python -m training.<module>`
   train.py        LoRA + readout training loop (`python -m training.train`)
@@ -433,7 +467,10 @@ tests/            pytest only: test_core (no GPU), test_server (stubbed), test_g
                   test_llm_client, test_cli_exit,
                   test_ddp (`-m distributed` for the multi-GPU runs);
                   test_core_prompt, test_core_readout, test_core_config, test_core_images
-                  (the torch-free core)
+                  (the torch-free core);
+                  test_backend_transformers, test_backend_images, test_decision_serving
+                  (model checkpoints, on tiny random-weight checkpoints that
+                  decision_support.py writes)
 docs/             architecture.md -- this document; inference.md -- serving a checkpoint:
                   install, ask, serve, the HTTP API, a Mac
 .github/          workflows/tests.yml -- the CPU tests; workflows/generators-live-test.yml

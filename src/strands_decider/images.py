@@ -2,8 +2,7 @@
 
 vision.py (the torch engine) and hidden_engine.py (any backend that returns hidden states,
 such as llama.cpp in deploy/lambda) read images through these functions, so both prepare
-the same pixels and the same prompt. Pillow is imported on first use
-(`pip install "strands-decider[vision]"`).
+the same pixels and the same prompt. Pillow is imported on first use.
 """
 
 from __future__ import annotations
@@ -77,7 +76,7 @@ def _pil() -> Any:
     try:
         from PIL import Image as PILImage
     except ImportError as e:  # pragma: no cover - depends on the environment
-        raise ImportError('image input needs Pillow: pip install "strands-decider[vision]"') from e
+        raise ImportError("image input needs Pillow: pip install pillow") from e
     return PILImage
 
 

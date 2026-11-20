@@ -40,8 +40,9 @@ ENV PIP_NO_CACHE_DIR=1 HF_HOME=/tmp/hf
 WORKDIR /opt/strands-decider
 COPY pyproject.toml README.md LICENSE ./
 COPY src ./src
-# The versions this image was tested with; torch from its CPU index, which has no CUDA libraries.
-RUN pip install torch==2.14.1 --index-url https://download.pytorch.org/whl/cpu \
+# The versions this image was tested with; torch and torchvision from the CPU index, which has no
+# CUDA libraries.
+RUN pip install torch==2.14.1 torchvision==0.29.1 --index-url https://download.pytorch.org/whl/cpu \
     && SETUPTOOLS_SCM_PRETEND_VERSION=0.0.0+lambda pip install . transformers==5.20.2
 # llama.cpp's source, for its converter, and its quantizer.
 COPY --from=llama /llama /llama

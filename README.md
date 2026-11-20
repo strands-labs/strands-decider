@@ -52,6 +52,8 @@ pip install strands-decider
 ```
 
 On an Apple-silicon Mac, `--device mlx` runs the model through MLX, 1.4 to 1.6x faster than MPS.
+For model checkpoints other than v1's, MLX is the default on a Mac once the `mlx` extra is
+installed.
 It needs the `mlx` extra, which ships with the next release; until then, install from a clone with
 `pip install -e ".[mlx]"`. The `cuda`, `mps` and `cpu` extras name the other devices
 ([docs/inference.md](docs/inference.md#environments-for-serving)).
@@ -176,7 +178,7 @@ curl -s localhost:8000/v1/systemone \
 
 Qwen3.5-2B-Base is natively multimodal. With `--vision` the server keeps its vision tower,
 and a request may carry `images` (base64) as part of the state; the published checkpoints
-(v1, and hobson-v21 and v19 before it) answer over them with no image training. Needs `pip install "strands-decider[vision]"` and
+(v1, and hobson-v21 and v19 before it) answer over them with no image training. Needs
 transformers 5.18 or later.
 
 ```bash

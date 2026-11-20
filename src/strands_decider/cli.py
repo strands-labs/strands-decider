@@ -1,4 +1,4 @@
-"""The strands-decider CLI: ask and serve.
+"""The strands-decider CLI: ask and serve, and convert-mlx for model checkpoints.
 
 Training, evaluation, calibration and corpus-building live outside this package.
 Run them as `python -m training.train`, `python -m training.evaluate`,
@@ -8,9 +8,11 @@ Run them as `python -m training.train`, `python -m training.evaluate`,
 from __future__ import annotations
 
 import atexit
+import base64
 import logging
 import os
 import sys
+from pathlib import Path
 
 import torch
 import typer
@@ -37,6 +39,36 @@ def _auto_device() -> str:
     return "cpu"
 
 
+def _mlx_vlm_available() -> bool:
+    """Apple silicon with the mlx extra, mlx-vlm included: what the MLX backend runs on."""
+    import importlib.util
+
+    from .infer import mlx_available
+
+    return mlx_available() and importlib.util.find_spec("mlx_vlm") is not None
+
+
+def _default_device(checkpoint: str, revision: str | None) -> str:
+    """`_auto_device`'s choice, except that a model checkpoint, validated on MLX rather than
+    MPS, gets mlx without CUDA where the MLX backend runs. On mps without it, a note says what to
+    install: on stderr, so that `ask --json` stays JSON, in plain text, as rich would read "[mlx]"
+    as markup."""
+    from .decision import is_model_checkpoint
+
+    device = _auto_device()
+    if device == "cuda" or not is_model_checkpoint(checkpoint, revision=revision):
+        return device
+    if _mlx_vlm_available():
+        return "mlx"
+    if device == "mps":
+        typer.echo(
+            "note: on Apple silicon, this checkpoint is validated on MLX, not MPS: "
+            "pip install 'strands-decider[mlx]', then pass --device mlx or no --device",
+            err=True,
+        )
+    return device
+
+
 def _configure_inference_logging(device: str) -> None:
     if str(device).split(":", 1)[0] in {"cpu", "mps", "mlx"}:
         logging.getLogger("transformers.integrations.hub_kernels").setLevel(logging.ERROR)
@@ -49,9 +81,6 @@ def resolve_device(device: str | None) -> str:
     return selected
 
 
-# ---------------------------------------------------------------- serve / ask
-
-
 @app.command("serve")
 def serve_cmd(
     checkpoint: str = typer.Argument(...),
@@ -61,9 +90,15 @@ def serve_cmd(
         None,
         "--device",
         help="cuda, mps or cpu (torch), or mlx (Apple silicon, needs the mlx extra). "
-        "Auto-detected when omitted: cuda > mps > cpu; mlx only when asked for.",
+        "Auto-detected when omitted: cuda > mps > cpu for v1 model checkpoints, and "
+        "cuda > mlx (with the mlx extra) > mps > cpu for other model checkpoints.",
     ),
-    no_prefix_cache: bool = typer.Option(False, "--no-prefix-cache"),
+    no_prefix_cache: bool = typer.Option(
+        False,
+        "--no-prefix-cache",
+        help="Encode each question with its own copy of the state on v1 model checkpoints, and in "
+        "one full pass on other model checkpoints (the reference, on CUDA in bfloat16).",
+    ),
     model_name: str | None = typer.Option(
         None,
         "--model-name",
@@ -72,7 +107,9 @@ def serve_cmd(
     vision: bool = typer.Option(
         False,
         "--vision",
-        help="Keep Qwen3.5's vision tower so requests may carry `images` (docs/vision.md).",
+        help="v1 model checkpoints: keep Qwen3.5's vision tower so requests may carry `images` "
+        "(docs/vision.md). Other model checkpoints take images when their decision_config.json "
+        "lists them.",
     ),
     max_batch: int = typer.Option(
         32,
@@ -94,8 +131,42 @@ def serve_cmd(
         None,
         "--max-concurrency",
         min=1,
-        help="Run at most N requests on the model at once; the rest wait without a thread or GPU "
-        "memory. Default: no cap beyond the 40-thread worker pool.",
+        help="Run at most N requests on the model at once; the rest wait. v1 model checkpoints: no "
+        "cap beyond the 40-thread worker pool by default, and a waiting request holds no thread or "
+        "GPU memory. Other model checkpoints: 1 by default, and a request waits up to "
+        "--queue-timeout.",
+    ),
+    dtype: str | None = typer.Option(
+        None,
+        "--dtype",
+        help="float32 or bfloat16. Default: float32 on cpu, bfloat16 on cuda and mps, and the "
+        "dtype the checkpoint is stored in on mlx. Not supported for v1 model checkpoints.",
+    ),
+    queue_timeout: float = typer.Option(
+        60.0,
+        "--queue-timeout",
+        help="Seconds a request waits for the model before a 503. Not supported for v1 model "
+        "checkpoints.",
+    ),
+    revision: str | None = typer.Option(
+        None,
+        "--revision",
+        help="The Hub branch, tag or commit to load. Not supported for v1 model checkpoints.",
+    ),
+    max_length: int | None = typer.Option(
+        None,
+        "--max-length",
+        min=1,
+        help="Refuse prompts longer than this many tokens (default: decision_config.json's "
+        "max_length_validated). Raising it past the validated length is the operator's decision. "
+        "Not supported for v1 model checkpoints.",
+    ),
+    max_image_token_budget: int | None = typer.Option(
+        None,
+        "--max-image-token-budget",
+        help="The largest token budget a request may give an image: 70, 140, 280, 560 or 1120 "
+        "(default: the checkpoint's, processor_config.json's max_soft_tokens). Not supported for "
+        "v1 model checkpoints.",
     ),
     warmup: bool = typer.Option(
         True,
@@ -104,24 +175,34 @@ def serve_cmd(
     ),
 ) -> None:
     """Serve POST /v1/systemone. JevBench's typesafe adapter runs against it unchanged."""
-    from .server import serve
+    import uvicorn
 
-    selected_device = resolve_device(device)
+    from .server import create_app
+
+    selected_device = resolve_device(device or _default_device(checkpoint, revision))
+    try:  # before anything is announced: the arguments' checks, and a model checkpoint's load
+        app_ = create_app(
+            checkpoint,
+            device=selected_device,
+            use_prefix_cache=not no_prefix_cache,
+            model_name=model_name,
+            max_batch=max_batch,
+            vision=vision,
+            max_batch_tokens=max_batch_tokens,
+            device_map=device_map,
+            warmup=warmup,
+            dtype=dtype,
+            max_concurrency=max_concurrency,
+            queue_timeout=queue_timeout,
+            revision=revision,
+            max_length=max_length,
+            max_image_token_budget=max_image_token_budget,
+        )
+    except ValueError as e:
+        raise typer.BadParameter(str(e)) from e
     console.print(f"[green]serving[/] {checkpoint} on http://{host}:{port} ({selected_device})")
-    serve(
-        checkpoint,
-        host=host,
-        port=port,
-        device=selected_device,
-        use_prefix_cache=not no_prefix_cache,
-        model_name=model_name,
-        max_batch=max_batch,
-        vision=vision,
-        max_batch_tokens=max_batch_tokens,
-        device_map=device_map,
-        max_concurrency=max_concurrency,
-        warmup=warmup,
-    )
+    # Single worker: the model owns the GPU, and forking more would just duplicate it.
+    uvicorn.run(app_, host=host, port=port, workers=1)
 
 
 @app.command("ask")
@@ -129,7 +210,10 @@ def ask_cmd(
     checkpoint: str = typer.Argument(...),
     state: str = typer.Option(..., "--state", "-s", help="The content to evaluate."),
     image: list[str] | None = typer.Option(
-        None, "--image", help="Image file, part of the state; repeat. Loads the vision tower."
+        None,
+        "--image",
+        help="Image file, part of the state; repeat. Loads the vision tower (v1); a decision "
+        "checkpoint takes images when its decision_config.json lists them.",
     ),
     noul: list[str] | None = typer.Option(None, "--noul", help="Yes/no question; repeat."),
     choice: list[str] | None = typer.Option(
@@ -142,9 +226,21 @@ def ask_cmd(
         None,
         "--device",
         help="cuda, mps or cpu (torch), or mlx (Apple silicon, needs the mlx extra). "
-        "Auto-detected when omitted: cuda > mps > cpu; mlx only when asked for.",
+        "Auto-detected when omitted: cuda > mps > cpu for v1 model checkpoints, and "
+        "cuda > mlx (with the mlx extra) > mps > cpu for other model checkpoints.",
     ),
     as_json: bool = typer.Option(False, "--json", help="Print the raw API response."),
+    revision: str | None = typer.Option(
+        None,
+        "--revision",
+        help="The Hub branch, tag or commit to load. Not supported for v1 model checkpoints.",
+    ),
+    dtype: str | None = typer.Option(
+        None,
+        "--dtype",
+        help="float32 or bfloat16. Default: float32 on cpu, bfloat16 on cuda and mps, and the "
+        "dtype the checkpoint is stored in on mlx. Not supported for v1 model checkpoints.",
+    ),
 ) -> None:
     """Ask one state a set of typed questions from the command line."""
     from .infer import EngineConfig, load_engine
@@ -169,18 +265,36 @@ def ask_cmd(
     if not questions:
         raise typer.BadParameter("ask at least one --noul / --choice / --score question")
 
-    selected_device = resolve_device(device)
-    if image:
-        import base64
+    selected_device = resolve_device(device or _default_device(checkpoint, revision))
+    images = [base64.b64encode(Path(p).read_bytes()).decode("ascii") for p in image or []]
+    from .decision import is_model_checkpoint, load_decision_engine
 
+    if is_model_checkpoint(checkpoint, revision=revision):
+        # Images go in the request; the checkpoint's decision_config.json says if it takes them.
+        from .core import Request
+
+        request = {
+            "state": state,
+            "questions": {n: q.model_dump() for n, q in questions.items()},
+            "images": images,
+        }
+        try:
+            engine = load_decision_engine(
+                checkpoint, device=selected_device, dtype=dtype, revision=revision
+            )
+            response = engine.evaluate(Request.model_validate(request))
+        except ValueError as e:  # a device or dtype, an image or a prompt it refuses
+            raise typer.BadParameter(str(e)) from e
+    elif dtype is not None or revision is not None:
+        flag = "--dtype" if dtype is not None else "--revision"
+        raise typer.BadParameter(
+            f"{flag} is not supported for v1 model checkpoints", param_hint=flag
+        )
+    elif images:
         from .vision import load_vision_engine
 
-        encoded = []
-        for path in image:
-            with open(path, "rb") as fh:
-                encoded.append(base64.b64encode(fh.read()).decode("ascii"))
         response = load_vision_engine(checkpoint, EngineConfig(device=selected_device)).ask_images(
-            state, questions, encoded
+            state, questions, images
         )
     else:
         response = load_engine(checkpoint, device=selected_device).ask(state, questions)
@@ -211,6 +325,33 @@ def _print_answers(response: SystemOneResponse) -> None:
             )
             for lvl, p in ans.probabilities.items():
                 console.print(f"    {lvl}: {ans.legend.get(lvl, ''):<40} {p:.3f}")
+
+
+@app.command("convert-mlx")
+def convert_mlx_cmd(
+    checkpoint: str = typer.Argument(
+        ..., help="A model checkpoint, a directory or a Hub id; not a v1 model checkpoint."
+    ),
+    out: str = typer.Argument(..., help="The new directory to write the MLX artifact to."),
+    bits: int | None = typer.Option(
+        None,
+        "--bits",
+        help="Quantize the decoder to 8 or 4 bits. Omitted: bf16. The vision and audio "
+        "encoders and their projections stay bf16, and the readout is copied unchanged.",
+    ),
+    group_size: int = typer.Option(64, "--group-size", help="Quantization group size."),
+) -> None:
+    """Write the MLX artifact of a model checkpoint, for `--device mlx`."""
+    from .backends.mlx_format import convert
+
+    try:
+        artifact = convert(checkpoint, out, bits=bits, group_size=group_size)
+    except (ImportError, ValueError, OSError, RuntimeError) as e:
+        typer.echo(f"error: {e}", err=True)  # plain text, as rich would read "[mlx]" as markup
+        raise typer.Exit(1) from e
+    size = sum(f.stat().st_size for f in artifact.iterdir()) / 1e9
+    precision = f"decoder at {bits} bits (group {group_size})" if bits else "bf16"
+    console.print(f"[green]wrote[/] {artifact}: {size:.2f} GB, {precision}")
 
 
 @app.command("info", hidden=True)
