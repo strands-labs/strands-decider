@@ -16,7 +16,7 @@ import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, get_args
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
@@ -33,11 +33,15 @@ MAX_IMAGE_PIXELS = 4096 * 4096
 MAX_IMAGE_BYTES = 16 * 2**20
 DATA_URI = re.compile(r"^data:image/[A-Za-z0-9_.+-]+;base64,")
 
-# Gemma 4's image processor, as every base's processor_config.json sets it: 16-pixel patches,
-# pooled 3 x 3 into one soft token, at most 280 soft tokens per image.
+# Gemma 4's image processor: 16-pixel patches, pooled 3 x 3 into one soft token, and at most a
+# token budget of soft tokens per image. The budgets are the processor's `max_soft_tokens`
+# values, the "visual token budget" of Gemma 4's model card; every base's processor_config.json
+# sets 280.
 PATCH_SIZE = 16
 POOLING_KERNEL_SIZE = 3
-MAX_SOFT_TOKENS = 280
+TokenBudget = Literal[70, 140, 280, 560, 1120]
+TOKEN_BUDGETS: tuple[int, ...] = get_args(TokenBudget)
+DEFAULT_TOKEN_BUDGET = 280
 PROCESSOR_CONFIG_FILE = "processor_config.json"
 
 # An image in the prompt: begin, one placeholder per soft token, end.
@@ -46,27 +50,29 @@ IMAGE_SOFT = "<|image|>"
 IMAGE_CLOSE = "<image|>"
 
 
-def resized_size(width: int, height: int) -> tuple[int, int]:
+def resized_size(
+    width: int, height: int, token_budget: int = DEFAULT_TOKEN_BUDGET
+) -> tuple[int, int]:
     """(W, H) Gemma 4's processor resizes an image to: the aspect ratio kept, each side a multiple
-    of 48, and at most MAX_SOFT_TOKENS soft tokens. The processor's arithmetic, operation for
+    of 48, and at most `token_budget` soft tokens. The processor's arithmetic, operation for
     operation (`get_aspect_ratio_preserving_size` in transformers' Gemma4ImageProcessor). Call it
     with the decoded size, after EXIF orientation."""
     side = POOLING_KERNEL_SIZE * PATCH_SIZE
-    factor = math.sqrt(MAX_SOFT_TOKENS * side * side / (height * width))
+    factor = math.sqrt(token_budget * side * side / (height * width))
     target_height = math.floor(factor * height / side) * side
     target_width = math.floor(factor * width / side) * side
-    if target_height == 0:  # wider than 280:1
+    if target_height == 0:  # wider than token_budget:1
         target_height = side
-        target_width = min(math.floor(width / height) * side, MAX_SOFT_TOKENS * side)
+        target_width = min(math.floor(width / height) * side, token_budget * side)
     elif target_width == 0:
         target_width = side
-        target_height = min(math.floor(height / width) * side, MAX_SOFT_TOKENS * side)
+        target_height = min(math.floor(height / width) * side, token_budget * side)
     return target_width, target_height
 
 
-def soft_tokens(width: int, height: int) -> int:
+def soft_tokens(width: int, height: int, token_budget: int = DEFAULT_TOKEN_BUDGET) -> int:
     """N, the image's placeholders in the prompt: one per 48 x 48 block of its resized size."""
-    w, h = resized_size(width, height)
+    w, h = resized_size(width, height, token_budget)
     side = POOLING_KERNEL_SIZE * PATCH_SIZE
     return (h // side) * (w // side)
 
@@ -88,30 +94,34 @@ def resize_image(image: Image, width: int, height: int) -> Image:
 def check_decoded_size(
     image: EncodedImage | RenderedImage, width: int, height: int
 ) -> tuple[int, int]:
-    """(W, H) to resize a decoded image of `width` x `height` to. The decoded size must be the
-    header's, or its transpose after EXIF orientation; W and H come from the decoded size."""
+    """(W, H) to resize a decoded image of `width` x `height` to, at the image's token budget.
+    The decoded size must be the header's, or its transpose after EXIF orientation; W and H come
+    from the decoded size."""
     header = (image.width, image.height)
     if (width, height) not in (header, header[::-1]):
         raise ValueError(
             f"image could not be decoded: its pixels are {width}x{height}, and its header "
             f"gives {header[0]}x{header[1]}"
         )
-    return resized_size(width, height)
+    return resized_size(width, height, image.token_budget)
 
 
 class _ProcessorSettings(BaseModel):
-    """The image processor settings the core's placeholder count depends on."""
+    """The image processor settings the core's placeholder count depends on, and the
+    checkpoint's token budget."""
 
     model_config = ConfigDict(extra="allow")
 
     patch_size: Literal[16]
     pooling_kernel_size: Literal[3]
-    max_soft_tokens: Literal[280]
+    max_soft_tokens: TokenBudget
 
 
-def check_image_processor(config: dict[str, Any] | str | os.PathLike[str]) -> None:
-    """That a checkpoint's processor_config.json (read, or its path or directory) sizes images as
-    the core counts their placeholders; a mismatch would give the encoder the wrong number of slots."""
+def check_image_processor(config: dict[str, Any] | str | os.PathLike[str]) -> int:
+    """The checkpoint's token budget, the one its images get by default, after checking that its
+    processor_config.json (read, or its path or directory) sizes images as the core counts their
+    placeholders; a mismatch would give the encoder the wrong number of slots. A runtime may serve
+    images at any budget: the processor takes it per call."""
     if isinstance(config, dict):
         settings = config
     else:
@@ -120,19 +130,22 @@ def check_image_processor(config: dict[str, Any] | str | os.PathLike[str]) -> No
             (path / PROCESSOR_CONFIG_FILE if path.is_dir() else path).read_text("utf-8")
         )
     try:
-        _ProcessorSettings.model_validate(settings.get("image_processor", settings))
+        processor = _ProcessorSettings.model_validate(settings.get("image_processor", settings))
     except ValidationError as e:
         raise ValueError(f"the checkpoint's image processor can't take images here: {e}") from None
+    return processor.max_soft_tokens
 
 
 @dataclass(frozen=True)
 class EncodedImage:
-    """An image as the request sends it: the file, its format, and its size from the header."""
+    """An image as the request sends it: the file, its format, its size from the header, and the
+    token budget it is rendered at."""
 
     data: bytes = field(repr=False)
     format: str
     width: int
     height: int
+    token_budget: int = DEFAULT_TOKEN_BUDGET
     sha256: str = field(init=False)
 
     def __post_init__(self) -> None:
@@ -140,7 +153,7 @@ class EncodedImage:
 
     @property
     def tokens(self) -> int:
-        return soft_tokens(self.width, self.height)
+        return soft_tokens(self.width, self.height, self.token_budget)
 
 
 def _pillow() -> Any:  # PIL.Image, typed only where Pillow is installed
@@ -151,7 +164,7 @@ def _pillow() -> Any:  # PIL.Image, typed only where Pillow is installed
     return Image
 
 
-def decode_image(data: str) -> EncodedImage:
+def decode_image(data: str, token_budget: int = DEFAULT_TOKEN_BUDGET) -> EncodedImage:
     """One request image, checked from its header: base64 (optionally a data URI), at most
     MAX_IMAGE_BYTES, one of IMAGE_FORMATS, at most MAX_IMAGE_PIXELS. The pixels aren't decoded."""
     try:
@@ -176,4 +189,4 @@ def decode_image(data: str) -> EncodedImage:
             f"image is {width}x{height}; at most {MAX_IMAGE_PIXELS:,} pixels are accepted"
         )
     # A JPEG with more pictures after the first (MPO, as some cameras write) is a JPEG.
-    return EncodedImage(raw, "JPEG" if fmt == "MPO" else fmt, width, height)
+    return EncodedImage(raw, "JPEG" if fmt == "MPO" else fmt, width, height, token_budget)
