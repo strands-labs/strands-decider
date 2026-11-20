@@ -1,0 +1,13 @@
+{
+  "app": "npx tsx bin/cdk-app.ts",
+  "context": {
+    "model": "StrandsAgents/strands-decider-2B-qwen3.5-v1-2610",
+    "model_revision": "main",
+    "instance_types": "g4dn.xlarge,g4dn.2xlarge,g4dn.4xlarge",
+    "accelerator_memory_gb": 16,
+    "max_vcpus": 32,
+    "per_env_max_concurrency": 4,
+    "memory_size_mb": 4096,
+    "ephemeral_storage_mb": 4096
+  }
+}
