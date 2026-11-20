@@ -12,7 +12,14 @@ from itertools import groupby
 from typing import TYPE_CHECKING
 
 from .codes import CODE_TOKEN_IDS, CODES, CONTROL_TOKEN_IDS
-from .images import IMAGE_CLOSE, IMAGE_OPEN, IMAGE_SOFT, EncodedImage, decode_image
+from .images import (
+    DEFAULT_TOKEN_BUDGET,
+    IMAGE_CLOSE,
+    IMAGE_OPEN,
+    IMAGE_SOFT,
+    EncodedImage,
+    decode_image,
+)
 from .request import Content, Request
 
 if TYPE_CHECKING:
@@ -100,6 +107,7 @@ class RenderedImage:
     sha256: str
     start: int
     tokens: int
+    token_budget: int = DEFAULT_TOKEN_BUDGET
 
     @property
     def end(self) -> int:
@@ -174,15 +182,32 @@ class _Question:
     prompt: list[str]
 
 
+def _token_budgets(request: Request, default: int, limit: int | None) -> list[int]:
+    """Each image's token budget: its own, else the request's, else `default`, at most `limit`."""
+    limit = default if limit is None else limit
+    default = min(default, limit)
+    budgets = [im.token_budget or request.image_token_budget or default for im in request.images]
+    for i, budget in enumerate(budgets):
+        if budget > limit:
+            raise ValueError(
+                f"image {i}: a token budget of {budget} is over this server's limit of {limit}"
+            )
+    return budgets
+
+
 def _parts(
-    request: Request, option_orders: dict[str, list[int]] | None
+    request: Request,
+    option_orders: dict[str, list[int]] | None,
+    token_budget: int,
+    max_token_budget: int | None,
 ) -> tuple[list[str], tuple[EncodedImage, ...], dict[str, _Question]]:
     """The state part, the decoded image headers, and each question's part."""
     orders = option_orders or {}
     unknown = set(orders) - set(request.questions)
     if unknown:
         raise ValueError(f"option_orders names unknown questions {sorted(unknown)}")
-    images = tuple(decode_image(i) for i in request.images)
+    budgets = _token_budgets(request, token_budget, max_token_budget)
+    images = tuple(decode_image(im.data, b) for im, b in zip(request.images, budgets, strict=True))
     questions = {}
     for name, question in request.questions.items():
         q = question.normalised()
@@ -199,10 +224,14 @@ def _parts(
 
 
 def render_text(
-    request: Request, *, option_orders: dict[str, list[int]] | None = None
+    request: Request,
+    *,
+    option_orders: dict[str, list[int]] | None = None,
+    token_budget: int = DEFAULT_TOKEN_BUDGET,
+    max_token_budget: int | None = None,
 ) -> tuple[str, dict[str, str]]:
     """The prompt as text, control tokens as their strings: the state part and each question's."""
-    state, _, questions = _parts(request, option_orders)
+    state, _, questions = _parts(request, option_orders, token_budget, max_token_budget)
     return "".join(state), {n: "".join(q.prompt) for n, q in questions.items()}
 
 
@@ -212,21 +241,32 @@ def render(
     *,
     option_orders: dict[str, list[int]] | None = None,
     max_length: int | None = None,
+    token_budget: int = DEFAULT_TOKEN_BUDGET,
+    max_token_budget: int | None = None,
 ) -> RenderedRequest:
     """Every question of `request` as token ids, with the shared state ids, its codes and their
     ids, and each image's placeholder span. `tokenizer` must encode with special-token matching
     off (`load_tokenizer` and `prepare_tokenizer` set it). `option_orders` permutes a question's
-    options for training. A prompt longer than `max_length` is refused, never truncated."""
+    options for training. A prompt longer than `max_length` is refused, never truncated.
+
+    An image gets its own token budget, else the request's `image_token_budget`, else
+    `token_budget`, the checkpoint's (`check_image_processor`). `max_token_budget` is the most a
+    server allows, `token_budget` unless given; an image over it is refused, and the default
+    never exceeds it."""
     if not tokenizer.encode_special_tokens:
         raise ValueError(
             "the tokenizer must encode with special-token matching off, so request text can't "
             "become a control token: load it with load_tokenizer or prepare_tokenizer"
         )
-    state, encoded_images, questions = _parts(request, option_orders)
+    state, encoded_images, questions = _parts(
+        request, option_orders, token_budget, max_token_budget
+    )
     state_ids = tuple(encode(tokenizer, state))
     starts = [i + 1 for i, t in enumerate(state_ids) if t == CONTROL_TOKEN_IDS[IMAGE_OPEN]]
     images = tuple(
-        RenderedImage(im.data, im.format, im.width, im.height, im.sha256, start, im.tokens)
+        RenderedImage(
+            im.data, im.format, im.width, im.height, im.sha256, start, im.tokens, im.token_budget
+        )
         for im, start in zip(encoded_images, starts, strict=True)
     )
     out = {}
