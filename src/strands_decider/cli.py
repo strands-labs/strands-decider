@@ -1,4 +1,4 @@
-"""The strands-decider CLI: ask and serve.
+"""The strands-decider CLI: ask and serve, and convert-mlx for model checkpoints.
 
 Training, evaluation, calibration and corpus-building live outside this package.
 Run them as `python -m training.train`, `python -m training.evaluate`,
@@ -39,6 +39,36 @@ def _auto_device() -> str:
     return "cpu"
 
 
+def _mlx_vlm_available() -> bool:
+    """Apple silicon with the mlx extra, mlx-vlm included: what the MLX backend runs on."""
+    import importlib.util
+
+    from .infer import mlx_available
+
+    return mlx_available() and importlib.util.find_spec("mlx_vlm") is not None
+
+
+def _default_device(checkpoint: str, revision: str | None) -> str:
+    """`_auto_device`'s choice, except that a model checkpoint, validated on MLX rather than
+    MPS, gets mlx without CUDA where the MLX backend runs. On mps without it, a note says what to
+    install: on stderr, so that `ask --json` stays JSON, in plain text, as rich would read "[mlx]"
+    as markup."""
+    from .decision import is_model_checkpoint
+
+    device = _auto_device()
+    if device == "cuda" or not is_model_checkpoint(checkpoint, revision=revision):
+        return device
+    if _mlx_vlm_available():
+        return "mlx"
+    if device == "mps":
+        typer.echo(
+            "note: on Apple silicon, this checkpoint is validated on MLX, not MPS: "
+            "pip install 'strands-decider[mlx]', then pass --device mlx or no --device",
+            err=True,
+        )
+    return device
+
+
 def _configure_inference_logging(device: str) -> None:
     if str(device).split(":", 1)[0] in {"cpu", "mps", "mlx"}:
         logging.getLogger("transformers.integrations.hub_kernels").setLevel(logging.ERROR)
@@ -51,9 +81,6 @@ def resolve_device(device: str | None) -> str:
     return selected
 
 
-# ---------------------------------------------------------------- serve / ask
-
-
 @app.command("serve")
 def serve_cmd(
     checkpoint: str = typer.Argument(...),
@@ -63,7 +90,8 @@ def serve_cmd(
         None,
         "--device",
         help="cuda, mps or cpu (torch), or mlx (Apple silicon, needs the mlx extra). "
-        "Auto-detected when omitted: cuda > mps > cpu; mlx only when asked for.",
+        "Auto-detected when omitted: cuda > mps > cpu for v1 model checkpoints, and "
+        "cuda > mlx (with the mlx extra) > mps > cpu for other model checkpoints.",
     ),
     no_prefix_cache: bool = typer.Option(
         False,
@@ -111,8 +139,8 @@ def serve_cmd(
     dtype: str | None = typer.Option(
         None,
         "--dtype",
-        help="float32 or bfloat16. Default: float32 on cpu, bfloat16 on cuda and mps. Not "
-        "supported for v1 model checkpoints.",
+        help="float32 or bfloat16. Default: float32 on cpu, bfloat16 on cuda and mps, and the "
+        "dtype the checkpoint is stored in on mlx. Not supported for v1 model checkpoints.",
     ),
     queue_timeout: float = typer.Option(
         60.0,
@@ -144,7 +172,7 @@ def serve_cmd(
 
     from .server import create_app
 
-    selected_device = resolve_device(device)
+    selected_device = resolve_device(device or _default_device(checkpoint, revision))
     try:  # before anything is announced: the arguments' checks, and a model checkpoint's load
         app_ = create_app(
             checkpoint,
@@ -190,7 +218,8 @@ def ask_cmd(
         None,
         "--device",
         help="cuda, mps or cpu (torch), or mlx (Apple silicon, needs the mlx extra). "
-        "Auto-detected when omitted: cuda > mps > cpu; mlx only when asked for.",
+        "Auto-detected when omitted: cuda > mps > cpu for v1 model checkpoints, and "
+        "cuda > mlx (with the mlx extra) > mps > cpu for other model checkpoints.",
     ),
     as_json: bool = typer.Option(False, "--json", help="Print the raw API response."),
     revision: str | None = typer.Option(
@@ -201,8 +230,8 @@ def ask_cmd(
     dtype: str | None = typer.Option(
         None,
         "--dtype",
-        help="float32 or bfloat16. Default: float32 on cpu, bfloat16 on cuda and mps. Not "
-        "supported for v1 model checkpoints.",
+        help="float32 or bfloat16. Default: float32 on cpu, bfloat16 on cuda and mps, and the "
+        "dtype the checkpoint is stored in on mlx. Not supported for v1 model checkpoints.",
     ),
 ) -> None:
     """Ask one state a set of typed questions from the command line."""
@@ -228,7 +257,7 @@ def ask_cmd(
     if not questions:
         raise typer.BadParameter("ask at least one --noul / --choice / --score question")
 
-    selected_device = resolve_device(device)
+    selected_device = resolve_device(device or _default_device(checkpoint, revision))
     images = [base64.b64encode(Path(p).read_bytes()).decode("ascii") for p in image or []]
     from .decision import is_model_checkpoint, load_decision_engine
 
@@ -288,6 +317,33 @@ def _print_answers(response: SystemOneResponse) -> None:
             )
             for lvl, p in ans.probabilities.items():
                 console.print(f"    {lvl}: {ans.legend.get(lvl, ''):<40} {p:.3f}")
+
+
+@app.command("convert-mlx")
+def convert_mlx_cmd(
+    checkpoint: str = typer.Argument(
+        ..., help="A model checkpoint, a directory or a Hub id; not a v1 model checkpoint."
+    ),
+    out: str = typer.Argument(..., help="The new directory to write the MLX artifact to."),
+    bits: int | None = typer.Option(
+        None,
+        "--bits",
+        help="Quantize the decoder to 8 or 4 bits. Omitted: bf16. The vision and audio "
+        "encoders and their projections stay bf16, and the readout is copied unchanged.",
+    ),
+    group_size: int = typer.Option(64, "--group-size", help="Quantization group size."),
+) -> None:
+    """Write the MLX artifact of a model checkpoint, for `--device mlx`."""
+    from .backends.mlx_format import convert
+
+    try:
+        artifact = convert(checkpoint, out, bits=bits, group_size=group_size)
+    except (ImportError, ValueError, OSError, RuntimeError) as e:
+        typer.echo(f"error: {e}", err=True)  # plain text, as rich would read "[mlx]" as markup
+        raise typer.Exit(1) from e
+    size = sum(f.stat().st_size for f in artifact.iterdir()) / 1e9
+    precision = f"decoder at {bits} bits (group {group_size})" if bits else "bf16"
+    console.print(f"[green]wrote[/] {artifact}: {size:.2f} GB, {precision}")
 
 
 @app.command("info", hidden=True)

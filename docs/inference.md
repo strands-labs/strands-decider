@@ -48,14 +48,15 @@ Every answer includes a calibrated confidence.
 ## Devices
 
 The server picks a device automatically — `cuda`, then `mps`, then `cpu`. Pass
-`--device` to override. On Apple silicon, `--device mlx` runs the torso on
-Metal through mlx-lm.
+`--device` to override. On Apple silicon, `--device mlx` runs a v1 checkpoint's torso on
+Metal through mlx-lm, and another model checkpoint through mlx-vlm, which is its default
+there once the `mlx` extra is installed.
 
 | Flag | Install | Target |
 | --- | --- | --- |
 | `--device cuda` | `pip install "strands-decider[cuda]"` | NVIDIA GPU on Linux or WSL2. |
 | `--device mps` | `pip install strands-decider` | Apple silicon GPU. |
-| `--device mlx` | `pip install "strands-decider[mlx]"` | Apple silicon GPU through mlx-lm. |
+| `--device mlx` | `pip install "strands-decider[mlx]"` | Apple silicon GPU through mlx-lm, or mlx-vlm for model checkpoints. |
 | `--device cpu` | `pip install strands-decider` | CPU-only hosts. |
 
 ## Flags worth knowing

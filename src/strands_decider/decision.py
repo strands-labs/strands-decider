@@ -14,6 +14,7 @@ import threading
 import warnings
 from typing import TYPE_CHECKING, Any, Protocol
 
+from .backends.mlx_format import is_mlx_artifact
 from .core import Backend, DecisionConfig, Request, load_readout, load_tokenizer, read, render
 from .core.config import FILENAME, IMAGE, INTERFACE
 from .modeling import checkpoint_dir
@@ -26,7 +27,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_DEVICES = ("cpu", "cuda", "mps")
+_DEVICES = ("cpu", "cuda", "mps", "mlx")
 _DTYPES = ("float32", "bfloat16")
 # Told to clients when the backend couldn't build the image processor; the reason, which may
 # name local paths, is only warned at load.
@@ -45,6 +46,10 @@ class DecisionBackend(Backend, Protocol):
 
     def describe(self) -> dict[str, Any]:
         """What the health check reports of it: `backend`, `device` and `dtype` at least."""
+        ...
+
+    def close(self) -> None:
+        """Releases what it holds, such as the MLX backend's worker thread."""
         ...
 
 
@@ -127,6 +132,10 @@ class DecisionEngine:
             }
         )
 
+    def close(self) -> None:
+        """Releases what the backend holds; `serve` calls it at shutdown."""
+        self.backend.close()
+
     def describe(self) -> dict[str, Any]:
         """What `serve`'s health check reports."""
         return {
@@ -159,12 +168,15 @@ def load_decision_engine(
 ) -> DecisionEngine:
     """The model checkpoint `checkpoint`, a directory or a Hub repo, on `device`. Its interface
     files are read and checked before the backend loads the weights. `reuse_state=False` runs each
-    question as one full prompt; on CUDA in bfloat16 that is the reference."""
+    question as one full prompt; on CUDA in bfloat16 that is the reference. An MLX artifact
+    (`convert-mlx`) runs on mlx alone."""
     if device.split(":", 1)[0] not in _DEVICES:
         raise ValueError(f"model checkpoints run on {', '.join(_DEVICES)}, not {device!r}")
     if dtype is not None and dtype not in _DTYPES:
         raise ValueError(f"--dtype is one of {', '.join(_DTYPES)}, not {dtype!r}")
     path = checkpoint_dir(checkpoint, revision)
+    if device != "mlx" and is_mlx_artifact(path):
+        raise ValueError(f"{checkpoint} is an MLX artifact: serve it with --device mlx")
     config = DecisionConfig.load(path)
     if max_length is not None and max_length > config.max_length_validated:
         warnings.warn(
@@ -174,16 +186,22 @@ def load_decision_engine(
             stacklevel=2,
         )
     tokenizer, weight = load_tokenizer(path), load_readout(path)
-    from .backends.transformers import load_backend
+    backend: DecisionBackend
+    if device == "mlx":  # questions run one at a time: max_batch and max_batch_tokens don't apply
+        from .backends.mlx import load_backend as load_mlx_backend
 
-    backend = load_backend(
-        path,
-        device=device,
-        dtype=dtype,
-        reuse_state=reuse_state,
-        max_batch=max_batch,
-        max_batch_tokens=max_batch_tokens,
-    )
+        backend = load_mlx_backend(path, dtype=dtype, reuse_state=reuse_state)
+    else:
+        from .backends.transformers import load_backend
+
+        backend = load_backend(
+            path,
+            device=device,
+            dtype=dtype,
+            reuse_state=reuse_state,
+            max_batch=max_batch,
+            max_batch_tokens=max_batch_tokens,
+        )
     engine = DecisionEngine(
         backend,
         tokenizer,

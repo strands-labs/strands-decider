@@ -102,3 +102,35 @@ def test_the_server_builds_the_mlx_engine_for_device_mlx(monkeypatch):
     assert checkpoint == "org/hobson"
     assert (config.device, config.use_prefix_cache, config.model_name) == ("mlx", True, "hobson")
     assert config.max_batch == 7  # the shared config reaches MLX
+
+
+@pytest.mark.parametrize(
+    ("decision", "cuda", "mlx", "mps", "expected"),
+    [
+        (True, True, True, True, "cuda"),
+        (True, False, True, True, "mlx"),  # a model checkpoint on a Mac with the extra: MLX
+        (True, False, False, True, "mps"),  # without it: MPS, with a note on stderr
+        (True, False, False, False, "cpu"),
+        (False, False, True, True, "mps"),  # a v1 checkpoint: MLX stays opt-in
+    ],
+)
+def test_serve_runs_a_model_checkpoint_on_mlx_on_a_mac_with_the_extra(
+    tmp_path, monkeypatch, decision, cuda, mlx, mps, expected
+):
+    import uvicorn
+    from typer.testing import CliRunner
+
+    from strands_decider import server
+
+    if decision:
+        (tmp_path / "decision_config.json").write_text('{"interface": "strands-decider"}')
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: cuda)
+    monkeypatch.setattr(cli, "_mlx_vlm_available", lambda: mlx)
+    monkeypatch.setattr(torch.backends.mps, "is_available", lambda: mps)
+    devices = []
+    monkeypatch.setattr(server, "create_app", lambda _, *, device, **__: devices.append(device))
+    monkeypatch.setattr(uvicorn, "run", lambda *_, **__: None)
+    out = CliRunner().invoke(cli.app, ["serve", str(tmp_path)])
+    assert out.exit_code == 0, out.output
+    assert devices == [expected]
+    assert ("strands-decider[mlx]" in out.stderr) == (decision and expected == "mps")
