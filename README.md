@@ -221,7 +221,62 @@ Hugging Face, their main home. The five v1 models are also in the
 [`amazon`](https://huggingface.co/amazon) organization, with the same files and the same names:
 for example `amazon/strands-decider-E4B-gemma4-v1-2610`.
 
-## Gemma 4 models
+## Strands Decider v2
+
+Five models on the Gemma 4 instruction-tuned base models (`google/gemma-4-*-it`, Apache-2.0),
+including a new 31B size the first release did not have. v2 is a different architecture: instead
+of a small pointer head and a LoRA adapter, v2 **replaces Gemma 4's LM head with a token
+readout** — a 255-row layer seeded from the LM head's rows for the answer codes `A`, `B`, `C`,
+… and trained with the model. Each option's probability is read from its code at the last
+prompt token. Every checkpoint ships as one full model: the fine-tuned decoder merged into the
+base weights, plus `readout.safetensors` and `decision_config.json`.
+
+What v2 adds over v1:
+
+- **More option headroom** — `choice` takes 2 to 255 options and `score` takes 2 to 10 levels,
+  up from v1's narrower ranges.
+- **One encoding of the state.** The state is encoded bidirectionally once, and every question
+  reads the same KV cache; no question sees another. Several questions on one state cost only
+  their own tokens (E2B: 62 ms with one question, 92 ms with 30 questions on H100 bf16).
+- **Longer prompts.** Trained up to 16,384 tokens, validated at 32,768 (the default), and runs
+  up to 131,072 with `--max-length 131072` on `strands-decider serve` or
+  `max_length=131072` in `load_decision_engine`.
+- **Images.** Images go through Gemma 4's own vision encoder, unchanged from the base; v2 is
+  trained on text only.
+- **A new 31B size.**
+
+| model | Decision Index 0.3 (public) | JevBench | OpenDecisions | DecisionPivot | BEV | GPU memory (bf16) | one H100 median, 1 question / 30 questions |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| [`strands-decider-E2B-gemma4-v2-2611`](https://huggingface.co/StrandsAgents/strands-decider-E2B-gemma4-v2-2611) | 57.1 | 87.4 | 77.7 | 23.3 | 74.0 | 10.3 GB (24 GB GPU) | 62 ms / 92 ms |
+| [`strands-decider-E4B-gemma4-v2-2611`](https://huggingface.co/StrandsAgents/strands-decider-E4B-gemma4-v2-2611) | 63.2 | 88.3 | 83.9 | 45.2 | 78.9 | 16 GB (40 GB GPU) | 78 ms / 138 ms |
+| [`strands-decider-12B-gemma4-v2-2611`](https://huggingface.co/StrandsAgents/strands-decider-12B-gemma4-v2-2611) | 64.1 | 92.2 | 85.7 | 58.9 | 79.0 | 24 GB (48 GB GPU) | 80 ms / 261 ms |
+| [`strands-decider-26B-A4B-gemma4-v2-2611`](https://huggingface.co/StrandsAgents/strands-decider-26B-A4B-gemma4-v2-2611) | 69.0 | 92.6 | 88.6 | 69.2 | 81.4 | 52 GB (80 GB GPU) | 86 ms / 220 ms |
+| [`strands-decider-31B-gemma4-v2-2611`](https://huggingface.co/StrandsAgents/strands-decider-31B-gemma4-v2-2611) | 71.5 | 93.1 | 92.2 | 84.3 | 84.5 | 63 GB (80 GB GPU) | 99 ms / 614 ms |
+
+Scores are 0–100. Each v2 row is at the temperature it ships with (stored in
+`decision_config.json` and applied once per request); of the five benchmarks only OpenDecisions
+depends on the temperature. For comparison on the same benchmarks, v1 ranges from
+E2B at 29.3 / 77.5 to 26B-A4B at 48.8 / 90.5 on Decision Index / JevBench; v1's largest
+checkpoint is 26B-A4B (v1 had no 31B).
+
+**Install.** Until the strands-decider release with v2 support is on PyPI, `pip install
+strands-decider` cannot load a v2 checkpoint. Install the `strands_decider-*.whl` bundled with
+the model instead; the model's `HOWTO.md` has the steps. Usage is the same as v1:
+
+```bash
+strands-decider ask StrandsAgents/strands-decider-E4B-gemma4-v2-2611 \
+  --state "Help! My payouts have been failing for 3 days!" \
+  --choice "Which team should handle this?=billing,sales,retail" \
+  --noul "Does this convey urgency?" \
+  --score "How frustrated is the writer?=calm,frustrated,depressed"
+```
+
+Or serve it on `POST /v1/systemone` with `strands-decider serve
+StrandsAgents/strands-decider-E4B-gemma4-v2-2611 --port 8000` (binds to `127.0.0.1`, no auth).
+The server, the CLI and `load_decision_engine` all read v2 checkpoints through the
+[decision interface](docs/spec.md).
+
+## Gemma 4 v1 models
 
 Four models on the Gemma 4 instruction-tuned base models (`google/gemma-4-*-it`, Apache-2.0). They
 have the same pointer head and answer the same three question types as the Qwen3.5 model.
