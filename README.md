@@ -176,7 +176,7 @@ curl -s localhost:8000/v1/systemone \
 
 Qwen3.5-2B-Base is natively multimodal. With `--vision` the server keeps its vision tower,
 and a request may carry `images` (base64) as part of the state; the published checkpoints
-(v1, and hobson-v21 and v19 before it) answer over them with no image training. Needs `pip install "strands-decider[vision]"` and
+(v1, and hobson-v21 and v19 before it) answer over them with no image training. Needs
 transformers 5.18 or later.
 
 ```bash

@@ -196,6 +196,17 @@ def test_malformed_question_is_rejected(client):
     assert r.status_code == 422  # choice needs >= 2 options
 
 
+def test_token_budgets_are_refused_for_v1_checkpoints(client):
+    """v1 sizes images by image_long_side, so a token budget is refused rather than ignored."""
+    base = {"state": "x", "questions": {"q": {"type": "noul", "instructions": "y?"}}}
+    for extra, message in (
+        ({"images": [{"data": "aGk=", "token_budget": 70}]}, "token_budget is not supported"),
+        ({"image_token_budget": 70}, "image_token_budget is not supported"),
+    ):
+        r = client.post("/v1/systemone", json={**base, **extra})
+        assert r.status_code == 422 and message in r.text, r.text
+
+
 def test_empty_questions_rejected(client):
     r = client.post("/v1/systemone", json={"state": "x", "questions": {}})
     assert r.status_code == 422
@@ -371,6 +382,13 @@ def test_device_map_needs_the_text_engine_on_cuda(kwargs):
 
     with pytest.raises(ValueError, match="device-map"):
         server.create_app("checkpoints/strands-decider-test", device_map="auto", **kwargs)
+
+
+def test_vision_is_refused_on_mlx():
+    from strands_decider import server
+
+    with pytest.raises(ValueError, match="--vision runs on torch devices"):
+        server.create_app("checkpoints/strands-decider-test", device="mlx", vision=True)
 
 
 def test_ping_answers_while_every_worker_thread_is_busy():
