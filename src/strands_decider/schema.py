@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 # A `state` or `instructions` may be a bare string, or structured data that we
 # render deterministically (see strands_decider.prompting.render_content).
@@ -101,6 +101,21 @@ class SystemOneRequest(BaseModel):
     # Base64 images (or data: URIs), part of the state. Needs a vision engine
     # (`serve --vision`); a text-only engine refuses them rather than ignore them.
     images: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _no_token_budgets(cls, data: Any) -> Any:
+        # Model checkpoints with a decision_config.json take token budgets (core.Request); v1's
+        # Qwen engine sizes images by image_long_side, so a budget is refused, never ignored.
+        if isinstance(data, dict):
+            if data.get("image_token_budget") is not None:
+                raise ValueError("image_token_budget is not supported for v1 model checkpoints")
+            if any(isinstance(im, dict) for im in data.get("images") or ()):
+                raise ValueError(
+                    "token_budget is not supported for v1 model checkpoints: send each image as a "
+                    "base64 string"
+                )
+        return data
 
 
 class NoulAnswer(BaseModel):
