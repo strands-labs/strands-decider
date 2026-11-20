@@ -10,12 +10,17 @@ position k out of the prompt.
 from __future__ import annotations
 
 import random
+import threading
 from collections.abc import Sequence
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Any
 
 import torch
+from tokenizers import Tokenizer
+from transformers import PreTrainedTokenizerFast
 
+from strands_decider import core
 from strands_decider.prompting import build_prompt
 
 from .format import Example
@@ -24,6 +29,9 @@ from .format import Example
 @dataclass
 class CollatorConfig:
     max_length: int = 3072
+    # "numbered" (the default), or for a token readout "strands-chat" (strands_decider.core.render),
+    # which shuffles only a choice's options, as the v2 recipe does.
+    render: str = "numbered"
     shuffle_options: bool = True
     # Score levels are ordered, so they are never permuted -- but reversing the whole
     # rubric (and the label with it) is meaning-preserving and doubles the orderings seen.
@@ -36,6 +44,25 @@ class CollatorConfig:
     seed: int = 0
 
 
+_CHAT_TOKENIZER_LOCK = threading.Lock()
+
+
+# Cached, so that a tokenizer is copied once: a copy of Gemma 4's tokenizer takes about half a
+# second, and the trainer's length check asks for it once for every 1,000 rows.
+@lru_cache(maxsize=2)
+def _chat_tokenizer(tokenizer: PreTrainedTokenizerFast) -> Tokenizer:
+    return core.prepare_tokenizer(Tokenizer.from_str(tokenizer.backend_tokenizer.to_str()))
+
+
+def chat_tokenizer(tokenizer: PreTrainedTokenizerFast) -> Tokenizer:
+    """The tokenizer `core.render` takes, for a Hugging Face `tokenizer`: a copy of its backend
+    that encodes request text as plain text, checked to be Gemma 4's (`core.prepare_tokenizer`).
+    A copy, so that `tokenizer` itself keeps its own settings. The length check runs on a pool
+    of threads; the lock stops them from making a copy each before the first one is cached."""
+    with _CHAT_TOKENIZER_LOCK:
+        return _chat_tokenizer(tokenizer)
+
+
 class SystemOneCollator:
     """Turns a list of Examples into a padded, tokenised training batch."""
 
@@ -44,12 +71,18 @@ class SystemOneCollator:
         self.cfg = config
         self.train = train
         self.rng = random.Random(config.seed)
+        if config.render not in ("numbered", core.CHAT):
+            raise ValueError(f"render {config.render!r}: numbered or {core.CHAT} only")
+        self.chat = config.render == core.CHAT
+        self.chat_tok = chat_tokenizer(tokenizer) if self.chat else None
 
     # ---- option ordering -------------------------------------------------
 
     def _option_order(self, ex: Example) -> list[int] | None:
         n = ex.n_options
-        if not self.cfg.shuffle_options or not self.train:
+        if not self.cfg.shuffle_options or not self.train or ex.fixed_order:
+            return None
+        if self.chat and ex.kind != "choice":
             return None
         if ex.kind == "score":
             if self.rng.random() < self.cfg.reverse_score_prob:
@@ -127,12 +160,16 @@ class SystemOneCollator:
     def _target_distribution(
         self, ex: Example, label: int, n_options: int, order: Sequence[int] | None
     ) -> torch.Tensor | None:
-        """Soft target for score questions; None for noul/choice (plain NLL is right there).
+        """Soft target: a row's own `target`, else ordinal smoothing for a score question, in
+        slot order. None otherwise (plain NLL is right there).
 
         The smoothing is applied in *level* space and then mapped through the slot
         permutation, so a reversed rubric still spreads mass onto the neighbouring
         levels rather than onto arbitrary slots.
         """
+        if ex.target is not None:
+            t = ex.target if order is None else [ex.target[i] for i in order]
+            return torch.tensor(t, dtype=torch.float32)
         if ex.kind != "score" or self.cfg.ordinal_smoothing <= 0:
             return None
 
@@ -165,16 +202,20 @@ class SystemOneCollator:
         teachers: list[list[float] | None] = []
 
         spans: list[Any] = []
+        rendered: list[core.RenderedQuestion] = []
         for ex in batch:
             order = self._option_order(ex)
-            prompt, rq = build_prompt(
-                ex.state,
-                ex.to_question(self._instruction(ex)),
-                option_order=order,
-            )
-            texts.append(prompt)
-            # Option spans are relative to the question; the prompt is state + question.
-            spans.append((len(prompt) - len(rq.text), rq.option_spans))
+            instr = self._instruction(ex)
+            if self.chat:
+                orders = None if order is None else {"q": order}
+                assert self.chat_tok is not None
+                req = core.render(ex.to_request(instr), self.chat_tok, option_orders=orders)
+                rendered.append(req.questions["q"])
+            else:
+                prompt, rq = build_prompt(ex.state, ex.to_question(instr), option_order=order)
+                texts.append(prompt)
+                # Option spans are relative to the question; the prompt is state + question.
+                spans.append((len(prompt) - len(rq.text), rq.option_spans))
             labels.append(self._remap_label(ex.label, order))
             n_slots.append(ex.n_options)
             dists.append(self._target_distribution(ex, ex.label, ex.n_options, order))
@@ -184,17 +225,26 @@ class SystemOneCollator:
             t = getattr(ex, "teacher", None)
             teachers.append(None if t is None else (t if order is None else [t[i] for i in order]))
 
-        enc = self.tok(
-            texts,
-            padding=True,
-            truncation=True,
-            max_length=self.cfg.max_length,
-            return_tensors="pt",
-            # Right padding: pool_last_token finds the final real token by mask length,
-            # and the shared-prefix cache in infer.py assumes the prompt starts at 0.
-            padding_side="right",
-            return_offsets_mapping=True,
-        )
+        # A strands-chat prompt is core.render's ids as they are, padded like the others.
+        enc: Any
+        if self.chat:
+            enc = _pad_right([list(q.ids) for q in rendered], self.tok.pad_token_id)
+        else:
+            enc = self.tok(
+                texts,
+                padding=True,
+                truncation=True,
+                max_length=self.cfg.max_length,
+                return_tensors="pt",
+                # Right padding: pool_last_token finds the final real token by mask length,
+                # and the shared-prefix cache in infer.py assumes the prompt starts at 0.
+                padding_side="right",
+                return_offsets_mapping=True,
+            )
+        if self.chat and enc["input_ids"].size(1) > self.cfg.max_length:
+            raise ValueError(
+                f"a {self.cfg.render} prompt is longer than max_length {self.cfg.max_length}"
+            )
 
         out: dict[str, torch.Tensor] = {
             "input_ids": enc["input_ids"],
@@ -203,10 +253,17 @@ class SystemOneCollator:
             "labels": torch.tensor(labels, dtype=torch.long),
             "weights": torch.tensor(weights, dtype=torch.float32),
         }
-        offs = enc["offset_mapping"].tolist()
-        per = [self.option_token_index(offs[i], sp, base) for i, (base, sp) in enumerate(spans)]
-        width = max(len(p) for p in per)
-        out["opt_idx"] = torch.tensor([p + [-1] * (width - len(p)) for p in per], dtype=torch.long)
+        if self.chat:
+            # The state part's length, the prefix_bidir boundary, as core.render gives it.
+            out["prefix_end"] = torch.tensor([q.state_len for q in rendered], dtype=torch.long)
+            width = max(n_slots)
+        else:
+            offs = enc["offset_mapping"].tolist()
+            per = [self.option_token_index(offs[i], sp, base) for i, (base, sp) in enumerate(spans)]
+            width = max(len(p) for p in per)
+            out["opt_idx"] = torch.tensor(
+                [p + [-1] * (width - len(p)) for p in per], dtype=torch.long
+            )
         if any(d is not None for d in dists):
             # The pointer head emits one logit per option present, so each target is
             # padded to the batch's widest option count rather than to a fixed slot count.
@@ -227,3 +284,14 @@ class SystemOneCollator:
             out["teacher"] = tt
             out["has_teacher"] = torch.tensor([t is not None for t in teachers])
         return out
+
+
+def _pad_right(rows: list[list[int]], pad_id: int) -> dict[str, torch.Tensor]:
+    """input_ids and attention_mask, right-padded, as the tokenizer pads the other renders."""
+    width = max((len(r) for r in rows), default=0)
+    ids = torch.full((len(rows), width), pad_id, dtype=torch.long)
+    mask = torch.zeros((len(rows), width), dtype=torch.long)
+    for i, r in enumerate(rows):
+        ids[i, : len(r)] = torch.tensor(r, dtype=torch.long)
+        mask[i, : len(r)] = 1
+    return {"input_ids": ids, "attention_mask": mask}

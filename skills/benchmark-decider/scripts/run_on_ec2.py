@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import re
 import shlex
@@ -10,6 +11,7 @@ import tarfile
 import tempfile
 import time
 import uuid
+from collections.abc import Iterator
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -22,10 +24,27 @@ TERMINAL_COMMAND_STATES = {"Success", "Cancelled", "TimedOut", "Failed", "Cancel
 ANSI_ESCAPE = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))")
 
 
+def split_lambda_arn(function_arn: str) -> tuple[str, str | None]:
+    """(unqualified_arn, qualifier) for a function or function-alias ARN."""
+    if function_arn.count(":") >= 7:
+        unqualified, qualifier = function_arn.rsplit(":", 1)
+        return unqualified, qualifier
+    return function_arn, None
+
+
+@contextlib.contextmanager
+def warn_on_fail(label: str) -> Iterator[None]:
+    """Log but do not re-raise AWS errors; for best-effort cleanup steps."""
+    try:
+        yield
+    except (ClientError, WaiterError) as error:
+        print(f"{label} cleanup warning: {error}", file=sys.stderr, flush=True)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Run a SageMaker benchmark from a temporary, same-region EC2 client. "
+            "Run a SageMaker or Lambda benchmark from a temporary, same-region EC2 client. "
             "The client has no inbound access and is managed through SSM."
         )
     )
@@ -38,7 +57,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--region",
-        help="expected target region; defaults to and must match sagemaker.region",
+        help="expected target region; defaults to and must match sagemaker.region / aws_sigv4.region",
     )
     parser.add_argument(
         "--instance-type",
@@ -50,7 +69,6 @@ def parse_args() -> argparse.Namespace:
         default="HEAD",
         help="committed Git revision copied to EC2 (default: HEAD)",
     )
-    parser.add_argument("--smoke", action="store_true", help="run the benchmark smoke preset")
     parser.add_argument(
         "--command-timeout-seconds",
         type=int,
@@ -58,14 +76,12 @@ def parse_args() -> argparse.Namespace:
         help="SSM benchmark timeout (default: 7200)",
     )
     parser.add_argument(
-        "--dry-run",
+        "--debug-hold",
         action="store_true",
-        help="validate and print the resource plan without creating AWS resources",
-    )
-    parser.add_argument(
-        "--yes",
-        action="store_true",
-        help="confirm creation of temporary paid AWS resources",
+        help=(
+            "on remote-benchmark failure, keep the EC2 instance alive and wait for a sentinel "
+            "file (/tmp/benchmark-release-<suffix>) before cleanup; use with `aws ssm start-session`"
+        ),
     )
     return parser.parse_args()
 
@@ -107,27 +123,14 @@ def validate_environment(
     raw: dict[str, Any],
     requested_model: str | None,
     requested_region: str | None,
-) -> tuple[str, list[str], list[str], str]:
+    account: str,
+) -> tuple[str, list[str], dict[str, Any], str]:
     try:
         relative_environment = path.relative_to(root)
     except ValueError as error:
         raise ValueError(
             "the environment file must be inside the current Git repository"
         ) from error
-
-    sagemaker = raw.get("sagemaker")
-    if not isinstance(sagemaker, dict):
-        raise ValueError(f"{path} is not a SageMaker environment")
-    if sagemaker.get("profile"):
-        raise ValueError(
-            f"{path}: remove sagemaker.profile so the EC2 client uses its instance role"
-        )
-
-    region = sagemaker.get("region")
-    if not isinstance(region, str) or not region:
-        raise ValueError(f"{path}: sagemaker.region is required")
-    if requested_region and requested_region != region:
-        raise ValueError(f"--region {requested_region} does not match sagemaker.region {region}")
 
     models = raw.get("models")
     if (
@@ -139,21 +142,68 @@ def validate_environment(
     selected_models = [requested_model] if requested_model else models
     if requested_model and requested_model not in models:
         raise ValueError(f"{requested_model} is not configured in {path}")
-    endpoint_name = sagemaker.get("endpoint_name")
-    endpoints = sagemaker.get("endpoints")
-    if endpoint_name:
-        if len(models) != 1:
-            raise ValueError("sagemaker.endpoint_name is valid only for a single-model environment")
-        selected_endpoints = [str(endpoint_name)]
-    elif isinstance(endpoints, dict):
-        missing = [model for model in selected_models if not endpoints.get(model)]
-        if missing:
-            raise ValueError(f"missing SageMaker endpoints for: {', '.join(missing)}")
-        selected_endpoints = sorted({str(endpoints[model]) for model in selected_models})
-    else:
-        raise ValueError("configure sagemaker.endpoint_name or sagemaker.endpoints")
 
-    return str(relative_environment), selected_models, selected_endpoints, region
+    sagemaker = raw.get("sagemaker")
+    aws_sigv4 = raw.get("aws_sigv4")
+    if isinstance(sagemaker, dict):
+        if sagemaker.get("profile"):
+            raise ValueError(
+                f"{path}: remove sagemaker.profile so the EC2 client uses its instance role"
+            )
+        region = sagemaker.get("region")
+        if not isinstance(region, str) or not region:
+            raise ValueError(f"{path}: sagemaker.region is required")
+        if requested_region and requested_region != region:
+            raise ValueError(
+                f"--region {requested_region} does not match sagemaker.region {region}"
+            )
+        endpoint_name = sagemaker.get("endpoint_name")
+        endpoints = sagemaker.get("endpoints")
+        if endpoint_name:
+            if len(models) != 1:
+                raise ValueError(
+                    "sagemaker.endpoint_name is valid only for a single-model environment"
+                )
+            selected_endpoints = [str(endpoint_name)]
+        elif isinstance(endpoints, dict):
+            missing = [model for model in selected_models if not endpoints.get(model)]
+            if missing:
+                raise ValueError(f"missing SageMaker endpoints for: {', '.join(missing)}")
+            selected_endpoints = sorted({str(endpoints[model]) for model in selected_models})
+        else:
+            raise ValueError("configure sagemaker.endpoint_name or sagemaker.endpoints")
+        target = {"kind": "sagemaker", "endpoints": selected_endpoints}
+        return str(relative_environment), selected_models, target, region
+
+    if isinstance(aws_sigv4, dict):
+        if aws_sigv4.get("profile"):
+            raise ValueError(
+                f"{path}: remove aws_sigv4.profile so the EC2 client uses its instance role"
+            )
+        region = aws_sigv4.get("region")
+        if not isinstance(region, str) or not region:
+            raise ValueError(f"{path}: aws_sigv4.region is required")
+        if requested_region and requested_region != region:
+            raise ValueError(
+                f"--region {requested_region} does not match aws_sigv4.region {region}"
+            )
+        service = aws_sigv4.get("service", "lambda")
+        if service != "lambda":
+            raise ValueError(
+                f"{path}: aws_sigv4.service={service!r} is not supported by this helper"
+            )
+        function_arn = aws_sigv4.get("function_arn")
+        if not isinstance(function_arn, str) or not function_arn.startswith(
+            f"arn:aws:lambda:{region}:{account}:function:"
+        ):
+            raise ValueError(
+                f"{path}: aws_sigv4.function_arn must be a Lambda ARN in "
+                f"{region} and account {account}"
+            )
+        target = {"kind": "lambda", "function_arn": function_arn}
+        return str(relative_environment), selected_models, target, region
+
+    raise ValueError(f"{path} is neither a SageMaker nor a Lambda (aws_sigv4) environment")
 
 
 def wait_for_ssm(ssm: Any, instance_id: str, timeout_seconds: int = 600) -> None:
@@ -287,18 +337,15 @@ def build_remote_script(
     environment_path: str,
     model: str | None,
     region: str,
-    smoke: bool,
 ) -> str:
     benchmark_arguments = [environment_path]
     if model:
         benchmark_arguments.append(model)
-    if smoke:
-        benchmark_arguments.append("--smoke")
     command = " ".join(shlex.quote(argument) for argument in benchmark_arguments)
     environment_dir = str(Path(environment_path).parent)
     environment_object = f"s3://{bucket_name}/{object_prefix}/environment.yaml"
     benchmark_command = (
-        "env PYTHONPATH=src /usr/local/bin/uv run --project benchmark --locked --python 3.12 "
+        "env PYTHONPATH=src /usr/local/bin/uv run --project benchmark --python 3.12 "
         f"python -m benchmark.runner run {command}"
     )
 
@@ -373,21 +420,18 @@ def extract_results(archive_path: Path, destination: Path) -> None:
 
 def main() -> int:
     args = parse_args()
-    if not args.dry_run and not args.yes:
-        raise ValueError("pass --yes to confirm creation of temporary paid AWS resources")
-    if args.smoke and args.model is None:
-        raise ValueError("smoke runs require a model")
     if args.command_timeout_seconds < 60:
         raise ValueError("--command-timeout-seconds must be at least 60")
 
     root = repo_root()
     environment_file, environment = load_environment(root, args.environment)
-    environment_path, selected_models, endpoints, region = validate_environment(
+    environment_path, selected_models, target, region = validate_environment(
         root,
         environment_file,
         environment,
         args.model,
         args.region,
+        args.account,
     )
 
     plan = {
@@ -396,16 +440,13 @@ def main() -> int:
         "instance_type": args.instance_type,
         "environment": environment_path,
         "models": selected_models,
-        "endpoints": endpoints,
+        "target": target,
         "git_ref": args.ref,
         "environment_transfer": "local environment.yaml copied separately from the Git archive",
-        "smoke": args.smoke,
         "network": "default VPC, public egress, no inbound rules",
         "cleanup": "terminate instance and delete temporary IAM, S3, and security group",
     }
     print(json.dumps(plan, indent=2), flush=True)
-    if args.dry_run:
-        return 0
 
     session = boto3.Session(region_name=region)
     identity = session.client("sts").get_caller_identity()
@@ -416,6 +457,7 @@ def main() -> int:
 
     ec2 = session.client("ec2")
     iam = session.client("iam")
+    lambda_client = session.client("lambda")
     s3 = session.client("s3")
     ssm = session.client("ssm")
     suffix = uuid.uuid4().hex[:10]
@@ -425,12 +467,14 @@ def main() -> int:
     group_name = role_name
     bucket_name = f"strands-decider-benchmark-{args.account}-{suffix}"
     object_prefix = f"runs/{suffix}"
+    lambda_statement_id = f"benchmark-{suffix}"
     delete_after = (datetime.now(timezone.utc) + timedelta(hours=8)).isoformat(timespec="seconds")
     instance_id: str | None = None
     group_id: str | None = None
     role_created = False
     profile_created = False
     bucket_created = False
+    lambda_permission_added = False
 
     with tempfile.TemporaryDirectory(prefix="strands-decider-ec2-") as temporary_directory:
         temporary = Path(temporary_directory)
@@ -480,13 +524,12 @@ def main() -> int:
             )
             role_created = True
             iam.attach_role_policy(RoleName=role_name, PolicyArn=SSM_POLICY_ARN)
-            endpoint_arns = [
-                f"arn:aws:sagemaker:{region}:{args.account}:endpoint/{endpoint}"
-                for endpoint in endpoints
-            ]
-            inline_policy = {
-                "Version": "2012-10-17",
-                "Statement": [
+            if target["kind"] == "sagemaker":
+                endpoint_arns = [
+                    f"arn:aws:sagemaker:{region}:{args.account}:endpoint/{endpoint}"
+                    for endpoint in target["endpoints"]
+                ]
+                target_statements = [
                     {
                         "Sid": "DescribeEndpoints",
                         "Effect": "Allow",
@@ -502,6 +545,28 @@ def main() -> int:
                         "Action": "sagemaker:InvokeEndpoint",
                         "Resource": endpoint_arns,
                     },
+                ]
+            else:  # lambda
+                # IAM evaluates lambda:InvokeFunctionUrl against the unqualified function ARN
+                # even when the URL is attached to an alias; the alias ARN here 403s. AWS
+                # also requires lambda:InvokeFunction alongside lambda:InvokeFunctionUrl for
+                # AWS_IAM-authed Function URLs.
+                lambda_arn, _ = split_lambda_arn(target["function_arn"])
+                target_statements = [
+                    {
+                        "Sid": "InvokeConfiguredFunctionUrl",
+                        "Effect": "Allow",
+                        "Action": [
+                            "lambda:InvokeFunctionUrl",
+                            "lambda:InvokeFunction",
+                        ],
+                        "Resource": lambda_arn,
+                    },
+                ]
+            inline_policy = {
+                "Version": "2012-10-17",
+                "Statement": [
+                    *target_statements,
                     {
                         "Sid": "TransferBenchmarkFiles",
                         "Effect": "Allow",
@@ -522,6 +587,38 @@ def main() -> int:
                 RoleName=role_name,
             )
             print(f"created temporary role and instance profile {role_name}", flush=True)
+
+            if target["kind"] == "lambda":
+                role_arn = f"arn:aws:iam::{args.account}:role/{role_name}"
+                function_arn = target["function_arn"]
+                unqualified, qualifier = split_lambda_arn(function_arn)
+                add_permission_kwargs: dict[str, Any] = {
+                    "FunctionName": unqualified,
+                    "StatementId": lambda_statement_id,
+                    "Action": "lambda:InvokeFunctionUrl",
+                    "Principal": role_arn,
+                    "FunctionUrlAuthType": "AWS_IAM",
+                }
+                if qualifier:
+                    add_permission_kwargs["Qualifier"] = qualifier
+                # IAM role creation is eventually consistent for other services.
+                for attempt in range(12):
+                    try:
+                        lambda_client.add_permission(**add_permission_kwargs)
+                        break
+                    except ClientError as error:
+                        if (
+                            error.response["Error"]["Code"] == "InvalidParameterValueException"
+                            and attempt < 11
+                        ):
+                            time.sleep(10)
+                            continue
+                        raise
+                lambda_permission_added = True
+                print(
+                    f"granted {role_arn} lambda:InvokeFunctionUrl on {function_arn}",
+                    flush=True,
+                )
 
             vpcs = ec2.describe_vpcs(Filters=[{"Name": "is-default", "Values": ["true"]}])["Vpcs"]
             if len(vpcs) != 1:
@@ -622,7 +719,6 @@ def main() -> int:
                 environment_path=environment_path,
                 model=args.model,
                 region=region,
-                smoke=args.smoke,
             )
             command_id = ssm.send_command(
                 InstanceIds=[instance_id],
@@ -668,6 +764,25 @@ def main() -> int:
             if invocation["Status"] != "Success":
                 failed_log = root / "benchmark-ec2-failure.log"
                 failed_log.write_bytes(log_path.read_bytes())
+                if args.debug_hold:
+                    release_path = Path(f"/tmp/benchmark-release-{suffix}")
+                    print(
+                        "\n=== DEBUG HOLD ===\n"
+                        f"instance: {instance_id}\n"
+                        f"region: {region}\n"
+                        f"ssm session: aws ssm start-session --region {region} "
+                        f"--target {instance_id}\n"
+                        f"failure log: {failed_log}\n"
+                        f"release the hold with: touch {release_path}\n"
+                        "cleanup will proceed as soon as that file exists.",
+                        flush=True,
+                    )
+                    while not release_path.exists():
+                        time.sleep(5)
+                    try:
+                        release_path.unlink()
+                    except OSError:
+                        pass
                 raise RuntimeError(
                     f"remote benchmark failed with {invocation['Status']}; log: {failed_log}"
                 )
@@ -682,7 +797,7 @@ def main() -> int:
             return 0
         finally:
             if instance_id:
-                try:
+                with warn_on_fail("instance"):
                     ec2.terminate_instances(InstanceIds=[instance_id])
                     print(f"termination requested for {instance_id}", flush=True)
                     ec2.get_waiter("instance_terminated").wait(
@@ -690,60 +805,58 @@ def main() -> int:
                         WaiterConfig={"Delay": 5, "MaxAttempts": 120},
                     )
                     print(f"{instance_id} terminated", flush=True)
-                except (ClientError, WaiterError) as error:
-                    print(f"instance cleanup warning: {error}", file=sys.stderr, flush=True)
 
             if group_id:
-                for _ in range(30):
-                    try:
-                        ec2.delete_security_group(GroupId=group_id)
-                        print(f"deleted security group {group_id}", flush=True)
-                        break
-                    except ClientError as error:
-                        if error.response["Error"]["Code"] != "DependencyViolation":
-                            print(
-                                f"security-group cleanup warning: {error}",
-                                file=sys.stderr,
-                                flush=True,
-                            )
+                with warn_on_fail("security-group"):
+                    for _ in range(30):
+                        try:
+                            ec2.delete_security_group(GroupId=group_id)
+                            print(f"deleted security group {group_id}", flush=True)
                             break
-                        time.sleep(5)
+                        except ClientError as error:
+                            if error.response["Error"]["Code"] != "DependencyViolation":
+                                raise
+                            time.sleep(5)
 
             if profile_created:
-                try:
+                with contextlib.suppress(ClientError):
                     iam.remove_role_from_instance_profile(
                         InstanceProfileName=profile_name,
                         RoleName=role_name,
                     )
-                except ClientError:
-                    pass
-                try:
+                with warn_on_fail("profile"):
                     iam.delete_instance_profile(InstanceProfileName=profile_name)
                     print(f"deleted instance profile {profile_name}", flush=True)
-                except ClientError as error:
-                    print(f"profile cleanup warning: {error}", file=sys.stderr, flush=True)
 
             if role_created:
-                try:
+                with contextlib.suppress(ClientError):
                     iam.delete_role_policy(RoleName=role_name, PolicyName=policy_name)
-                except ClientError:
-                    pass
-                try:
+                with contextlib.suppress(ClientError):
                     iam.detach_role_policy(RoleName=role_name, PolicyArn=SSM_POLICY_ARN)
-                except ClientError:
-                    pass
-                try:
+                with warn_on_fail("role"):
                     iam.delete_role(RoleName=role_name)
                     print(f"deleted role {role_name}", flush=True)
-                except ClientError as error:
-                    print(f"role cleanup warning: {error}", file=sys.stderr, flush=True)
 
             if bucket_created:
-                try:
+                with warn_on_fail("bucket"):
                     empty_and_delete_bucket(s3, bucket_name)
                     print(f"deleted transfer bucket {bucket_name}", flush=True)
-                except ClientError as error:
-                    print(f"bucket cleanup warning: {error}", file=sys.stderr, flush=True)
+
+            if lambda_permission_added:
+                with warn_on_fail("lambda permission"):
+                    function_arn = target["function_arn"]
+                    unqualified, qualifier = split_lambda_arn(function_arn)
+                    remove_kwargs: dict[str, Any] = {
+                        "FunctionName": unqualified,
+                        "StatementId": lambda_statement_id,
+                    }
+                    if qualifier:
+                        remove_kwargs["Qualifier"] = qualifier
+                    lambda_client.remove_permission(**remove_kwargs)
+                    print(
+                        f"revoked lambda permission {lambda_statement_id} on {function_arn}",
+                        flush=True,
+                    )
 
 
 if __name__ == "__main__":

@@ -17,6 +17,7 @@ class Environment:
     models: tuple[str, ...]
     endpoint: str
     sagemaker: dict[str, Any] | None
+    aws_sigv4: dict[str, Any] | None
     timeout_s: float
     lifecycle: dict[str, Any]
     pricing: dict[str, Any]
@@ -50,6 +51,9 @@ def load_environment(value: str) -> Environment:
         raise ValueError(f"{path}: models must be a list of model identifiers")
     endpoint = raw.get("endpoint")
     sagemaker = raw.get("sagemaker")
+    aws_sigv4 = raw.get("aws_sigv4")
+    if sagemaker is not None and aws_sigv4 is not None:
+        raise ValueError(f"{path}: configure either sagemaker or aws_sigv4, not both")
     timeout_s = float(raw.get("timeout_s", 120))
     lifecycle = raw.get("lifecycle") or {"type": "external"}
     pricing = raw.get("pricing") or {}
@@ -93,6 +97,27 @@ def load_environment(value: str) -> Environment:
             raise ValueError(f"{path}: multiple SageMaker models require sagemaker.endpoints")
         if not isinstance(endpoint, str) or not endpoint:
             endpoint = f"https://runtime.sagemaker.{region}.amazonaws.com"
+    elif aws_sigv4 is not None:
+        if not isinstance(aws_sigv4, dict):
+            raise ValueError(f"{path}: aws_sigv4 must be a mapping")
+        region = aws_sigv4.get("region")
+        if not isinstance(region, str) or not region:
+            raise ValueError(f"{path}: aws_sigv4.region is required")
+        service = aws_sigv4.get("service", "lambda")
+        if service != "lambda":
+            raise ValueError(f"{path}: aws_sigv4.service={service!r} is not supported")
+        function_arn = aws_sigv4.get("function_arn")
+        if not isinstance(function_arn, str) or not function_arn.startswith(
+            f"arn:aws:lambda:{region}:"
+        ):
+            raise ValueError(
+                f"{path}: aws_sigv4.function_arn must be a Lambda ARN in region {region}"
+            )
+        function_url = aws_sigv4.get("function_url")
+        if not isinstance(function_url, str) or not function_url.startswith("https://"):
+            raise ValueError(f"{path}: aws_sigv4.function_url (https://...) is required")
+        if not isinstance(endpoint, str) or not endpoint:
+            endpoint = function_url.rstrip("/")
     elif not isinstance(endpoint, str) or not endpoint:
         raise ValueError(f"{path}: endpoint is required")
     if timeout_s <= 0:
@@ -110,6 +135,7 @@ def load_environment(value: str) -> Environment:
         models=tuple(configured_models),
         endpoint=endpoint,
         sagemaker=sagemaker,
+        aws_sigv4=aws_sigv4,
         timeout_s=timeout_s,
         lifecycle=lifecycle,
         pricing=pricing,

@@ -28,7 +28,13 @@ from typing import Any
 import torch
 
 from . import __version__
-from .modeling import StrandsDeciderModel, apply_temperature, masked_log_softmax, pool_last_token
+from .modeling import (
+    StrandsDeciderModel,
+    apply_temperature,
+    masked_log_softmax,
+    pool_last_token,
+    refuse_token_readout,
+)
 from .prompting import (
     RenderedQuestion,
     fit_window,
@@ -442,6 +448,7 @@ def load_engine(
     if device == "mlx":
         return load_mlx(checkpoint, EngineConfig(device="mlx", use_prefix_cache=use_prefix_cache))
     model = StrandsDeciderModel.load(checkpoint, attn_implementation=attn_implementation)
+    refuse_token_readout(model.config)
     return SystemOneEngine(model, EngineConfig(device=device, use_prefix_cache=use_prefix_cache))
 
 

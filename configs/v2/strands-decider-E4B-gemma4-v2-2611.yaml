@@ -1,0 +1,49 @@
+# strands-decider-E4B-gemma4-v2-2611: the Strands Decider v2 training recipe for Gemma 4 E4B, for
+# training/train.py. One stage, one epoch.
+#   base google/gemma-4-E4B-it, revision ee0ef6023621cff504d758262d4e04895a5af4a2.
+# Data: v2 rows (train.jsonl / dev.jsonl) converted with
+#   `python -m training.data.strands_v2`. The data is not in this repository.
+# Head: a token readout with the strands-chat prompt and prefix_bidir attention.
+# Step: 30 x 91 = 2,730 rows per optimizer step, whatever the GPU count.
+#   group_by_length sorts the rows by length within windows of 30 x 102 = 3,060 rows.
+# slice_char_budget 56000 caps one forward at about 32,768 padded tokens (56,000 prompt
+#   characters for 32,768 tokens).
+# Optimizer: one AdamW group at lr 1e-4 for the adapters and the readout, no weight decay,
+#   5% linear warmup, then a cosine to 0.1 x the peak.
+train_files: ["data/train_examples.jsonl"]
+val_files: ["data/dev_examples.jsonl"]
+base_model: "google/gemma-4-E4B-it"
+base_revision: "ee0ef6023621cff504d758262d4e04895a5af4a2"
+head_type: "token_readout"
+attention_mode: "prefix_bidir"
+attn_split: 1024        # speed only
+bf16_autocast: true    # the LoRA and readout products run in bf16 on fp32 master weights
+max_length: 16384
+use_lora: true
+lora_r: 64
+lora_alpha: 128
+lora_targets: ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj",
+               "per_layer_input_gate", "per_layer_projection"]
+head_dropout: 0.0
+epochs: 1
+micro_batch_size: 30
+grad_accum: 91
+slice_char_budget: 56000
+group_by_length: true
+length_group_mega: 102
+lr: 1.0e-4
+head_lr: 1.0e-4
+weight_decay: 0.0
+adam_betas: [0.9, 0.999]
+warmup_ratio: 0.05
+lr_floor: 0.1           # linear warmup, then cosine to 0.1x
+max_grad_norm: 1.0
+gradient_checkpointing: true
+shuffle_options: true
+ordinal_smoothing: 0.0
+reverse_score_prob: 0.0
+seed: 20260920
+log_every: 1
+eval_every: 100
+save_every: 100
+output_dir: "checkpoints/strands-decider-E4B-gemma4-v2-2611"

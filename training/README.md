@@ -23,8 +23,9 @@ commands are written for WSL2; on native Linux, skip the `wsl.exe` line and the 
 - [`AGENTS.md`](AGENTS.md): runbooks for a coding agent that runs, operates or verifies training.
 - [`recipe_v7.sh`](recipe_v7.sh) and [`legacy-v7.md`](legacy-v7.md): the v7 route on Windows.
 - [`../configs/`](../configs/): `train.yaml`, its parent `train-parent.yaml`,
-  `experiments/` for the preregistered runs, and `v1/` for the v1 releases
-  ([The v1 release recipes](#the-v1-release-recipes)).
+  `experiments/` for the preregistered runs, `v1/` for the v1 releases
+  ([The v1 release recipes](#the-v1-release-recipes)) and `v2/` for the v2 token-readout
+  recipes ([The v2 recipes](#the-v2-recipes)).
 - [`../data/README.md`](../data/README.md): what the recipe downloads, and what is committed.
 
 Evaluation is in [evaluation/README.md](../evaluation/README.md), serving in
@@ -122,10 +123,13 @@ Settings for a Gemma torso:
   (E2B: 2.35B parameters, 4.4 GiB in bf16) in host memory. It is a lookup table and never
   trained. Under `torchrun` it is refused, because DDP refuses parameters on the CPU.
 
-**26B-A4B: the experts are not adapted.** Each layer has a mixture-of-experts block (128
-experts, top 8) beside a dense MLP. LoRA attaches by module name, so it reaches attention
-and the dense MLP. The experts are stored as 3-D parameters, not as linear modules, and
-neither they nor the router get an adapter: they keep their base weights.
+**26B-A4B: the experts are adapted only with `expert_lora`.** Each layer has a
+mixture-of-experts block (128 experts, top 8) beside a dense MLP. LoRA attaches by module
+name, so it reaches attention and the dense MLP. The experts are stored as 3-D parameters,
+not as linear modules, so by default neither they nor the router get an adapter: they keep
+their base weights. `expert_lora: true` (token readout only) adds one LoRA adapter of rank
+`expert_lora_r` to the gate, up and down projections of every expert. The router stays
+frozen. The 26B-A4B config in `configs/v2/` sets it.
 
 The frozen option-number readout and the teacher labeller apply Gemma's final logit
 soft-cap, so both read the model's own distribution. At serving time, a 32,768-token
@@ -314,3 +318,35 @@ each file the runs read, so a rebuild can be checked against them. The runs used
 they use are on `main` (`kl_frozen_reference`, the Gemma 4 torsos and the soup). The
 four Gemma 4 configs differ only in `base_model` and `output_dir`
 (`training/tests/test_configs.py`).
+
+## The v2 recipes
+
+`configs/v2/` holds one training config for each Gemma 4 size: E2B, E4B, 12B, 26B-A4B and
+31B. Each one trains a token readout with the `strands-chat` prompt and `prefix_bidir`
+attention ([docs/architecture.md](../docs/architecture.md#opt-in-the-token-readout)). The
+v2 training data is not in this repository. The steps are:
+
+1. Convert the v2 rows (`train.jsonl`, `dev.jsonl`) into training rows. The converter drops
+   the rows that training cannot use (no instructions, an image, a request that
+   `strands_decider.core` refuses) and prints the count of each group.
+
+   ```bash
+   python -m training.data.strands_v2 train.jsonl data/train_examples.jsonl --workers 16
+   python -m training.data.strands_v2 dev.jsonl data/dev_examples.jsonl
+   ```
+
+2. Train one config. A config fixes the rows of one optimizer step, so the number of steps
+   does not depend on the number of GPUs. Without `torchrun`, the same config trains the
+   same steps on one GPU.
+
+   ```bash
+   torchrun --standalone --nproc_per_node=8 -m training.train \
+     --config configs/v2/strands-decider-E2B-gemma4-v2-2611.yaml
+   ```
+
+3. Export the checkpoint as the directory that `strands_decider.core` loads. Several
+   checkpoints before the output directory export as one averaged model.
+
+   ```bash
+   python -m training.export_v2 checkpoints/strands-decider-E2B-gemma4-v2-2611 exports/E2B
+   ```
