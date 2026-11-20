@@ -42,6 +42,8 @@ const ASSET_EXCLUDE = [
 const DECISION_MAX_REQUEST_TOKENS = 16384;
 
 const MODEL_NEEDED = "set the model: -c model=<Hub id, or s3://bucket/prefix/>";
+// Gemma 4's image token budgets (strands_decider.core.TOKEN_BUDGETS).
+const TOKEN_BUDGETS = [70, 140, 280, 560, 1120];
 // The settings only v1's stack reads.
 const V1_SETTINGS = ["snapstart", "vision", "image_long_side", "decoder_precision", "vision_precision"];
 
@@ -80,8 +82,9 @@ export function decisionStackName(checkpoint: string): string {
  * for llama.cpp, the function, its `live` alias and that alias's IAM-authenticated Function URL.
  * Settings are CDK context values (cdk.json, or -c key=value): `model`, a Hugging Face Hub id or an
  * s3:// URI of a checkpoint directory; `model_revision`; `model_digest`, the checkpoint's manifest
- * digest, to refuse any other; and `max_request_tokens`, the most tokens one request may forward
- * (DECISION_MAX_REQUEST_TOKENS by default). v1's settings are refused, SnapStart among them: it
+ * digest, to refuse any other; `max_request_tokens`, the most tokens one request may forward
+ * (DECISION_MAX_REQUEST_TOKENS by default); and `max_image_token_budget`, the largest token budget
+ * a request may give an image (the checkpoint's by default). v1's settings are refused, SnapStart among them: it
  * was not measured for these checkpoints, whose load reads 5 GB from a lazily loaded image.
  */
 export class DecisionFunctionStack extends Stack {
@@ -104,6 +107,10 @@ export class DecisionFunctionStack extends Stack {
     const maxRequestTokens = Number(rawMaxRequestTokens);
     if (!Number.isInteger(maxRequestTokens) || maxRequestTokens < 0) {
       throw new Error(`max_request_tokens must be a whole number, 0 for no limit, not ${ctx("max_request_tokens")}`);
+    }
+    const rawBudget = ctx("max_image_token_budget");
+    if (rawBudget !== undefined && !TOKEN_BUDGETS.includes(Number(rawBudget))) {
+      throw new Error(`max_image_token_budget must be one of ${TOKEN_BUDGETS.join(", ")}, not ${rawBudget}`);
     }
 
     // Builds the image in AWS CodeBuild during `cdk deploy` (deploy-time-build) and publishes it to
@@ -182,7 +189,10 @@ export class DecisionFunctionStack extends Stack {
       memorySize: 10240,
       timeout: Duration.minutes(15),
       logGroup,
-      environment: { DECIDER_MAX_REQUEST_TOKENS: String(maxRequestTokens) },
+      environment: {
+        DECIDER_MAX_REQUEST_TOKENS: String(maxRequestTokens),
+        ...(rawBudget !== undefined && { DECIDER_MAX_IMAGE_TOKEN_BUDGET: String(Number(rawBudget)) }),
+      },
       // Each deploy that changes the function publishes a version, and CloudFormation deletes the
       // one it replaces.
       currentVersionOptions: { removalPolicy: RemovalPolicy.DESTROY },

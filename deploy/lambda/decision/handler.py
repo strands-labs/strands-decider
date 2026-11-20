@@ -27,11 +27,13 @@ from strands_decider.core import (
     DecisionConfig,
     RenderedImage,
     Request,
+    check_image_processor,
     evaluate,
     load_readout,
     load_tokenizer,
 )
 from strands_decider.core.config import IMAGE
+from strands_decider.core.images import DEFAULT_TOKEN_BUDGET
 
 _log = logging.getLogger("decider")
 _log.setLevel(logging.INFO)
@@ -56,7 +58,9 @@ class _Model:
     """The image's checkpoint, loaded once, and the Backend `evaluate` runs: llama.cpp behind the
     request limit."""
 
-    def __init__(self, model_dir: str, max_request_tokens: int | None):
+    def __init__(
+        self, model_dir: str, max_request_tokens: int | None, max_token_budget: int | None = None
+    ):
         started = time.perf_counter()
         with open(os.path.join(model_dir, "artifact.json"), encoding="utf-8") as f:
             artifact = json.load(f)
@@ -67,11 +71,16 @@ class _Model:
         self.max_request_tokens = max_request_tokens
         gguf = os.path.join(model_dir, "model.gguf")
         mmproj = os.path.join(model_dir, "mmproj.gguf") if IMAGE in self.config.inputs else None
+        # Images get the checkpoint's token budget unless a request gives one, at most the limit.
+        self.token_budget = check_image_processor(model_dir) if mmproj else DEFAULT_TOKEN_BUDGET
+        self.max_token_budget = max_token_budget or self.token_budget
         for path in (gguf, mmproj):
             if path:
                 _prefetch(path)
         _log.info("model read in %.1f s", time.perf_counter() - started)
-        self.llama = LlamaCppBackend(_LIBRARY, gguf, mmproj=mmproj)
+        self.llama = LlamaCppBackend(
+            _LIBRARY, gguf, mmproj=mmproj, max_token_budget=self.max_token_budget
+        )
         if mmproj:
             # mtmd has read the vision tower into its own buffers, so its pages in the page
             # cache, which Lambda counts as memory used, aren't needed.
@@ -102,7 +111,14 @@ class _Model:
 
     def evaluate(self, request: Request) -> dict[str, Any]:
         return evaluate(
-            request, self.tokenizer, self.weight, self.config, self, model_name=self.name
+            request,
+            self.tokenizer,
+            self.weight,
+            self.config,
+            self,
+            model_name=self.name,
+            token_budget=self.token_budget,
+            max_token_budget=self.max_token_budget,
         )
 
     def health(self) -> dict[str, Any]:
@@ -112,6 +128,8 @@ class _Model:
             "inputs": list(self.config.inputs),
             "max_length": self.config.max_length_validated,
             "max_request_tokens": self.max_request_tokens,
+            "token_budget": min(self.token_budget, self.max_token_budget),
+            "max_token_budget": self.max_token_budget,
         }
 
 
@@ -146,7 +164,9 @@ def _drop_from_page_cache(path: str, offset: int = 0, length: int = 0) -> None:
 def _load() -> _Model:
     raw = os.environ.get("DECIDER_MAX_REQUEST_TOKENS", "").strip()
     limit = int(raw) if raw else _DEFAULT_MAX_REQUEST_TOKENS
-    return _Model(_MODEL_DIR, limit or None)
+    # The largest token budget a request may give an image (the stack's max_image_token_budget).
+    budget = os.environ.get("DECIDER_MAX_IMAGE_TOKEN_BUDGET", "").strip()
+    return _Model(_MODEL_DIR, limit or None, int(budget) if budget else None)
 
 
 def _exit_if_failed(future: Future) -> None:

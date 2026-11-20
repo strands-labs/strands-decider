@@ -14,8 +14,9 @@ float32 on the same prompts:
   mask      the shim matches the prefix_bidir reference, and for each question is several times
             further from the reference under each other mask (tiny_checkpoint.MASKS);
   reuse     several questions in one call give, bit for bit, what each gives alone, in any order;
-  images    with two images in the state, the shim matches the reference, which places each
-            image's vision-tower rows at its span; swapping the images changes the rows;
+  images    with two images in the state, one at a token budget of 70, the shim matches the
+            reference, which places each image's vision-tower rows at its span; swapping the
+            images changes the rows;
   golden    `strands_decider.core.evaluate` on the shim gives the reference's top answer to each
             question, with probabilities within 0.01.
 """
@@ -112,9 +113,10 @@ def _check_reuse(backend, state, questions, rows, failures) -> float:
 
 
 def _check_images(backend, ref, tok, failures) -> dict:
-    """Two images in the state: the shim's row against the reference's, and against its own with
-    the images swapped."""
-    request = {"state": "two pictures", "images": [_png(*_RED), _png(*_BLUE)],
+    """Two images in the state, the first at a token budget of 70, under mtmd's own minimum: the
+    shim's row against the reference's, and against its own with the images swapped."""
+    request = {"state": "two pictures",
+               "images": [{"data": _png(*_RED), "token_budget": 70}, _png(*_BLUE)],
                "questions": {"which": {"type": "choice", "instructions": "which?",
                                        "criteria": {"red": None, "blue": None}}}}  # fmt: skip
     rendered = render(Request.model_validate(request), tok)

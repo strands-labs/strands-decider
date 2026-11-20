@@ -39,8 +39,9 @@ class FakeBackend:
     """LlamaCppBackend's stand-in: hidden states that make the first question's first code and the
     others' second code win, or `fail` raised."""
 
-    def __init__(self, library, model, *, mmproj=None, threads=None):
+    def __init__(self, library, model, *, mmproj=None, max_token_budget=280, threads=None):
         self.args = (library, model, mmproj)
+        self.max_token_budget = max_token_budget
         self.calls: list[tuple] = []
         self.fail: Exception | None = None
         self.last_timings = {"state_ms": 1.0}
@@ -83,6 +84,8 @@ def write_checkpoint(d: Path, *, inputs=("text", "image"), lazy_ranges=()) -> Pa
     (d / "model.gguf").write_bytes(bytes(range(256)) * 4)
     if "image" in inputs:
         (d / "mmproj.gguf").write_bytes(b"\0" * 100)
+        processor = {"patch_size": 16, "pooling_kernel_size": 3, "max_soft_tokens": 280}
+        (d / "processor_config.json").write_text(json.dumps({"image_processor": processor}))
     artifact = {"model_name": "tiny-decision-q8_0", "lazy_ranges": list(lazy_ranges)}
     (d / "artifact.json").write_text(json.dumps(artifact))
     return d
@@ -111,7 +114,11 @@ def load(tmp_path, monkeypatch):
     def load(directory: Path | None = None, **env: str):
         directory = directory or write_checkpoint(tmp_path / "model")
         monkeypatch.setenv("DECIDER_MODEL_DIR", str(directory))
-        for key in ("AWS_LAMBDA_INITIALIZATION_TYPE", "DECIDER_MAX_REQUEST_TOKENS"):
+        for key in (
+            "AWS_LAMBDA_INITIALIZATION_TYPE",
+            "DECIDER_MAX_REQUEST_TOKENS",
+            "DECIDER_MAX_IMAGE_TOKEN_BUDGET",
+        ):
             monkeypatch.delenv(key, raising=False)
         for key, value in env.items():
             monkeypatch.setenv(key, value)
@@ -233,8 +240,22 @@ def test_health_and_the_request_limit_which_fails_closed(load, value, limit):
             "inputs": ["text", "image"],
             "max_length": 512,
             "max_request_tokens": limit,
+            "token_budget": 280,
+            "max_token_budget": 280,
         },
     )
+
+
+def test_the_image_token_budget_limit(load):
+    """DECIDER_MAX_IMAGE_TOKEN_BUDGET is the largest budget a request may give an image, and the
+    vision tower's; the checkpoint's 280 by default. An image over it gets 422."""
+    handler = load(DECIDER_MAX_IMAGE_TOKEN_BUDGET="560")
+    assert load.backends[-1].max_token_budget == 560
+    health = call(handler, url_event("GET", "/health"))[1]
+    assert (health["token_budget"], health["max_token_budget"]) == (280, 560)
+    image = {"data": image_b64("checker-64x48.png"), "token_budget": 1120}
+    status, body = call(handler, url_event("POST", "/v1/systemone", {**REQUEST, "images": [image]}))
+    assert status == 422 and "over this server's limit of 560" in body["detail"]
 
 
 def test_an_on_demand_load_answers_once_ready_and_exits_if_it_fails(load, tmp_path, monkeypatch):

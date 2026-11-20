@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 
 from ..core.codes import CONTROL_TOKEN_IDS
-from ..core.images import IMAGE_SOFT, MAX_SOFT_TOKENS, check_decoded_size, resize_image
+from ..core.images import DEFAULT_TOKEN_BUDGET, IMAGE_SOFT, check_decoded_size, resize_image
 from ..core.runtime import NO_VISION
 from ..images import decode_image
 
@@ -62,9 +62,9 @@ def _check(err: bytes | None, what: str) -> None:
 
 
 class LlamaCppBackend:
-    """A model checkpoint's decoder on llama.cpp; without `mmproj` it serves text only. Calls
-    run one at a time, since each uses every thread. `last_timings` holds the last call's
-    milliseconds."""
+    """A model checkpoint's decoder on llama.cpp; without `mmproj` it serves text only. An image
+    may take up to `max_token_budget` soft tokens, and gets its own budget's pixels. Calls run one
+    at a time, since each uses every thread. `last_timings` holds the last call's milliseconds."""
 
     def __init__(
         self,
@@ -72,6 +72,7 @@ class LlamaCppBackend:
         model: str | os.PathLike[str],
         *,
         mmproj: str | os.PathLike[str] | None = None,
+        max_token_budget: int = DEFAULT_TOKEN_BUDGET,
         threads: int | None = None,
     ):
         lib = ctypes.CDLL(os.fspath(library))
@@ -93,7 +94,7 @@ class LlamaCppBackend:
         self._n_embd, self._n_embd_inp = n_embd.value, n_embd_inp.value
         self._vision = mmproj is not None
         if mmproj is not None:
-            err = lib.sd_load_vision(self._handle, os.fsencode(mmproj), MAX_SOFT_TOKENS)
+            err = lib.sd_load_vision(self._handle, os.fsencode(mmproj), max_token_budget)
             if err:
                 self.close()
                 _check(err, f"llama.cpp could not load the vision tower {os.fspath(mmproj)}")
@@ -134,14 +135,14 @@ class LlamaCppBackend:
 
     def _image_rows(self, images: tuple[RenderedImage, ...]) -> np.ndarray:
         """The images' soft-token rows end to end, [placeholders, n_embd_inp]; a file the request
-        repeats is encoded once."""
+        repeats at one token budget is encoded once."""
         if not images:
             return np.empty((0, self._n_embd_inp), dtype=np.float32)
-        rows: dict[str, np.ndarray] = {}
+        rows: dict[tuple[str, int], np.ndarray] = {}
         for im in images:
-            if im.sha256 not in rows:
-                rows[im.sha256] = self._encode(im)
-        return np.concatenate([rows[im.sha256] for im in images])
+            if (im.sha256, im.token_budget) not in rows:
+                rows[im.sha256, im.token_budget] = self._encode(im)
+        return np.concatenate([rows[im.sha256, im.token_budget] for im in images])
 
     def _encode(self, image: RenderedImage) -> np.ndarray:
         """One image through the vision tower: its N soft-token rows."""

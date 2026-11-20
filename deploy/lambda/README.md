@@ -118,11 +118,13 @@ Every setting is a CDK context value. Change it in `cdk.json`, or pass `-c key=v
 | `decoder_precision` | `q8_0` | `f16` keeps the decoder unquantized: closer to the torch engine, and slower ([Precision](#precision)) |
 | `vision_precision` | `f16` | `f32` for the vision tower ([Precision](#precision)) |
 | `max_request_tokens` | `24576`, `16384` for a checkpoint with a `decision_config.json` | The most tokens one request may forward, the state once plus every question; `0` for no limit ([Limits](#limits)) |
+| `max_image_token_budget` | the checkpoint's | A checkpoint with a `decision_config.json`: the largest token budget a request may give an image, 70, 140, 280, 560 or 1120 ([Limits](#limits-1)) |
 | `model_digest` | none | A checkpoint with a `decision_config.json`: its manifest digest ([What the build does](#what-the-build-does)); the build refuses a checkpoint with another |
 | `stack_name` | from the model | The stack's name, instead of one made from `model` (an `s3://` checkpoint's name gets 8 hex digits of its URI's sha256, so checkpoints of one name in different places get stacks of their own) |
 
 `snapstart`, `vision`, `image_long_side`, `decoder_precision` and `vision_precision` are only
-supported for v1 model checkpoints, and `model_digest` is not supported for them.
+supported for v1 model checkpoints, and `model_digest` and `max_image_token_budget` are not
+supported for them.
 
 ### Which stack a model gets
 
@@ -364,8 +366,14 @@ assumes the environment read the files itself.
 - A prompt, the state with its image placeholders plus one question, may be at most the
   checkpoint's `max_length_validated` tokens, 8,192 for E2B; a longer one gets a 422.
 - Images are PNG, JPEG, WebP or GIF, each at most 4096 x 4096 pixels. They go first in the state,
-  each as up to 280 tokens, and their number is not limited: the prompt's length bounds how many
-  fit.
+  each as up to its token budget of tokens, and their number is not limited: the prompt's length
+  bounds how many fit. An image's budget is its own (`{"data": "<base64>", "token_budget": 560}`
+  in `images`), else the request's `image_token_budget`, else the checkpoint's, 280 for E2B, and
+  at most `max_image_token_budget`.
+- A larger budget encodes more slowly than its tokens suggest: on Graviton2 an image took 8.7 s
+  at 280 tokens and about 70 s at 1,120. The request limit below counts tokens, not encoding
+  time, so with a high `max_image_token_budget` a request with many images can run past the
+  15-minute timeout.
 - A request may forward at most `max_request_tokens` tokens, the state once plus every question,
   16,384 by default, and the function applies the same limit when `DECIDER_MAX_REQUEST_TOKENS` is
   unset; `0` lifts it. That keeps the slowest request measured inside the 15-minute timeout on

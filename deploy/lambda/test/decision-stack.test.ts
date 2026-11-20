@@ -73,6 +73,15 @@ test("the request limit is 16,384 by default, and set by max_request_tokens", ()
   });
 });
 
+test("max_image_token_budget reaches the function, and only Gemma 4's budgets are taken", () => {
+  synth({ ...S3, max_image_token_budget: 560 }).hasResourceProperties("AWS::Lambda::Function", {
+    Environment: { Variables: { DECIDER_MAX_IMAGE_TOKEN_BUDGET: "560" } },
+  });
+  const unset = synth(S3).findResources("AWS::Lambda::Function");
+  assert.doesNotMatch(JSON.stringify(unset), /DECIDER_MAX_IMAGE_TOKEN_BUDGET/);
+  assert.throws(() => synth({ ...S3, max_image_token_budget: 300 }), /must be one of 70, 140, 280, 560, 1120/);
+});
+
 test("the checkpoint digest goes to the build", () => {
   const digest = "a".repeat(64);
   synth({ ...S3, model_digest: digest }).hasResourceProperties("Custom::CDKContainerImageBuild", {
@@ -116,6 +125,7 @@ test("v1's stack keeps its defaults, and refuses model_digest", () => {
     Template.fromStack(new DeciderFunctionStack(new App({ context }), "v1-test", { env: ENV }));
   const model = "StrandsAgents/strands-decider-2B-qwen3.5-v1-2610";
   assert.throws(() => v1({ model, model_digest: "a".repeat(64) }), /model_digest is not supported for v1 model checkpoints/);
+  assert.throws(() => v1({ model, max_image_token_budget: 560 }), /max_image_token_budget is not supported for v1/);
   const t = v1({ model });
   t.hasResourceProperties("Custom::CDKContainerImageBuild", {
     buildCommand: Match.stringLikeRegexp("VISION=false.*DECODER_PRECISION=q8_0.*VISION_PRECISION=f16"),

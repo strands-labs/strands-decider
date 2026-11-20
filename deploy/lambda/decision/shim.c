@@ -143,7 +143,7 @@ void sd_free(void * handle) {
 }
 
 // Load a vision tower (an mmproj GGUF) beside the decoder. image_max_tokens caps an image's soft
-// tokens (280 for Gemma 4).
+// tokens: the largest token budget the server allows.
 const char * sd_load_vision(void * handle, const char * mmproj_path, int image_max_tokens) {
     sd_handle * h = (sd_handle *) handle;
     if (h->mtmd) return "a vision tower is already loaded";
@@ -154,6 +154,10 @@ const char * sd_load_vision(void * handle, const char * mmproj_path, int image_m
     p.n_threads        = h->n_threads;
     p.warmup           = false;  // the caller warms up with a request
     p.image_max_tokens = image_max_tokens;
+    // Images come resized at their own budget, sides multiples of 48, which mtmd leaves as they
+    // are; one at a budget of 70 often has fewer than mtmd's Gemma 4 minimum of 70 tokens, and
+    // mtmd would enlarge it past its placeholders.
+    p.image_min_tokens = 1;
     mtmd_context * m   = mtmd_init_from_file(mmproj_path, h->model, p);
     if (!m) return "mtmd could not load it";
     if (!mtmd_support_vision(m) || mtmd_decode_use_mrope(m)) {

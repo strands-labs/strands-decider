@@ -65,7 +65,9 @@ export class DeciderFunctionStack extends Stack {
   constructor(scope: Construct, id: string, props?: StackProps) {
     super(scope, id, props);
     const ctx = (key: string) => this.node.tryGetContext(key);
-    if (ctx("model_digest") !== undefined) throw new Error("model_digest is not supported for v1 model checkpoints");
+    for (const key of ["model_digest", "max_image_token_budget"]) {
+      if (ctx(key) !== undefined) throw new Error(`${key} is not supported for v1 model checkpoints`);
+    }
     // Off by default. SnapStart's snapshot is billed for as long as the stack exists, about
     // $39.50 a month at 10 GB with no traffic at all, which is not what a serverless deploy
     // should cost at rest. It cuts a new environment's first answer from up to 30 s to about 6 s;

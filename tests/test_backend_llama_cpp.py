@@ -30,10 +30,10 @@ SOFT = CONTROL_TOKEN_IDS["<|image|>"]
 N_EMBD, N_EMBD_INP = 6, 4
 
 
-def _image(name: str) -> RenderedImage:
+def _image(name: str, token_budget: int = 280) -> RenderedImage:
     data = image_bytes(name)
-    e = decode_image(base64.b64encode(data).decode())
-    return RenderedImage(data, e.format, e.width, e.height, e.sha256, 1, e.tokens)
+    e = decode_image(base64.b64encode(data).decode(), token_budget)
+    return RenderedImage(data, e.format, e.width, e.height, e.sha256, 1, e.tokens, token_budget)
 
 
 @pytest.mark.parametrize("name", sorted(PIXEL_FILES))
@@ -63,6 +63,7 @@ class FakeShim:
         pass
 
     def sd_load_vision(self, handle, path, max_tokens):
+        self.vision_max_tokens = max_tokens
         return self.fail.get("sd_load_vision")
 
     def sd_encode_image(self, handle, rgb, w, h, n_rows, out):
@@ -116,6 +117,21 @@ def test_forward_passes_the_state_questions_and_image_rows(shim):
     assert shim.encoded == [(*resized_size(64, 48), a.tokens), (*resized_size(40, 80), b.tokens)]
     assert shim.forwarded[-1]["rows"] == [1] * a.tokens + [2] * b.tokens + [1] * a.tokens
     assert shim.forwarded[-1]["state"] == state
+
+
+def test_each_image_is_encoded_at_its_token_budget(shim):
+    """The vision tower takes up to the server's largest budget; a file the request gives at two
+    budgets is encoded at each, since its pixels and its number of rows differ."""
+    LlamaCppBackend("lib.so", "m.gguf", mmproj="mm.gguf")
+    assert shim.vision_max_tokens == 280
+    backend = LlamaCppBackend("lib.so", "m.gguf", mmproj="mm.gguf", max_token_budget=560)
+    assert shim.vision_max_tokens == 560
+    a, small = _image("checker-64x48.png"), _image("checker-64x48.png", 70)
+    state = [2, *[SOFT] * a.tokens, *[SOFT] * small.tokens, *[SOFT] * a.tokens]
+    backend.forward(state, [[30]], (a, small, a))
+    sizes = [(*resized_size(64, 48), a.tokens), (*resized_size(64, 48, 70), small.tokens)]
+    assert shim.encoded == sizes and small.tokens < a.tokens
+    assert shim.forwarded[-1]["rows"] == [1] * a.tokens + [2] * small.tokens + [1] * a.tokens
 
 
 def test_a_text_backend_refuses_images(shim):
