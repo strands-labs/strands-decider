@@ -38,7 +38,6 @@ strands-decider serve StrandsAgents/strands-decider-2B-qwen3.5-v1-2610 --port 80
 With images (needs `transformers >= 5.18`):
 
 ```bash
-pip install "strands-decider[vision]"
 strands-decider serve StrandsAgents/strands-decider-2B-qwen3.5-v1-2610 --vision --port 8000
 ```
 

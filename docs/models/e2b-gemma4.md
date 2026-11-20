@@ -31,10 +31,8 @@ per-skill results: [evaluation/results.md](https://github.com/strands-labs/stran
 
 ## Run it
 
-Gemma 4 support lives on `main`; the PyPI package does not have it yet.
-
 ```bash
-pip install "strands-decider @ git+https://github.com/strands-labs/strands-decider"
+pip install strands-decider
 strands-decider serve StrandsAgents/strands-decider-E2B-gemma4-v1-2610 --port 8000
 ```
 

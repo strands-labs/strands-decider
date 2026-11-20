@@ -30,13 +30,11 @@ Full per-skill numbers in the HF card and in
 ## Run it
 
 ```bash
-pip install "strands-decider @ git+https://github.com/strands-labs/strands-decider"
+pip install strands-decider
 strands-decider serve StrandsAgents/strands-decider-E4B-gemma4-v1-2610 --port 8000
 ```
 
-Gemma 4 support lives on the code repository's `main` — the PyPI package
-doesn't have it yet. See [Inference server](../inference.md) for the request
-shape.
+See [Inference server](../inference.md) for the request shape.
 
 ## When to pick it
 

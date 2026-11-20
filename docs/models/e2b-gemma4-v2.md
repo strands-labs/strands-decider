@@ -8,7 +8,7 @@ then calibrated.
 
 - **Base model:** google/gemma-4-E2B-it
 - **Parameters:** 2.3B effective (5.1B with embeddings)
-- **Image support:** yes (no image training; uses the base's vision encoder)
+- **Image support:** yes (no image training; uses the base's image input)
 - **Decision types:** `choice` (2 to 255 options), `noul` (yes/no), `score` (2 to 10 levels)
 - **Prompt length:** 32,768 tokens by default, up to 131,072 with `--max-length`; trained on prompts of up to 16,384 tokens
 - **Size:** 10.3 GB in bf16; one GPU with 24 GB of memory
@@ -45,8 +45,7 @@ strands-decider ask StrandsAgents/strands-decider-E2B-gemma4-v2-2611 \
   --noul "Does this convey urgency?"
 ```
 
-A v2 model needs a `strands-decider` release with v2 support. Until that release is on PyPI, install the
-wheel that comes with the model, as the `HOWTO.md` in the model repository describes.
+A v2 model needs `strands-decider` 0.4.0 or later.
 
 Add `--image photo.jpg`, once for each image, to send images with the state. To serve the model over HTTP:
 
@@ -57,10 +56,11 @@ strands-decider serve StrandsAgents/strands-decider-E2B-gemma4-v2-2611 --port 80
 In Python:
 
 ```python
+from strands_decider.core import Request
 from strands_decider.decision import load_decision_engine
 
 engine = load_decision_engine("StrandsAgents/strands-decider-E2B-gemma4-v2-2611", device="cuda")
-response = engine.evaluate(
+request = Request.model_validate(
     {
         "state": "My integration keeps failing with a 401 since we rotated our API key. Please help.",
         "questions": {
@@ -77,6 +77,7 @@ response = engine.evaluate(
         },
     }
 )
+response = engine.evaluate(request)
 answers = response.model_dump(exclude_none=True)["answers"]
 print(answers["team"]["choice"], answers["urgent"]["noul"])
 ```
@@ -92,6 +93,6 @@ See [Inference server](../inference.md) for the request shape.
 
 - On a GPU, the model needs 24 GB of memory and cannot be split over GPUs. Long prompts with many
   questions need more memory: send a shorter text or fewer questions in one request.
-- v2 is trained on text only. Images go through Gemma 4's own vision encoder, unchanged from the base model.
+- v2 is trained on text only. Images go through the base model's own image input, unchanged.
 - The temperature is fitted on held-out data and does not change the chosen answer. If your application
   relies on the probability values, check them on a sample of your own traffic.

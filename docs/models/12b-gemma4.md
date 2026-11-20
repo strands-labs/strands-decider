@@ -32,10 +32,8 @@ and in [evaluation/results.md](https://github.com/strands-labs/strands-decider/b
 
 ## Run it
 
-Gemma 4 support lives on `main`, not yet on PyPI:
-
 ```bash
-pip install "strands-decider @ git+https://github.com/strands-labs/strands-decider"
+pip install strands-decider
 strands-decider serve StrandsAgents/strands-decider-12B-gemma4-v1-2610 --port 8000
 ```
 
