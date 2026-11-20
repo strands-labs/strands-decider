@@ -6,12 +6,13 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from strands_decider import core
-from strands_decider.core.images import MAX_IMAGE_BYTES
+from strands_decider.core.images import DEFAULT_TOKEN_BUDGET, MAX_IMAGE_BYTES
 from vllm.engine.arg_utils import AsyncEngineArgs
 
 from . import ARCHITECTURES, SERVER_CONFIG_KEY
@@ -30,6 +31,8 @@ class Settings:
     engine_args: AsyncEngineArgs
     served_name: str
     max_length: int
+    token_budget: int
+    max_token_budget: int
     max_body: int
     max_buffered: int
     body_read_timeout: float
@@ -46,8 +49,9 @@ def settings(args: argparse.Namespace) -> Settings:
         path, revision = _config_files(args.model, args.revision)
         config = core.DecisionConfig.load(path)
         tokenizer = core.load_tokenizer(path)
-        if "image" in config.inputs:
-            core.check_image_processor(path)
+        token_budget = (
+            core.check_image_processor(path) if "image" in config.inputs else DEFAULT_TOKEN_BUDGET
+        )
         base = json.loads((path / "config.json").read_text("utf-8"))["architectures"][0]
         if base not in ARCHITECTURES:
             raise ValueError(f"config.json names {base}, which is no Strands Decider layout")
@@ -55,6 +59,13 @@ def settings(args: argparse.Namespace) -> Settings:
         raise SystemExit(f"strands-decider-vllm serve: {args.model}: {e}") from None
     max_length = args.max_length or config.max_length_validated
     takes_images = "image" in config.inputs
+    max_token_budget = args.max_image_token_budget or token_budget
+    if max_token_budget > token_budget:
+        warnings.warn(
+            f"serving images at up to {max_token_budget} tokens each, past the checkpoint's "
+            f"{token_budget} (processor_config.json max_soft_tokens)",
+            stacklevel=2,
+        )
     if args.max_body_mb:
         max_body = int(args.max_body_mb * 2**20)
     else:  # 8 MiB of text, and four of the largest images (93 MiB)
@@ -62,9 +73,11 @@ def settings(args: argparse.Namespace) -> Settings:
     return Settings(
         config=config,
         tokenizer=tokenizer,
-        engine_args=_engine_args(args, base, revision, max_length, takes_images),
+        engine_args=_engine_args(args, base, revision, max_length, takes_images, max_token_budget),
         served_name=args.served_model_name,
         max_length=max_length,
+        token_budget=min(token_budget, max_token_budget),
+        max_token_budget=max_token_budget,
         max_body=max_body,
         max_buffered=max(int(args.max_buffered_mb * 2**20), max_body),  # room for any one body
         body_read_timeout=args.body_read_timeout,
@@ -84,7 +97,12 @@ def _config_files(model: str, revision: str | None) -> tuple[Path, str | None]:
 
 
 def _engine_args(
-    args: argparse.Namespace, base: str, revision: str | None, max_length: int, takes_images: bool
+    args: argparse.Namespace,
+    base: str,
+    revision: str | None,
+    max_length: int,
+    takes_images: bool,
+    max_token_budget: int,
 ) -> AsyncEngineArgs:
     # vLLM refuses a prompt that fills the context: it leaves no position for the answer.
     max_model_len = max_length + 1
@@ -121,4 +139,7 @@ def _engine_args(
             if multimodal
             else {}
         ),
+        # vLLM plans its encoder cache for the largest image, which the engine's own
+        # max_soft_tokens sets; each request passes its images' largest budget (decider.py).
+        mm_processor_kwargs={"max_soft_tokens": max_token_budget} if takes_images else None,
     )

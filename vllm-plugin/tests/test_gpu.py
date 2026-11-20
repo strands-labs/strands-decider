@@ -191,8 +191,14 @@ class Reference:
             use_cache=False,
         )
         if images:
-            resized = [resize_image(im, *resized_size(*im.size)) for im in images]
-            pixels = self.processor(images=resized, do_resize=False, return_tensors="pt")
+            budgets = [r.token_budget for r in q.images]
+            resized = [
+                resize_image(im, *resized_size(*im.size, b))
+                for im, b in zip(images, budgets, strict=True)
+            ]
+            pixels = self.processor(
+                images=resized, do_resize=False, max_soft_tokens=max(budgets), return_tensors="pt"
+            )
             counts = torch.as_tensor(pixels["num_soft_tokens_per_image"]).view(-1).tolist()
             assert counts == [im.tokens for im in q.images], "the processor counts as the core"
             kwargs.update(
@@ -236,15 +242,21 @@ def questions(rng: random.Random) -> dict:
 
 @pytest.fixture(scope="module")
 def image_requests():
-    """Requests with short, empty and long states and 0 to 4 images of mixed sizes, aspect ratios
-    and formats."""
-    rng = random.Random(0)
+    """Requests with short, empty and long states and 0 to 4 images of mixed sizes, aspect ratios,
+    formats and token budgets."""
+    rng, budgets = random.Random(0), random.Random(3)
     sizes = [(640, 480), (480, 640), (300, 40), (64, 48), (1000, 1000), (96, 1200), (1600, 1200)]
     formats = ["PNG", "JPEG", "WEBP", "GIF"]
+
+    def image() -> str | dict:
+        data = photo(rng, *rng.choice(sizes), rng.choice(formats))
+        budget = budgets.choice([None, None, 70, 140])
+        return data if budget is None else {"data": data, "token_budget": budget}
+
     return [
         {
             "state": words(rng, rng.choice([0, 12, 300])),
-            "images": [photo(rng, *rng.choice(sizes), rng.choice(formats)) for _ in range(i % 5)],
+            "images": [image() for _ in range(i % 5)],
             "questions": questions(rng),
         }
         for i in range(20)

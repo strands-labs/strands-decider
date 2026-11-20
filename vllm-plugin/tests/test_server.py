@@ -78,13 +78,35 @@ def test_an_image_request_sends_one_placeholder_and_the_resized_pixels_per_image
         assert ids.count(SOFT) == 2 and OPEN not in ids
         assert [im.size for im in prompt["multi_modal_data"]["image"]] == [(912, 672), (2160, 288)]
         assert prompt["multi_modal_uuids"] == {
-            "image": [hashlib.sha256(f).hexdigest() for f in files]
+            "image": [f"{hashlib.sha256(f).hexdigest()}-280" for f in files]
         }
-        assert prompt["mm_processor_kwargs"] == {"do_resize": False}
+        assert prompt["mm_processor_kwargs"] == {"do_resize": False, "max_soft_tokens": 280}
         assert sp.extra_args == {"prefix_end": state_len}, "S counts the expansion"
     first = Image.open(io.BytesIO(files[0])).convert("RGB")
     sent = s.engine.calls[0][0]["multi_modal_data"]["image"][0]
     assert sent.tobytes() == core.resize_image(first, 912, 672).tobytes()
+
+
+def test_each_image_is_sent_at_its_token_budget(server):
+    """Resized at its own budget and named by its file and that budget, which vLLM's caches key
+    on; the processor runs at the request's largest. A budget over the server's limit is 422."""
+    s = server()
+    f = png(64, 48)
+    body = {
+        "state": "",
+        "images": [{"data": b64(f), "token_budget": 70}, b64(f)],
+        "questions": QUESTIONS,
+    }
+    with s.client as c:
+        assert c.post("/v1/systemone", json=body).status_code == 200
+        over = {**body, "images": [{"data": b64(f), "token_budget": 560}]}
+        r = c.post("/v1/systemone", json=over)
+    assert r.status_code == 422 and "over this server's limit of 280" in r.text
+    prompt = s.engine.calls[0][0]
+    assert [im.size for im in prompt["multi_modal_data"]["image"]] == [(432, 336), (912, 672)]
+    sha = hashlib.sha256(f).hexdigest()
+    assert prompt["multi_modal_uuids"] == {"image": [f"{sha}-70", f"{sha}-280"]}
+    assert prompt["mm_processor_kwargs"] == {"do_resize": False, "max_soft_tokens": 280}
 
 
 def test_images_are_decoded_upright_with_transparency_on_white(server):

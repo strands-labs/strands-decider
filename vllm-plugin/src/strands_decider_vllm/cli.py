@@ -5,6 +5,8 @@ from __future__ import annotations
 import argparse
 import os
 
+from strands_decider.core import TOKEN_BUDGETS
+
 #: vLLM's internal sockets on loopback, whatever address the HTTP server binds.
 _LOOPBACK = {
     "VLLM_HOST_IP": "127.0.0.1",
@@ -31,6 +33,13 @@ def parser() -> argparse.ArgumentParser:
         "--max-length",
         type=int,
         help="refuse longer prompts (default: decision_config.json's max_length_validated)",
+    )
+    s.add_argument(
+        "--max-image-token-budget",
+        type=int,
+        choices=TOKEN_BUDGETS,
+        help="the largest token budget a request may give an image (default: the checkpoint's, "
+        "processor_config.json's max_soft_tokens)",
     )
     s.add_argument(
         "--max-num-batched-tokens", type=int, help="the step's budget (default: --max-length + 1)"

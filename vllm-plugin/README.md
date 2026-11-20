@@ -30,6 +30,7 @@ The server has no authentication. It binds 127.0.0.1 by default, and vLLM's inte
 | `--host`, `--port` | 127.0.0.1, 8000 | |
 | `--served-model-name` | `strands-decider` | each response's `model` |
 | `--max-length` | `max_length_validated` | longer prompts get HTTP 422, never truncated |
+| `--max-image-token-budget` | the checkpoint's `max_soft_tokens` | the largest token budget a request may give an image (70, 140, 280, 560 or 1120); a larger one gets HTTP 422, and vLLM plans its encoder cache for it |
 | `--max-num-batched-tokens`, `--max-num-seqs` | `--max-length` + 1, vLLM's | the step's budget, at least `--max-length` + 1 |
 | `--gpu-memory-utilization`, `--tensor-parallel-size` | 0.90, 1 | the 31B at 8,192 tokens fits one H100 at 0.95; 26B-A4B wants 0.92 |
 | `--max-body-mb` | 93 (8 without images) | larger bodies get HTTP 413; 93 holds four 16 MiB images in base64 and 8 MiB of text |
@@ -65,7 +66,7 @@ The server has no authentication. It binds 127.0.0.1 by default, and vLLM's inte
  "latency_ms": 212.4}
 ```
 
-An invalid body or image, images for a text-only checkpoint, a prompt over `--max-length` and the engine's refusals get HTTP 422 with `{"detail": "..."}`. Anything else that fails is logged and gets HTTP 500 with only an error id. `GET /health` and `GET /ping` answer 200 with the model's name, inputs and limits while the engine is healthy, and 503 when it isn't.
+An image's token budget is its own (`{"data": "<base64>", "token_budget": 560}` in `images`), else the request's `image_token_budget`, else the checkpoint's. An invalid body or image, images for a text-only checkpoint, a prompt over `--max-length`, a budget over `--max-image-token-budget` and the engine's refusals get HTTP 422 with `{"detail": "..."}`. Anything else that fails is logged and gets HTTP 500 with only an error id. `GET /health` and `GET /ping` answer 200 with the model's name, inputs and limits while the engine is healthy, and 503 when it isn't.
 
 ## Serving token ids: `vllm serve`
 

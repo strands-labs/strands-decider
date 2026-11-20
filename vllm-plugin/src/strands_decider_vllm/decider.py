@@ -101,7 +101,11 @@ class Decider:
             raise Refused("this checkpoint does not take images")
         try:
             return core.render(
-                request, self.settings.tokenizer, max_length=self.settings.max_length
+                request,
+                self.settings.tokenizer,
+                max_length=self.settings.max_length,
+                token_budget=self.settings.token_budget,
+                max_token_budget=self.settings.max_token_budget,
             )
         except ValueError as e:  # an image, or the prompt's length
             raise Refused(str(e)) from e
@@ -114,8 +118,14 @@ class Decider:
         prompt: dict[str, Any] = {"prompt_token_ids": _one_id_per_image(q) + list(q.question_ids)}
         if pixels:
             prompt["multi_modal_data"] = {"image": pixels}
-            prompt["multi_modal_uuids"] = {"image": [im.sha256 for im in q.images]}
-            prompt["mm_processor_kwargs"] = {"do_resize": False}  # already at W x H
+            # The budget is part of an image's name: vLLM's caches key on it, and the same file
+            # at another budget has other pixels and another number of placeholders.
+            uuids = [f"{im.sha256}-{im.token_budget}" for im in q.images]
+            prompt["multi_modal_uuids"] = {"image": uuids}
+            prompt["mm_processor_kwargs"] = {  # already at each image's W x H
+                "do_resize": False,
+                "max_soft_tokens": max(im.token_budget for im in q.images),
+            }
         params = SamplingParams(
             max_tokens=1,
             logprobs=len(q.code_token_ids),

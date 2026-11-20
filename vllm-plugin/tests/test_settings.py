@@ -57,6 +57,24 @@ def test_the_context_leaves_a_position_for_the_answer(make_settings, flags, leng
     assert (s.max_length, e.max_model_len, e.max_num_batched_tokens) == lengths
 
 
+def test_the_image_token_budget_and_its_limit(make_settings):
+    """The checkpoint's budget is the default and the limit; vLLM plans its encoder cache for the
+    limit. A higher limit warns, a lower one lowers the default, and a text-only checkpoint plans
+    for no images."""
+    s = make_settings()
+    assert (s.token_budget, s.max_token_budget) == (280, 280)
+    assert s.engine_args.mm_processor_kwargs == {"max_soft_tokens": 280}
+    with pytest.warns(UserWarning, match="past the checkpoint's 280"):
+        s = make_settings("--max-image-token-budget", "1120")
+    assert (s.token_budget, s.max_token_budget) == (280, 1120)
+    assert s.engine_args.mm_processor_kwargs == {"max_soft_tokens": 1120}
+    s = make_settings("--max-image-token-budget", "140")
+    assert (s.token_budget, s.max_token_budget) == (140, 140)
+    assert make_settings(inputs=("text",)).engine_args.mm_processor_kwargs is None
+    with pytest.raises(SystemExit):
+        make_settings("--max-image-token-budget", "300")
+
+
 def test_the_body_limit_follows_the_checkpoints_inputs(make_settings):
     image = 4 * math.ceil(MAX_IMAGE_BYTES / 3)  # one of the core's largest images in base64
     assert 4 * image + 8 * 2**20 <= make_settings().max_body < 5 * image

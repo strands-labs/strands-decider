@@ -53,6 +53,8 @@ def build_app(s: Settings, start_engine: Callable[[], Any]) -> FastAPI:
             "model": s.served_name,
             "inputs": list(s.config.inputs),
             "max_length": s.max_length,
+            "token_budget": s.token_budget,
+            "max_token_budget": s.max_token_budget,
             "max_body_bytes": s.max_body,
             "version": __version__,
         }
