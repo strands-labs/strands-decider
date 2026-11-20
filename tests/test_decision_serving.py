@@ -121,7 +121,7 @@ def test_serve_refuses_what_the_interface_refuses(ckpt, text_only):
 def test_a_processor_that_fails_refuses_images_only_and_names_no_path(tmp_path, cause):
     """Clients get a fixed reason; the error, which may name local paths, is only warned."""
     if cause == "settings the core refuses":
-        path = model_checkpoint(tmp_path / "p", processor={"max_soft_tokens": 560})
+        path = model_checkpoint(tmp_path / "p", processor={"max_soft_tokens": 300})
     else:
         path = model_checkpoint(tmp_path / "p")
         (path / "processor_config.json").unlink()
@@ -215,7 +215,12 @@ def test_serve_command_options(ckpt, tmp_path, monkeypatch):
             [str(tmp_path), "--max-length", "100"],
             "--max-length is not supported for v1 model checkpoints",
         ),
+        (
+            [str(tmp_path), "--max-image-token-budget", "560"],
+            "--max-image-token-budget is not supported for v1 model checkpoints",
+        ),
         ([str(ckpt), "--dtype", "float16"], "--dtype is one of"),
+        ([str(ckpt), "--max-image-token-budget", "300"], "--max-image-token-budget is one of"),
         ([str(ckpt), "--max-length", "0"], "greater than or equal to 1"),
         ([str(ckpt), "--device-map", "auto"], "--device-map is only supported for v1"),
         ([str(ckpt), "--device", "tpu"], "model checkpoints run on cpu, cuda, mps"),
@@ -244,6 +249,34 @@ def test_serve_takes_a_max_length(ckpt, caplog):
         server.create_app(str(ckpt), device="cpu", warmup=False, max_length=10000)
     server.create_app(str(ckpt), device="cpu", max_length=8)
     assert "a warm-up request was skipped" in caplog.text
+
+
+def test_serve_takes_each_images_token_budget(ckpt):
+    """An image gets its own token budget, else the request's, at most --max-image-token-budget,
+    which is the checkpoint's 280 unless raised; a lower one lowers the default too. /health
+    reports both, and a limit past the checkpoint's budget warns."""
+    small = {"data": IMAGE, "token_budget": 70}
+
+    def tokens(client, req: dict) -> int:
+        r = client.post("/v1/systemone", json=req)
+        assert r.status_code == 200, r.text
+        return int(r.json()["usage"]["input_tokens"])
+
+    with _client(ckpt) as client:
+        health = client.get("/health").json()
+        assert tokens(client, request([IMAGE])) - tokens(client, request([small])) == 266 - 63
+        assert tokens(client, request([small, IMAGE])) == tokens(client, request([IMAGE, small]))
+        r = client.post("/v1/systemone", json=request([{"data": IMAGE, "token_budget": 560}]))
+    assert (health["token_budget"], health["max_token_budget"]) == (280, 280)
+    assert r.status_code == 422 and "over this server's limit of 280" in r.text
+    with _client(ckpt, max_image_token_budget=140) as client:
+        health = client.get("/health").json()
+        assert tokens(client, request([IMAGE])) == tokens(
+            client, {**request([IMAGE]), "image_token_budget": 140}
+        )
+    assert (health["token_budget"], health["max_token_budget"]) == (140, 140)
+    with pytest.warns(UserWarning, match="past the checkpoint's 280"):
+        server.create_app(str(ckpt), device="cpu", warmup=False, max_image_token_budget=560)
 
 
 def test_ask_on_a_model_checkpoint(ckpt, text_only, tmp_path):

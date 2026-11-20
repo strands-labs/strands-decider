@@ -107,6 +107,7 @@ def create_app(
     queue_timeout: float = 60.0,
     revision: str | None = None,
     max_length: int | None = None,
+    max_image_token_budget: int | None = None,
 ) -> FastAPI:
     if max_concurrency is not None and max_concurrency < 1:
         raise ValueError("--max-concurrency must be at least 1")
@@ -136,6 +137,7 @@ def create_app(
             max_batch=max_batch,
             max_batch_tokens=max_batch_tokens,
             max_length=max_length,
+            max_token_budget=max_image_token_budget,
             model_name=resolved_name,
             max_concurrency=max_concurrency or 1,
             queue_timeout=queue_timeout,
@@ -144,7 +146,12 @@ def create_app(
         if warmup:  # before uvicorn binds the listener
             _warm_up_decision(engine)
         return _decision_app(engine, checkpoint)
-    for flag, value in (("--dtype", dtype), ("--revision", revision), ("--max-length", max_length)):
+    for flag, value in (
+        ("--dtype", dtype),
+        ("--revision", revision),
+        ("--max-length", max_length),
+        ("--max-image-token-budget", max_image_token_budget),
+    ):
         if value is not None:
             raise ValueError(f"{flag} is not supported for v1 model checkpoints")
     if device_map and (vision or not device.startswith("cuda")):
