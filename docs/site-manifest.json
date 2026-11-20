@@ -265,6 +265,17 @@
         "group": "Training",
         "order": 10
       }
+    },
+    {
+      "id": "data-card",
+      "source": "docs/data-card.md",
+      "slug": "data-card",
+      "title": "Data card",
+      "description": "The v2 training data: how many rows, how they were made, what they are about, and sample rows.",
+      "nav": {
+        "group": "Training",
+        "order": 11
+      }
     }
   ]
 }
