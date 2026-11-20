@@ -346,12 +346,20 @@ src/strands_decider/              -- published package (inference only)
   cpu_kernels.py  the Gated DeltaNet depthwise causal conv for CPU inference
   mlx_engine.py   serving with the torso on MLX (--device mlx); the engine otherwise infer.py's
   server.py       FastAPI, POST /v1/systemone
-  cli.py          the strands-decider command (ask / serve / info)
+  cli.py          the strands-decider command (ask / serve / convert-mlx / info)
   hf_export.py    a checkpoint as a Hugging Face model folder (safetensors, card, manifest)
   naming.py       release naming helpers (used by hf_export and release scripts)
   vision.py       Qwen3.5 vision-tower engine (`serve --vision`, `ask --image`)
   core/           the decision interface without torch: prompt rendering, the code
                   readout, decision_config.json, the runtime contract
+  backends/       runtimes for model checkpoints: transformers.py runs them on PyTorch
+                  (CPU, CUDA, MPS) and is the reference runtime, transformers_attention.py
+                  its prefix_bidir attention, images.py the pixels every backend encodes;
+                  mlx.py runs them on Apple silicon through mlx-vlm (--device mlx), and
+                  mlx_format.py loads them into mlx-vlm and writes their MLX artifacts
+                  (convert-mlx)
+  decision.py     model checkpoints behind ask and serve: the core and a backend
+  refusals.py     the request errors serve maps to 422 and 503
 
 training/                         -- not published; run as `python -m training.<module>`
   train.py        LoRA + readout training loop (`python -m training.train`)
@@ -433,7 +441,10 @@ tests/            pytest only: test_core (no GPU), test_server (stubbed), test_g
                   test_llm_client, test_cli_exit,
                   test_ddp (`-m distributed` for the multi-GPU runs);
                   test_core_prompt, test_core_readout, test_core_config, test_core_images
-                  (the torch-free core)
+                  (the torch-free core);
+                  test_backend_transformers, test_backend_images, test_decision_serving
+                  (model checkpoints, on tiny random-weight checkpoints that
+                  decision_support.py writes)
 docs/             architecture.md -- this document; inference.md -- serving a checkpoint:
                   install, ask, serve, the HTTP API, a Mac
 .github/          workflows/tests.yml -- the CPU tests; workflows/generators-live-test.yml

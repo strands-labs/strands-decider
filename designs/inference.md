@@ -7,7 +7,9 @@ returned as P(true)), a `choice` (one of N options) or a `score` (a level on an 
 scale). Install the package, point the commands at the published Hub id or at a checkpoint you
 trained, then `strands-decider ask` or `strands-decider serve`. Pass `--device cuda`, `mps`, `cpu` or `mlx`
 explicitly; without it the CLI picks cuda, then mps, then cpu, and mlx only when asked for. A
-checkpoint from `training/recipe.sh all` is already calibrated; calibrate any other
+model checkpoint is the exception: on Apple silicon with the `mlx` extra it defaults to mlx,
+the Mac backend it is validated on, and without the extra it runs on mps with a note to install
+it. A checkpoint from `training/recipe.sh all` is already calibrated; calibrate any other
 checkpoint with `python -m training.evaluate calibrate` before you serve it.
 
 `eval` and `calibrate` also accept `--device cuda`, `mps`, or `cpu` and use the same
@@ -19,9 +21,12 @@ CPU), so they report the numbers serving returns. `--device mlx` is refused.
 - [Model artifact](#model-artifact): what a checkpoint holds, and the Hugging Face export.
 - [Ask](#ask): one command, with recorded v19 output and how to read its confidence.
 - [Serve](#serve): `POST /v1/systemone` and `/health`, on `127.0.0.1` with no authentication.
+- [Model checkpoints](#model-checkpoints): checkpoints of the decision interface
+  (`strands_decider.core`), with images, on the transformers backend.
 - [Asking many questions is nearly free](#asking-many-questions-is-nearly-free): the shared-prefix cache.
 - [Serving on a Mac](#serving-on-a-mac): MPS, and the one kernel that had to be replaced.
-- [Serving on a Mac with MLX](#serving-on-a-mac-with-mlx): `--device mlx`, measured against MPS.
+- [Serving on a Mac with MLX](#serving-on-a-mac-with-mlx): `--device mlx`, measured against MPS, and
+  [model checkpoints on MLX](#model-checkpoints-on-mlx), images included.
 - [Deployment guide](../deploy/README.md): hosting the server, for example on an Amazon SageMaker
   real-time endpoint.
 - [Strands Agents example](../examples/strands/README.md): an agent built with the Strands
@@ -53,7 +58,7 @@ from a clone, for example `pip install -e ".[mlx]"`.
 | `cuda` | `pip install "strands-decider[cuda]"` | flash-linear-attention (Linux). causal-conv1d compiles against the local CUDA toolkit and is installed separately: `pip install causal-conv1d --no-build-isolation`. |
 | `mps` | `pip install "strands-decider[mps]"` | Nothing: the base install. |
 | `cpu` | `pip install "strands-decider[cpu]"` | Nothing: the base install. |
-| `mlx` | `pip install "strands-decider[mlx]"` | mlx and mlx-lm (Python 3.11+, Apple silicon only). |
+| `mlx` | `pip install "strands-decider[mlx]"` | mlx, mlx-lm and, for model checkpoints, mlx-vlm (Python 3.11+, Apple silicon only). |
 
 flash-linear-attention installs on a Mac without Triton, but its kernels need Triton, so it
 cannot run there. `mps_kernels.py` therefore steps aside only when Triton is present too, and
@@ -74,9 +79,12 @@ Transformers' `causal_conv1d_fn` falls back to its reference PyTorch path. On CP
 `chunk_gated_delta_rule` also falls back. On MPS, `mps_kernels.py` replaces that second
 function, so only the first fallback matters there, and it costs 32 ms a forward.
 
-**macOS (Apple silicon) with MLX.** The `mlx` extra adds mlx and mlx-lm, and `--device mlx`
-runs the torso on Metal through mlx-lm ([Serving on a Mac with MLX](#serving-on-a-mac-with-mlx)).
-MLX is opt-in: with the extra installed, a command without `--device` still runs on MPS.
+**macOS (Apple silicon) with MLX.** The `mlx` extra adds mlx, mlx-lm, mlx-vlm and Pillow.
+`--device mlx` runs a v1 checkpoint's torso on Metal through mlx-lm
+([Serving on a Mac with MLX](#serving-on-a-mac-with-mlx)) and a model checkpoint through
+mlx-vlm ([Model checkpoints on MLX](#model-checkpoints-on-mlx)). For v1 checkpoints MLX is
+opt-in: with the extra installed, a command without `--device` still runs on MPS. Another model
+checkpoint runs on MLX by default.
 
 ```bash
 pip install -e ".[dev,mlx]"
@@ -299,6 +307,40 @@ took 4.9 s (E2B), 7.2 s (E4B), 13.5 s (12B) and 7.8 s (26B-A4B). The 26B-A4B is 
 there, because it computes with 4B of its parameters per token. On one H100, the median is
 102 ms, 139 ms, 136 ms and 245 ms.
 
+## Model checkpoints
+
+A model checkpoint is the base Gemma 4 model's multimodal checkpoint with the fine-tuning
+merged in, beside `readout.safetensors` and a `decision_config.json` that says
+`"interface": "strands-decider"` ([architecture.md](architecture.md#the-cores-runtime-interface)).
+`ask` and `serve` take one like any other checkpoint, a local directory or a Hub id.
+
+```bash
+strands-decider ask path/to/model-checkpoint --state "A photo sent with a claim." \
+  --image photo.jpg --choice "What does the photo show?=a car,a bicycle,a house"
+strands-decider serve path/to/model-checkpoint --port 8000
+```
+
+The core renders each request and the transformers backend (`backends/transformers.py`) runs
+the model, encoding the state once when a request asks several questions; on `--device mlx`
+the MLX backend runs it ([Model checkpoints on MLX](#model-checkpoints-on-mlx)). CPU runs
+float32, and CUDA and MPS bf16; `--dtype float32` or `--dtype bfloat16` chooses. A request may
+carry images when `decision_config.json` lists `image` in `inputs`. A request whose `audio` is
+anything but null is refused with 422.
+
+The serving options, as a model checkpoint takes them:
+
+- `--no-prefix-cache`: one full pass per question, the reference on CUDA in bf16.
+- `--max-batch`, `--max-batch-tokens`: bound the questions of one pass over a state.
+- `--max-concurrency` (default 1) and `--queue-timeout` (default 60 s): requests past the
+  limit wait, then get 503, so a burst of long or image requests can't hold several states on
+  the GPU at once. A refused request is answered without waiting.
+- `--max-length N`: serve prompts of up to N tokens instead of `max_length_validated`. A
+  longer prompt gets 422 and is never truncated; a value above the validated length warns.
+- `--revision`: the branch, tag or commit of a checkpoint on the Hub.
+
+`--vision` and `--device-map` are only supported for v1 model checkpoints. `/health` reports the
+backend, device, dtype, longest prompt served, whether images are served, and the concurrency.
+
 ## Asking many questions is nearly free
 
 *The latency table below was measured on v7, a Qwen3 torso. The cache now also forks the
@@ -385,3 +427,64 @@ trainable token embeddings, per-module ranks and quantised base weights. `--dtyp
 (`mlx_engine.DEFAULT_CACHE_LIMIT`); MLX's own default is its memory limit, nearly all of RAM.
 Evaluations run one at a time, because `_fit` keeps a request's option offsets on the engine for
 `_option_idx` to read; the torch engine has the same race (#9).
+
+### Model checkpoints on MLX
+
+On `--device mlx`, a model checkpoint runs through mlx-vlm
+([`backends/mlx.py`](../src/strands_decider/backends/mlx.py)) behind the same decision engine,
+request checks and responses as on the other devices ([Model checkpoints](#model-checkpoints));
+`/health` names the backend `mlx-vlm`. The weights run in the dtype they are stored in unless
+`--dtype` says otherwise, and images are taken whenever the checkpoint's `inputs` list `image`.
+
+```bash
+strands-decider ask CHECKPOINT --device mlx --state "A photo from the support chat." \
+  --image photo.jpg --choice "What does it show?=a person,an animal,food or drink"
+strands-decider serve CHECKPOINT --device mlx --port 8099
+```
+
+The backend runs mlx-vlm's own Gemma 4 classes, unpatched, with an explicit `prefix_bidir` mask
+on every layer and no sliding window. The state is encoded once into KV caches and each question
+runs over them (`--no-prefix-cache`: one full pass per question). Images are resized with the
+core's `resize_image` and prepared by mlx-vlm's image processor with its resize off. The
+backend hands the core the final-norm hidden state, and the core applies the readout.
+
+`strands-decider convert-mlx CHECKPOINT OUT [--bits 8|4]` writes an MLX artifact, bf16 without
+`--bits` ([`backends/mlx_format.py`](../src/strands_decider/backends/mlx_format.py)). `ask`
+and `serve` load it like the checkpoint on `--device mlx` and refuse it on any other device.
+Only the decoder is quantized; the vision and audio encoders and their projections stay bf16,
+and the decision files (`readout.safetensors`, `decision_config.json`, `processor_config.json`,
+the tokenizer) are copied byte for byte. The artifact is written beside `OUT`, reloaded, and
+only then renamed to `OUT`, so a failed conversion leaves nothing. `mlx_vlm.convert` alone would
+lose the readout and quantize the audio projection.
+
+Measured on an M4 Pro (48 GB) with a pre-release E2B model checkpoint, against reference
+outputs from transformers in bf16 on a GPU, one masked pass per prompt:
+
+- Text. On 1,200 prompts (300 in each of four length buckets, about 256 to 8K tokens), bf16
+  agrees on the top code for 99.25% of questions (98.67% to 99.67% per bucket), with mean |Δp|
+  0.0065 and at most 0.086; every disagreement is a near-tie, the reference's top two at most
+  0.084 apart. The 8-bit artifact agrees on 98.83% (98.00% to 99.67%), with mean |Δp| 0.0099
+  and at most 0.225; 11 of its 14 disagreements are within 0.02 in the reference, the widest
+  0.107.
+- Images. On 24 requests over six photographs (one to four images each, an empty state and a
+  1,300-token state), with the reference's pixels from transformers' `Gemma4ImageProcessorPil`,
+  bf16 and 8-bit agree on 24 of 24 top codes, with mean |Δp| 0.0021 and 0.0043 (at most 0.024
+  in bf16).
+- Latency, the state encoded and then one question: a median of 78 ms at about 270 tokens,
+  231 ms at 1,100, 968 ms at 3,900 and 2,471 ms at 7,400 in bf16, and 70, 233, 1,010 and
+  2,485 ms in 8-bit. A one-image request of 350 tokens takes 300 ms (90 ms with the
+  placeholders alone); two, three and four images (630 to 1,140 tokens) take 567, 841 and
+  1,099 ms. `ask` with one image on the 8-bit artifact, model load included, takes 6.0 s.
+- Memory. bf16 holds 8.9 GiB (the audio encoder is not loaded) and peaks at 9.3 GiB at 270
+  tokens and 11.8 GiB at 7,400; 8-bit holds 4.9 GiB and peaks at 5.3 and 7.7 GiB.
+  `convert-mlx --bits 8` wrote the 5.9 GB artifact in 11 s, with a peak footprint of 13.1 GB.
+
+The 12B, 26B-A4B and 31B load strictly and convert to 8 bits (and the 26B-A4B to 4) with the
+same code; their answers on a Mac are not yet measured. A 4-bit E2B has agreed on only 88.9% of
+top codes.
+
+Limits. mlx-vlm is pinned to the release tested, and the backend refuses another at load,
+because it calls mlx-vlm's internals. The model runs on one worker thread, since MLX arrays
+belong to the thread that made them; with `--max-concurrency` above 1, a request's images are
+decoded on its own thread while the worker runs another. There is no cache across requests, and
+`--max-batch` and `--max-batch-tokens` do not apply: questions run one at a time.

@@ -346,7 +346,7 @@ src/strands_decider/              -- published package (inference only)
   cpu_kernels.py  the Gated DeltaNet depthwise causal conv for CPU inference
   mlx_engine.py   serving with the torso on MLX (--device mlx); the engine otherwise infer.py's
   server.py       FastAPI, POST /v1/systemone
-  cli.py          the strands-decider command (ask / serve / convert-mlx / info)
+  cli.py          the strands-decider command (ask / serve / info)
   hf_export.py    a checkpoint as a Hugging Face model folder (safetensors, card, manifest)
   naming.py       release naming helpers (used by hf_export and release scripts)
   vision.py       Qwen3.5 vision-tower engine (`serve --vision`, `ask --image`)
@@ -354,10 +354,7 @@ src/strands_decider/              -- published package (inference only)
                   readout, decision_config.json, the runtime contract
   backends/       runtimes for model checkpoints: transformers.py runs them on PyTorch
                   (CPU, CUDA, MPS) and is the reference runtime, transformers_attention.py
-                  its prefix_bidir attention, images.py the pixels every backend encodes;
-                  mlx.py runs them on Apple silicon through mlx-vlm (--device mlx), and
-                  mlx_format.py loads them into mlx-vlm and writes their MLX artifacts
-                  (convert-mlx)
+                  its prefix_bidir attention, images.py the pixels every backend encodes
   decision.py     model checkpoints behind ask and serve: the core and a backend
   refusals.py     the request errors serve maps to 422 and 503
 
