@@ -143,8 +143,12 @@ class MLXBackend:
         self, state: list[int], questions: list[list[int]], images: Sequence[RenderedImage] = ()
     ) -> np.ndarray:
         """Each question after the shared state under prefix_bidir, seeing no other question:
-        the final-norm hidden state at each question's last token, float32, [questions, hidden]."""
-        pixels = [self.image_processor(image_pixels(im))[0] for im in images]
+        the final-norm hidden state at each question's last token, float32, [questions, hidden].
+        Each image is resized and processed at its own token budget."""
+        pixels = [
+            self.image_processor(image_pixels(im), max_soft_tokens=im.token_budget)[0]
+            for im in images
+        ]
         rows: np.ndarray = self._worker.submit(self._run, state, questions, images, pixels).result()
         return rows
 

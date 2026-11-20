@@ -95,7 +95,10 @@ def _rel(ref, got) -> float:
     return float(np.abs(ref - got).max()) / max(1.0, float(np.abs(ref).max()))
 
 
-@pytest.mark.parametrize("images", [[], IMAGES], ids=["text", "two-images"])
+MIXED = [{"data": IMAGES[0], "token_budget": 70}, IMAGES[1]]
+
+
+@pytest.mark.parametrize("images", [[], IMAGES, MIXED], ids=["text", "two-images", "two-budgets"])
 def test_hidden_states_are_the_transformers_backends(ckpt, kind, reference, ours, images):
     """Every question, over the state or in its own pass, gets the reference's hidden state: no
     window on the sliding layers, the KV-shared layers exact, and each image's vectors at its
@@ -165,7 +168,7 @@ def test_serve_on_mlx(e2b):
 
 def test_a_processor_the_core_refuses_leaves_the_vision_encoder_unloaded(tmp_path):
     """Image requests are refused and text ones answered; the encoder's weights are never read."""
-    path = model_checkpoint(tmp_path / "ckpt", GEMMA4, processor={"max_soft_tokens": 560})
+    path = model_checkpoint(tmp_path / "ckpt", GEMMA4, processor={"max_soft_tokens": 300})
     with pytest.warns(UserWarning, match="max_soft_tokens"):
         engine = load_decision_engine(str(path), device="mlx")
     try:
