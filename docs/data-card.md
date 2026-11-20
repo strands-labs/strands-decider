@@ -156,7 +156,7 @@ One row for each topic. Each sample is a row of the training file that a languag
 <details>
 <summary>Reasoning, math and puzzles</summary>
 
-> **State:** {"question": "Omar makes 9 beads an hour and works 3 hours a day for 4 days. At the end, 3 of them turn out to be damaged and are thrown away. How many good beads does Omar have?", "task": "a word problem with one numeric answer"}
+> **State:** \{"question": "Omar makes 9 beads an hour and works 3 hours a day for 4 days. At the end, 3 of them turn out to be damaged and are thrown away. How many good beads does Omar have?", "task": "a word problem with one numeric answer"\}
 >
 > **Question:** Which option is the answer to the problem?
 >
@@ -167,7 +167,7 @@ One row for each topic. Each sample is a row of the training file that a languag
 <details>
 <summary>Reading, retrieval and grounding</summary>
 
-> **State:** {"passage": "Brennan Marsh Edges Ferrers in Dramatic Finish at the Kingsway Velodrome\n\nBrennan Marsh of Team Aldergrove won the 34th Kingsway Criterium on Sunday, out-sprinting Noor Ferrers of the Crandall Track Club by half a wheel at the line after 96 lap…
+> **State:** \{"passage": "Brennan Marsh Edges Ferrers in Dramatic Finish at the Kingsway Velodrome\n\nBrennan Marsh of Team Aldergrove won the 34th Kingsway Criterium on Sunday, out-sprinting Noor Ferrers of the Crandall Track Club by half a wheel at the line after 96 lap…
 >
 > **Question:** Does the answer state anything the passage does not support?
 >
@@ -200,11 +200,11 @@ One row for each topic. Each sample is a row of the training file that a languag
 <details>
 <summary>Tools, agents and devices</summary>
 
-> **State:** {"tools": [{"name": "get_balance", "description": "Return the current balance of an account.", "parameters": {"type": "object", "properties": {"account_number": {"type": "string"}}, "required": ["account_number"]}}, {"name": "block_card", "description": "Imme…
+> **State:** \{"tools": [\{"name": "get_balance", "description": "Return the current balance of an account.", "parameters": \{"type": "object", "properties": \{"account_number": \{"type": "string"\}\}, "required": ["account_number"]\}\}, \{"name": "block_card", "description": "Imme…
 >
 > **Question:** Given the tools on offer, which reply should the assistant send?
 >
-> **Options:** (1) {"name": "block_card", "arguments": {"card_id": "CRD-77321", "reason"…; (2) Which restaurant did you leave it at, and do you want me to block it…; (3) Don't worry, the card is now blocked and no further charges can go th…; (4) {"name": "block_card", "arguments": {"card_id": "CRD-77321", "reason"…
+> **Options:** (1) \{"name": "block_card", "arguments": \{"card_id": "CRD-77321", "reason"…; (2) Which restaurant did you leave it at, and do you want me to block it…; (3) Don't worry, the card is now blocked and no further charges can go th…; (4) \{"name": "block_card", "arguments": \{"card_id": "CRD-77321", "reason"…
 
 </details>
 
@@ -233,7 +233,7 @@ One row for each topic. Each sample is a row of the training file that a languag
 <details>
 <summary>Language and linguistics</summary>
 
-> **State:** {"sentence": "The masterclass on partimenti by the old maestro Fenzi's last living assistant ended in a shouting match over figured bass.", "context": {"source": "Conservatory bulletin, spring term", "program_note": "Masterclass leader: Sigr. A. Lotti, former…
+> **State:** \{"sentence": "The masterclass on partimenti by the old maestro Fenzi's last living assistant ended in a shouting match over figured bass.", "context": \{"source": "Conservatory bulletin, spring term", "program_note": "Masterclass leader: Sigr. A. Lotti, former…
 >
 > **Question:** Which reading of the sentence does the bulletin's context force?
 >
@@ -266,7 +266,7 @@ One row for each topic. Each sample is a row of the training file that a languag
 <details>
 <summary>Code</summary>
 
-> **State:** {"code": "def f(s):\n s = s.upper()\n s = s[3:] + s[:3]\n return s", "input": "'tea sea salt'", "task": "the return value of a function"}
+> **State:** \{"code": "def f(s):\n s = s.upper()\n s = s[3:] + s[:3]\n return s", "input": "'tea sea salt'", "task": "the return value of a function"\}
 >
 > **Question:** Select the exact return value of f on this input.
 >
