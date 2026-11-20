@@ -161,7 +161,7 @@ strands-decider serve exports/E4B --port 8000
 ```
 
 See
-[The token readout](https://github.com/strands-labs/strands-decider/blob/main/designs/architecture.md#opt-in-the-token-readout)
+[The token readout](https://github.com/strands-labs/strands-decider/blob/main/designs/architecture.md#training-a-token-readout)
 for what the export checks.
 
 ## 4. Evaluate and calibrate the export
@@ -205,5 +205,5 @@ path.
 
 - [The `customize-decider` skill](https://github.com/strands-labs/strands-decider/tree/main/skills/customize-decider) — measure a released model on your data, and train only if the measurement says so.
 - [The v2 recipes](https://github.com/strands-labs/strands-decider/blob/main/training/README.md#the-v2-recipes) — the three steps in the training guide.
-- [The token readout](https://github.com/strands-labs/strands-decider/blob/main/designs/architecture.md#opt-in-the-token-readout) — the design of the readout, the attention and the export.
+- [The token readout](https://github.com/strands-labs/strands-decider/blob/main/designs/architecture.md#training-a-token-readout) — the design of the readout, the attention and the export.
 - [`training/hardware.md`](https://github.com/strands-labs/strands-decider/blob/main/training/hardware.md) — memory, throughput, and length-grouped batching.

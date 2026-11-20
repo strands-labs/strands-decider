@@ -1,8 +1,10 @@
 # Architecture
 
-This document describes the model: the pointer readout, the three question types, the
-training objective and the design decisions behind them. It then gives the runtime interface
-of `strands_decider.core`, which the v2 models use, and ends with the repository layout. Paths
+Strands Decider has two versions. A v1 model scores each option with a pointer head. A v2
+model, the current version, reads the score of each option from a token readout. This
+document describes the two readouts, the three question types, the training objective and
+the design decisions behind them. It then gives the runtime interface of
+`strands_decider.core`, which the v2 models use, and ends with the repository layout. Paths
 are relative to the repository root unless they are links. The published
 `strands_decider` package (inference) lives under `src/strands_decider/`; the training
 code lives under `training/`. An inference module path such as `infer.py` is relative
@@ -10,11 +12,19 @@ to `src/strands_decider/`; a training module path such as `data/teacher.py` is r
 to `training/`. The scripts under `data/generators/` and `data/checks/` are relative to
 the repository root.
 
+The numbers v7 to v19 in this document are research versions from before the first release
+([research/history.md](../research/history.md)), and v19 is the reference recipe of this
+repository. v1 and v2 are the two releases. Their recipes are in `configs/v1/` and
+`configs/v2/`, and the v1 recipes keep their answers close to v19's.
+
 ## The architecture
 
 ![Strands Decider architecture, v1 and v2. In both versions a prompt goes through a pretrained LLM torso once, and the model gives one probability for each option without text generation. v1 reads the hidden states of the options and of the answer position into a pointer head. v2 reads the hidden state at the last token of the prompt into a token readout with one row for each of 255 codes.](figures/architecture.png)
 
-The picture shows the two versions. This section describes the v1 pointer head, and [Opt-in: the token readout](#opt-in-the-token-readout) describes the v2 readout.
+The picture shows the two versions. In both, the prompt goes through the torso once, and the
+model generates no text. The two readouts differ, and each has its own section below.
+
+### The v1 pointer head
 
 Take a pretrained decoder LLM, **discard its language-modelling head**, and score each
 option by comparing the question's answer position against that option's own hidden
@@ -50,7 +60,7 @@ logit_k = <q(h_answer), k(h_option_k)> / sqrt(dim)
 Softmax over those `K` logits is the answer. That is the entire inference path.
 
 **An option's score depends on what it says, not where it sits.** There is no
-per-option parameter anywhere in the model, so nothing can learn that "the first
+per-option parameter anywhere in a v1 model, so nothing can learn that "the first
 option is usually the right one", and nothing caps how many options a question may
 carry. The same weights answer a two-option yes/no and a thirty-option routing
 question, with label sets never seen in training, because the prompt alone establishes
@@ -75,11 +85,70 @@ layers are Gated DeltaNet — linear attention carrying a recurrent state — an
 attention. LoRA covers the projections of both kinds (`lora_targets`). v7 and earlier
 ran Qwen3-1.7B-Base, all full attention. The architecture is the same either way; what
 the hybrid changes is serving ([Asking many questions is nearly free](inference.md#asking-many-questions-is-nearly-free)) and the
-training environment ([Setup](../training/README.md#setup)).
+training environment ([Setup](../training/README.md#setup)). The released v1 models run
+Qwen3.5-2B-Base and four Gemma 4 sizes (E2B, E4B, 12B and 26B-A4B).
+
+### The v2 token readout
+
+A v2 model keeps the idea: one forward pass, and a softmax over the options of the question.
+It changes where the scores come from, and how the torso reads the prompt.
+
+A request renders to a prompt in the `strands-chat` format. This format puts the request in
+one user turn of the Gemma 4 chat format, and gives each option a code:
+
+```
+<bos><|turn>user
+<state>
+Help! My payouts have been failing for 3 days.
+</state>
+<question type="choice">
+Select exactly one option.
+Which team should handle this?
+<options>
+A. billing — payments, invoices, payouts
+B. technical — bugs, outages, API errors
+C. sales — pricing and upgrades
+</options>
+Answer with the code of one option.
+</question><turn|>
+<|turn>model
+```
+
+The readout is one linear map with one row for each of 255 codes. The codes are the
+spreadsheet column names from `A` to `IV`, without `GZ`, so each code is one token of the
+Gemma 4 tokenizer. The readout reads the hidden state of the last prompt token. Row `k`
+gives the score of the option under code `k`, and the rows past the question's option count
+are masked. The model caps the scores with the tanh soft cap that Gemma 4 has on its own
+logits, and divides them by the one temperature in the checkpoint's `decision_config.json`.
+A softmax over the scores that remain is the answer. A `choice` question takes at most 255
+options, the same limit as in v1.
+
+The readout has a row for each code, not for each option. Training shuffles the options of
+a `choice` question, so no code stands for a fixed label, and the model must read the text
+of the option next to the code. A yes/no question and a score question keep their order: a
+yes/no question has the same two options in every request (false, then true), and the
+levels of a score question are ordered.
+
+Each row starts as the base model's language-modelling head row for the token of its code,
+so before training the readout gives the base model's own preference among the codes. The
+model does not use the rest of that head.
+
+The attention changes too. A state token sees all of the state, in both directions, and
+never the question. A question token sees the state and all of its own question, also in
+both directions, and no other question. The encoding of the state thus does not depend on the question. A request
+can carry several questions about one state: the torso encodes the state once, and each
+question reads that encoding.
+
+The options still come from the request, so no retraining is necessary to add a category.
+The v2 models are Gemma 4 base models, from E2B to 31B, with rank-64 LoRA adapters that the
+export merges into the base weights. A v2 checkpoint is thus one directory that holds the
+full model. [Training a token readout](#training-a-token-readout) has the config keys and
+the export.
 
 ### One mechanism, three primitives
 
-All three question types are the same masked softmax read back differently:
+In the two versions, all three question types are the same masked softmax, read back
+differently:
 
 | Primitive  | Options      | Returns                                        |
 | ---------- | ------------ | ---------------------------------------------- |
@@ -124,9 +193,15 @@ The floor is corrected for ordinal smoothing. Training deliberately puts `eps` o
 target on neighbouring levels, so a perfectly fitted model still shows sigma ~
 sqrt(eps). Without that correction a 3-level score capped at 0.68 confidence, making
 the ">= 0.9 act automatically" band of the [routing convention](#the-routing-convention)
-unreachable by construction.
+unreachable by construction. The v2 recipes use no ordinal smoothing, so the correction is
+zero for a v2 model.
 
 ### Training
+
+This section describes the v19 reference recipe, a pointer-head recipe. The v1 release
+recipes build on it, and [training/README.md](../training/README.md#the-v1-release-recipes)
+lists their data and their teachers. The v2 recipes are different, and
+[Training a token readout](#training-a-token-readout) describes them.
 
 The loss has three parts:
 
@@ -158,10 +233,12 @@ genericity is lost. With it, the only strategy that survives gradient descent is
 actually reading the option text. Score questions are the exception — their slots are
 ordinal, so they are only ever *reversed* (rubric and label together), never permuted.
 
-### Opt-in: the token readout
+### Training a token readout
 
-A training config can replace the pointer head with a token readout, the 255-code readout
-of `strands_decider.core` read at the last prompt token. Two keys select it:
+The v2 recipes train a token readout, the 255-code readout of `strands_decider.core` read at
+the last prompt token. They train toward the target of each row only: no teacher, no KL
+term and no ordinal smoothing. Two keys of the training config select the readout and its
+attention:
 
 - `head_type: token_readout`. The head is one linear map, 255 outputs and no bias, on the
   hidden state of the last prompt token. Output k scores the option listed under code k of
@@ -174,8 +251,8 @@ of `strands_decider.core` read at the last prompt token. Two keys select it:
   same cap as the LM head's (`final_logit_softcapping`), saved with the checkpoint as
   `readout_softcap`. The outputs past the question's option
   count are masked.
-- `attention_mode: causal` (the default) or `prefix_bidir`. With `prefix_bidir` the prompt
-  splits where `strands_decider.core.render` says the state ends. A state token sees all of
+- `attention_mode: causal` (the default) or `prefix_bidir`, which the v2 recipes set. With
+  `prefix_bidir` the prompt splits where `strands_decider.core.render` says the state ends. A state token sees all of
   the state, in both directions, and never the question. A question token sees the state and
   all of its own question. The
   full-attention layers take this mask. The sliding-window layers of Gemma 4 take it too,
@@ -251,26 +328,32 @@ directory.
 
 ## Design decisions worth knowing
 
+These decisions come from the pointer-head models. Where a v2 model does something
+different, the item says so.
+
 **Causal attention, read at the right tokens.** The note sketching this architecture likened
 it to BERT, and a bidirectional encoder would pool better in principle. But converting
 a causal LLM to bidirectional attention requires substantial retraining to recover what
 you break. Keeping attention causal uses the pretrained weights exactly as they were
 trained, which matters when the adaptation budget is one 3090. Under causal attention
 the `<answer>` position has read the whole prompt and each option's last token has read
-that option, so they are sound positions to read.
+that option, so they are sound positions to read. A v2 model does not keep this decision:
+it reads the state in both directions, and its rank-64 adapters train with that mask
+([The v2 token readout](#the-v2-token-readout)).
 
 **Head in fp32.** The torso runs bf16; the head is tiny and a low-precision classifier
-is a needless source of calibration error.
+is a needless source of calibration error. A v2 readout multiplies in bf16, as in
+training, and computes the cap and the softmax in float32.
 
 **Ordinal smoothing for scores.** Being one level off is a much smaller error than
 being four off, and plain cross-entropy cannot express that. Score targets put 10% of
-their mass on adjacent levels.
+their mass on adjacent levels. The v2 recipes use no ordinal smoothing.
 
 **Teacher targets only where the teacher is better.** Distillation transfers the
 teacher's behaviour on the prompts it is given. On short classification the frozen 4B
 was no better than the student, and distilling there moved nothing on JevBench (v12);
 on multi-step documents it was far better, and there it helped (v14). Measure the
-teacher against the student on the prompts first.
+teacher against the student on the prompts first. The v2 recipes use no teacher.
 
 **Remove the shortcuts the data allows.** The model learns whatever cheaply predicts the
 label: one fixed question per task taught it to ignore questions (v11), and ContractNLI's
@@ -282,7 +365,8 @@ before believing it (v14).
 **Drop, never truncate.** A prompt cut through its option list would score an option from
 a neighbour's representation. Training and evaluation drop rows over the window; at
 serving time the question's tokens are reserved first and the state is cut from the
-front (`_fit` in `infer.py`).
+front (`_fit` in `infer.py`). A v2 runtime cuts nothing: it refuses a prompt that is longer
+than its length limit.
 
 **Hybrid torsos share the prefix too.** A Gated DeltaNet layer carries convolution and
 recurrent states instead of keys and values. The cache fork (`_expand_cache` in
@@ -290,7 +374,9 @@ recurrent states instead of keys and values. The cache fork (`_expand_cache` in
 and tensors — the layer updates its states and flags in place, so a fork sharing them
 would corrupt the prefix — following decider-2b's `shared_prefix.py`. A layer holding
 any other tensor raises `UnforkableCache`, and the engine falls back to exact batched
-encoding rather than guess whether it has a batch dimension.
+encoding rather than guess whether it has a batch dimension. This item is about the
+Qwen3.5 torso of the pointer-head models. A v2 runtime can cache the keys and values of the
+state for its questions ([The core's runtime interface](#the-cores-runtime-interface)).
 
 ## The core's runtime interface
 
