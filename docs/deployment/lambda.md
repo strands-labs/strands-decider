@@ -118,6 +118,18 @@ cat answer.json
 
 Same JSON works as an SQS message body or an EventBridge event `detail`.
 
+### Delete it
+
+```bash
+npx cdk destroy                    # the default model
+npx cdk destroy -c model=<Hub id>  # any other deployed model
+```
+
+Removes the function, capacity provider, VPC, ECR repository, CodeBuild
+project, log groups, and IAM roles. Log groups default to
+`RemovalPolicy.RETAIN`; delete them from the CloudWatch console if you want
+to drop their retained cost.
+
 ## See also
 
 - **CPU stack:** [`deploy/lambda/`](https://github.com/strands-labs/strands-decider/tree/main/deploy/lambda) — [full README](https://github.com/strands-labs/strands-decider/blob/main/deploy/lambda/README.md). Exhaustive measurements, precision notes, image-size tradeoffs, cost breakdown, and debugging.
