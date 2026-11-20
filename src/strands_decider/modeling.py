@@ -30,7 +30,7 @@ from safetensors import safe_open
 from transformers import AutoConfig, AutoModel, AutoTokenizer
 
 from . import expert_lora, prefix_split_attention
-from .core import CODE_TOKEN_IDS, MAX_CODES
+from .core import CODE_TOKEN_IDS, MAX_CODES, DecisionConfig, load_readout
 
 # Large negative rather than -inf: keeps softmax finite under autocast/bf16, where
 # -inf can produce NaNs if an entire row is masked by a malformed batch.
@@ -515,6 +515,12 @@ class StrandsDeciderModel(nn.Module):
             model.attach_lora()
         return model
 
+    def set_readout(self, checkpoint: str) -> None:
+        """Set the token readout to the one of model checkpoint `checkpoint`, a directory
+        (training.export_v2, a released v2 model)."""
+        assert isinstance(self.head, TokenReadoutHead)
+        self.head.proj.weight.data.copy_(torch.tensor(load_readout(checkpoint)))
+
     def attach_expert_lora(self) -> None:
         c = self.config
         alpha = c.lora_alpha if c.expert_lora_alpha is None else c.expert_lora_alpha
@@ -719,8 +725,27 @@ class StrandsDeciderModel(nn.Module):
     ) -> StrandsDeciderModel:
         """Load checkpoint `path` (a local directory or a Hub id) to serve it, or with
         `trainable` to train it on: the adapter trains, and the attention is the one training
-        uses. `host_embeddings`, when given, replaces the checkpoint's setting."""
+        uses. `host_embeddings`, when given, replaces the checkpoint's setting. A model
+        checkpoint (training.export_v2, a released v2 model) loads as its merged weights and
+        its readout, to evaluate."""
+        from .decision import is_model_checkpoint  # here: decision imports this module
+
         path = checkpoint_dir(path)
+        if is_model_checkpoint(path):
+            decision = DecisionConfig.load(path)
+            config = StrandsDeciderConfig(
+                base_model=path,
+                head_type="token_readout",
+                attention_mode=decision.attention_mode,
+                max_length=decision.max_length_validated,
+                temperature=decision.temperature,
+                use_lora=False,
+            )
+            model = cls.from_pretrained_base(
+                config, device_map=device_map, attn_implementation=attn_implementation
+            )
+            model.set_readout(path)
+            return model
         config = StrandsDeciderConfig.from_json(config_path(path))
         config.base_revision = base_revision(path, config)
         if host_embeddings is not None:

@@ -42,6 +42,7 @@ from torch.utils.data import DataLoader
 
 from strands_decider import core
 from strands_decider.confidence import derive_confidence, derive_score_confidence
+from strands_decider.decision import is_model_checkpoint
 from strands_decider.infer import EngineConfig, SystemOneEngine
 from strands_decider.modeling import (
     MASK_VALUE,
@@ -490,6 +491,19 @@ def calibrate_checkpoint(
 
     model.config.temperature = float(t)
     model.config.temperature_by_kind = by_kind
+    if is_model_checkpoint(checkpoint):  # its decision_config.json holds one temperature
+        decision = os.path.join(checkpoint, core.config.FILENAME)
+        with open(decision, encoding="utf-8") as fh:
+            settings = json.load(fh)
+        settings["temperature"] = float(t)
+        with open(decision + ".tmp", "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(settings, indent=2) + "\n")
+        os.replace(decision + ".tmp", decision)  # never a half-written file
+        return {
+            "temperature": float(t),
+            "before": before["overall"],
+            "after": global_after["overall"],
+        }
     # The same file `load` reads: strands_decider_config.json, or the legacy name.
     with open(config_path(checkpoint), "w", encoding="utf-8") as fh:
         fh.write(model.config.to_json())

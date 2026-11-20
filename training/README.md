@@ -350,3 +350,9 @@ v2 training data is not in this repository. The steps are:
    ```bash
    python -m training.export_v2 checkpoints/strands-decider-E2B-gemma4-v2-2611 exports/E2B
    ```
+
+4. Use the exported directory as a model. `python -m training.evaluate eval` and `calibrate`
+   take it, and `calibrate` writes its one temperature into `decision_config.json`.
+   `init_from: <exported directory>` in a training config fine-tunes it: a new LoRA adapter
+   trains on the merged weights, and the readout trains on from the exported one. An export
+   of that run records the same base model as the directory it started from.

@@ -123,6 +123,38 @@ position. The learning rates are starting points, not measured optima for fine-t
 smoke run's loss does not fall, or the first full seed moves the dev half less than expected,
 try `lr` 2e-4 on one seed before you train three.
 
+## A v2 model
+
+For a v2 model, start from the training config of its size in `configs/v2/`. That file holds
+the LoRA, attention and precision settings of the size. Copy it to `work/train.yaml` and change
+these keys:
+
+```yaml
+# remove base_model and base_revision, and add:
+init_from: "work/models/<name>"   # the local copy of the v2 model (Phase 3), or its Hub id
+train_files: ["work/train/train.jsonl", "work/train/public.jsonl"]
+# remove val_files, and add:
+val_fraction: 0.03
+val_split_seed: 0
+micro_batch_size: 8
+grad_accum: 4               # 32 rows per optimizer step; the release recipe uses thousands
+seed: 0
+output_dir: "work/ckpt/s0"
+log_every: 20
+eval_every: 500
+```
+
+Leave the other keys as they are. These points differ from the sections around this one:
+
+- No `kl_frozen_*` keys: training refuses them for a v2 model.
+- The smoke run prints `continuing from <model>` and then `loading base model <model>`.
+- The memory table of "Hosts" is for v1. `slice_char_budget` caps the size of one forward
+  pass. If the smoke run stops with an out-of-memory error, halve it.
+- These settings are a start, not a measured optimum for fine-tuning. The rule of Phase 7
+  decides: keep the released model if the new one is not better on the test half.
+- Soup, calibrate and compare as SKILL.md "Version 1 or version 2" says: `training.export_v2`
+  of the three seeds, then `calibrate` and `eval` on the exported directory.
+
 ## Smoke run
 
 ```bash

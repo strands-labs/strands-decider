@@ -68,6 +68,7 @@ from safetensors import safe_open
 from safetensors.torch import load_file, save_file
 
 from strands_decider import core, expert_lora
+from strands_decider.decision import is_model_checkpoint
 from strands_decider.modeling import StrandsDeciderConfig, config_path, load_head_state
 from training.soup import check_one_recipe, member_records
 
@@ -491,12 +492,21 @@ def export_v2(
                 f"{cfg.temperature_by_kind} are not carried over; pass --temperature for a "
                 "value fitted on the exported model."
             )
+    base = base_dir(cfg.base_model, cfg.base_revision)
     hub_id = base_model or cfg.base_model
+    revision = cfg.base_revision or os.path.basename(os.path.normpath(base))
+    if is_model_checkpoint(base):
+        # The run trained on a model checkpoint (a released v2 model): its base is this one's.
+        released = core.DecisionConfig.load(base).provenance
+        if base_model not in (None, released.base_model):
+            raise ValueError(
+                f"--base-model {base_model}: the run's base is a model checkpoint of "
+                f"{released.base_model}; leave --base-model out"
+            )
+        hub_id, revision = released.base_model, released.base_revision
     if not _HUB_ID.fullmatch(hub_id) or os.path.isdir(hub_id):
         raise ValueError(f"{hub_id}: provenance needs the base's Hub id; pass --base-model")
-    base = base_dir(cfg.base_model, cfg.base_revision)
     names, inputs = _base_inputs(base)
-    revision = cfg.base_revision or os.path.basename(os.path.normpath(base))
     record = _optional_json(os.path.join(checkpoint, BASE_RECORD))
     if record is not None:
         if record["digest"] != base_digest(base):
