@@ -221,7 +221,7 @@ def test_the_torso_config_and_weights_load_at_the_pinned_revision(monkeypatch):
 
     def fake_model(name, **kwargs):
         revisions.append(("model", kwargs.get("revision")))
-        return transformers.Qwen3Model(
+        model = transformers.Qwen3Model(
             transformers.Qwen3Config(
                 vocab_size=6,
                 hidden_size=32,
@@ -232,6 +232,7 @@ def test_the_torso_config_and_weights_load_at_the_pinned_revision(monkeypatch):
                 head_dim=8,
             )
         )
+        return model, {"missing_keys": []}
 
     monkeypatch.setattr(transformers.AutoConfig, "from_pretrained", fake_config)
     monkeypatch.setattr(transformers.AutoModel, "from_pretrained", fake_model)
