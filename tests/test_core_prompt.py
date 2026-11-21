@@ -633,6 +633,34 @@ def test_image_spans_and_control_ids():
     assert all(q.images == r.images for q in r.questions.values())
 
 
+def test_each_image_gets_its_own_token_budget():
+    """An image's own budget, else the request's, else the server's default, and never more than
+    the server's limit. Gemini (`resolution`) and OpenAI (`detail`) size each image too."""
+    tok = gemma4_tokenizer()
+    names = ["stripes-300x40.jpg", "rings-90x120.webp"]
+    a, b = (image_b64(n) for n in names)
+
+    def budgets(request: dict, **limits) -> list[tuple[int, int]]:
+        r = render(_r({**CASES["support_ticket"], **request}), tok, **limits)
+        return [(i.token_budget, i.end - i.start) for i in r.images]
+
+    def expected(*budgets: int) -> list[tuple[int, int]]:
+        sizes = [IMAGE_FILES[n][1:] for n in names]
+        return [(b, soft_tokens(*size, b)) for b, size in zip(budgets, sizes, strict=True)]
+
+    assert budgets({"images": [a, b]}) == expected(280, 280)
+    assert budgets({"images": [{"data": a, "token_budget": 70}, b]}) == expected(70, 280)
+    both = {"images": [a, {"data": b, "token_budget": 140}], "image_token_budget": 70}
+    assert budgets(both) == expected(70, 140)
+    over = {"images": [a, {"data": b, "token_budget": 560}]}
+    with pytest.raises(
+        ValueError, match="image 1: a token budget of 560 is over this server's limit of 280"
+    ):
+        budgets(over)
+    assert budgets(over, max_token_budget=1120) == expected(280, 560)
+    assert budgets({"images": [a, b]}, token_budget=560, max_token_budget=140) == expected(140, 140)
+
+
 def test_images_are_checked_when_rendered():
     for bad in (None, "", 0, {}, "aGk=", [1], [None]):
         with pytest.raises(ValueError, match="images"):
@@ -759,7 +787,7 @@ def test_s_is_a_token_boundary(controls):
     requests = [*(WITH_CONTROLS if controls else PLAIN_TEXT)]
     requests += IMAGES_WITH_CONTROLS if controls else IMAGES_PLAIN_TEXT
     for req in requests:
-        (state, _, questions), rendered = _parts(_r(req), None), render(_r(req), tok)
+        (state, _, questions), rendered = _parts(_r(req), None, 280, None), render(_r(req), tok)
         for name, q in questions.items():
             assert encode(tok, state + q.prompt) == list(rendered.questions[name].ids)
     rng = random.Random(f"s-{controls}")
