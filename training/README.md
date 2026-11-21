@@ -323,7 +323,7 @@ four Gemma 4 configs differ only in `base_model` and `output_dir`
 
 `configs/v2/` holds one training config for each Gemma 4 size: E2B, E4B, 12B, 26B-A4B and
 31B. Each one trains a token readout with the `strands-chat` prompt and `prefix_bidir`
-attention ([docs/architecture.md](../designs/architecture.md#opt-in-the-token-readout)). The
+attention ([docs/architecture.md](../designs/architecture.md#training-a-token-readout)). The
 v2 training data is not in this repository. The steps are:
 
 1. Convert the v2 rows (`train.jsonl`, `dev.jsonl`) into training rows. The converter drops
