@@ -21,7 +21,7 @@ RUN apt-get update \
 
 # The Lambda Runtime Interface Client turns the container into a Lambda target: it reads
 # AWS_LAMBDA_RUNTIME_API and routes invocations to the Python handler named in CMD.
-RUN pip install awslambdaric==3.1.0
+RUN pip install awslambdaric==4.2.3
 
 # ---- Download the model into the image ---------------------------------------------------------
 FROM base AS model
