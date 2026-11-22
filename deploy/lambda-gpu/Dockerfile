@@ -35,8 +35,10 @@ RUN SETUPTOOLS_SCM_PRETEND_VERSION=0.0.0+lambda-gpu \
 COPY deploy/lambda-gpu/scripts/prepare_model.py ./
 ARG MODEL
 ARG MODEL_REVISION=main
+# A v2 checkpoint holds its own weights and names no base model, so prepare_model.py writes
+# nothing to HF_HOME. Create it anyway so `du` and the final stage's COPY find it.
 RUN python prepare_model.py "${MODEL}" "${MODEL_REVISION}" /tmp/out \
-    && mkdir -p /model && mv /tmp/out/checkpoint /model/checkpoint \
+    && mkdir -p /model /opt/hf && mv /tmp/out/checkpoint /model/checkpoint \
     && du -sh /model/checkpoint /opt/hf
 
 # ---- Final runtime image -----------------------------------------------------------------------
@@ -54,8 +56,9 @@ RUN abi=$(python -c "import torch; print(str(torch._C._GLIBCXX_USE_CXX11_ABI).up
     pip install "https://github.com/Dao-AILab/causal-conv1d/releases/download/v${CAUSAL_CONV1D_VERSION}/causal_conv1d-${CAUSAL_CONV1D_VERSION}+cu12torch2.7cxx11abi${abi}-cp311-cp311-linux_x86_64.whl"
 
 COPY --from=model /model /opt/model
-# prepare_model.py also materialized the base model into HF_HOME so transformers.AutoConfig /
-# AutoModelForCausalLM resolve the base model offline. Copy the cache into the final image.
+# For a v1 adapter, prepare_model.py also materialized the base model into HF_HOME so
+# transformers.AutoConfig / AutoModelForCausalLM resolve it offline. Copy the cache into the
+# final image (empty for a v2 checkpoint).
 COPY --from=model /opt/hf /opt/hf
 COPY deploy/lambda-gpu/function/handler.py ./
 
