@@ -103,7 +103,11 @@ def _materialize_base(hub_id: str, revision: str) -> None:
 def main(model_id: str, revision: str, out: str) -> None:
     dst = os.path.join(out, "checkpoint")
     _git_clone(f"https://huggingface.co/{model_id}", revision, dst)
-    # strands-decider's adapter config is `strands_decider_config.json` (not `config.json`), and
+    # A v2 decision checkpoint carries `decision_config.json` and its own full weights, so there
+    # is no base model to download.
+    if os.path.exists(os.path.join(dst, "decision_config.json")):
+        return
+    # A v1 adapter's config is `strands_decider_config.json` (not `config.json`), and
     # provenance.json carries the pinned base-model revision the adapter was trained on.
     sd_cfg_path = os.path.join(dst, "strands_decider_config.json")
     prov_path = os.path.join(dst, "provenance.json")
