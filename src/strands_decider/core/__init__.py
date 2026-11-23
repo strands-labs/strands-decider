@@ -10,6 +10,7 @@ from __future__ import annotations
 from .codes import CODE_TOKEN_IDS, CODES, CONTROL_TOKEN_IDS, MAX_CODES
 from .config import FORMAT_VERSION, INTERFACE, DecisionConfig
 from .images import (
+    TOKEN_BUDGETS,
     check_decoded_size,
     check_image_processor,
     decode_image,
@@ -31,7 +32,7 @@ from .readout import (
     question_probabilities,
     read,
 )
-from .request import Request
+from .request import ImageInput, Request
 from .runtime import NO_VISION, Backend, attention_mask, evaluate
 from .tokenizer import load_tokenizer, prepare_tokenizer
 
@@ -44,8 +45,10 @@ __all__ = [
     "INTERFACE",
     "MAX_CODES",
     "NO_VISION",
+    "TOKEN_BUDGETS",
     "Backend",
     "DecisionConfig",
+    "ImageInput",
     "RenderedImage",
     "RenderedQuestion",
     "RenderedRequest",
