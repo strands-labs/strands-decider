@@ -322,88 +322,34 @@ works and the measurements.
 
 ## About the model
 
-`strands-decider-2B`, the first model of the family, has 1.9 billion parameters. It answers a
-question in a median 115 ms on an RTX 3090 and also serves on an Apple-silicon Mac or on CPU,
-and many questions about one text are cheap, because the text is read once and each question
-adds only its own tokens
-([designs/inference.md](designs/inference.md#asking-many-questions-is-nearly-free)). Its
-accuracy and calibration are measured on JevBench, a third-party benchmark for this class of
-model ([Performance](#performance)).
+One forward pass, no generation. A pretrained decoder LLM torso reads the prompt, and a small
+readout turns the final hidden states into a probability over the options of the question. Three
+question types come out of the same masked softmax: `noul` (yes/no), `choice` (one of N), `score`
+(an ordered rubric). Options come from the request, so label sets are not baked into the weights —
+no retraining to add a category, and no option ceiling other than the schema's 255. Many questions
+about one text are cheap: the text is read once and each question adds only its own tokens
+([designs/inference.md](designs/inference.md#asking-many-questions-is-nearly-free)).
 
+**Two readouts.** v1 uses a pointer head of about a million parameters that compares the hidden
+state at the `<answer>` position against each option's last token; the torso is adapted with a
+rank-16 LoRA. **v2** replaces the pointer head with a token readout over 255 single-token option
+codes (`A`..`IV`), read off the hidden state at the last prompt token, with the state encoded
+once under bidirectional attention so several questions share it. v2 ships on five Gemma 4 sizes
+(E2B – 31B) and is more accurate than v1 at every size
+([designs/architecture.md](designs/architecture.md#the-architecture)).
 
-## Model Architecture
+**Accuracy, calibration, latency.** v2's five models score 87.4 – 93.1 on JevBench (231 tasks)
+and 57.1 – 71.5 on Decision Index 0.3, with median H100 latency of 62 – 99 ms per question
+([Model options](#model-options)). v1's reference Qwen3.5 2B scores 180 / 231 on JevBench with
+Brier 0.280 and answers in a median 115 ms on an RTX 3090 and 153 ms on an M3 Pro
+([evaluation/results.md](evaluation/results.md#v1-the-released-model)). JevBench is a third-party
+benchmark for this class of model; 231 tasks are few, so treat differences under about ten tasks
+between two single runs as unresolved ([evaluation/README.md](evaluation/README.md)).
 
-The core idea: take a pretrained decoder LLM torso ([Qwen3.5-2B-Base](https://huggingface.co/Qwen)),
-**discard its language-modelling head** — taking away its ability to generate text — and
-replace it with a small **pointer head** of about a million parameters. The head scores each
-option by comparing the hidden state at the `<answer>` position against the hidden state at
-that option's own last token. One forward pass, no generation, no decoding loop. The torso is
-adapted with a rank-16 LoRA adapter, and the head runs in fp32.
-
-Because the head holds no per-option parameters, nothing can learn that "the first option is
-usually right", nothing caps how many options a question may carry, and label sets are
-defined by the request rather than baked into the weights. Three question types come out of
-the same masked softmax, read back differently: `noul` (yes/no), `choice` (one of N) and
-`score` (an ordered rubric).
-
-As you browse the research, you will find that this is the second major iteration of the
-pointer-head architecture. The first used a slot head, which mapped the final hidden state to a
-fixed set of slots and performed significantly worse. Every change since is captured in the
-research so you can follow along with the work. The reference pointer-head model is **v1**
-(`strands-decider-2B-qwen3.5-v1-2610`; [designs/naming.md](designs/naming.md) explains the name).
-The current release line, **v2**, drops the pointer head for a token readout over 255 single-token
-option codes, ships on five Gemma 4 sizes (E2B – 31B), and is more accurate at every size
-([Model options](#model-options), [designs/architecture.md](designs/architecture.md#the-v2-token-readout)).
-It trains on a new, balanced data mix of 246,678 rows, about twice v21's: it adds code tasks,
-new rule-application rows (apply a written policy to a case) and rows from more public datasets,
-so that the mix follows the kinds of decisions in the evaluations. Its teacher is
-gemma-4-31B-it, and training keeps its answers close to the released v19. The released
-checkpoint is a soup of three training runs: their LoRA updates and head scores averaged
-exactly, then calibrated
-([evaluation/results.md](evaluation/results.md#v1-the-released-model)).
-`strands-decider-2B-hobson-v21` and `-v19` stay published.
-[designs/architecture.md](designs/architecture.md#the-architecture) has the full design, the
-training objective, and the decisions behind them.
-
-## Performance
-
-Three targets matter: **accuracy**, **calibration** and **latency**. v1, v21 and v19 measure:
-
-| Measurement | v1 | v21 | v19 | Source |
-| --- | --- | --- | --- | --- |
-| JevBench v1 public set, 231 tasks, accuracy | 0.779 (180 of 231); its three seeds 179.7 ± 3.8 | 0.762 (176 of 231); six-seed mean 0.758 (175.0, SD 2.4) | 0.723 (167 of 231) | [evaluation/results.md](evaluation/results.md#v1-the-released-model) |
-| JevBench Brier score / expected calibration error | 0.280 / 0.072 | 0.323 / 0.064 | 0.342 / 0.052 | [evaluation/README.md](evaluation/README.md) |
-| Tiers (this repository's split of the public tasks): easy / standard / hard | 1.000 / 0.931 / 0.586 | 1.000 / 0.931 / 0.550 | 1.000 / 0.875 / 0.505 | [evaluation/jevbench.md](evaluation/jevbench.md#board-position-v142-25-september-2026) |
-| Latency per JevBench question, RTX 3090 under WSL2, median / 95th percentile | same architecture and size as v19 | same architecture and size as v19 | 115 ms / 299 ms | [evaluation/results.md](evaluation/results.md#summary) |
-| Latency per question, M3 Pro (Apple silicon), warm median, under 300 tokens / all tasks | same architecture and size as v19 | same architecture and size as v19 | 153 ms / 234 ms | [evaluation/results.md](evaluation/results.md#serving-on-a-mac-accuracy-and-latency) |
-
-Every task in the easy tier is answered correctly, and the nearest comparison is
-`decider-2b`, which shares v19's torso with a different recipe
-([evaluation/jevbench.md](evaluation/jevbench.md#against-the-nearest-open-systems)).
-
-v1's column is measured through `main` (the training harness gives 181; one task is a near tie).
-v1 also answers code questions: 0.836 on 1,996 held-out code tasks
-([evaluation/results.md](evaluation/results.md#v1-the-released-model)).
-
-Read the v21 and v19 columns as two single runs, not as a measured gain. Trained on one
-host with six seeds each, the v19 recipe and v21's average 172.8 and 172.3 JevBench tasks:
-the same accuracy. v21's Brier score is lower on that host (0.331 against 0.341), and the
-two recipes differ by the paraphrases and the distillation only.
-
-v19's JevBench figures are at the 3072-token window the run was preregistered at; the recipe
-saves a 4096-token window, at which v19 scores 168. And 231 tasks are few: six retrains of
-the v17 recipe had a standard deviation of 3.2 tasks, so treat a difference under about 10
-tasks between two single runs as unresolved. [evaluation/README.md](evaluation/README.md)
-has the scripts and the limitations, and links the results by version and the board
-position with its caveats.
-
-## Why 2B?
-
-Two reasons. First, **experimentation**: at 1.9 billion parameters you can serve the model,
-and retrain the whole recipe, on hardware you already have — about 11 hours on one RTX 3090,
-and serving works on an Apple-silicon Mac. That makes trying an idea fast and low-risk.
-Second, ~2B parameters looks like a sweet spot: small enough to experiment with, large enough
-to do meaningful work.
+**Why a small model.** At 1.9 B (v1 Qwen3.5), or an E2B / E4B v2, you can serve the model and
+retrain the whole recipe on hardware you already have — about 11 hours on one RTX 3090, and
+serving works on an Apple-silicon Mac or on CPU. That makes trying an idea fast and low-risk,
+while leaving the 12B, 26B-A4B and 31B v2 sizes for when accuracy matters more than footprint.
 
 ## What can I do with it?
 
@@ -439,22 +385,6 @@ as an agent built with the [Strands Agents SDK](https://github.com/strands-agent
 a coding CLI. If your agent supports skills, install the folder where it looks for skills. If not,
 tell the agent to read `skills/customize-decider/SKILL.md` and follow it. Then ask it to evaluate
 Strands Decider on your task.
-
-## Benchmarking inference performance
-
-[`benchmark/`](benchmark/README.md) measures how a serving change affects the configured models in
-one compute environment. It runs the same synthetic workload against an accepted baseline and a
-candidate, then records peak requests per second, concurrency-1 latency, optional cost per
-1 million decisions, and a separate reliability gate. It benchmarks managed local servers or an
-already-running HTTP endpoint:
-
-```bash
-python -m benchmark.runner run local
-python -m benchmark.runner run local MODEL  # one model only
-python -m benchmark.runner compare local MODEL CANDIDATE_DIR
-```
-
-Full runs also create environment-level throughput and latency graphs with one line per model.
 
 ## Training
 
