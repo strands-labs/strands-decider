@@ -53,17 +53,16 @@ The easiest place to get started is through the `strands-decider` cli:
 pip install strands-decider
 ```
 
-On an Apple-silicon Mac, `--device mlx` runs the model through MLX, 1.4 to 1.6x faster than MPS.
-It needs the `mlx` extra, which ships with the next release; until then, install from a clone with
-`pip install -e ".[mlx]"`. The `cuda`, `mps` and `cpu` extras name the other devices
-([designs/inference.md](designs/inference.md#environments-for-serving)).
-The example outputs below are from `strands-decider-2B-qwen3.5-v1-2610`, recorded with
-`--device cpu`; other devices differ in the last digits.
+The examples below use `strands-decider-E2B-gemma4-v2-2611`, the smallest v2 model: it fits on a
+24 GB GPU and serves on CPU. The `cuda`, `mps` and `cpu` extras name the devices
+([designs/inference.md](designs/inference.md#environments-for-serving)); on Apple silicon,
+`--device mlx` runs the v1 Qwen3.5 model 1.4 to 1.6x faster than MPS. Example outputs below are
+illustrative; other devices and models differ in the last digits.
 
 ### Choice question
 You can ask the model to choose based on some state and a question:
 ```bash
-strands-decider ask StrandsAgents/strands-decider-2B-qwen3.5-v1-2610 \
+strands-decider ask StrandsAgents/strands-decider-E2B-gemma4-v2-2611 \
   --state "Help! My payouts have been failing for 3 days! " \
   --choice "Which team should handle this?=billing,sales,retail" 
 ```
@@ -80,7 +79,7 @@ choice_0 -> billing (confidence 0.659)
 You can also ask the model a Yes/No question:
 
 ```bash
-strands-decider ask StrandsAgents/strands-decider-2B-qwen3.5-v1-2610 \
+strands-decider ask StrandsAgents/strands-decider-E2B-gemma4-v2-2611 \
   --state "Help! My payouts have been failing for 3 days! " \
   --noul "Does this convey urgency?" 
 ```
@@ -95,7 +94,7 @@ Closer to 1 is leaning more toward Yes
 ### Score question
 Or give a question a score:
 ```bash
-strands-decider ask StrandsAgents/strands-decider-2B-qwen3.5-v1-2610 \
+strands-decider ask StrandsAgents/strands-decider-E2B-gemma4-v2-2611 \
   --state "Help! My payouts have been failing for 3 days! " \
   --score "How frustrated is the writer?=calm,frustrated,depressed"
 ```
@@ -113,7 +112,7 @@ score_0 score = 1.03 (confidence 0.509)
 You can combine multiple questions into a single command. This is more efficient as you only need to load the state for the model once:
 
 ```bash
-strands-decider ask StrandsAgents/strands-decider-2B-qwen3.5-v1-2610 \
+strands-decider ask StrandsAgents/strands-decider-E2B-gemma4-v2-2611 \
   --state "Help! My payouts have been failing for 3 days! " \
   --choice "Which team should handle this?=billing,sales,retail" \
   --noul "Does this convey urgency?" \
@@ -139,7 +138,7 @@ strands-decider ask StrandsAgents/strands-decider-2B-qwen3.5-v1-2610 \
 
 You can also run the model as a server, and ask questions via http requests:
 ```bash
-strands-decider serve StrandsAgents/strands-decider-2B-qwen3.5-v1-2610 --port 8000
+strands-decider serve StrandsAgents/strands-decider-E2B-gemma4-v2-2611 --port 8000
 ```
 
 ```bash
@@ -158,7 +157,7 @@ curl -s localhost:8000/v1/systemone \
 
   ```bash
   {
-    "model": "strands-decider-2B-qwen3.5-v1-2610",
+    "model": "strands-decider-E2B-gemma4-v2-2611",
     "answers": {
       "is_urgent": {
         "type": "noul",
@@ -176,23 +175,19 @@ curl -s localhost:8000/v1/systemone \
 
 ### Images
 
-Qwen3.5-2B-Base is natively multimodal. With `--vision` the server keeps its vision tower,
-and a request may carry `images` (base64) as part of the state; the published checkpoints
-(v1, and hobson-v21 and v19 before it) answer over them with no image training. Needs `pip install "strands-decider[vision]"` and
-transformers 5.18 or later.
+v2 Gemma 4 models accept images directly — no `--vision` flag or extra install needed:
 
 ```bash
-strands-decider serve StrandsAgents/strands-decider-2B-qwen3.5-v1-2610 --vision --port 8000
-strands-decider ask StrandsAgents/strands-decider-2B-qwen3.5-v1-2610 --state "" --image page.png \
+strands-decider serve StrandsAgents/strands-decider-E2B-gemma4-v2-2611 --port 8000
+strands-decider ask StrandsAgents/strands-decider-E2B-gemma4-v2-2611 --state "" --image page.png \
   --noul "Is the signature block filled in?"
 ```
 
-v19 matches an image-trained 2B decider on accuracy, and on NaturalBench is much better
-calibrated (ECE 0.014 against 0.080). v21 has v19's image accuracy, is better calibrated on
-POPE, and is more confident than v19 when the image is missing. v1 has v21's image accuracy;
-with the image missing it is more overconfident than v21 on POPE
-([designs/images.md](designs/images.md#v1)). See
-[designs/images.md](designs/images.md) for the request shape, how it works and the measurements.
+From the HTTP API, pass base64 images in the `images` field of the state. For the v1 Qwen3.5 model,
+`--vision` keeps the base model's vision tower and needs `pip install "strands-decider[vision]"`;
+v19 matches an image-trained 2B decider on accuracy, and on NaturalBench is much better calibrated
+(ECE 0.014 against 0.080). See [designs/images.md](designs/images.md) for the request shape, how it
+works and the measurements.
 
 ### Deploying it
 
