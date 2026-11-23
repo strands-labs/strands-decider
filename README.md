@@ -249,9 +249,8 @@ for example `amazon/strands-decider-E4B-gemma4-v1-2610`.
 
 [`strands-decider-2B-qwen3.5-v1-2610`](https://huggingface.co/StrandsAgents/strands-decider-2B-qwen3.5-v1-2610)
 is the reference v1 model: 1.9 B parameters on Qwen3.5-2B-Base, pointer head, JevBench 180 / 231,
-Brier 0.280, about 4.5 GB in bf16. It is the only v1 checkpoint that takes images (`--vision`,
-needs `pip install "strands-decider[vision]"`), and the only one that runs through MLX on an
-Apple-silicon Mac.
+Brier 0.280, about 4.5 GB in bf16. It is the only v1 checkpoint that takes images (via the
+`--vision` flag), and the only one that runs through MLX on an Apple-silicon Mac.
 
 Four more v1 models on the Gemma 4 instruction-tuned bases (`google/gemma-4-*-it`, Apache-2.0),
 same pointer head and same three question types, text only:
@@ -322,8 +321,8 @@ strands-decider ask StrandsAgents/strands-decider-E2B-gemma4-v2-2611 --state "" 
 See [designs/images.md](designs/images.md) for the request shape, how it works and the measurements.
 
 > **v1 note.** The v1 Gemma 4 models are text-only. The v1 Qwen3.5 model takes images with the
-> `--vision` flag and `pip install "strands-decider[vision]"`; v19 matches an image-trained 2B
-> decider on accuracy, and on NaturalBench is much better calibrated (ECE 0.014 against 0.080).
+> `--vision` flag; v19 matches an image-trained 2B decider on accuracy, and on NaturalBench is
+> much better calibrated (ECE 0.014 against 0.080).
 
 ## About the model
 
