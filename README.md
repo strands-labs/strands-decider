@@ -310,7 +310,8 @@ lists every source with its licence.
 
 ## Images
 
-v2 Gemma 4 models accept images directly — no `--vision` flag or extra install needed:
+Strands Decider answers over images: pass `--image page.png` on the CLI, or base64 images in the
+`images` field of the state over HTTP.
 
 ```bash
 strands-decider serve StrandsAgents/strands-decider-E2B-gemma4-v2-2611 --port 8000
@@ -318,11 +319,11 @@ strands-decider ask StrandsAgents/strands-decider-E2B-gemma4-v2-2611 --state "" 
   --noul "Is the signature block filled in?"
 ```
 
-From the HTTP API, pass base64 images in the `images` field of the state. For the v1 Qwen3.5 model,
-`--vision` keeps the base model's vision tower and needs `pip install "strands-decider[vision]"`;
-v19 matches an image-trained 2B decider on accuracy, and on NaturalBench is much better calibrated
-(ECE 0.014 against 0.080). See [designs/images.md](designs/images.md) for the request shape, how it
-works and the measurements.
+See [designs/images.md](designs/images.md) for the request shape, how it works and the measurements.
+
+> **v1 note.** The v1 Gemma 4 models are text-only. The v1 Qwen3.5 model takes images with the
+> `--vision` flag and `pip install "strands-decider[vision]"`; v19 matches an image-trained 2B
+> decider on accuracy, and on NaturalBench is much better calibrated (ECE 0.014 against 0.080).
 
 ## About the model
 
