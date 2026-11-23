@@ -245,10 +245,16 @@ Hugging Face, their main home. The five v1 models are also in the
 for example `amazon/strands-decider-E4B-gemma4-v1-2610`.
 
 <details>
-  <summary><b>v1 models</b> — the Gemma 4 pointer-head release and the Qwen3.5 model</summary>
+  <summary><b>v1 models</b> — the Qwen3.5 model (with vision) and the Gemma 4 pointer-head release</summary>
 
-Four models on the Gemma 4 instruction-tuned base models (`google/gemma-4-*-it`, Apache-2.0). They
-have the same pointer head and answer the same three question types as the Qwen3.5 model.
+[`strands-decider-2B-qwen3.5-v1-2610`](https://huggingface.co/StrandsAgents/strands-decider-2B-qwen3.5-v1-2610)
+is the reference v1 model: 1.9 B parameters on Qwen3.5-2B-Base, pointer head, JevBench 180 / 231,
+Brier 0.280, about 4.5 GB in bf16. It is the only v1 checkpoint that takes images (`--vision`,
+needs `pip install "strands-decider[vision]"`), and the only one that runs through MLX on an
+Apple-silicon Mac.
+
+Four more v1 models on the Gemma 4 instruction-tuned bases (`google/gemma-4-*-it`, Apache-2.0),
+same pointer head and same three question types, text only:
 
 | model | JevBench (231) | Brier | held-out short tasks | held-out code tasks | Decision Index | GPU memory for the weights (bf16) | median latency per JevBench question, one H100 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -257,9 +263,9 @@ have the same pointer head and answer the same three question types as the Qwen3
 | [`strands-decider-12B-gemma4-v1-2610`](https://huggingface.co/StrandsAgents/strands-decider-12B-gemma4-v1-2610) | 200 | 0.173 | 0.708 | 0.870 | 47.14 | about 23 GB | 136 ms |
 | [`strands-decider-26B-A4B-gemma4-v1-2610`](https://huggingface.co/StrandsAgents/strands-decider-26B-A4B-gemma4-v1-2610) | 207 | 0.162 | 0.708 | 0.859 | 48.69 | about 51 GB | 245 ms |
 
-For comparison, `strands-decider-2B-qwen3.5-v1-2610` scores 180, Brier 0.280. The E2B Decision Index
-was measured before the E2B attention fix (see [designs/inference.md](designs/inference.md#gemma-4-models)),
-so it may be off. Every model is a soup of three training runs, calibrated afterwards
+The E2B Decision Index was measured before the E2B attention fix (see
+[designs/inference.md](designs/inference.md#gemma-4-models)), so it may be off. Every model is a
+soup of three training runs, calibrated afterwards
 ([evaluation/results.md](evaluation/results.md#gemma-4-v1)).
 
 **Choose a size.** A larger model is more accurate and better calibrated, and needs more memory.
@@ -268,10 +274,10 @@ twice the memory and twice the latency of the 12B. The E4B is a good choice when
 must share one GPU with other work. The E2B is the smallest: use it where memory is tightest, or on
 CPU. All four serve on CPU ([designs/inference.md](designs/inference.md#gemma-4-models)).
 
-**Install.** Gemma 4 support is on `main` and not yet in the package on PyPI:
+**Install.**
 
 ```bash
-pip install "strands-decider @ git+https://github.com/strands-labs/strands-decider"
+pip install strands-decider
 strands-decider ask StrandsAgents/strands-decider-E4B-gemma4-v1-2610 \
   --state "Help! My payouts have been failing for 3 days! " \
   --choice "Which team should handle this?=billing,sales,retail" \
@@ -299,8 +305,6 @@ teacher, where its answer agrees with the gold label, and training keeps the ans
 released v19. The rows come from 25 public Hugging Face datasets, five of them code datasets, and from
 ContractNLI, MuSiQue, generated rows and generated code tasks. [data/sources.md](data/sources.md)
 lists every source with its licence.
-
-The Gemma 4 v1 models read text only: `--vision` is for the Qwen3.5 model.
 
 </details>
 
