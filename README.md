@@ -211,17 +211,61 @@ Model names now use the pattern `strands-decider-<size>-<base>-v<N>-<YYMM>`:
   what its model trained on.
 - `<YYMM>` is the release month.
 
-Examples: `strands-decider-2B-qwen3.5-v1-2610` (Qwen3.5) and `strands-decider-E4B-gemma4-v1-2610`
-(Gemma 4). The earlier models keep their names: `strands-decider-2B-hobson-v19` and
-`strands-decider-2B-hobson-v21`. A second release in the same month updates the same Hub
-repository and adds a revision tag `YYMMDD`. [designs/naming.md](designs/naming.md) has the full rules.
+Examples: `strands-decider-2B-qwen3.5-v1-2610` (Qwen3.5 v1), `strands-decider-E4B-gemma4-v1-2610`
+(Gemma 4 v1) and `strands-decider-31B-gemma4-v2-2611` (Gemma 4 v2). The earlier models keep their
+names: `strands-decider-2B-hobson-v19` and `strands-decider-2B-hobson-v21`. A second release in the
+same month updates the same Hub repository and adds a revision tag `YYMMDD`.
+[designs/naming.md](designs/naming.md) has the full rules.
 
 The models live in the [`StrandsAgents`](https://huggingface.co/StrandsAgents) organization on
 Hugging Face, their main home. The five v1 models are also in the
 [`amazon`](https://huggingface.co/amazon) organization, with the same files and the same names:
 for example `amazon/strands-decider-E4B-gemma4-v1-2610`.
 
-## Gemma 4 models
+## v2 models
+
+v2 is the current version of Strands Decider. Five models on the Gemma 4 instruction-tuned bases
+(`google/gemma-4-*-it`, Apache-2.0), from E2B to 31B. They are more accurate than the v1 models at
+every size, read a 32,768-token context, and take images. v2 replaces the v1 pointer head with a
+**token readout**: one linear map with one row for each of 255 single-token option codes (`A`..`IV`),
+read off the hidden state at the last prompt token. Options come from the request, so no retraining
+is needed to add a category. One forward pass, no generation, same three question types
+(`noul`, `choice`, `score`) ([designs/architecture.md](designs/architecture.md#the-v2-token-readout)).
+
+| model | Decision Index 0.3 | JevBench | OpenDecisions | DecisionPivot | BEV | GPU to use | median latency per JevBench question, one H100 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| [`strands-decider-E2B-gemma4-v2-2611`](https://huggingface.co/StrandsAgents/strands-decider-E2B-gemma4-v2-2611) | 57.1 | 87.4 | 77.7 | 23.3 | 74.0 | 24 GB | 62 ms |
+| [`strands-decider-E4B-gemma4-v2-2611`](https://huggingface.co/StrandsAgents/strands-decider-E4B-gemma4-v2-2611) | 63.2 | 88.3 | 83.9 | 45.2 | 78.9 | 40 GB | 78 ms |
+| [`strands-decider-12B-gemma4-v2-2611`](https://huggingface.co/StrandsAgents/strands-decider-12B-gemma4-v2-2611) | 64.1 | 92.2 | 85.7 | 58.9 | 79.0 | 48 GB | 80 ms |
+| [`strands-decider-26B-A4B-gemma4-v2-2611`](https://huggingface.co/StrandsAgents/strands-decider-26B-A4B-gemma4-v2-2611) | 69.0 | 92.6 | 88.6 | 69.2 | 81.4 | 80 GB | 86 ms |
+| [`strands-decider-31B-gemma4-v2-2611`](https://huggingface.co/StrandsAgents/strands-decider-31B-gemma4-v2-2611) | 71.5 | 93.1 | 92.2 | 84.3 | 84.5 | 80 GB | 99 ms |
+
+Scores are 0 to 100. Every v2 model takes the same request and gives the same kind of answer as
+v1, so switching from v1 to v2 is a one-name change in `strands-decider ask` or `strands-decider
+serve`. The v2 training data card is in [data/README.md](data/README.md), the training recipes are
+in `configs/v2/` ([training/README.md](training/README.md#the-v2-recipes)), and the full per-model
+numbers are in [docs/models.md](docs/models.md).
+
+**Choose a size.** The 31B is the most accurate. The 26B-A4B is the best of the mixture-of-experts
+models and has the lowest latency among the top two. The 12B is the best dense model that fits on
+one 48 GB GPU. E4B is a good choice when the model must share a GPU; E2B is the smallest and runs
+on 24 GB or on CPU.
+
+**Install and ask.** v2 support is on `main` and not yet in the package on PyPI:
+
+```bash
+pip install "strands-decider @ git+https://github.com/strands-labs/strands-decider"
+strands-decider ask StrandsAgents/strands-decider-E2B-gemma4-v2-2611 \
+  --state "Help! My payouts have been failing for 3 days! " \
+  --choice "Which team should handle this?=billing,sales,retail" \
+  --noul "Does this convey urgency?" \
+  --score "How frustrated is the writer?=calm,frustrated,depressed"
+```
+
+**Deploying v2.** v2 checkpoints serve on SageMaker and on Lambda Managed Instances GPU in addition
+to the environments that v1 serves on ([deploy/README.md](deploy/README.md)).
+
+## v1 Gemma 4 models
 
 Four models on the Gemma 4 instruction-tuned base models (`google/gemma-4-*-it`, Apache-2.0). They
 have the same pointer head and answer the same three question types as the Qwen3.5 model.
@@ -307,10 +351,13 @@ the same masked softmax, read back differently: `noul` (yes/no), `choice` (one o
 `score` (an ordered rubric).
 
 As you browse the research, you will find that this is the second major iteration of the
-architecture. The first used a slot head, which mapped the final hidden state to a fixed set
-of slots and performed significantly worse. Every change since is captured in the research
-so you can follow along with the work. The reference model today is **v1**
+pointer-head architecture. The first used a slot head, which mapped the final hidden state to a
+fixed set of slots and performed significantly worse. Every change since is captured in the
+research so you can follow along with the work. The reference pointer-head model is **v1**
 (`strands-decider-2B-qwen3.5-v1-2610`; [designs/naming.md](designs/naming.md) explains the name).
+The current release line, **v2**, drops the pointer head for a token readout over 255 single-token
+option codes, ships on five Gemma 4 sizes (E2B – 31B), and is more accurate at every size
+([v2 models](#v2-models), [designs/architecture.md](designs/architecture.md#the-v2-token-readout)).
 It trains on a new, balanced data mix of 246,678 rows, about twice v21's: it adds code tasks,
 new rule-application rows (apply a written policy to a case) and rows from more public datasets,
 so that the mix follows the kinds of decisions in the evaluations. Its teacher is
