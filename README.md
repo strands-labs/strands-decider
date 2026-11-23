@@ -208,10 +208,10 @@ models and has the lowest latency among the top two. The 12B is the best dense m
 one 48 GB GPU. E4B is a good choice when the model must share a GPU; E2B is the smallest and runs
 on 24 GB or on CPU.
 
-**Install and ask.** v2 support is on `main` and not yet in the package on PyPI:
+**Install and ask.**
 
 ```bash
-pip install "strands-decider @ git+https://github.com/strands-labs/strands-decider"
+pip install strands-decider
 strands-decider ask StrandsAgents/strands-decider-E2B-gemma4-v2-2611 \
   --state "Help! My payouts have been failing for 3 days! " \
   --choice "Which team should handle this?=billing,sales,retail" \
