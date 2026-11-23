@@ -179,28 +179,6 @@ The server you ran above is what you deploy. To host it beyond your machine, see
 [deploy/README.md](deploy/README.md): it lists where the server can run and links to a guide for
 each.
 
-## Model names
-
-Model names now use the pattern `strands-decider-<size>-<base>-v<N>-<YYMM>`:
-
-- `<size>` is the size of the base model, as its Hugging Face id writes it (`2B`, `E4B`).
-- `<base>` is the base model family (`qwen3.5`, `gemma4`).
-- `v<N>` counts the releases on one base family: `v1` is the first release on each base.
-  Releases with the same `N` on different bases can use different recipes; each model card says
-  what its model trained on.
-- `<YYMM>` is the release month.
-
-Examples: `strands-decider-2B-qwen3.5-v1-2610` (Qwen3.5 v1), `strands-decider-E4B-gemma4-v1-2610`
-(Gemma 4 v1) and `strands-decider-31B-gemma4-v2-2611` (Gemma 4 v2). The earlier models keep their
-names: `strands-decider-2B-hobson-v19` and `strands-decider-2B-hobson-v21`. A second release in the
-same month updates the same Hub repository and adds a revision tag `YYMMDD`.
-[designs/naming.md](designs/naming.md) has the full rules.
-
-The models live in the [`StrandsAgents`](https://huggingface.co/StrandsAgents) organization on
-Hugging Face, their main home. The five v1 models are also in the
-[`amazon`](https://huggingface.co/amazon) organization, with the same files and the same names:
-for example `amazon/strands-decider-E4B-gemma4-v1-2610`.
-
 ## Model options
 
 v2 is the current version of Strands Decider. Five models on the Gemma 4 instruction-tuned bases
@@ -243,6 +221,28 @@ strands-decider ask StrandsAgents/strands-decider-E2B-gemma4-v2-2611 \
 
 **Deploying v2.** v2 checkpoints serve on SageMaker and on Lambda Managed Instances GPU in addition
 to the environments that v1 serves on ([deploy/README.md](deploy/README.md)).
+
+### Model names
+
+Model names use the pattern `strands-decider-<size>-<base>-v<N>-<YYMM>`:
+
+- `<size>` is the size of the base model, as its Hugging Face id writes it (`2B`, `E4B`).
+- `<base>` is the base model family (`qwen3.5`, `gemma4`).
+- `v<N>` counts the releases on one base family: `v1` is the first release on each base.
+  Releases with the same `N` on different bases can use different recipes; each model card says
+  what its model trained on.
+- `<YYMM>` is the release month.
+
+Examples: `strands-decider-2B-qwen3.5-v1-2610` (Qwen3.5 v1), `strands-decider-E4B-gemma4-v1-2610`
+(Gemma 4 v1) and `strands-decider-31B-gemma4-v2-2611` (Gemma 4 v2). The earlier models keep their
+names: `strands-decider-2B-hobson-v19` and `strands-decider-2B-hobson-v21`. A second release in the
+same month updates the same Hub repository and adds a revision tag `YYMMDD`.
+[designs/naming.md](designs/naming.md) has the full rules.
+
+The models live in the [`StrandsAgents`](https://huggingface.co/StrandsAgents) organization on
+Hugging Face, their main home. The five v1 models are also in the
+[`amazon`](https://huggingface.co/amazon) organization, with the same files and the same names:
+for example `amazon/strands-decider-E4B-gemma4-v1-2610`.
 
 <details>
   <summary><b>v1 models</b> — the Gemma 4 pointer-head release and the Qwen3.5 model</summary>
