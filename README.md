@@ -201,7 +201,7 @@ Scores are 0 to 100. Every v2 model takes the same request and gives the same ki
 v1, so switching from v1 to v2 is a one-name change in `strands-decider ask` or `strands-decider
 serve`. The v2 training data card is in [data/README.md](data/README.md), the training recipes are
 in `configs/v2/` ([training/README.md](training/README.md#the-v2-recipes)), and the full per-model
-numbers are in [docs/models.md](docs/models.md).
+numbers are in the [models reference](https://strandsagents.com/docs/labs/strands-decider/models/).
 
 **Choose a size.** The 31B is the most accurate. The 26B-A4B is the best of the mixture-of-experts
 models and has the lowest latency among the top two. The 12B is the best dense model that fits on
