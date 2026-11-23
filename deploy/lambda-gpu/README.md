@@ -49,6 +49,17 @@ npx cdk bootstrap aws://<account>/<region>
 npx cdk deploy
 ```
 
+For a v2 model, pass a GPU with 24 GB and more host memory. This deploys the E2B model on an L4:
+
+```bash
+npx cdk deploy -c model=StrandsAgents/strands-decider-E2B-gemma4-v2-2611 \
+  -c instance_types=g6.xlarge,g6.2xlarge -c accelerator_memory_gb=24 -c memory_size_mb=12288
+```
+
+E2B fails to initialize at the default 4,096 MB (`InitResourceExhausted`). At Lambda's 2 GB per
+vCPU, 12,288 MB needs six vCPUs, so Lambda launches a g6.2xlarge. 16,384 MB fails with
+`IncompatibleInstanceTypes` on g6.xlarge and g6.2xlarge.
+
 This builds the GPU image in AWS CodeBuild, publishes it to an ECR repository in the stack,
 creates a Lambda capacity provider over the configured GPU instance types, and creates the
 function with `AcceleratorConfig` attached. About 15 minutes: most of it is torch + CUDA layers
