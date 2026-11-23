@@ -27,8 +27,6 @@
     <a href="https://pypi.org/project/strands-decider/"><b>PyPI</b></a>
     &nbsp;•&nbsp;
     <a href="https://huggingface.co/StrandsAgents"><b>Hugging Face</b></a>
-    &nbsp;•&nbsp;
-    <a href="https://discord.gg/Wa4CQrxsP"><b>Discord</b></a>
   </p>
 
 </div>
