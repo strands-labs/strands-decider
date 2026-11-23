@@ -176,7 +176,7 @@ curl -s localhost:8000/v1/systemone \
 ### Deploying it
 
 The server you ran above is what you deploy. To host it beyond your machine, see
-[deploy/README.md](deploy/README.md): it lists where the server can run and links to a guide for
+the [deployment guide](https://strandsagents.com/docs/labs/strands-decider/deployment/local/): it lists where the server can run and links to a guide for
 each.
 
 ## Model options
@@ -220,7 +220,7 @@ strands-decider ask StrandsAgents/strands-decider-E2B-gemma4-v2-2611 \
 ```
 
 **Deploying v2.** v2 checkpoints serve on SageMaker and on Lambda Managed Instances GPU in addition
-to the environments that v1 serves on ([deploy/README.md](deploy/README.md)).
+to the environments that v1 serves on (the [deployment guide](https://strandsagents.com/docs/labs/strands-decider/deployment/local/)).
 
 ### Model names
 
