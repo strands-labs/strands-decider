@@ -201,7 +201,7 @@ Hugging Face, their main home. The five v1 models are also in the
 [`amazon`](https://huggingface.co/amazon) organization, with the same files and the same names:
 for example `amazon/strands-decider-E4B-gemma4-v1-2610`.
 
-## v2 models
+## Model options
 
 v2 is the current version of Strands Decider. Five models on the Gemma 4 instruction-tuned bases
 (`google/gemma-4-*-it`, Apache-2.0), from E2B to 31B. They are more accurate than the v1 models at
@@ -244,7 +244,8 @@ strands-decider ask StrandsAgents/strands-decider-E2B-gemma4-v2-2611 \
 **Deploying v2.** v2 checkpoints serve on SageMaker and on Lambda Managed Instances GPU in addition
 to the environments that v1 serves on ([deploy/README.md](deploy/README.md)).
 
-## v1 Gemma 4 models
+<details>
+  <summary><b>v1 models</b> — the Gemma 4 pointer-head release and the Qwen3.5 model</summary>
 
 Four models on the Gemma 4 instruction-tuned base models (`google/gemma-4-*-it`, Apache-2.0). They
 have the same pointer head and answer the same three question types as the Qwen3.5 model.
@@ -278,21 +279,19 @@ strands-decider ask StrandsAgents/strands-decider-E4B-gemma4-v1-2610 \
   --score "How frustrated is the writer?=calm,frustrated,depressed"
 ```
 
-<details>
-  <summary>Example Output (`--device cpu`)</summary>
+Example output on `--device cpu`:
 
-  ```bash
-  noul_0 noul = 0.959
-  choice_0 -> billing (confidence 0.951)
-    billing                  0.967
-    sales                    0.019
-    retail                   0.013
-  score_0 score = 0.97 (confidence 0.848)
-    0: calm                                     0.102
-    1: frustrated                               0.823
-    2: depressed                                0.075
-  ```
-</details>
+```bash
+noul_0 noul = 0.959
+choice_0 -> billing (confidence 0.951)
+  billing                  0.967
+  sales                    0.019
+  retail                   0.013
+score_0 score = 0.97 (confidence 0.848)
+  0: calm                                     0.102
+  1: frustrated                               0.823
+  2: depressed                                0.075
+```
 
 **What they train on.** The Gemma 4 models do not use the Qwen3.5 v1 data mix. They train on
 hobson-v21's data (123,339 rows) plus 12,263 code-task rows, 135,602 rows in all. Qwen3.5-4B is the
@@ -301,7 +300,9 @@ released v19. The rows come from 25 public Hugging Face datasets, five of them c
 ContractNLI, MuSiQue, generated rows and generated code tasks. [data/sources.md](data/sources.md)
 lists every source with its licence.
 
-The Gemma 4 models read text only: `--vision` is for the Qwen3.5 model.
+The Gemma 4 v1 models read text only: `--vision` is for the Qwen3.5 model.
+
+</details>
 
 ## Images
 
@@ -352,7 +353,7 @@ research so you can follow along with the work. The reference pointer-head model
 (`strands-decider-2B-qwen3.5-v1-2610`; [designs/naming.md](designs/naming.md) explains the name).
 The current release line, **v2**, drops the pointer head for a token readout over 255 single-token
 option codes, ships on five Gemma 4 sizes (E2B – 31B), and is more accurate at every size
-([v2 models](#v2-models), [designs/architecture.md](designs/architecture.md#the-v2-token-readout)).
+([Model options](#model-options), [designs/architecture.md](designs/architecture.md#the-v2-token-readout)).
 It trains on a new, balanced data mix of 246,678 rows, about twice v21's: it adds code tasks,
 new rule-application rows (apply a written policy to a case) and rows from more public datasets,
 so that the mix follows the kinds of decisions in the evaluations. Its teacher is
