@@ -21,6 +21,8 @@
     <a href="https://discord.gg/Wa4CQrxsP"><img src="https://img.shields.io/badge/Discord-Join-5865F2?logo=discord&logoColor=white" alt="Discord"></a>
   </div>
 
+  <p><a href="https://strandsagents.com/docs/labs/strands-decider/overview/"><b>Documentation</b></a></p>
+
 </div>
 
 <hr>
