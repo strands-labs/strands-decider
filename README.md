@@ -173,22 +173,6 @@ curl -s localhost:8000/v1/systemone \
   ```
 </details>
 
-### Images
-
-v2 Gemma 4 models accept images directly — no `--vision` flag or extra install needed:
-
-```bash
-strands-decider serve StrandsAgents/strands-decider-E2B-gemma4-v2-2611 --port 8000
-strands-decider ask StrandsAgents/strands-decider-E2B-gemma4-v2-2611 --state "" --image page.png \
-  --noul "Is the signature block filled in?"
-```
-
-From the HTTP API, pass base64 images in the `images` field of the state. For the v1 Qwen3.5 model,
-`--vision` keeps the base model's vision tower and needs `pip install "strands-decider[vision]"`;
-v19 matches an image-trained 2B decider on accuracy, and on NaturalBench is much better calibrated
-(ECE 0.014 against 0.080). See [designs/images.md](designs/images.md) for the request shape, how it
-works and the measurements.
-
 ### Deploying it
 
 The server you ran above is what you deploy. To host it beyond your machine, see
@@ -318,6 +302,22 @@ ContractNLI, MuSiQue, generated rows and generated code tasks. [data/sources.md]
 lists every source with its licence.
 
 The Gemma 4 models read text only: `--vision` is for the Qwen3.5 model.
+
+## Images
+
+v2 Gemma 4 models accept images directly — no `--vision` flag or extra install needed:
+
+```bash
+strands-decider serve StrandsAgents/strands-decider-E2B-gemma4-v2-2611 --port 8000
+strands-decider ask StrandsAgents/strands-decider-E2B-gemma4-v2-2611 --state "" --image page.png \
+  --noul "Is the signature block filled in?"
+```
+
+From the HTTP API, pass base64 images in the `images` field of the state. For the v1 Qwen3.5 model,
+`--vision` keeps the base model's vision tower and needs `pip install "strands-decider[vision]"`;
+v19 matches an image-trained 2B decider on accuracy, and on NaturalBench is much better calibrated
+(ECE 0.014 against 0.080). See [designs/images.md](designs/images.md) for the request shape, how it
+works and the measurements.
 
 ## About the model
 
