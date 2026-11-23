@@ -402,6 +402,32 @@ each question's result is what it would be alone.
 `render` needs a tokenizer that encodes request text with special-token matching off, so the text
 can never become a control token. `load_tokenizer` and `prepare_tokenizer` set it up that way.
 
+### Image token budgets
+
+Each image takes at most its token budget of soft tokens, one of Gemma 4's five: 70, 140, 280,
+560 and 1120. Gemma 4's [model card](https://gemma.ai/models/gemma-4/model-card/) calls it the
+visual token budget and suggests lower budgets for classification and captioning and higher ones
+for OCR and small text. Gemma's processor keeps the aspect ratio and makes each side a multiple of
+48 pixels, so a budget of N covers about N × 48 × 48 pixels:
+
+| Budget | 70 | 140 | 280 | 560 | 1120 |
+| --- | --- | --- | --- | --- | --- |
+| A square photo becomes | 384 × 384 | 528 × 528 | 768 × 768 | 1,104 × 1,104 | 1,584 × 1,584 |
+| Its tokens | 64 | 121 | 256 | 529 | 1,089 |
+
+A request sets the budget per image, as Gemini (`resolution`,
+[media resolution](https://aistudio.google.com/docs/media-resolution)) and OpenAI (`detail`,
+[image detail level](https://developers.openai.com/api/docs/guides/images-vision#choose-an-image-detail-level))
+do. An entry of `images` is a base64 string, as in v1, or an object such as
+`{"data": "<base64>", "token_budget": 560}`. An image without a budget gets the request's
+`image_token_budget`, else the server's default: the checkpoint's, `max_soft_tokens` in its
+`processor_config.json` (280 in every base), which `check_image_processor` returns. `render`
+takes that default as `token_budget` and the server's limit as `max_token_budget`, which is the
+default unless the operator raises it. An image over the limit is refused, and a limit below the
+default lowers the default to it. A runtime resizes each image with `resized_size` at its budget
+and passes the budget to its image processor, which takes it per call. v1 model checkpoints
+size images by `image_long_side` and refuse a token budget.
+
 ## Layout
 
 ```

@@ -46,6 +46,7 @@ from core_support import (
 )
 
 from strands_decider.core import (
+    TOKEN_BUDGETS,
     Request,
     check_decoded_size,
     decode_image,
@@ -55,12 +56,12 @@ from strands_decider.core import (
     soft_tokens,
 )
 from strands_decider.core.images import (
+    DEFAULT_TOKEN_BUDGET,
     IMAGE_CLOSE,
     IMAGE_OPEN,
     IMAGE_SOFT,
     MAX_IMAGE_BYTES,
     MAX_IMAGE_PIXELS,
-    MAX_SOFT_TOKENS,
     PATCH_SIZE,
     POOLING_KERNEL_SIZE,
 )
@@ -288,19 +289,24 @@ def test_each_image_is_checked_in_turn_after_everything_else():
         render_text(Request.model_validate({**req, "images": [bad, big]}))
     with pytest.raises(ValueError, match="instructions"):
         Request.model_validate({"state": "", "questions": {"q": {"type": "noul"}}, "images": [bad]})
-    assert Request.model_validate({**req, "images": [bad] * 5}).images == [bad] * 5
+    assert [im.data for im in Request.model_validate({**req, "images": [bad] * 5}).images] == [
+        bad
+    ] * 5
 
 
 def test_the_image_processors_settings_are_checked(tmp_path):
     from strands_decider.core import check_image_processor
 
     good = {"image_processor": {"patch_size": 16, "pooling_kernel_size": 3, "max_soft_tokens": 280}}
-    check_image_processor(good)
-    check_image_processor(good["image_processor"])
+    assert check_image_processor(good) == check_image_processor(good["image_processor"]) == 280
     (tmp_path / "processor_config.json").write_text(json.dumps(good))
-    check_image_processor(tmp_path)
-    check_image_processor(tmp_path / "processor_config.json")
-    for k, v in (("patch_size", 14), ("max_soft_tokens", 560), ("pooling_kernel_size", None)):
+    assert check_image_processor(tmp_path) == check_image_processor(
+        tmp_path / "processor_config.json"
+    )
+    for budget in TOKEN_BUDGETS:  # the checkpoint's budget, its images' default
+        settings = {**good["image_processor"], "max_soft_tokens": budget}
+        assert check_image_processor({"image_processor": settings}) == budget
+    for k, v in (("patch_size", 14), ("max_soft_tokens", 300), ("pooling_kernel_size", None)):
         with pytest.raises(ValueError, match="can't take images"):
             check_image_processor({"image_processor": {**good["image_processor"], k: v}})
     with pytest.raises(ValueError, match="can't take images"):
@@ -333,7 +339,7 @@ def test_soft_tokens_match_the_processor_table():
         == PROCESSOR_SETTINGS
         == {
             "patch_size": PATCH_SIZE,
-            "max_soft_tokens": MAX_SOFT_TOKENS,
+            "max_soft_tokens": DEFAULT_TOKEN_BUDGET,
             "pooling_kernel_size": POOLING_KERNEL_SIZE,
         }
     )
@@ -388,11 +394,13 @@ def test_soft_token_properties():
     for _ in range(20000):
         w, h = rng.randint(1, 5000), rng.randint(1, 5000)
         n = soft_tokens(w, h)
-        assert 1 <= n <= MAX_SOFT_TOKENS and n == soft_tokens(h, w), (w, h)
+        assert 1 <= n <= DEFAULT_TOKEN_BUDGET and n == soft_tokens(h, w), (w, h)
+        for budget in TOKEN_BUDGETS:
+            assert 1 <= soft_tokens(w, h, budget) <= budget, (w, h, budget)
     for side in (1, 2, 3, 48, 100, 803, 804, 4096):
         assert soft_tokens(side, side) == 256  # a square resizes to 768 x 768: 16 x 16
     for w in (281, 1000, 13441, MAX_IMAGE_PIXELS):
-        assert soft_tokens(w, 1) == soft_tokens(1, w) == MAX_SOFT_TOKENS  # one 48-pixel row
+        assert soft_tokens(w, 1) == soft_tokens(1, w) == DEFAULT_TOKEN_BUDGET  # one 48-pixel row
     assert soft_tokens(64, 48) == 266 and soft_tokens(300, 40) == 270
     assert soft_tokens(840, 768) == 272  # 645,120 pixels: a scale of exactly 1
     assert soft_tokens(100, 1) == 167 and soft_tokens(1, 32) == 188 and soft_tokens(1, 31) == 279
@@ -738,9 +746,12 @@ def _random_sizes(n: int, seed: int) -> list[tuple[int, int]]:
 
 @pytest.mark.parametrize("which", [GEMMA4_PROCESSOR, UNIFIED_PROCESSOR])
 def test_soft_tokens_match_the_image_processors(which):
+    """At every token budget, which the processor takes per call."""
     processor = _image_processor(which)
-    for w, h in _random_sizes(80, seed=12):
-        assert soft_tokens(w, h) == processor_soft_tokens(processor, w, h), (which, w, h)
+    for budget in TOKEN_BUDGETS:
+        for w, h in _random_sizes(40, seed=budget):
+            n = processor_soft_tokens(processor, w, h, budget)
+            assert soft_tokens(w, h, budget) == n, (which, budget, w, h)
 
 
 # ---- against Gemma4Processor and v1 -----------------------------------------------------------
