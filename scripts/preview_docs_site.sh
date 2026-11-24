@@ -51,7 +51,8 @@ cmd_start() {
 
   export EXTERNAL_DOCS_STRANDS_DECIDER_SOURCE="${REPO_ROOT}"
   echo "[preview-site] starting Astro dev server on :${PORT}"
-  echo "[preview-site] Decider docs: http://localhost:${PORT}/docs/labs/strands-decider/overview/"
+  echo "[preview-site] Decider landing: http://localhost:${PORT}/decider/"
+  echo "[preview-site] Decider docs: http://localhost:${PORT}/docs/labs/strands-decider/quickstart/"
   echo "[preview-site] stop with: scripts/preview_docs_site.sh stop"
   npm run dev -- --port "${PORT}" --host 127.0.0.1
 }

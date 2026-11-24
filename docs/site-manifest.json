@@ -6,17 +6,6 @@
   },
   "pages": [
     {
-      "id": "landing",
-      "source": "docs/landing.md",
-      "slug": "overview",
-      "title": "Overview",
-      "description": "Strands Decider is a top-performing System One decision model from the Strands Agents team and AWS.",
-      "nav": {
-        "group": "Get started",
-        "order": 1
-      }
-    },
-    {
       "id": "quickstart",
       "source": "docs/quickstart.md",
       "slug": "quickstart",
@@ -24,7 +13,7 @@
       "description": "Install Strands Decider, serve it, and use it as a model router inside a Strands agent.",
       "nav": {
         "group": "Get started",
-        "order": 2
+        "order": 1
       }
     },
     {
@@ -35,7 +24,7 @@
       "description": "Understand System One models and the three question types Strands Decider supports.",
       "nav": {
         "group": "Get started",
-        "order": 3
+        "order": 2
       }
     },
     {

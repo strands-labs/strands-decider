@@ -22,7 +22,7 @@
   </div>
 
   <p>
-    <a href="https://strandsagents.com/docs/labs/strands-decider/overview/"><b>Documentation</b></a>
+    <a href="https://strandsagents.com/decider/"><b>Documentation</b></a>
     &nbsp;•&nbsp;
     <a href="https://pypi.org/project/strands-decider/"><b>PyPI</b></a>
     &nbsp;•&nbsp;
