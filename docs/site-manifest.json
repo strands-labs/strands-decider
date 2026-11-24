@@ -4,17 +4,6 @@
     "id": "strands-decider",
     "name": "Strands Decider"
   },
-  "links": [
-    {
-      "id": "landing",
-      "href": "/decider/",
-      "title": "Overview",
-      "nav": {
-        "group": "Get started",
-        "order": 1
-      }
-    }
-  ],
   "pages": [
     {
       "id": "quickstart",
@@ -24,7 +13,7 @@
       "description": "Install Strands Decider, serve it, and use it as a model router inside a Strands agent.",
       "nav": {
         "group": "Get started",
-        "order": 2
+        "order": 1
       }
     },
     {
@@ -35,7 +24,7 @@
       "description": "Understand System One models and the three question types Strands Decider supports.",
       "nav": {
         "group": "Get started",
-        "order": 3
+        "order": 2
       }
     },
     {
