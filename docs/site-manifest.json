@@ -4,18 +4,18 @@
     "id": "strands-decider",
     "name": "Strands Decider"
   },
-  "pages": [
+  "links": [
     {
       "id": "landing",
-      "source": "docs/landing.md",
-      "slug": "overview",
+      "href": "/decider/",
       "title": "Overview",
-      "description": "Strands Decider is a top-performing System One decision model from the Strands Agents team and AWS.",
       "nav": {
         "group": "Get started",
         "order": 1
       }
-    },
+    }
+  ],
+  "pages": [
     {
       "id": "quickstart",
       "source": "docs/quickstart.md",
