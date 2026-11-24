@@ -43,13 +43,17 @@ def load_backend(
     *,
     device: str = "cpu",
     dtype: str | None = None,
+    quantization: str | None = None,
     reuse_state: bool = True,
     max_batch: int = 32,
     max_batch_tokens: int | None = None,
 ) -> TransformersBackend:
     """The model checkpoint in directory `path` on `device`, in `dtype` (the device's own by
     default). The vision encoder is built only with the image processor (`load_image_processor`),
-    and the audio tower never: the core refuses audio, and it has no SDPA path."""
+    and the audio tower never: the core refuses audio, and it has no SDPA path.
+    `quantization` ("4bit" or "8bit", CUDA only) loads the linear layers, the text decoder's and
+    the image encoder's, with bitsandbytes: about a third or a half of the bfloat16 memory, for a
+    small change of the probabilities."""
     config = transformers.AutoConfig.from_pretrained(path)
     if config.model_type not in _ARCHITECTURES:
         raise ValueError(f"{path}: not a Gemma 4 model checkpoint ({config.model_type!r})")
@@ -58,10 +62,13 @@ def load_backend(
     if processor is None:
         config.vision_config = None
     torch_dtype = getattr(torch, dtype) if dtype else _DEVICE_DTYPES[torch.device(device).type]
-    model = _from_pretrained(_ARCHITECTURES[config.model_type], path, config, torch_dtype)
+    model = _from_pretrained(
+        _ARCHITECTURES[config.model_type], path, config, torch_dtype, device, quantization
+    )
     use_prefix_bidir(model)
     return TransformersBackend(
-        model.to(device).eval(),
+        # bitsandbytes places the model itself, and an 8-bit model refuses a later move.
+        (model if quantization else model.to(device)).eval(),
         image_processor=processor,
         reuse_state=reuse_state,
         max_batch=max_batch,
@@ -76,15 +83,55 @@ def _image_processor(path: str, model_type: str) -> Any:
     return transformers.Gemma4ImageProcessorPil.from_pretrained(path)
 
 
-def _from_pretrained(architecture: str, path: str, config: Any, dtype: torch.dtype) -> Any:
+# Kept in the model's own dtype under `quantization`: the LM head, which shares its weight with
+# the embeddings and is not used by the readout. transformers matches a name from the start of a
+# module's full name, so "vision_tower" would not keep "model.vision_tower".
+_UNQUANTIZED = ["lm_head"]
+
+
+def _quantization_config(quantization: str, dtype: torch.dtype) -> Any:
+    if quantization == "8bit":
+        return transformers.BitsAndBytesConfig(
+            load_in_8bit=True, llm_int8_skip_modules=_UNQUANTIZED
+        )
+    return transformers.BitsAndBytesConfig(
+        load_in_4bit=True,
+        bnb_4bit_quant_type="nf4",
+        bnb_4bit_use_double_quant=True,
+        bnb_4bit_compute_dtype=dtype,
+        llm_int8_skip_modules=_UNQUANTIZED,
+    )
+
+
+def _from_pretrained(
+    architecture: str,
+    path: str,
+    config: Any,
+    dtype: torch.dtype,
+    device: str,
+    quantization: str | None,
+) -> Any:
     """The model, loaded quietly: transformers' load report lists every tensor it doesn't build,
     the audio tower's hundreds. A checkpoint missing a tensor is refused, where transformers would
     initialise it at random."""
     verbosity = hf_logging.get_verbosity()
     hf_logging.set_verbosity_error()
     try:
+        quantized = (
+            {
+                "quantization_config": _quantization_config(quantization, dtype),
+                "device_map": {"": device},
+            }
+            if quantization
+            else {}
+        )
         model, info = getattr(transformers, architecture).from_pretrained(
-            path, config=config, dtype=dtype, attn_implementation="sdpa", output_loading_info=True
+            path,
+            config=config,
+            dtype=dtype,
+            attn_implementation="sdpa",
+            output_loading_info=True,
+            **quantized,
         )
     finally:
         hf_logging.set_verbosity(verbosity)

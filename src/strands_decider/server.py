@@ -104,6 +104,7 @@ def create_app(
     build_engine: Callable[[], SystemOneEngine] | None = None,
     max_concurrency: int | None = None,
     dtype: str | None = None,
+    quantization: str | None = None,
     queue_timeout: float = 60.0,
     revision: str | None = None,
     max_length: int | None = None,
@@ -132,6 +133,7 @@ def create_app(
             checkpoint,
             device=device,
             dtype=dtype,
+            quantization=quantization,
             reuse_state=use_prefix_cache,
             max_batch=max_batch,
             max_batch_tokens=max_batch_tokens,
@@ -144,7 +146,12 @@ def create_app(
         if warmup:  # before uvicorn binds the listener
             _warm_up_decision(engine)
         return _decision_app(engine, checkpoint)
-    for flag, value in (("--dtype", dtype), ("--revision", revision), ("--max-length", max_length)):
+    for flag, value in (
+        ("--dtype", dtype),
+        ("--quantization", quantization),
+        ("--revision", revision),
+        ("--max-length", max_length),
+    ):
         if value is not None:
             raise ValueError(f"{flag} is not supported for v1 model checkpoints")
     if device_map and (vision or not device.startswith("cuda")):

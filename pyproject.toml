@@ -55,6 +55,9 @@ cuda = ["flash-linear-attention>=0.5; sys_platform == 'linux'"]
 # every device installs the same way.
 mps = []
 cpu = []
+# `--quantization 4bit` or `8bit` on `--device cuda`: a model checkpoint's linear layers in 4 or
+# 8 bits (src/strands_decider/backends/transformers.py). 0.50 is the version tested.
+quantization = ["bitsandbytes>=0.50"]
 benchmark = ["boto3>=1.34", "matplotlib>=3.8"]
 dev = [
     # The chat-template tests (tests/test_core_prompt.py) render Gemma 4's templates.
