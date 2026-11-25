@@ -43,6 +43,11 @@ done
 echo "$REV" > "$SRC/LLAMA_CPP_REV"
 
 if [ "$LAMBDA" = "--lambda" ]; then
+    # Graviton2 and later. Lambda picks the host's generation (Graviton2, 3 or 4) for each execution
+    # environment, so the library may use no instruction Graviton2 lacks (i8mm, bf16, SVE); the check
+    # below enforces it. Where the generation is known and newer, as on an instance type chosen for
+    # Lambda Managed Instances, a higher target is faster: armv8.6-a+i8mm (Graviton3) or
+    # armv9-a+i8mm+sve2 (Graviton4), with the i8mm check below relaxed to match.
     ARCH_FLAGS="-DGGML_NATIVE=OFF -DGGML_CPU_ARM_ARCH=armv8.2-a+fp16+dotprod"
 elif [ -n "$LAMBDA" ]; then
     echo "build_native.sh: unknown option $LAMBDA" >&2

@@ -37,7 +37,12 @@ from gguf_files import check_mmproj, lazy_ranges, vision_only
 from strands_decider.core import DecisionConfig, check_image_processor, load_readout, load_tokenizer
 from strands_decider.core.config import IMAGE
 
+# Two settings, not one: llama-quantize quantizes the decoder and takes the type in capitals;
+# convert_hf_to_gguf.py writes the vision tower directly (it is not quantized afterwards) and takes
+# its --outtype in lower case. On Graviton the q8_0 tower encodes an image about three times as fast
+# as the f16 one (README.md, What the build does).
 _QUANT = "Q8_0"
+_VISION_OUTTYPE = "q8_0"
 # What the function holds in memory, the files less the lazily read per-layer embedding table, must
 # leave llama.cpp's buffers, Python and a request's state room within Lambda's 10,240 MB: E2B's are
 # 2.4 GB of decoder and 0.23 GB of vision tower at q8_0, E4B's 5.0 GB and 0.23 GB.
@@ -202,7 +207,7 @@ def main() -> None:
     if IMAGE in config.inputs:
         files["mmproj.gguf"] = a.out / "mmproj.gguf"
         full = tmp / "mmproj-full.gguf"
-        _run(*convert, "--mmproj", "--outtype", "q8_0", "--outfile", full)
+        _run(*convert, "--mmproj", "--outtype", _VISION_OUTTYPE, "--outfile", full)
         vision_only(full, files["mmproj.gguf"])
         full.unlink()
         check_mmproj(files["mmproj.gguf"], ckpt)
