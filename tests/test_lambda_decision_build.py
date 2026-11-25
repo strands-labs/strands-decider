@@ -95,3 +95,9 @@ def test_a_checkpoint_with_another_digest_is_refused_before_conversion(
     with pytest.raises(SystemExit, match="manifest digest is"):
         build_artifact.main()
     assert not (tmp_path / "out").exists()  # refused before anything was converted
+
+
+def test_the_request_limit_follows_the_resident_weights(build_artifact):
+    # E2B holds 2.7 GB once its per-layer embeddings are left on disk, E4B 5.3 GB.
+    assert build_artifact.max_request_tokens(2_699_086_016) == 16384
+    assert build_artifact.max_request_tokens(5_264_544_960) == 12288

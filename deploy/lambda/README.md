@@ -302,8 +302,10 @@ npx cdk deploy -c model=<Hub id, or s3://bucket/prefix/> \
   [-c model_revision=<Hub revision>] [-c model_digest=<sha256>]
 ```
 
-Lambda serves E2B, with text and images. E4B does not fit with its vision tower: its text model
-alone fills the 10,240 MB function, so the build refuses a model over 6 GB.
+Lambda serves E2B and E4B, with text and images. E4B's files are 8.3 GB, but 3.0 GB of them are
+the per-layer embedding table, which llama.cpp reads a few rows at a time from disk: the function
+holds 5.3 GB of weights, against E2B's 2.7 GB. The build refuses a model that would hold more than
+6 GB, or whose files would not fit in the image beside the runtime (9 GB). 12B and larger do not fit.
 
 The torch-free core ([src/strands_decider/core](../../src/strands_decider/core)) renders, checks
 and reads each request. The decoder and the base model's vision tower run in llama.cpp through
@@ -368,7 +370,9 @@ assumes the environment read the files itself.
   fit.
 - A request may forward at most `max_request_tokens` tokens, the state once plus every question,
   16,384 by default, and the function applies the same limit when `DECIDER_MAX_REQUEST_TOKENS` is
-  unset; `0` lifts it. That keeps the slowest request measured inside the 15-minute timeout on
+  unset; `0` lifts it. The build records the most the model can run in 10,240 MB, and the function
+  lowers a higher limit to it: 16,384 for E2B, 12,288 for E4B, which ran a 13,735-token request and
+  was killed for memory at 15,894. That keeps the slowest request measured inside the 15-minute timeout on
   Graviton2, the slowest host Lambda gives: 4 images and an 8,000-token state, then 137 questions
   up to the limit, took 549 to 557 s there; with the shortest questions, 121 of them, it took
   499 s on Graviton3, about 640 s on Graviton2. A question after a long state costs about as much
@@ -404,6 +408,31 @@ the handler drops the per-layer embedding table, 2.5 GB of the decoder's file of
 reads a few rows, from the page cache. With it kept, and the f16 vision tower, a prompt of 8,131
 tokens with four images reached 10,077 MB, at the same warm latency: 2.3 s against 2.9 s at 250
 tokens on Graviton2.
+
+#### The v2 checkpoints, E2B and E4B
+
+Measured in us-east-1 on `StrandsAgents/strands-decider-E2B-gemma4-v2-2611` and
+`-E4B-gemma4-v2-2611` with this build, against each checkpoint's `golden_vectors.jsonl`: all 60 of its
+requests with images and 80 of its text ones, eight at a time. Warm requests, server-side medians
+over whichever Graviton generations Lambda gave:
+
+| Request | E2B | E4B |
+| --- | --- | --- |
+| text, about 40 tokens, one to three questions | 2.5 s | 6.6 s |
+| text, about 4,100 tokens | 76 s | 143 s |
+| text, about 9,650 tokens | 267 s | 421 s |
+| one image, about 290 state tokens | 9.0 s | 14.4 s |
+| two images, about 550 | 17.0 s | 25.4 s |
+| three images, about 810 | 24.8 s | 35.8 s |
+| Max Memory Used, which counts the page cache | 9,297 MB | 10,238 MB |
+| Top answer as the golden vector's | 399 of 403 questions | 398 of 400 |
+| Mean largest probability difference | 0.0075 | 0.0047 |
+
+E4B is about 1.5 to 2.5 times as slow as E2B. It holds twice the weights, and decoding the state is
+bound by reading them. Its Max Memory Used stays at the limit because the page cache fills the rest;
+that cache is given back under pressure, and no request inside the 12,288-token limit was killed.
+After a deploy, E4B's first requests took longer than 15 minutes, as E2B's do (warm the function).
+Each checkpoint's 7 golden requests over 16,384 tokens were refused with a 422, as designed.
 
 The answers agree with the reference runtime (transformers, bf16, the same rendered prompts and
 pixels) and with the same files on x86:

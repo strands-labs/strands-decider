@@ -69,7 +69,9 @@ def gemma_ids_tokenizer():
     return tok
 
 
-def write_checkpoint(d: Path, *, inputs=("text", "image"), lazy_ranges=()) -> Path:
+def write_checkpoint(
+    d: Path, *, inputs=("text", "image"), lazy_ranges=(), max_request_tokens=None
+) -> Path:
     """What the image holds in /opt/model, with a readout of identity rows."""
     from safetensors.numpy import save_file
 
@@ -84,6 +86,8 @@ def write_checkpoint(d: Path, *, inputs=("text", "image"), lazy_ranges=()) -> Pa
     if "image" in inputs:
         (d / "mmproj.gguf").write_bytes(b"\0" * 100)
     artifact = {"model_name": "tiny-decision-q8_0", "lazy_ranges": list(lazy_ranges)}
+    if max_request_tokens is not None:
+        artifact["max_request_tokens"] = max_request_tokens
     (d / "artifact.json").write_text(json.dumps(artifact))
     return d
 
@@ -146,8 +150,8 @@ def call(handler, event):
 @pytest.mark.parametrize(
     ("inputs", "mmproj", "warm_ups", "dropped"),
     [
-        (["text", "image"], "mmproj.gguf", [0, 1], [(0, 0), (100, 800)]),
-        (["text"], None, [0], [(100, 800)]),
+        (["text", "image"], "mmproj.gguf", [0, 1], [(100, 800), (0, 0), (100, 800)]),
+        (["text"], None, [0], [(100, 800), (100, 800)]),
     ],
 )
 def test_the_load_warms_up_then_drops_the_pages_it_is_done_with(
@@ -161,7 +165,8 @@ def test_the_load_warms_up_then_drops_the_pages_it_is_done_with(
     )  # fmt: skip
     # A text warm-up, then for a checkpoint that takes images an image one.
     assert [len(images) for _, _, images in backend.calls] == warm_ups
-    # The vision tower's file, whole, once mtmd has read it; the table's range after the warm-ups.
+    # The table's range right after the prefetch, before llama.cpp loads; the vision tower's file,
+    # whole, once mtmd has read it; the table's range again after the warm-ups.
     assert load.dropped == dropped
     assert call(handler, url_event("GET", "/health"))[1]["inputs"] == inputs
 
@@ -235,6 +240,14 @@ def test_health_and_the_request_limit_which_fails_closed(load, value, limit):
             "max_request_tokens": limit,
         },
     )
+
+
+@pytest.mark.parametrize(("value", "limit"), [(None, 12288), ("8000", 8000), ("0", None)])
+def test_the_build_s_request_limit_lowers_a_higher_one(load, tmp_path, value, limit):
+    # E4B's build records 12,288: a 16,384-token request runs it out of memory.
+    d = write_checkpoint(tmp_path / "ckpt", max_request_tokens=12288)
+    handler = load(d, **({} if value is None else {"DECIDER_MAX_REQUEST_TOKENS": value}))
+    assert call(handler, url_event("GET", "/health"))[1]["max_request_tokens"] == limit
 
 
 def test_an_on_demand_load_answers_once_ready_and_exits_if_it_fails(load, tmp_path, monkeypatch):

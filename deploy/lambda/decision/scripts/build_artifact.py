@@ -38,9 +38,23 @@ from strands_decider.core import DecisionConfig, check_image_processor, load_rea
 from strands_decider.core.config import IMAGE
 
 _QUANT = "Q8_0"
-# The decoder and the vision tower must leave the function room for llama.cpp's buffers, Python and
-# a request's state within Lambda's 10,240 MB: E2B's are 4.95 GB and, at q8_0, 0.23 GB.
-_MAX_BYTES = 6_000_000_000
+# What the function holds in memory, the files less the lazily read per-layer embedding table, must
+# leave llama.cpp's buffers, Python and a request's state room within Lambda's 10,240 MB: E2B's are
+# 2.4 GB of decoder and 0.23 GB of vision tower at q8_0, E4B's 5.0 GB and 0.23 GB.
+_MAX_RESIDENT_BYTES = 6_000_000_000
+# The files themselves go in the image, which Lambda caps at 10 GB unpacked, beside about 0.6 GB of
+# runtime: E2B's are 5.2 GB, E4B's 8.2 GB.
+_MAX_FILE_BYTES = 9_000_000_000
+
+
+def max_request_tokens(resident: int) -> int:
+    """The most tokens one request may forward in 10,240 MB, by the weights it holds: llama.cpp's
+    batch buffers grow with the state, which is decoded as one batch. E2B (2.7 GB resident) ran
+    16,384-token requests; E4B (5.3 GB) ran 13,735 and was killed for memory at 15,894, so it gets
+    12,288, which also keeps its slowest requests (about 330 s) well inside the 15-minute timeout."""
+    return 16384 if resident <= 3_500_000_000 else 12288
+
+
 _FILES = ("readout.safetensors", "decision_config.json", "tokenizer.json", "processor_config.json")
 
 
@@ -193,10 +207,18 @@ def main() -> None:
         full.unlink()
         check_mmproj(files["mmproj.gguf"], ckpt)
     size = sum(p.stat().st_size for p in files.values())
-    if size > _MAX_BYTES:
+    lazy = lazy_ranges(files["model.gguf"])
+    resident = size - sum(end - start for start, end in lazy)
+    if size > _MAX_FILE_BYTES:
         raise SystemExit(
-            f"the converted model is {size:,} bytes, over the {_MAX_BYTES:,} that leave a 10,240 MB "
-            "Lambda function room to run it; Lambda serves E2B"
+            f"the converted model is {size:,} bytes, over the {_MAX_FILE_BYTES:,} that fit in a "
+            "Lambda container image beside the runtime"
+        )
+    if resident > _MAX_RESIDENT_BYTES:
+        raise SystemExit(
+            f"the converted model holds {resident:,} bytes in memory (its {size:,} less the lazily "
+            f"read per-layer embeddings), over the {_MAX_RESIDENT_BYTES:,} that leave a 10,240 MB "
+            "Lambda function room to run it; Lambda serves E2B and E4B"
         )
     for f in _FILES:
         shutil.copyfile(ckpt / f, a.out / f)
@@ -207,7 +229,9 @@ def main() -> None:
         "revision": commit,
         "checkpoint_digest": digest,
         "llama_cpp": rev,
-        "lazy_ranges": lazy_ranges(files["model.gguf"]),
+        "lazy_ranges": lazy,
+        "resident_bytes": resident,
+        "max_request_tokens": max_request_tokens(resident),
         "files": {k: {"size": p.stat().st_size, "sha256": _sha256(p)} for k, p in files.items()},
     }
     (a.out / "artifact.json").write_text(json.dumps(artifact, indent=2) + "\n")

@@ -64,12 +64,22 @@ class _Model:
         self.config = DecisionConfig.load(model_dir)
         self.weight = load_readout(model_dir)
         self.tokenizer = load_tokenizer(model_dir)
+        # The build records the most a request may forward in this function's memory (E4B's is
+        # lower than E2B's); a configured limit above it is lowered to it. 0, no limit, is left alone.
+        cap = artifact.get("max_request_tokens")
+        if cap and max_request_tokens and max_request_tokens > cap:
+            _log.info("request limit lowered from %d to the build's %d", max_request_tokens, cap)
+            max_request_tokens = cap
         self.max_request_tokens = max_request_tokens
         gguf = os.path.join(model_dir, "model.gguf")
         mmproj = os.path.join(model_dir, "mmproj.gguf") if IMAGE in self.config.inputs else None
         for path in (gguf, mmproj):
             if path:
                 _prefetch(path)
+        # The prefetch brings the per-layer embedding table into this host's image cache, so its
+        # rows read quickly later; dropping it from the page cache now, before llama.cpp loads,
+        # keeps E4B's 3 GB of it from counting against the function's memory while the weights load.
+        self._drop_lazy(gguf, artifact)
         _log.info("model read in %.1f s", time.perf_counter() - started)
         self.llama = LlamaCppBackend(_LIBRARY, gguf, mmproj=mmproj)
         if mmproj:
@@ -81,11 +91,19 @@ class _Model:
         for warm_up in warm_ups:
             request = Request.model_validate(warm_up)
             evaluate(request, self.tokenizer, self.weight, self.config, self.llama)
-        # The per-layer embedding table, 2.5 GB of E2B's file, is read a few rows at a time; after
-        # the prefetch those rows come back quickly without the table staying in the page cache.
+        # The per-layer embedding table, 2.5 GB of E2B's file and 3.0 GB of E4B's, is read a few rows
+        # at a time; the warm-ups read some back, so drop it again.
+        self._drop_lazy(gguf, artifact)
+        _log.info(
+            "model ready in %.1f s, max RSS %d MB",
+            time.perf_counter() - started,
+            resource.getrusage(resource.RUSAGE_SELF).ru_maxrss // 1024,
+        )
+
+    @staticmethod
+    def _drop_lazy(gguf: str, artifact: dict[str, Any]) -> None:
         for start, end in artifact["lazy_ranges"]:
             _drop_from_page_cache(gguf, start, end - start)
-        _log.info("model ready in %.1f s", time.perf_counter() - started)
 
     def forward(
         self, state: list[int], questions: list[list[int]], images: tuple[RenderedImage, ...] = ()
