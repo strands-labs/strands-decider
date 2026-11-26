@@ -44,6 +44,7 @@ class FakeBackend:
         self.calls: list[tuple] = []
         self.fail: Exception | None = None
         self.last_timings = {"state_ms": 1.0}
+        self.cpu_backend = "static"
 
     def forward(self, state, questions, images=()):
         if self.fail is not None:

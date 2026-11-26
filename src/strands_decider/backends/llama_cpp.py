@@ -41,6 +41,7 @@ _SHIM = {
     "sd_load_vision": ([_P, _S, _N], _S),
     "sd_encode_image": ([_P, _S, _N, _N, _N, _F], _S),
     "sd_forward": ([_P, _I, _N, _N, _F, _N, _I, _I, _N, _F, _D], _S),
+    "sd_cpu_backend": ([], _S),
 }
 
 
@@ -91,6 +92,9 @@ class LlamaCppBackend:
         if not self._handle:
             raise RuntimeError(f"llama.cpp could not load {os.fspath(model)}")
         self._n_embd, self._n_embd_inp = n_embd.value, n_embd_inp.value
+        # The CPU backend llama.cpp runs on: "static", or the libggml-cpu-<tier>.so a build with
+        # every Arm tier picked for this host (deploy/lambda/decision/scripts/build_native.sh).
+        self.cpu_backend = lib.sd_cpu_backend().decode()
         self._vision = mmproj is not None
         if mmproj is not None:
             err = lib.sd_load_vision(self._handle, os.fsencode(mmproj), MAX_SOFT_TOKENS)

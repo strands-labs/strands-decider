@@ -41,7 +41,8 @@ from strands_decider.core.config import IMAGE
 # convert_hf_to_gguf.py writes the vision tower directly (it is not quantized afterwards) and takes
 # its --outtype in lower case. On Graviton the q8_0 tower encodes an image about three times as fast
 # as the f16 one (README.md, What the build does).
-_QUANT = "Q8_0"
+_QUANT = "Q8_0"  # the default; --decoder-quant picks another (docs/deployment/graviton-cpu-variants.md, Decoder quantization)
+_QUANTS = ("Q8_0", "Q6_K", "Q4_K_M", "Q4_0")
 _VISION_OUTTYPE = "q8_0"
 # What the function holds in memory, the files less the lazily read per-layer embedding table, must
 # leave llama.cpp's buffers, Python and a request's state room within Lambda's 10,240 MB: E2B's are
@@ -174,6 +175,9 @@ def _args() -> argparse.Namespace:
     )
     ap.add_argument("--llama-cpp", type=Path, required=True, help="the patched llama.cpp source")
     ap.add_argument("--quantize", type=Path, required=True, help="llama-quantize")
+    ap.add_argument(
+        "--decoder-quant", choices=_QUANTS, default=_QUANT, help="the decoder GGUF's type"
+    )
     ap.add_argument("--work", type=Path, default=Path("/tmp/decision-build"))
     ap.add_argument(
         "--gguf-tmp", type=Path, default=None, help="where the BF16 GGUF goes; --work by default"
@@ -202,7 +206,7 @@ def main() -> None:
     files = {"model.gguf": a.out / "model.gguf"}
     bf16 = tmp / "model-bf16.gguf"
     _run(*convert, "--outtype", "bf16", "--outfile", bf16)
-    _run(a.quantize, bf16, files["model.gguf"], _QUANT, str(os.cpu_count() or 1))
+    _run(a.quantize, bf16, files["model.gguf"], a.decoder_quant, str(os.cpu_count() or 1))
     bf16.unlink()
     if IMAGE in config.inputs:
         files["mmproj.gguf"] = a.out / "mmproj.gguf"
@@ -229,7 +233,7 @@ def main() -> None:
         shutil.copyfile(ckpt / f, a.out / f)
         files[f] = a.out / f
     artifact = {
-        "model_name": f"{name}-{_QUANT.lower()}",
+        "model_name": f"{name}-{a.decoder_quant.lower()}",
         "checkpoint": a.checkpoint,
         "revision": commit,
         "checkpoint_digest": digest,

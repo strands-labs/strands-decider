@@ -81,6 +81,22 @@ test("the checkpoint digest goes to the build", () => {
   assert.throws(() => synth({ ...S3, model_digest: "abc" }), /model_digest must be a sha256/);
 });
 
+test("the CPU build is Graviton2's by default, every Arm tier with cpu=variants", () => {
+  const command = (t: Template) => (Object.values(t.findResources("Custom::CDKContainerImageBuild"))[0] as any).Properties.buildCommand;
+  assert.match(command(synth(S3)), /NATIVE=--lambda\b(?!-)/);
+  assert.match(command(synth(S3)), /KLEIDIAI=0/);
+  assert.match(command(synth({ ...S3, cpu: "variants", kleidiai: "true" })), /NATIVE=--lambda-variants/);
+  assert.match(command(synth({ ...S3, cpu: "variants", kleidiai: "true" })), /KLEIDIAI=1/);
+  assert.throws(() => synth({ ...S3, cpu: "native" }), /cpu must be baseline or variants/);
+  assert.throws(() => synth({ ...S3, kleidiai: "yes" }), /kleidiai must be true or false/);
+  assert.match(command(synth(S3)), /GRAVITON_SVE=0/);
+  assert.match(command(synth({ ...S3, cpu: "variants", graviton_sve: "true" })), /GRAVITON_SVE=1/);
+  assert.throws(() => synth({ ...S3, graviton_sve: "on" }), /graviton_sve must be true or false/);
+  assert.match(command(synth(S3)), /DECODER_QUANT=Q8_0/);
+  assert.match(command(synth({ ...S3, decoder_quant: "Q4_0" })), /DECODER_QUANT=Q4_0/);
+  assert.throws(() => synth({ ...S3, decoder_quant: "Q2_K" }), /decoder_quant must be/);
+});
+
 test("v1's settings are refused, whatever their value", () => {
   for (const [key, value] of Object.entries({
     snapstart: false,

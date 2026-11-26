@@ -52,7 +52,7 @@ from strands_decider.core import (
 # nearest; a build without patches/0001 is 27 to 35 times nearer swa_only than prefix_bidir).
 _AGREE = 0.05
 _MISS_FACTOR = 5.0
-_GOLDEN_DP = 0.01
+_GOLDEN_DP = 0.01  # a variants build's modules get 0.015: docs/deployment/graviton-cpu-variants.md#the-image-builds-tiny-model-check
 _RED, _BLUE = ((220, 30, 30), (64, 48)), ((30, 30, 220), (48, 96))  # (colour, size)
 _GOLDEN = {
     "state": {"ticket": 4182, "text": "The checkout page fails after the payment step."},
@@ -136,7 +136,7 @@ def _probabilities(answer: dict) -> dict[str, float]:
     return answer.get("probabilities") or {"false": 1 - answer["noul"], "true": answer["noul"]}
 
 
-def _check_golden(backend, ref, ckpt, tok, failures) -> dict:
+def _check_golden(backend, ref, ckpt, tok, failures, golden_dp: float = _GOLDEN_DP) -> dict:
     """`evaluate`'s answers on the shim against the core's reading of the reference's rows."""
     config, weight = DecisionConfig.load(ckpt), load_readout(ckpt)
     request = Request.model_validate({**_GOLDEN, "images": [_png(*_RED)]})
@@ -152,12 +152,12 @@ def _check_golden(backend, ref, ckpt, tok, failures) -> dict:
         g, w = _probabilities(got[name]), _probabilities(want[name])
         if max(g, key=g.__getitem__) != max(w, key=w.__getitem__):
             failures.append(f"golden {name!r}: the top answer is not the reference's, {w}")
-        if max(abs(g[k] - w[k]) for k in w) > _GOLDEN_DP:
+        if max(abs(g[k] - w[k]) for k in w) > golden_dp:
             failures.append(f"golden {name!r}: probabilities {g}, the reference's {w}")
     return {name: {"reference": want[name], "shim": got[name]} for name in want}
 
 
-def run(llama_cpp: Path, lib: Path, work: Path) -> dict:
+def run(llama_cpp: Path, lib: Path, work: Path, golden_dp: float = _GOLDEN_DP) -> dict:
     """Every check's measurements, and `failures`, empty when the shim passes. llama.cpp's
     gguf-py must be importable."""
     started = time.time()
@@ -176,7 +176,7 @@ def run(llama_cpp: Path, lib: Path, work: Path) -> dict:
         report["mask"] = _check_mask(ref, state, questions, rows, failures)
         report["reuse_max_abs"] = _check_reuse(backend, state, questions, rows, failures)
         report["images"] = _check_images(backend, ref, tok, failures)
-        report["golden"] = _check_golden(backend, ref, ckpt, tok, failures)
+        report["golden"] = _check_golden(backend, ref, ckpt, tok, failures, golden_dp)
     finally:
         backend.close()
     report["seconds"] = round(time.time() - started, 1)
@@ -190,10 +190,13 @@ def main() -> None:
     )
     ap.add_argument("--llama-cpp", type=Path, required=True)
     ap.add_argument("--lib", type=Path, required=True)
+    ap.add_argument(
+        "--golden-dp", type=float, default=_GOLDEN_DP, help="each golden probability's tolerance"
+    )
     a = ap.parse_args()
     sys.path.insert(0, str(a.llama_cpp / "gguf-py"))
     with tempfile.TemporaryDirectory() as work:
-        report = run(a.llama_cpp, a.lib, Path(work))
+        report = run(a.llama_cpp, a.lib, Path(work), a.golden_dp)
     print(json.dumps(report, indent=1, default=str))
     if report["failures"]:
         raise SystemExit("shim check FAILED:\n  " + "\n  ".join(report["failures"]))

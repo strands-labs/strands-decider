@@ -62,6 +62,9 @@ class FakeShim:
     def sd_free(self, handle):
         pass
 
+    def sd_cpu_backend(self):
+        return b"libggml-cpu-armv8.6_1.so"
+
     def sd_load_vision(self, handle, path, max_tokens):
         return self.fail.get("sd_load_vision")
 
@@ -136,6 +139,12 @@ def test_an_image_that_does_not_decode_is_refused_before_the_shim(shim, broken):
     with pytest.raises(ValueError, match=r"^image could not be decoded"):
         backend.forward([2], [[1]], (broken(_image("checker-64x48.png")),))
     assert shim.encoded == [] and shim.forwarded == []
+
+
+def test_the_cpu_backend_is_the_shims(shim):
+    """The CPU backend llama.cpp runs on is what the shim says it loaded."""
+    backend = llama_cpp.LlamaCppBackend("libdecision.so", "model.gguf")
+    assert backend.cpu_backend == "libggml-cpu-armv8.6_1.so"
 
 
 @pytest.mark.parametrize("function", ["sd_load", "sd_load_vision", "sd_encode_image", "sd_forward"])

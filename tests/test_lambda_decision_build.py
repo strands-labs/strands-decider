@@ -101,3 +101,13 @@ def test_the_request_limit_follows_the_resident_weights(build_artifact):
     # E2B holds 2.7 GB once its per-layer embeddings are left on disk, E4B 5.3 GB.
     assert build_artifact.max_request_tokens(2_699_086_016) == 16384
     assert build_artifact.max_request_tokens(5_264_544_960) == 12288
+
+
+def test_the_variants_image_keeps_the_libraries_versioned_names():
+    """A --lambda-variants libdecision.so links libmtmd.so.1, libllama.so.1 and libggml*.so.1, so
+    the image copies every name of each library, its symlinks too, not only libX.so."""
+    from pathlib import Path
+
+    dockerfile = (Path(__file__).parents[1] / "deploy/lambda/decision/Dockerfile").read_text()
+    assert "cp -a /build/bin/*.so* " in dockerfile
+    assert "check_variants.sh /llama /opt/lib" in dockerfile

@@ -186,7 +186,7 @@ else:
 
 def _cpu_part() -> str:
     """The host CPU, which Lambda picks per environment: 0xd0c is Graviton2, 0xd40 Graviton3,
-    0xd4f Graviton4."""
+    0xd4f Graviton4, 0xd84 Graviton5."""
     try:
         with open("/proc/cpuinfo") as f:
             return next(line for line in f if line.startswith("CPU part")).split(":")[1].strip()
@@ -195,6 +195,22 @@ def _cpu_part() -> str:
 
 
 _CPU_PART = _cpu_part()
+
+
+def _cpu_features() -> str:
+    """The host's features that pick a CPU backend variant (shim.c, sd_cpu_backend)."""
+    wanted = ("asimddp", "asimdhp", "sve", "sve2", "i8mm", "bf16", "sme", "sme2")
+    try:
+        with open("/proc/cpuinfo") as f:
+            have = set(
+                next(line for line in f if line.startswith("Features")).split(":")[1].split()
+            )
+    except (OSError, StopIteration):
+        return "?"
+    return " ".join(w for w in wanted if w in have)
+
+
+_CPU_FEATURES = _cpu_features()
 
 
 def _evaluate(request: Request) -> dict[str, Any]:
@@ -212,6 +228,8 @@ def _evaluate(request: Request) -> dict[str, Any]:
         "questions": payload["usage"]["output_tokens"],
         "images": len(request.images),
         "cpu_part": _CPU_PART,
+        "cpu_backend": model.llama.cpu_backend,
+        "cpu_features": _CPU_FEATURES,
         "maxrss_mb": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss // 1024,
         "timings_ms": model.llama.last_timings,
     }

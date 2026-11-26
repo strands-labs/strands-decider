@@ -32,11 +32,13 @@
 // An image row is what llama.cpp's Gemma 4 graph expects of an embedding row: it is not scaled by
 // sqrt(n_embd), and its per-layer embedding is the pad token's, as in transformers.
 
+#define _GNU_SOURCE  // dladdr
 #include "ggml-backend.h"
 #include "ggml.h"
 #include "llama.h"
 #include "mtmd.h"
 
+#include <dlfcn.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -94,6 +96,44 @@ static void sd_override_int(struct llama_model_kv_override * o, const char * key
     o->val_i64 = value;
 }
 
+// The CPU backend variant in use: the libggml-cpu-<tag>.so ggml picked for this host, "static" when
+// the CPU backend is linked in, or "none" before the first sd_load.
+static char sd_cpu_variant[64] = "none";
+
+// A --lambda-variants build (scripts/build_native.sh) links no CPU backend: ggml loads the best
+// libggml-cpu-*.so its host supports, from this library's own directory, since ggml's default
+// search (the executable's directory and the working directory) is Python's, not ours.
+static void sd_load_backends(void) {
+    if (ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_CPU)) {
+        if (strcmp(sd_cpu_variant, "none") == 0) snprintf(sd_cpu_variant, sizeof(sd_cpu_variant), "static");
+        return;
+    }
+    Dl_info info;
+    char    dir[4096] = ".";
+    if (dladdr((void *) sd_load_backends, &info) && info.dli_fname) {
+        snprintf(dir, sizeof(dir), "%s", info.dli_fname);
+        char * slash = strrchr(dir, '/');
+        if (slash) *slash = 0; else snprintf(dir, sizeof(dir), ".");
+    }
+    ggml_backend_load_all_from_path(dir);
+    ggml_backend_dev_t cpu = ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_CPU);
+    if (!cpu) {
+        fprintf(stderr, "strands-decider: no CPU backend in %s runs on this host\n", dir);
+        return;
+    }
+    // The module that defines the CPU registration function is the variant ggml chose.
+    ggml_backend_reg_t reg = ggml_backend_dev_backend_reg(cpu);
+    void * fn = ggml_backend_reg_get_proc_address(reg, "ggml_backend_set_n_threads");
+    const char * name = "loaded";
+    if (fn && dladdr(fn, &info) && info.dli_fname) {
+        const char * base = strrchr(info.dli_fname, '/');
+        name = base ? base + 1 : info.dli_fname;
+    }
+    snprintf(sd_cpu_variant, sizeof(sd_cpu_variant), "%s", name);
+}
+
+const char * sd_cpu_backend(void) { return sd_cpu_variant; }
+
 // Load a Gemma 4 GGUF, mapped, and give its hidden size and its input embedding size (an image
 // row's). The per-layer embedding table, half of E2B's weights, is read lazily
 // (LLAMA_LAZY_MODE_ON): only the rows of a batch's tokens, from the mapped file, never a copy of
@@ -102,6 +142,7 @@ static void sd_override_int(struct llama_model_kv_override * o, const char * key
 void * sd_load(const char * path, int n_threads, int * n_embd, int * n_embd_inp) {
     sd_verbose = getenv("STRANDS_DECIDER_LLAMA_VERBOSE") != NULL;
     llama_log_set(sd_log, NULL);
+    sd_load_backends();
     llama_backend_init();
     sd_handle * h = (sd_handle *) calloc(1, sizeof(sd_handle));
     if (!h) return NULL;
@@ -113,6 +154,8 @@ void * sd_load(const char * path, int n_threads, int * n_embd, int * n_embd_inp)
     mp.kv_overrides = h->overrides;
     mp.lazy_mode    = LLAMA_LAZY_MODE_ON;
     mp.load_mode    = LLAMA_LOAD_MODE_MMAP;
+    // STRANDS_DECIDER_NO_REPACK=1 keeps ggml from repacking weights for its GEMM kernels (llama.cpp's --no-repack), for measuring.
+    if (getenv("STRANDS_DECIDER_NO_REPACK")) mp.use_extra_bufts = false;
     h->model = llama_model_load_from_file(path, mp);
     if (!h->model) {
         free(h);
@@ -270,6 +313,9 @@ const char * sd_forward(void * handle, const int * state_ids, int n_state, int i
     cp.swa_full          = true;
     cp.attention_type    = LLAMA_ATTENTION_TYPE_NON_CAUSAL;
     cp.flash_attn_type   = LLAMA_FLASH_ATTN_TYPE_AUTO;
+    // For measuring precision: STRANDS_DECIDER_KV_F32=1 (an f32 KV cache), STRANDS_DECIDER_FLASH_ATTN=0 (no flash attention).
+    if (getenv("STRANDS_DECIDER_KV_F32")) cp.type_k = cp.type_v = GGML_TYPE_F32;
+    if (getenv("STRANDS_DECIDER_FLASH_ATTN") && strcmp(getenv("STRANDS_DECIDER_FLASH_ATTN"), "0") == 0) cp.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_DISABLED;
     cp.cb_eval           = sd_eval_cb;
     cp.cb_eval_user_data = &cap;
     struct llama_context * ctx = llama_init_from_model(h->model, cp);

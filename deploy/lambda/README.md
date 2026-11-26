@@ -119,6 +119,9 @@ Every setting is a CDK context value. Change it in `cdk.json`, or pass `-c key=v
 | `vision_precision` | `f16` | `f32` for the vision tower ([Precision](#precision)) |
 | `max_request_tokens` | `24576`, `16384` for a checkpoint with a `decision_config.json` | The most tokens one request may forward, the state once plus every question; `0` for no limit ([Limits](#limits)) |
 | `model_digest` | none | A checkpoint with a `decision_config.json`: its manifest digest ([What the build does](#what-the-build-does)); the build refuses a checkpoint with another |
+| `cpu` | `baseline` | A checkpoint with a `decision_config.json`: `variants` builds a CPU backend module per Arm tier and Graviton generation, picked per host ([Graviton CPU variants](../../docs/deployment/graviton-cpu-variants.md)) |
+| `kleidiai` | `false` | With `cpu=variants`: `true` adds Arm's KleidiAI kernels |
+| `graviton_sve` | `false` | With `cpu=variants`: `true` adds SVE Graviton modules, for measuring ([why it is off](../../docs/deployment/graviton-cpu-variants.md#why-the-graviton-modules-are-nosve)) |
 | `stack_name` | from the model | The stack's name, instead of one made from `model` (an `s3://` checkpoint's name gets 8 hex digits of its URI's sha256, so checkpoints of one name in different places get stacks of their own) |
 
 `snapstart`, `vision`, `image_long_side`, `decoder_precision` and `vision_precision` are only
