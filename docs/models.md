@@ -57,8 +57,10 @@ Rules of thumb:
   in 4 bits, so run them in 8.
 - **A threshold on the probability: 8 bits.** Where the bf16 model gives its top answer a probability between
   0.1 and 0.9, the 31B moves that probability by 0.06 on average in 4 bits and by 0.02 in 8 bits.
-- **For latency, a smaller model.** Fewer bits save memory, not time: with `--quantization`, one request takes
-  about 1.2 times the time of bf16 in 4 bits and about 2.2 times in 8 bits.
+- **For speed, fewer active parameters.** Fewer bits save memory, not time: with `--quantization`, one request
+  takes about 1.2 times the time of bf16 in 4 bits and about 2.2 times in 8 bits. Throughput follows the number
+  of active parameters. Served with vLLM on one H100, the 26B-A4B, with 4B active parameters, answers 59
+  decisions a second, the 12B answers 24 and the 31B answers 9.
 - **The 26B-A4B stays in bf16.** The option converts linear layers, and most of this model's weights are in
   expert tensors: in 4 bits it takes 45.0 GiB where bf16 takes 48.2 GiB.
 
