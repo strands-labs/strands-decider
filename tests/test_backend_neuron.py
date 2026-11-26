@@ -22,7 +22,7 @@ import numpy as np
 import pytest
 from neuron_support import REAL, needs_neuron, needs_real_neuron
 
-from decision_support import GEMMA4_VISION, image_b64, model_checkpoint, request  # isort: skip
+from decision_support import GEMMA4_VISION, UNIFIED, image_b64, model_checkpoint, request  # isort: skip
 
 from strands_decider.backends.neuron import NeuronBackend, pack_joint
 from strands_decider.backends.transformers import load_backend
@@ -56,6 +56,25 @@ LAYOUTS = {
     # on the full layers (here 1, replicated over two ranks) than on the sliding ones.
     "31B": {
         "kind": GEMMA4_VISION,
+        "text": {
+            "vocab_size": 262144,
+            "hidden_size": 256,
+            "intermediate_size": 512,
+            "num_hidden_layers": 2,
+            "layer_types": ["sliding_attention", "full_attention"],
+            "num_attention_heads": 4,
+            "num_key_value_heads": 2,
+            "num_global_key_value_heads": 1,
+            "head_dim": 256,
+            "global_head_dim": 512,
+            "attention_k_eq_v": True,
+            "rope_parameters": _ROPE,
+        },
+    },
+    # 12B: Gemma4Unified's text model, dense; 16 query heads over 8 key/value heads on the sliding
+    # layers (here 4 over 2) and one replicated key/value head on the full ones, keys as values.
+    "12B": {
+        "kind": UNIFIED,
         "text": {
             "vocab_size": 262144,
             "hidden_size": 256,
@@ -189,6 +208,28 @@ def test_forward_agrees_with_the_cpu(ckpt, cpu, neuron, dtype):
     got = neuron(dtype=dtype).forward(state, questions)
     bound = FLOAT32 if dtype == "float32" else _bf16_bound(cpu, state, questions)
     assert _rel(truth, got) < bound, (_rel(truth, got), bound)
+
+
+def test_a_one_file_checkpoint_needs_no_index(ckpt, neuron, devices, tmp_path):
+    """The 12B ships one model.safetensors and no index: the same rows as the indexed copy."""
+    one = tmp_path / "one-file"
+    one.mkdir()
+    for f in ckpt.iterdir():
+        if f.name != "model.safetensors.index.json":
+            (one / f.name).symlink_to(f)
+    state, questions = _prompt(ckpt)
+    indexed = neuron().forward(state, questions)
+    devices.release()
+    b = NeuronBackend(
+        str(one),
+        tp=1,
+        max_length=2048,
+        opts={"env": {"NEURON_RT_VISIBLE_CORES": str(FIRST_CORE)}, "applies_readout": False},
+    )
+    try:
+        assert _rel(indexed, b.forward(state, questions)) < SAME
+    finally:
+        b.close()
 
 
 # b ------------------------------------------------------------------------------------------
