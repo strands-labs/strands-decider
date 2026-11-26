@@ -313,8 +313,17 @@ const char * sd_forward(void * handle, const int * state_ids, int n_state, int i
     cp.swa_full          = true;
     cp.attention_type    = LLAMA_ATTENTION_TYPE_NON_CAUSAL;
     cp.flash_attn_type   = LLAMA_FLASH_ATTN_TYPE_AUTO;
-    // For measuring precision: STRANDS_DECIDER_KV_F32=1 (an f32 KV cache), STRANDS_DECIDER_FLASH_ATTN=0 (no flash attention).
+    // For measuring: STRANDS_DECIDER_KV_TYPE=f16|f32|q8_0|q4_0 (the KV cache's type; a quantized one is Hadamard-rotated
+    // by llama.cpp), STRANDS_DECIDER_KV_F32=1 (same as f32), STRANDS_DECIDER_FLASH_ATTN=0 (no flash attention).
     if (getenv("STRANDS_DECIDER_KV_F32")) cp.type_k = cp.type_v = GGML_TYPE_F32;
+    const char * kv = getenv("STRANDS_DECIDER_KV_TYPE");
+    if (kv) {
+        const enum ggml_type t = strcmp(kv, "f32") == 0  ? GGML_TYPE_F32
+                               : strcmp(kv, "q8_0") == 0 ? GGML_TYPE_Q8_0
+                               : strcmp(kv, "q4_0") == 0 ? GGML_TYPE_Q4_0
+                                                         : GGML_TYPE_F16;
+        cp.type_k = cp.type_v = t;
+    }
     if (getenv("STRANDS_DECIDER_FLASH_ATTN") && strcmp(getenv("STRANDS_DECIDER_FLASH_ATTN"), "0") == 0) cp.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_DISABLED;
     cp.cb_eval           = sd_eval_cb;
     cp.cb_eval_user_data = &cap;
