@@ -202,7 +202,10 @@ def report(args) -> None:
     labels = sorted(
         {r["label"] for r in ok}, key=lambda x: (order.index(x) if x in order else 9, x)
     )
-    names = ["text40", "text1k", "text4k", "image1"]
+    # Every request name in the results, the usual mix first in its order, then any others.
+    usual = ["text40", "text1k", "text4k", "text10k", "image1"]
+    present = {r["name"] for r in ok}
+    names = [n for n in usual if n in present] + sorted(present - set(usual))
     print("Median server latency (ms) [n], and speedup against the first label\n")
     print("| where | CPU | request | " + " | ".join(labels) + " |")
     print("|---|---|---|" + "---|" * len(labels))
