@@ -72,7 +72,8 @@ Metal through mlx-lm.
   bits with bitsandbytes, on `--device cuda`
   (`pip install "strands-decider[quantization]"`). The weights take about a
   third or a half of the bfloat16 memory, and the probabilities change a
-  little. Measurements are in
+  little. It saves memory, not time: a request takes about 1.2 times as long
+  as in bfloat16 in 4 bits, and about 2.2 times in 8 bits. Measurements are in
   [issue 172](https://github.com/strands-labs/strands-decider/issues/172).
 
 ## Shared-prefix cache
