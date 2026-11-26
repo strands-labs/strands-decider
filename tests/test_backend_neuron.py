@@ -99,6 +99,28 @@ LAYOUTS = {
             "rope_parameters": _ROPE,
         },
     },
+    # E4B: per-layer input embeddings and KV-shared layers like E2B, but two key/value heads
+    # (one per rank at TP=2), MLPs of one width, and more layers before the shared ones (here
+    # four, so each type's producer is an earlier layer than the first shared one).
+    "E4B": {
+        "kind": GEMMA4,
+        "text": {
+            "vocab_size": 262144,
+            "hidden_size": 256,
+            "intermediate_size": 512,
+            "num_hidden_layers": 6,
+            "layer_types": ["sliding_attention", "full_attention"] * 3,
+            "num_kv_shared_layers": 2,
+            "hidden_size_per_layer_input": 16,
+            "use_double_wide_mlp": False,
+            "num_attention_heads": 4,
+            "num_key_value_heads": 2,
+            "head_dim": 256,
+            "global_head_dim": 512,
+            "attention_k_eq_v": False,
+            "rope_parameters": _ROPE,
+        },
+    },
 }
 FLOAT32 = 5e-3  # float32 on the device against float32 on the CPU (4.3e-4 on the CPU alone)
 SAME = 1e-3  # one device graph, the same token positions: only masked keys differ
