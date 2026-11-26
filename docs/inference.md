@@ -121,6 +121,7 @@ probability difference of at most 0.02 (`tests/core_conformance.py`).
 
 | Checkpoint | NeuronCores | Typed Decisions request, p50 | One question at 4K / 32K tokens | Conformance |
 | --- | --- | --- | --- | --- |
+| `StrandsAgents/strands-decider-12B-gemma4-v2-2611` | 16 | 40.6 ms (about 1K tokens, five questions) | 135 ms / 1.6 s | Golden vectors up to 32K tokens: 1,227 questions, top-1 0.992, mean \|dp\| 0.004. Typed Decisions against a float32 CPU run of the transformers backend (the checkpoint publishes no predictions): 2,000 decisions, top-1 0.991, mean \|dp\| 0.007, accuracy 0.740 (CPU run 0.739). |
 
 **Environment variables.**
 
