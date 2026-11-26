@@ -121,19 +121,20 @@ probability difference of at most 0.02 (`tests/core_conformance.py`).
 
 | Checkpoint | NeuronCores | Typed Decisions request, p50 | One question at 4K / 32K tokens | Conformance |
 | --- | --- | --- | --- | --- |
+| `StrandsAgents/strands-decider-E2B-gemma4-v2-2611` | 8 | 13.1 ms (about 1K tokens, five questions) | 29 ms / 407 ms | Golden vectors up to 32K tokens: 1,227 questions, top-1 0.998, mean \|dp\| 0.003. Typed Decisions against a float32 CPU run (no published predictions): 2,000 decisions, top-1 0.995, mean \|dp\| 0.004, accuracy 0.693 (CPU 0.693). |
 
 **Environment variables.**
 
 | Variable | Default | Effect |
 | --- | --- | --- |
-| `STRANDS_NEURON_TP` | `16` | NeuronCores (and worker processes) the model is split over. |
+| `STRANDS_NEURON_TP` | `8` for checkpoints up to 18 GB, else `16` | NeuronCores (and worker processes) the model is split over. |
 | `STRANDS_NEURON_CORES` | first `TP` cores | Which NeuronCores to use, such as `16-31`; sets `NEURON_RT_VISIBLE_CORES`. Lets several servers share an instance. |
 | `STRANDS_NEURON_WARM` | `default` | Shapes compiled at start-up: `default`, `none`, or `state:question tokens:questions,...`, such as `512:640:5`. |
 | `STRANDS_NEURON_EAGER` | `0` | `1` runs op by op without `torch.compile` (slow; for debugging). |
 | `STRANDS_NEURON_CC_OVERLAP` | `0` | `1` passes neuronx-cc's collective/compute overlap option: about 4% faster, but it fails to compile the graphs for states over 4,096 tokens. Use it only when prompts stay below that. Ignored when `NEURON_CC_FLAGS` is set. |
 | `STRANDS_NEURON_JOINT_MAX` | `4096` | Longest state, in tokens, packed jointly. Longer states use separate buckets and the NKI flash-attention kernel. |
 | `STRANDS_NEURON_NKI_STATE` | `1` | NKI Library `attention_cte` for the state block of long prompts. `0` uses plain PyTorch, which runs out of device memory past about 20K tokens. |
-| `STRANDS_NEURON_LAYERS_PER_GRAPH` | `6` | Decoder layers per compiled graph for joint buckets. |
+| `STRANDS_NEURON_LAYERS_PER_GRAPH` | `6`; with KV-shared layers, all the others | Decoder layers per compiled graph for joint buckets. |
 
 ## Flags worth knowing
 
