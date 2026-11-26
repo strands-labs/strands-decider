@@ -322,7 +322,9 @@ def test_a_decision_engine_answers_as_on_the_cpu(engines):
     for name in ref:
         p, r, r16 = _distribution(ours[name]), _distribution(ref[name]), _distribution(ref16[name])
         assert set(p) == set(r)
-        assert abs(sum(p.values()) - 1.0) < 1e-5, name
+        # Each answer probability is rounded to 4 decimals (core.readout), so k of them sum to
+        # 1 within k * 5e-5.
+        assert abs(sum(p.values()) - 1.0) <= 5e-5 * len(p) + 1e-9, (name, p)
         assert all(0.0 <= v <= 1.0 for v in p.values()), name
         keys = list(r)
         floor = max(abs(r[k] - r16[k]) for k in keys)
