@@ -8,6 +8,7 @@ import contextlib
 import json
 import math
 import os
+import shutil
 import warnings
 
 import numpy as np
@@ -18,7 +19,11 @@ import transformers
 from decision_support import GEMMA4, KINDS, model_checkpoint, image_b64, request  # isort: skip
 
 from strands_decider.backends.images import image_pixels
-from strands_decider.backends.transformers import TransformersBackend, load_backend
+from strands_decider.backends.transformers import (
+    _UNQUANTIZED,
+    TransformersBackend,
+    load_backend,
+)
 from strands_decider.backends.transformers_attention import ATTENTION, StateCache, StateSplit
 from strands_decider.core import (
     DecisionConfig,
@@ -310,6 +315,29 @@ def test_a_device_agrees_with_the_cpu(ckpt, kind, device):
     state, questions, images = _prompt(ckpt, request(IMAGES[:1]))
     got = _reusing(full).forward(state, questions, images)
     assert _rel(full.forward(state, questions, images), got) < 1e-4
+
+
+@needs_cuda
+@pytest.mark.parametrize("quantization", ["4bit", "8bit"])
+def test_a_quantized_load(ckpt, quantization, tmp_path):
+    """bitsandbytes holds every linear layer but the LM head, the image encoder's too, and the
+    numbers are finite. A copy saved in 4 bits loads without the option and answers as the model
+    that saved it."""
+    bnb = pytest.importorskip("bitsandbytes")
+    backend = load_backend(str(ckpt), device="cuda", quantization=quantization)
+    quantized = bnb.nn.Linear4bit if quantization == "4bit" else bnb.nn.Linear8bitLt
+    linear = {n: m for n, m in backend.model.named_modules() if isinstance(m, torch.nn.Linear)}
+    assert set(_UNQUANTIZED) < set(linear)
+    assert all(isinstance(m, quantized) == (n not in _UNQUANTIZED) for n, m in linear.items())
+    state, questions, images = _prompt(ckpt, request(IMAGES[:1]))
+    got = backend.forward(state, questions, images)
+    assert np.isfinite(got).all()
+    if quantization == "4bit":
+        backend.model.save_pretrained(str(tmp_path))
+        for name in ("decision_config.json", "processor_config.json"):
+            shutil.copy(ckpt / name, tmp_path)
+        saved = load_backend(str(tmp_path), device="cuda")
+        assert _rel(got, saved.forward(state, questions, images)) < 1e-4
 
 
 def _question_batches(path, widths, state_len: int):

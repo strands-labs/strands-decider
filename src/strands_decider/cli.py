@@ -114,6 +114,13 @@ def serve_cmd(
         help="float32 or bfloat16. Default: float32 on cpu, bfloat16 on cuda and mps. Not "
         "supported for v1 model checkpoints.",
     ),
+    quantization: str | None = typer.Option(
+        None,
+        "--quantization",
+        help="4bit or 8bit: load the model's linear layers with bitsandbytes, for less GPU "
+        "memory and a small change of the probabilities. CUDA only, with the quantization extra. "
+        "Not supported for v1 model checkpoints.",
+    ),
     queue_timeout: float = typer.Option(
         60.0,
         "--queue-timeout",
@@ -157,6 +164,7 @@ def serve_cmd(
             device_map=device_map,
             warmup=warmup,
             dtype=dtype,
+            quantization=quantization,
             max_concurrency=max_concurrency,
             queue_timeout=queue_timeout,
             revision=revision,
@@ -204,6 +212,13 @@ def ask_cmd(
         help="float32 or bfloat16. Default: float32 on cpu, bfloat16 on cuda and mps. Not "
         "supported for v1 model checkpoints.",
     ),
+    quantization: str | None = typer.Option(
+        None,
+        "--quantization",
+        help="4bit or 8bit: load the model's linear layers with bitsandbytes, for less GPU "
+        "memory and a small change of the probabilities. CUDA only, with the quantization extra. "
+        "Not supported for v1 model checkpoints.",
+    ),
 ) -> None:
     """Ask one state a set of typed questions from the command line."""
     from .infer import EngineConfig, load_engine
@@ -243,13 +258,23 @@ def ask_cmd(
         }
         try:
             engine = load_decision_engine(
-                checkpoint, device=selected_device, dtype=dtype, revision=revision
+                checkpoint,
+                device=selected_device,
+                dtype=dtype,
+                quantization=quantization,
+                revision=revision,
             )
             response = engine.evaluate(Request.model_validate(request))
-        except ValueError as e:  # a device or dtype, an image or a prompt it refuses
+        except ValueError as e:  # a device, dtype or quantization, an image or a prompt it refuses
             raise typer.BadParameter(str(e)) from e
-    elif dtype is not None or revision is not None:
-        flag = "--dtype" if dtype is not None else "--revision"
+    elif dtype is not None or quantization is not None or revision is not None:
+        flag = (
+            "--dtype"
+            if dtype is not None
+            else "--quantization"
+            if quantization is not None
+            else "--revision"
+        )
         raise typer.BadParameter(
             f"{flag} is not supported for v1 model checkpoints", param_hint=flag
         )

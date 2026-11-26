@@ -215,7 +215,13 @@ def test_serve_command_options(ckpt, tmp_path, monkeypatch):
             [str(tmp_path), "--max-length", "100"],
             "--max-length is not supported for v1 model checkpoints",
         ),
+        (
+            [str(tmp_path), "--quantization", "4bit"],
+            "--quantization is not supported for v1 model checkpoints",
+        ),
         ([str(ckpt), "--dtype", "float16"], "--dtype is one of"),
+        ([str(ckpt), "--quantization", "2bit"], "--quantization is one of"),
+        ([str(ckpt), "--device", "cpu", "--quantization", "4bit"], "needs a CUDA device"),
         ([str(ckpt), "--max-length", "0"], "greater than or equal to 1"),
         ([str(ckpt), "--device-map", "auto"], "--device-map is only supported for v1"),
         ([str(ckpt), "--device", "tpu"], "model checkpoints run on cpu, cuda, mps"),
@@ -263,6 +269,18 @@ def test_ask_on_a_model_checkpoint(ckpt, text_only, tmp_path):
             [str(tmp_path), "--device", "cpu", "--dtype", "bfloat16"],
             "--dtype is not supported for v1 model checkpoints",
         ),
+        (
+            [str(tmp_path), "--device", "cpu", "--quantization", "4bit"],
+            "--quantization is not supported for v1 model checkpoints",
+        ),
+        ([str(ckpt), "--device", "cpu", "--quantization", "8bit"], "needs a CUDA device"),
     ):
         code, out = _cli("ask", args[0], "--state", "x", "--noul", "y?", *args[1:])
         assert code == 2 and hint in out, out
+
+
+def test_quantization_needs_bitsandbytes(ckpt, monkeypatch):
+    """Refused before the weights load, with the extra to install."""
+    monkeypatch.setattr("importlib.util.find_spec", lambda name: None)
+    with pytest.raises(ValueError, match=r"strands-decider\[quantization\]"):
+        load_decision_engine(str(ckpt), device="cuda", quantization="4bit")

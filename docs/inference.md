@@ -68,6 +68,13 @@ Metal through mlx-lm.
 - `--max-batch N` sets the per-request question budget.
 - `--device-map auto` splits a model across multiple GPUs when one is not
   enough.
+- `--quantization 4bit` or `8bit` loads a v2 model's linear layers in 4 or 8
+  bits with bitsandbytes, on `--device cuda`
+  (`pip install "strands-decider[quantization]"`). The weights take about a
+  third or a half of the bfloat16 memory, and the probabilities change a
+  little. It saves memory, not time: a request takes about 1.2 times as long
+  as in bfloat16 in 4 bits, and about 2.2 times in 8 bits. Measurements are in
+  [issue 172](https://github.com/strands-labs/strands-decider/issues/172).
 
 ## Shared-prefix cache
 

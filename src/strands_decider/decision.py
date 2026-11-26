@@ -7,6 +7,7 @@ unchanged.
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import logging
 import os
@@ -28,6 +29,7 @@ logger = logging.getLogger(__name__)
 
 _DEVICES = ("cpu", "cuda", "mps")
 _DTYPES = ("float32", "bfloat16")
+_QUANTIZATIONS = ("4bit", "8bit")
 # Told to clients when the backend couldn't build the image processor; the reason, which may
 # name local paths, is only warned at load.
 NO_IMAGE_PROCESSOR = (
@@ -148,6 +150,7 @@ def load_decision_engine(
     *,
     device: str,
     dtype: str | None = None,
+    quantization: str | None = None,
     reuse_state: bool = True,
     max_batch: int = 32,
     max_batch_tokens: int | None = None,
@@ -164,6 +167,16 @@ def load_decision_engine(
         raise ValueError(f"model checkpoints run on {', '.join(_DEVICES)}, not {device!r}")
     if dtype is not None and dtype not in _DTYPES:
         raise ValueError(f"--dtype is one of {', '.join(_DTYPES)}, not {dtype!r}")
+    if quantization is not None and quantization not in _QUANTIZATIONS:
+        raise ValueError(
+            f"--quantization is one of {', '.join(_QUANTIZATIONS)}, not {quantization!r}"
+        )
+    if quantization is not None and not device.startswith("cuda"):
+        raise ValueError("--quantization needs a CUDA device (bitsandbytes)")
+    if quantization is not None and importlib.util.find_spec("bitsandbytes") is None:
+        raise ValueError(
+            '--quantization needs bitsandbytes: pip install "strands-decider[quantization]"'
+        )
     path = checkpoint_dir(checkpoint, revision)
     config = DecisionConfig.load(path)
     if max_length is not None and max_length > config.max_length_validated:
@@ -180,6 +193,7 @@ def load_decision_engine(
         path,
         device=device,
         dtype=dtype,
+        quantization=quantization,
         reuse_state=reuse_state,
         max_batch=max_batch,
         max_batch_tokens=max_batch_tokens,
