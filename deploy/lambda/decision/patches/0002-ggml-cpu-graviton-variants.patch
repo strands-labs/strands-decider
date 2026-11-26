@@ -14,7 +14,7 @@ index b1018cb..ee4dc18 100644
  set(GGML_CPU_POWERPC_CPUTYPE "" CACHE STRING "ggml: CPU type for PowerPC")
  
 diff --git a/ggml/src/CMakeLists.txt b/ggml/src/CMakeLists.txt
-index 5ff78f2..cd5de42 100644
+index 5ff78f2..d91deaa 100644
 --- a/ggml/src/CMakeLists.txt
 +++ b/ggml/src/CMakeLists.txt
 @@ -454,8 +454,19 @@ function(ggml_add_cpu_backend_variant tag_name)
@@ -43,15 +43,15 @@ index 5ff78f2..cd5de42 100644
              ggml_add_cpu_backend_variant(armv9.2_1    DOTPROD FP16_VECTOR_ARITHMETIC SVE MATMUL_INT8 SME)
              ggml_add_cpu_backend_variant(armv9.2_2    DOTPROD FP16_VECTOR_ARITHMETIC SVE MATMUL_INT8 SVE2 SME)
 +            if (GGML_CPU_GRAVITON_VARIANTS)
-+                # One per Graviton generation, loaded only on its MIDR part; +nosve: see strands-decider docs/deployment/graviton-cpu-variants.md.
++                # One per Graviton generation, loaded only on its MIDR part; 4 and 5 +nosve: see strands-decider docs/deployment/graviton-cpu-variants.md.
 +                ggml_add_cpu_backend_variant(graviton2     DOTPROD FP16_VECTOR_ARITHMETIC MCPU=neoverse-n1 PART=0xd0c)
-+                ggml_add_cpu_backend_variant(graviton3     DOTPROD FP16_VECTOR_ARITHMETIC MATMUL_INT8 NOSVE MCPU=neoverse-v1 PART=0xd40)
++                # Graviton3's SVE is 256-bit, twice NEON's width: with patches/0003 (SVE simd_gemm) it is faster than NEON there.
++                ggml_add_cpu_backend_variant(graviton3     DOTPROD FP16_VECTOR_ARITHMETIC SVE MATMUL_INT8 MCPU=neoverse-v1 PART=0xd40)
 +                ggml_add_cpu_backend_variant(graviton4     DOTPROD FP16_VECTOR_ARITHMETIC MATMUL_INT8 NOSVE MCPU=neoverse-v2 PART=0xd4f)
 +                # Graviton5 (Neoverse V3): -mtune=GGML_CPU_GRAVITON5_TUNE, as GCC 14 has no neoverse-v3.
 +                ggml_add_cpu_backend_variant(graviton5     DOTPROD FP16_VECTOR_ARITHMETIC MATMUL_INT8 NOSVE
 +                                                           ARCH=armv8.6-a TUNE=${GGML_CPU_GRAVITON5_TUNE} PART=${GGML_CPU_GRAVITON5_PART})
 +                if (GGML_CPU_GRAVITON_SVE)
-+                    ggml_add_cpu_backend_variant(graviton3_sve DOTPROD FP16_VECTOR_ARITHMETIC SVE MATMUL_INT8 MCPU=neoverse-v1 PART=0xd40)
 +                    ggml_add_cpu_backend_variant(graviton4_sve DOTPROD FP16_VECTOR_ARITHMETIC SVE MATMUL_INT8 SVE2 MCPU=neoverse-v2 PART=0xd4f)
 +                    ggml_add_cpu_backend_variant(graviton5_sve DOTPROD FP16_VECTOR_ARITHMETIC SVE MATMUL_INT8 SVE2
 +                                                               ARCH=armv9.2-a TUNE=${GGML_CPU_GRAVITON5_TUNE} PART=${GGML_CPU_GRAVITON5_PART})

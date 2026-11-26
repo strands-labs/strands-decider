@@ -113,7 +113,7 @@ graviton2_clean() {
     rm -f "$1.s"
     echo "$(basename "$1"): arm64, no i8mm, bf16 or SVE"
 }
-# The Graviton3-5 modules are +nosve (docs/deployment/graviton-cpu-variants.md): no z or p register.
+# The Graviton4 and 5 modules are +nosve (docs/deployment/graviton-cpu-variants.md): no z or p register.
 no_sve() {
     objdump -d --no-show-raw-insn "$1" > "$1.s"
     if grep -qE '\s[a-z0-9.]+\s+[^;]*\b(z[0-9]{1,2}\.[bhsdq]|p[0-9]{1,2}/[mz])\b' "$1.s"; then
@@ -130,8 +130,9 @@ elif [ "$LAMBDA" = "--lambda-variants" ]; then
         case $(basename "$so") in
             # Loaded only where the host has SVE, i8mm or SME (ggml-cpu/arch/arm/cpu-feats.cpp).
             libggml-cpu-armv8.2_3.so | libggml-cpu-armv8.6_*.so | libggml-cpu-armv9.*.so) ;;
-            libggml-cpu-graviton[345]_s*.so) ;;  # GRAVITON_SVE=1's
-            libggml-cpu-graviton[345].so) [ "${KLEIDIAI:-0}" = 1 ] || no_sve "$so" ;;
+            libggml-cpu-graviton[45]_s*.so) ;;  # GRAVITON_SVE=1's
+            libggml-cpu-graviton3.so) ;;  # SVE, loaded only on Graviton3
+            libggml-cpu-graviton[45].so) [ "${KLEIDIAI:-0}" = 1 ] || no_sve "$so" ;;
             libggml-cpu-*.so) [ "${KLEIDIAI:-0}" = 1 ] || graviton2_clean "$so" ;;
             *) graviton2_clean "$so" ;;
         esac
