@@ -31,6 +31,43 @@ has the v1 scores next to these and the latency for 30 questions.
 Every v2 model takes the same request and gives the same kind of answer, so a change of model is a change of
 one name in `strands-decider ask` or [`strands-decider serve`](inference.md).
 
+### On a smaller GPU: fewer bits before a smaller model
+
+`strands-decider serve` and `ask` take [`--quantization 4bit` or `8bit`](inference.md#flags-worth-knowing),
+which loads a model's weights in 4 or 8 bits on an NVIDIA GPU. On the same GPU, a larger model in fewer bits is
+more accurate than the smaller model that fits in bf16:
+
+| GPU | Model in bf16 | Model in fewer bits | GPU memory in use | Gain in accuracy |
+| --- | --- | --- | --- | --- |
+| 48 GB | 12B | 31B, `--quantization 8bit` | 30.5 GiB after load, 39.4 GiB with a 32,768-token prompt | 3.5 points |
+| 40 GB | E4B | 31B, `--quantization 4bit` | 17.0 GiB after load, 25.9 GiB with a 32,768-token prompt | 4.6 points |
+| 24 GB | E2B | 12B, `--quantization 8bit` | 12.1 GiB after load, 18.3 GiB with a 32,768-token prompt | 4.1 points |
+
+The 31B in 4 bits also runs in 24 GB with shorter prompts: with GPU memory limited to 23 GiB, it answered every
+prompt of up to 14,000 tokens. A copy of the 31B saved in 4 bits is on the Hub as a preview,
+[strands-decider-31B-gemma4-v2-2611-bnb-4bit-preview](https://huggingface.co/StrandsAgents/strands-decider-31B-gemma4-v2-2611-bnb-4bit-preview),
+and it loads without the option.
+
+Rules of thumb:
+
+- **Reduce the bits before the size.** One step down in size costs 1.6 to 2.5 points of accuracy. In 8 bits the
+  31B and the 12B keep their accuracy within 0.2 points, and in 4 bits the 31B loses about 0.3 points.
+- **4 bits for the 31B, 8 bits for the smaller models.** In 4 bits the 31B keeps the top answer of its bf16
+  model on 99.1% of the reference questions. The 12B, the E4B and the E2B change 2% to 7% of their top answers
+  in 4 bits, so run them in 8.
+- **A threshold on the probability: 8 bits.** Where the bf16 model gives its top answer a probability between
+  0.1 and 0.9, the 31B moves that probability by 0.06 on average in 4 bits and by 0.02 in 8 bits.
+- **For speed, fewer active parameters.** Fewer bits save memory, not time: with `--quantization`, one request
+  takes about 1.2 times the time of bf16 in 4 bits and about 2.2 times in 8 bits. Throughput follows the number
+  of active parameters. Served with vLLM on one H100, the 26B-A4B, with 4B active parameters, answers 59
+  decisions a second, the 12B answers 24 and the 31B answers 9.
+- **The 26B-A4B stays in bf16.** The option converts linear layers, and most of this model's weights are in
+  expert tensors: in 4 bits it takes 45.0 GiB where bf16 takes 48.2 GiB.
+
+The gains are differences in accuracy on 2,991 questions sampled from Decision Index 0.3, BEV, JevBench and 22
+public NLI and QA datasets, with both models on the same questions. The measurements, with the memory by prompt
+length and the latency, are in [issue 172](https://github.com/strands-labs/strands-decider/issues/172).
+
 ## v1 model matrix
 
 Strands Decider v1 publishes five checkpoints: one Qwen3.5 base (with a vision
