@@ -65,3 +65,37 @@ def test_passes_split_on_the_bucket() -> None:
     assert passes(qs, 4096, 2) == [[0, 1], [2]]
     with pytest.raises(ValueError):
         passes([[1] * 5000], 4096, 128)
+
+
+@pytest.mark.parametrize("joint", [True, False])
+def test_shared_layer_rows_see_their_own_prompt(joint: bool) -> None:
+    """neuron_model.rows_of (into the KV-shared layers): each read row's mask over the packed
+    keys equals its prompt's last row of core.attention_mask, and sees nothing else."""
+    torch = pytest.importorskip("torch")
+    from strands_decider.backends.neuron_model import rows_of
+
+    rng = np.random.default_rng(1)
+    state = list(rng.integers(10, 1000, 37))
+    questions = [list(rng.integers(10, 1000, n)) for n in (5, 1, 12)]
+    b = pack_joint(state, questions, pad_id=0) if joint else pack(state, questions, pad_id=0)
+    sb, t = int(b["state_bucket"]), len(b["ids"])
+    tab = torch.zeros(t, 4)
+    _, bias, *_ = rows_of(
+        torch.zeros(t, 2),
+        torch.from_numpy(b["positions"]).long(),
+        torch.from_numpy(b["qid"]),
+        torch.from_numpy(b["state_valid"]),
+        torch.from_numpy(b["rows"]).long(),
+        tab,
+        tab,
+        tab,
+        tab,
+        state_len=sb,
+    )
+    allowed = (bias == 0).numpy()
+    s, off = len(state), len(state) if joint else sb
+    for i, q in enumerate(questions):
+        q_idx = off + sum(len(x) for x in questions[:i]) + np.arange(len(q))
+        idx = np.concatenate([np.arange(s), q_idx])
+        np.testing.assert_array_equal(allowed[i, idx], attention_mask(s, s + len(q))[-1])
+        assert not allowed[i, np.setdiff1d(np.arange(t), idx)].any()
