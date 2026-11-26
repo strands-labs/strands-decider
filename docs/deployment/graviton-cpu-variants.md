@@ -163,6 +163,20 @@ Upstream, as of llama.cpp master on 2026-11-26:
 - **The `vec.h` fallbacks are unchanged.**
 - **The only new SVE dot products are for Q5_0 and Q5_1** (#30867), which the build doesn't use.
 
+Re-pinning to llama.cpp master (`e8d7128`, 2026-11-26) was measured on E4B. Both patches apply,
+and the shim check passes. Master adds multi-threaded embedding lookups (#32514), a new memory
+access pattern in the two-row i8mm matrix path (#30846), and a rework of Gemma 4's KV-shared
+pruning. None of them measurably changed this model:
+
+| | `c56be86` | master |
+| --- | --- | --- |
+| E4B golden vectors, every generation, `--lambda` and its Graviton module | 99.71%, 0.00376 | 99.71%, 0.00376 |
+| `--lambda`, ECS speed on Graviton2–5 and Fargate | 1.00× | 0.98–1.01× |
+| `cpu=variants`, ECS speed on Graviton3 / 4 / 5 | 1.09–1.15× / 1.11–1.15× / 1.13–1.17× | 1.09–1.16× / 1.11–1.15× / 1.12–1.16× |
+| `RssAnon` after load | 5,486 MB | 5,459–5,471 MB |
+
+The pin stays at `c56be86`.
+
 ### Preconditions for turning SVE on
 
 `GRAVITON_SVE=1` (`-c graviton_sve=true`) adds `graviton3_sve`, `graviton4_sve`, `graviton5_sve`
