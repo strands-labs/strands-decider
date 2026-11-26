@@ -5,12 +5,15 @@ golden: each text line of golden_vectors.jsonl, its state_ids and question_ids f
         overall and per prompt-length band, with the worst questions. Also checks that the
         core's `render` reproduces the golden token ids.
 typed:  the Typed Decisions test split, one request per case through the decision engine,
-        against the checkpoint's eval/typed-decisions/predictions.jsonl, and scored as the
+        against the checkpoint's eval/typed-decisions/predictions.jsonl (or --reference, such as
+        a CPU float32 run's --dump for a checkpoint that publishes none), and scored as the
         dataset's bench/score_with_jobs.py scores (its `score_one`, then its accuracy, Brier
         and 10-bin ECE).
 
 python tools/parity.py golden --device neuron --max-prompt 8192 --out results/golden.json
 python tools/parity.py typed --device neuron --out results/typed.json
+python tools/parity.py typed --device cpu --shard 0/4 --out results/cpu0.json --dump results/cpu0.jsonl
+python tools/parity.py typed --device neuron --reference results/cpu.jsonl --out results/typed.json
 """
 
 from __future__ import annotations
@@ -202,11 +205,27 @@ def typed(args: argparse.Namespace) -> dict:
     ds = pd.read_parquet(next((data / "all").glob("test-*.parquet")))
     if args.limit:
         ds = ds.head(args.limit)
+    if args.shard:  # k/n: cases k, k + n, ... so that n processes can share a slow CPU run
+        k, n_shards = map(int, args.shard.split("/"))
+        ds = ds.iloc[k::n_shards]
+    # The reference: the checkpoint's published predictions, or another run's --dump (the 12B
+    # publishes none). Without one, the run is only scored.
+    default = Path(args.checkpoint) / "eval" / "typed-decisions" / "predictions.jsonl"
+    ref_path = Path(args.reference) if args.reference else default
     refpred = {}
-    with open(Path(args.checkpoint) / "eval" / "typed-decisions" / "predictions.jsonl") as f:
-        for raw in f:
-            p = json.loads(raw)
-            refpred[(p["id"], p["question"])] = p["probabilities"]
+    if ref_path.exists():
+        with open(ref_path) as f:
+            for raw in f:
+                p = json.loads(raw)
+                refpred[(p["id"], p["question"])] = p["probabilities"]
+    elif args.reference:
+        raise FileNotFoundError(ref_path)
+    golds = {
+        (r.id, q): g for r in ds.itertuples(index=False) for q, g in json.loads(r.gold).items()
+    }
+    ref_scores = [
+        sw.score_one({"probabilities": refpred[k]}, g)[:4] for k, g in golds.items() if k in refpred
+    ]
     engine = load_decision_engine(args.checkpoint, device=args.device, dtype=args.dtype)
     accs, briers, confs, kls, lat, toks = [], [], [], [], [], []
     ours, ref, preds = {}, {}, []
@@ -238,31 +257,33 @@ def typed(args: argparse.Namespace) -> dict:
             kls.append(kl)
             briers.append(brier)
             confs.append(conf)
-            r = refpred[(raw.id, qid)]
-            opts = list(r)
-            ours[(raw.id, qid)] = [probs[o] for o in opts]
-            ref[(raw.id, qid)] = [r[o] for o in opts]
+            if refpred:
+                r = refpred[(raw.id, qid)]
+                opts = list(r)
+                ours[(raw.id, qid)] = [probs[o] for o in opts]
+                ref[(raw.id, qid)] = [r[o] for o in opts]
         if (i + 1) % args.progress == 0:
-            a = agreement(ours, ref)
+            a = agreement(ours, ref) if ref else None
             print(
-                f"[typed] {i + 1}/{len(ds)} cases: acc {sum(accs) / len(accs):.4f} top1 {a.top1:.4f} "
-                f"mean|dp| {a.mean_abs_dp:.4f} p50 {statistics.median(lat) * 1e3:.0f} ms",
+                f"[typed] {i + 1}/{len(ds)} cases: acc {sum(accs) / len(accs):.4f} "
+                + (f"top1 {a.top1:.4f} mean|dp| {a.mean_abs_dp:.4f} " if a else "")
+                + f"p50 {statistics.median(lat) * 1e3:.0f} ms",
                 flush=True,
             )
-    # bench/score_with_jobs.py's aggregation, as its main() computes it.
-    n, n_bins = len(accs), 10
-    hits, total, csum = [0] * n_bins, [0] * n_bins, [0.0] * n_bins
-    for ok, conf in zip(accs, confs, strict=True):
-        b = min(int(conf * n_bins), n_bins - 1)
-        total[b] += 1
-        hits[b] += int(ok)
-        csum[b] += conf
-    ece = sum(
-        total[b] / n * abs(hits[b] / total[b] - csum[b] / total[b])
-        for b in range(n_bins)
-        if total[b]
-    )
-    out = summarise(ours, ref)
+            if args.dump:
+                _dump_typed(args.dump, preds, lat)
+    n = len(accs)
+    out = summarise(ours, ref) if ref else {"questions": n}
+    reference = None
+    if ref_scores:
+        reference = {
+            "path": str(ref_path),
+            "decisions": len(ref_scores),
+            "accuracy": sum(x[0] for x in ref_scores) / len(ref_scores),
+            "kl_from_gold": sum(x[1] for x in ref_scores) / len(ref_scores),
+            "brier": sum(x[2] for x in ref_scores) / len(ref_scores),
+            "ece": _ece([x[0] for x in ref_scores], [x[3] for x in ref_scores]),
+        }
     lat_ms = sorted(x * 1e3 for x in lat)
     out.update(
         mode="typed",
@@ -272,10 +293,12 @@ def typed(args: argparse.Namespace) -> dict:
         decisions=n,
         accuracy=sum(accs) / n,
         brier=sum(briers) / n,
-        ece=ece,
+        ece=_ece(accs, confs),
         kl_from_gold=sum(kls) / n,
-        published={"accuracy": 0.7605, "brier": 0.1316, "ece": 0.0329, "kl_from_gold": 0.3448},
-        accuracy_within_0_02=abs(sum(accs) / n - 0.7605) <= 0.02,
+        reference=reference,
+        accuracy_within_0_02=abs(sum(accs) / n - reference["accuracy"]) <= 0.02
+        if reference
+        else None,
         latency_ms={
             "p50": lat_ms[len(lat_ms) // 2],
             "p95": lat_ms[min(len(lat_ms) - 1, math.ceil(0.95 * len(lat_ms)) - 1)],
@@ -286,10 +309,30 @@ def typed(args: argparse.Namespace) -> dict:
         backend=engine.backend.describe(),
     )
     if args.dump:
-        with open(args.dump, "w") as f:
-            for p, l_ms in zip(preds, [x for x in lat for _ in range(5)], strict=False):
-                f.write(json.dumps({**p, "request_ms": round(l_ms * 1e3, 2)}) + "\n")
+        _dump_typed(args.dump, preds, lat)
     return out
+
+
+def _ece(accs: list, confs: list, n_bins: int = 10) -> float:
+    """bench/score_with_jobs.py's 10-bin expected calibration error."""
+    hits, total, csum = [0] * n_bins, [0] * n_bins, [0.0] * n_bins
+    for ok, conf in zip(accs, confs, strict=True):
+        b = min(int(conf * n_bins), n_bins - 1)
+        total[b] += 1
+        hits[b] += int(ok)
+        csum[b] += conf
+    n = len(accs)
+    return sum(
+        total[b] / n * abs(hits[b] / total[b] - csum[b] / total[b])
+        for b in range(n_bins)
+        if total[b]
+    )
+
+
+def _dump_typed(path: str, preds: list, lat: list) -> None:
+    with open(path, "w") as f:
+        for p, l_ms in zip(preds, [x for x in lat for _ in range(5)], strict=False):
+            f.write(json.dumps({**p, "request_ms": round(l_ms * 1e3, 2)}) + "\n")
 
 
 def main() -> None:
@@ -314,6 +357,12 @@ def main() -> None:
     )
     ap.add_argument("--progress", type=int, default=25)
     ap.add_argument("--out", required=True)
+    ap.add_argument(
+        "--reference",
+        help="typed: reference predictions (another run's --dump); by default the checkpoint's "
+        "eval/typed-decisions/predictions.jsonl",
+    )
+    ap.add_argument("--shard", help="typed: k/n, every n-th case from the k-th")
     ap.add_argument("--dump", help="per-question probabilities, jsonl")
     args = ap.parse_args()
     out = golden(args) if args.mode == "golden" else typed(args)
@@ -325,7 +374,7 @@ def main() -> None:
         for k in ("questions", "top1", "mean_abs_dp", "max_abs_dp", "conforms")
         if k in out
     }
-    for k in ("accuracy", "brier", "ece", "latency_ms", "bands", "render_mismatches"):
+    for k in ("accuracy", "brier", "ece", "reference", "latency_ms", "bands", "render_mismatches"):
         if k in out:
             brief[k] = out[k]
     print(json.dumps(brief, indent=1, default=str))
