@@ -160,6 +160,21 @@ Upstream, as of llama.cpp master on 2026-11-26:
   open since April and is waiting on review. Its own benchmark, flash attention on a Cortex-X2,
   gives 76.6 GFLOPS without SVE, 56.1 with SVE and the PR, and 9.6 with SVE today. So even with
   it, SVE would still trail NEON on that core.
+
+  We ported #21958 onto llama.cpp master, since it no longer applies, and measured it on
+  Graviton5 (`c9g.8xlarge`, 6 threads, E4B). The port matches a naive GEMM to 1.3e-6 on Graviton5
+  (128-bit SVE) and Graviton3 (256-bit). Median ms:
+
+  | Request | `graviton5` (NEON + i8mm) | `graviton5_sve`, with the port | `graviton5_sve`, today |
+  | --- | --- | --- | --- |
+  | ~40 tokens | 1,936 | 1,956 (0.99×) | 2,671 (0.73×) |
+  | ~1.1k tokens | 12,653 | 12,877 (0.98×) | 38,040 (0.33×) |
+  | ~4.1k tokens | 60,955 | 63,274 (0.96×) | 347,152 (0.18×) |
+  | one image | 6,321 | 6,496 (0.97×) | 18,336 (0.34×) |
+
+  The port removes nearly all of SVE's slowdown, which confirms the scalar `simd_gemm` caused it.
+  But SVE still trails NEON + i8mm on Graviton5, whose 128-bit SVE adds no width. Answers and
+  memory are the same either way.
 - **The `vec.h` fallbacks are unchanged.**
 - **The only new SVE dot products are for Q5_0 and Q5_1** (#30867), which the build doesn't use.
 
