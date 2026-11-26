@@ -366,6 +366,20 @@ def final(h: Any, rows: Any, norm: Any, *, eps: float, gather: Any = None) -> An
     return _rms(torch.index_select(h, 0, rows), norm, eps).float()
 
 
+def _rotary_embedding(text: Any) -> Any:
+    """transformers' rotary embedding for the text config: Gemma 4's, or the 12B's
+    Gemma4Unified one."""
+    if text.model_type == "gemma4_unified_text":
+        from transformers.models.gemma4_unified.modeling_gemma4_unified import (
+            Gemma4UnifiedTextRotaryEmbedding,
+        )
+
+        return Gemma4UnifiedTextRotaryEmbedding(text)
+    from transformers.models.gemma4.modeling_gemma4 import Gemma4TextRotaryEmbedding
+
+    return Gemma4TextRotaryEmbedding(text)
+
+
 # ------------------------------------------------------------------------------ the weights
 
 
@@ -375,8 +389,13 @@ class Shards:
     def __init__(self, path: str):
         from safetensors import safe_open
 
-        with open(os.path.join(path, "model.safetensors.index.json")) as f:
-            self.where = json.load(f)["weight_map"]
+        index = os.path.join(path, "model.safetensors.index.json")
+        if os.path.exists(index):
+            with open(index) as f:
+                self.where = json.load(f)["weight_map"]
+        else:  # a one-file checkpoint, such as the 12B
+            with safe_open(os.path.join(path, "model.safetensors"), framework="pt") as f:
+                self.where = dict.fromkeys(f.keys(), "model.safetensors")
         self.files = {
             name: safe_open(os.path.join(path, name), framework="pt")
             for name in sorted(set(self.where.values()))
@@ -503,9 +522,7 @@ class Rank:
 
         # cos and sin tables from transformers' own rotary embedding, as the reference computes
         # them (float32, then bf16), for every position a bucket can hold.
-        from transformers.models.gemma4.modeling_gemma4 import Gemma4TextRotaryEmbedding
-
-        rot = Gemma4TextRotaryEmbedding(text)
+        rot = _rotary_embedding(text)
         n = int(opts.get("max_positions", 32768 + 4096))
         pos = torch.arange(n).view(1, -1)
         dummy = torch.zeros(1, dtype=bf16)
