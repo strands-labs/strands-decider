@@ -73,6 +73,23 @@ def test_a_complete_checkpoint_and_its_safetensors_head_load_unchanged(ckpt):
     assert loads == ["tiny"]
 
 
+def test_the_adapter_loads_when_torch_reports_an_accelerator_safetensors_cannot_address(
+    ckpt, monkeypatch
+):
+    """In the AWS Neuron Deep Learning Container torch autoloads torch_neuronx, so
+    torch.accelerator reports "neuron" and PEFT's device inference picks it; safetensors
+    refuses that device. The adapter must still load, onto the CPU torso it belongs to."""
+    import peft.peft_model
+    import peft.utils.save_and_load
+
+    for module in (peft.peft_model, peft.utils.save_and_load):
+        monkeypatch.setattr(module, "infer_device", lambda: "neuron", raising=False)
+    path, model, _ = ckpt
+    loaded = StrandsDeciderModel.load(str(path))
+    assert _same(loaded, model)
+    assert {p.device.type for p in loaded.parameters()} == {"cpu"}
+
+
 def test_a_missing_adapter_is_refused_before_the_torso_loads(ckpt):
     path, _, loads = ckpt
     shutil.rmtree(path / "lora")
