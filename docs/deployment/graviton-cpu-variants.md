@@ -75,9 +75,13 @@ What these results show:
 
 - **SVE costs speed everywhere.** That includes Graviton3, whose SVE is 256 bits wide.
   Graviton4 and 5 implement SVE at 128 bits, NEON's width, so there SVE never adds width.
-- **The cost grows with context length.** At this pin, several of ggml's SVE branches fall back
-  to scalar loops (`ggml_vec_mad_f32_unroll` and `ggml_vec_mad1_f32` in `ggml-cpu/vec.h` are
-  marked "TODO: Write SVE code").
+- **The cost grows with context length, because SVE builds run flash attention in scalar code.**
+  The tiled CPU flash-attention kernel does both of its matrix multiplies, Q·Kᵀ and scores·V,
+  with `simd_gemm`. In `ggml-cpu/simd-gemm.h`, the vectorized path is under
+  `#if defined(GGML_SIMD) && !defined(__ARM_FEATURE_SVE) && …`, so an SVE build gets the scalar
+  loop. Attention grows with the square of the context, so the scalar GEMM comes to dominate long
+  requests. Smaller SVE fallbacks add to it: `ggml_vec_mad_f32_unroll` and `ggml_vec_mad1_f32`
+  in `ggml-cpu/vec.h` are marked "TODO: Write SVE code".
 - **i8mm is the gain, and it doesn't need SVE.** i8mm is the Q8_0 matrix multiply (`smmla`), so
   the modules keep it and leave SVE out.
 - **The modules answer like the build that ships today.** On E4B's `golden_vectors.jsonl`
@@ -149,6 +153,15 @@ So a variants build's modules are held to 0.015 on this check (`check_variants.s
 `shim_check.py --golden-dp 0.015`), and the `--lambda` build stays at 0.01. Because the tiny model
 is a weak signal for these kernels, the variants build also has a release check on the real
 checkpoint ([Release check](#release-check)).
+
+Upstream, as of llama.cpp master on 2026-11-26:
+
+- **The SVE `simd_gemm` fix is still open.** llama.cpp #21958, "Add SVE for simd-gemm.h", has been
+  open since April and is waiting on review. Its own benchmark, flash attention on a Cortex-X2,
+  gives 76.6 GFLOPS without SVE, 56.1 with SVE and the PR, and 9.6 with SVE today. So even with
+  it, SVE would still trail NEON on that core.
+- **The `vec.h` fallbacks are unchanged.**
+- **The only new SVE dot products are for Q5_0 and Q5_1** (#30867), which the build doesn't use.
 
 ### Preconditions for turning SVE on
 
