@@ -20,9 +20,8 @@ import numpy as np
 
 from ..core import NO_VISION, RenderedImage
 
-# Token buckets: state tokens, question tokens (all of a pass's questions, packed), questions.
-# The ladders are about 1.5x apart, from the Typed Decisions lengths (state 128 to 675 tokens,
-# median 333; five questions of 509 to 587 tokens together) and the golden lines'.
+# The split pass's buckets (states longer than joint_max): state tokens, question tokens (all
+# of a pass's questions, packed) and questions.
 STATE_BUCKETS = (
     128,
     256,
@@ -48,16 +47,6 @@ STATE_BUCKETS = (
 )
 QUESTION_BUCKETS = (64, 128, 256, 384, 512, 640, 768, 1024, 1536, 2048, 3072, 4096)
 ROW_BUCKETS = (8, 32, 128)
-# Warmed at load: (state tokens, question tokens, questions) per bucket a server most likely sees.
-WARM = (
-    (256, 640, 5),
-    (384, 640, 5),
-    (512, 640, 5),
-    (768, 640, 5),
-    (128, 64, 1),
-    (256, 128, 3),
-    (1024, 1536, 30),
-)
 _DEFAULT_TP = 16
 CC_FLAGS = "--tensorizer-options='--enable-ccop-compute-overlap --cc-pipeline-tiling-factor=2'"
 
@@ -119,9 +108,9 @@ def pack(
     }
 
 
-# Joint packing's warm-up: the Typed Decisions token buckets (637 to 1,262 tokens), a short
-# one-question request, and 30 questions over a 1,024-token state.
-JOINT_WARM = (
+# Compiled at load, as (state tokens, question tokens, questions): five questions in each token
+# bucket from 640 to 1,280, a short one-question request, and 30 questions over 1,024 tokens.
+WARM = (
     *((t - 520, 520, 5) for t in (640, 768, 896, 1024, 1152, 1280)),
     (100, 28, 1),
     (1024, 1530, 30),
@@ -246,13 +235,13 @@ class NeuronBackend:
             "max_positions": self.state_buckets[-1] + self.question_buckets[-1],
             **(opts or {}),
         }
-        self.joint = bool((opts or {}).get("joint", True))
         self.joint_max = int((opts or {}).get("joint_max", 4096))
         self._lock = threading.Lock()
         self._req = 0
         self.last_timings: dict[str, float] = {}
-        # The readout, applied here (the core's weight=None path, as the vLLM plugin does):
-        # the weight is rounded to bf16 and widened once, not on every request.
+        self.warm_s: dict[str, float] = {}
+        # The readout is applied here (the core's weight=None path), the weight rounded to bf16
+        # and widened once at load rather than on every request.
         from ..core import DecisionConfig, load_readout
         from ..core.readout import round_to_bf16
 
@@ -274,14 +263,12 @@ class NeuronBackend:
             )
             for r in range(tp)
         ]
-        started = time.time()
         for p in self._procs:
             p.start()
         import atexit
 
         atexit.register(self.close)
         ready = 0
-        self.ranks: dict[int, Any] = {}
         while ready < tp:
             msg = self._get(timeout)
             if msg[0] == "error":
@@ -289,8 +276,6 @@ class NeuronBackend:
                 raise RuntimeError(f"Neuron rank {msg[1]} failed to start:\n{msg[2]}")
             if msg[0] == "ready":
                 ready += 1
-                self.ranks[msg[1]] = msg[2]
-        self.load_s = time.time() - started
 
     def _get(self, timeout: float) -> Any:
         import queue
@@ -318,7 +303,7 @@ class NeuronBackend:
         return {
             "backend": "neuron",
             "device": f"neuron (tensor parallel over {self.tp} NeuronCores)",
-            "dtype": "bfloat16",
+            "dtype": self.opts.get("dtype", "bfloat16"),
             "reuse_state": True,
             "compiled": self.compiled,
             "state_buckets": list(self.state_buckets),
@@ -336,7 +321,7 @@ class NeuronBackend:
         timings: dict[str, float] = {}
         with self._lock:
             room = self.question_buckets[-1]
-            if self.joint and len(state) <= self.joint_max:
+            if len(state) <= self.joint_max:
                 room = min(room, TOKEN_BUCKETS[-1] - len(state))
             for run in passes(questions, room, self.row_buckets[-1]):
                 batch = self._pack(state, [questions[i] for i in run])
@@ -365,7 +350,7 @@ class NeuronBackend:
     def _pack(self, state: list[int], questions: list[list[int]]) -> dict[str, Any]:
         # Joint packing up to `joint_max` state tokens; past it, the split pass, whose state
         # attention runs in the NKI flash kernel and whose padding is a small share.
-        if self.joint and len(state) <= self.joint_max:
+        if len(state) <= self.joint_max:
             return pack_joint(state, questions, pad_id=self.pad_id, row_buckets=self.row_buckets)
         return pack(
             state,
@@ -461,22 +446,6 @@ def load_backend(
     if compile is None:
         compile = os.environ.get("STRANDS_NEURON_EAGER", "0") != "1"
     opts: dict[str, Any] = {}
-    if v := os.environ.get("STRANDS_NEURON_SCORES_FP32"):
-        opts["scores_fp32"] = v == "1"
-    if v := os.environ.get("STRANDS_NEURON_Q_CHUNK"):
-        opts["q_chunk"] = int(v)
-    if v := os.environ.get("STRANDS_NEURON_PRETRANSPOSE"):
-        opts["pretranspose"] = v == "1"
-    if v := os.environ.get("STRANDS_NEURON_SP"):
-        opts["sp"] = v == "1"
-    if v := os.environ.get("STRANDS_NEURON_TSP_MIN_STATE"):
-        opts["tsp_min_state"] = int(v)
-    if v := os.environ.get("STRANDS_NEURON_CC_CHUNKS"):
-        opts["cc_chunks"] = int(v)
-    if v := os.environ.get("STRANDS_NEURON_READOUT"):
-        opts["applies_readout"] = v == "1"
-    if v := os.environ.get("STRANDS_NEURON_JOINT"):
-        opts["joint"] = v == "1"
     if v := os.environ.get("STRANDS_NEURON_JOINT_MAX"):
         opts["joint_max"] = int(v)
     if v := os.environ.get("STRANDS_NEURON_NKI_STATE"):
@@ -486,9 +455,8 @@ def load_backend(
     env: dict[str, str] = {}
     if v := os.environ.get("STRANDS_NEURON_CORES"):  # such as 16-31: rank r takes the r-th
         env["NEURON_RT_VISIBLE_CORES"] = v
-    # CC_FLAGS (neuronx-cc's collective/compute overlap) gave typed p50 72.8 -> 69.6 ms but fails
-    # to compile the split pass's graphs (NCC_IBTN175), so it is opt-in: STRANDS_NEURON_CC_OVERLAP=1
-    # for servers whose prompts stay under 4,096 state tokens.
+    # neuronx-cc's collective/compute overlap is faster on short prompts but doesn't compile
+    # the split pass's graphs (NCC_IBTN175), so it is opt-in.
     if os.environ.get("STRANDS_NEURON_CC_OVERLAP") == "1" and "NEURON_CC_FLAGS" not in os.environ:
         env["NEURON_CC_FLAGS"] = CC_FLAGS
     opts["env"] = env
@@ -497,10 +465,9 @@ def load_backend(
     # STRANDS_NEURON_WARM is "state:questions' tokens:questions,..." or "none".
     warm = os.environ.get("STRANDS_NEURON_WARM", "default")
     if compile and warm != "none":
-        default = JOINT_WARM if backend.joint else WARM
-        shapes: Sequence[tuple[int, int, int]] = default
+        shapes: Sequence[tuple[int, int, int]] = WARM
         if warm != "default":
             shapes = [_warm_shape(w) for w in warm.split(",")]
         shapes = [w for w in shapes if w[0] + w[1] // max(1, w[2]) <= max_length]
-        backend.warm_s = backend.warm(shapes)  # type: ignore[attr-defined]
+        backend.warm_s = backend.warm(shapes)
     return backend

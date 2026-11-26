@@ -108,7 +108,7 @@ probability difference of at most 0.02 (`tests/core_conformance.py`).
 | Checkpoint | NeuronCores | Typed Decisions request, p50 | One question at 4K / 32K tokens | Conformance |
 | --- | --- | --- | --- | --- |
 
-**Environment variables.** The defaults are the measured best for the 31B.
+**Environment variables.**
 
 | Variable | Default | Effect |
 | --- | --- | --- |
@@ -117,17 +117,9 @@ probability difference of at most 0.02 (`tests/core_conformance.py`).
 | `STRANDS_NEURON_WARM` | `default` | Shapes compiled at start-up: `default`, `none`, or `state:question tokens:questions,...`, such as `512:640:5`. |
 | `STRANDS_NEURON_EAGER` | `0` | `1` runs op by op without `torch.compile` (slow; for debugging). |
 | `STRANDS_NEURON_CC_OVERLAP` | `0` | `1` passes neuronx-cc's collective/compute overlap option: about 4% faster, but it fails to compile the graphs for states over 4,096 tokens. Use it only when prompts stay below that. Ignored when `NEURON_CC_FLAGS` is set. |
-| `STRANDS_NEURON_JOINT` | `1` | Packs the state and all questions into one token bucket. `0` pads the state and the questions to separate buckets. |
 | `STRANDS_NEURON_JOINT_MAX` | `4096` | Longest state, in tokens, packed jointly. Longer states use separate buckets and the NKI flash-attention kernel. |
 | `STRANDS_NEURON_NKI_STATE` | `1` | NKI Library `attention_cte` for the state block of long prompts. `0` uses plain PyTorch, which runs out of device memory past about 20K tokens. |
 | `STRANDS_NEURON_LAYERS_PER_GRAPH` | `6` | Decoder layers per compiled graph for joint buckets. |
-| `STRANDS_NEURON_SP` | `1` | Sequence parallelism (reduce-scatter and all-gather around the norms). |
-| `STRANDS_NEURON_PRETRANSPOSE` | `1` | Stores projection weights as `[in, out]` at load. |
-| `STRANDS_NEURON_READOUT` | `1` | Applies the readout in the backend, with the weight rounded once at load. |
-| `STRANDS_NEURON_SCORES_FP32` | `1` | Attention scores and softmax in float32. |
-| `STRANDS_NEURON_Q_CHUNK` | `4096` | Query rows per attention chunk. |
-| `STRANDS_NEURON_CC_CHUNKS` | `1` | Splits each collective into this many row chunks (experimental; slower on the 31B). |
-| `STRANDS_NEURON_TSP_MIN_STATE` | `0` | From this many state tokens, gathers the MLP weights instead of the activations (experimental; slower on the 31B). `0` turns it off. |
 
 ## Flags worth knowing
 
