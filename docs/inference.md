@@ -73,6 +73,20 @@ listed with their measurements under [Checked checkpoints](#checked-checkpoints)
 Neuron deep learning container with PyTorch 2.14 and TorchNeuron from Neuron
 SDK 2.33.1
 (`public.ecr.aws/neuron/torch-neuronx:2.14.0-neuronx-py314-sdk2.33.1-ubuntu26.04`).
+
+**Getting a Trainium2 instance.** The AWS Neuron documentation covers each way
+to get one ([Deploy on AWS](https://awsdocs-neuron.readthedocs-hosted.com/en/latest/deploy/index.html)):
+
+- **Amazon EC2:** launch a trn2 instance, for example from a
+  [Neuron Deep Learning AMI](https://awsdocs-neuron.readthedocs-hosted.com/en/latest/deploy/environments/dlami.html),
+  which has the Neuron driver, and run the Neuron PyTorch container on it
+  ([PyTorch DLC setup](https://awsdocs-neuron.readthedocs-hosted.com/en/latest/setup/pytorch/dlc.html)).
+- **Amazon EKS:** add trn2 nodes and install the Neuron device plugin
+  ([Kubernetes getting started](https://awsdocs-neuron.readthedocs-hosted.com/en/latest/deploy/eks/setup.html)).
+- **Amazon SageMaker:** see
+  [Neuron on SageMaker](https://awsdocs-neuron.readthedocs-hosted.com/en/latest/deploy/sagemaker/index.html),
+  and check that the SageMaker feature you use offers trn2 instances.
+
 Use the container's `torch` and `torch-neuronx`: a `pip install` that replaces
 them breaks the backend. Install into a virtual environment that sees the
 container's packages, with the Neuron stack pinned:
