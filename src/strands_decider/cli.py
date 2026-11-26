@@ -62,7 +62,7 @@ def serve_cmd(
     device: str | None = typer.Option(
         None,
         "--device",
-        help="cuda, mps or cpu (torch), or mlx (Apple silicon, needs the mlx extra). "
+        help="cuda, mps or cpu (torch), neuron (Trainium2, model checkpoints only), or mlx (Apple silicon, needs the mlx extra). "
         "Auto-detected when omitted: cuda > mps > cpu; mlx only when asked for.",
     ),
     no_prefix_cache: bool = typer.Option(
@@ -189,7 +189,7 @@ def ask_cmd(
     device: str | None = typer.Option(
         None,
         "--device",
-        help="cuda, mps or cpu (torch), or mlx (Apple silicon, needs the mlx extra). "
+        help="cuda, mps or cpu (torch), neuron (Trainium2, model checkpoints only), or mlx (Apple silicon, needs the mlx extra). "
         "Auto-detected when omitted: cuda > mps > cpu; mlx only when asked for.",
     ),
     as_json: bool = typer.Option(False, "--json", help="Print the raw API response."),

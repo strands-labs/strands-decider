@@ -131,6 +131,8 @@ ignore_missing_imports = false
 [[tool.mypy.overrides]]
 module = [
     "torch.*",
+    "torch_neuronx.*",
+    "nkilib.*",
     "transformers.*",
     "peft.*",
     "datasets.*",
