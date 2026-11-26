@@ -22,7 +22,13 @@ import numpy as np
 import pytest
 from neuron_support import REAL, needs_neuron, needs_real_neuron
 
-from decision_support import GEMMA4_VISION, image_b64, model_checkpoint, request  # isort: skip
+from decision_support import (  # isort: skip
+    GEMMA4,
+    GEMMA4_VISION,
+    image_b64,
+    model_checkpoint,
+    request,
+)
 
 from strands_decider.backends.neuron import NeuronBackend, pack_joint
 from strands_decider.backends.transformers import load_backend
@@ -68,6 +74,28 @@ LAYOUTS = {
             "head_dim": 256,
             "global_head_dim": 512,
             "attention_k_eq_v": True,
+            "rope_parameters": _ROPE,
+        },
+    },
+    # E2B: per-layer input embeddings, and KV-shared layers (here the last two of four) that
+    # reuse the keys and values of the last earlier layer of their type, run on the read rows
+    # only and have double-wide MLPs; one key/value head, separate v_proj on full layers.
+    "E2B": {
+        "kind": GEMMA4,
+        "text": {
+            "vocab_size": 262144,
+            "hidden_size": 256,
+            "intermediate_size": 512,
+            "num_hidden_layers": 4,
+            "layer_types": ["sliding_attention", "full_attention"] * 2,
+            "num_kv_shared_layers": 2,
+            "hidden_size_per_layer_input": 16,
+            "use_double_wide_mlp": True,
+            "num_attention_heads": 4,
+            "num_key_value_heads": 1,
+            "head_dim": 256,
+            "global_head_dim": 512,
+            "attention_k_eq_v": False,
             "rope_parameters": _ROPE,
         },
     },
@@ -333,6 +361,70 @@ def test_a_decision_engine_answers_as_on_the_cpu(engines):
         ranked = sorted(keys, key=r.get, reverse=True)
         if r[ranked[0]] - r[ranked[1]] > bound:
             assert max(keys, key=p.get) == ranked[0], (name, p, r)
+
+
+# KV-shared layers and per-layer inputs (E2B) --------------------------------------------------
+
+
+def _kv_shared(layout: str) -> int:
+    n = int(LAYOUTS[layout]["text"].get("num_kv_shared_layers", 0))
+    if not n:
+        pytest.skip(f"{layout} has no KV-shared layers")
+    return n
+
+
+def test_kv_shared_layers_ignore_their_own_keys(layout, ckpt, neuron, devices, tmp_path):
+    """A KV-shared layer's k_proj, v_proj and k_norm in the file (the E2B checkpoint holds
+    them; transformers ignores them) change nothing: the backend reads only q for those layers."""
+    from safetensors.torch import load_file, save_file
+
+    n = _kv_shared(layout)
+    spec = LAYOUTS[layout]["text"]
+    state, questions = _prompt(ckpt)
+    want = neuron().forward(state, questions)
+    copy = tmp_path / "ckpt"
+    copy.mkdir()
+    for f in ckpt.iterdir():
+        if f.name != "model.safetensors":
+            (copy / f.name).write_bytes(f.read_bytes())
+    tensors = load_file(str(ckpt / "model.safetensors"))
+    hidden, prefix = int(spec["hidden_size"]), "model.language_model.layers."
+    for i in range(int(spec["num_hidden_layers"]) - n, int(spec["num_hidden_layers"])):
+        full = spec["layer_types"][i] == "full_attention"
+        hd = int(spec["global_head_dim"] if full else spec["head_dim"])
+        kv = int(spec["num_key_value_heads"]) * hd
+        for name, shape in (("k_proj", (kv, hidden)), ("v_proj", (kv, hidden)), ("k_norm", (hd,))):
+            tensors[f"{prefix}{i}.self_attn.{name}.weight"] = np.full(shape, 7.0, np.float32)
+    import torch
+
+    tensors = {k: torch.as_tensor(v).to(torch.bfloat16) for k, v in tensors.items()}
+    save_file(tensors, str(copy / "model.safetensors"))
+    index = {"weight_map": dict.fromkeys(tensors, "model.safetensors")}
+    (copy / "model.safetensors.index.json").write_text(json.dumps(index))
+
+    def make():
+        env = {"NEURON_RT_VISIBLE_CORES": str(FIRST_CORE)}
+        b = NeuronBackend(
+            str(copy), tp=1, max_length=2048, opts={"env": env, "applies_readout": False}
+        )
+        return b, b.close
+
+    got = devices.get(("kv-copy", str(copy)), make).forward(state, questions)
+    np.testing.assert_array_equal(got, want)
+
+
+def test_one_graph_per_layer_agrees_with_the_groups(layout, ckpt, cpu, neuron):
+    """The default graphs (all non-shared layers in one, all shared ones on the rows in another)
+    against one graph per layer: the same rows within the bf16 bound, both near the CPU's float32."""
+    _kv_shared(layout)
+    state, questions = _prompt(ckpt)
+    truth = cpu["float32"].forward(state, questions)
+    bound = _bf16_bound(cpu, state, questions)
+    grouped = neuron().forward(state, questions)
+    single = neuron(layers_per_graph=1, shared_per_graph=1).forward(state, questions)
+    assert _rel(truth, grouped) < bound, ("grouped", _rel(truth, grouped), bound)
+    assert _rel(truth, single) < bound, ("per layer", _rel(truth, single), bound)
+    assert _rel(grouped, single) < bound, (_rel(grouped, single), bound)
 
 
 # h ------------------------------------------------------------------------------------------
