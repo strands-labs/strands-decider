@@ -499,6 +499,32 @@ environment, since the repacked buffer is in the snapshot. It wouldn't reduce me
 supports container images on the Python 3.12 base image, but not ephemeral storage over 512 MB,
 so a repacked cache file in `/tmp` can't ride along with it.
 
+## Threads
+
+The function runs llama.cpp with `os.cpu_count()` threads, one per vCPU, for the decoder and the
+vision tower; numpy's OpenBLAS has one (`OPENBLAS_NUM_THREADS=1`). A Graviton vCPU is a whole core,
+with no SMT. Lambda gives a 10,240 MB function 6 vCPUs, the most it gives.
+
+Measured on Graviton5 (`c9g.8xlarge`, `cpu=variants`, E4B), the cores set by `--cpuset-cpus`:
+
+| Cores, threads | ~40 tokens | ~1.1k | ~4.1k | image | against 6 and 6 |
+| --- | --- | --- | --- | --- | --- |
+| 6, 4 | 2,848 ms | 18,691 | 90,774 | 9,380 | 0.67× |
+| 6, 5 | 2,297 | 15,132 | 72,916 | 7,564 | 0.83× |
+| 6, 6 | 1,938 | 12,646 | 60,897 | 6,310 | 1.00× |
+| 6, 8 | 2,125 | 13,779 | 66,463 | 6,910 | 0.91× |
+| 8, 8 | 1,493 | 9,715 | 47,466 | 4,860 | 1.28× |
+
+What these results show:
+
+- **One thread per core is best.** Leaving a core for Python and the OS costs 17%, because Python
+  waits while llama.cpp runs. More threads than cores costs 9%.
+- **Speed scales almost linearly with cores.** From 4 to 6 threads gives 1.48×, against an ideal
+  1.5×; from 6 to 8 cores gives 1.28×, against 1.33×.
+- **On ECS and Fargate, a bigger task is faster.** The handler takes every core the task has. The
+  benchmarks here pin 6 cores to match Lambda, so a deployed task with more vCPUs is faster than
+  they show.
+
 ## Release check
 
 Run this whenever `LLAMA_CPP_REV` or `patches/` change, and before changing a default here. The
