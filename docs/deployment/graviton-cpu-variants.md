@@ -460,6 +460,45 @@ Graviton2 (`c6g.8xlarge`) matched to within 60 MB for every build: `--lambda` 5,
   pressure. This is what E4B's 12,288-token request limit allows for. Q6_K would leave about
   1 GB more.
 
+
+### Options that change memory
+
+Measured on Graviton5 (`c9g.8xlarge`, cores 0–5, 6 threads, E4B), with each option set by the
+shim's measurement switches. Speed is median latency against `--lambda`; accuracy is on E4B's
+golden vectors:
+
+| Option | ~40 tokens | ~4.1k | ~9.6k | image | `RssAnon` after load | peak RSS | top-1 / mean \|dp\| |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `--lambda` | 1.00× | 1.00× | 1.00× | 1.00× | 5,555 MB | 13,353 MB | 99.71% / 0.00376 |
+| `cpu=variants` | 1.16× | 1.13× | 1.10× | 1.13× | 5,551 MB | 13,349 MB | 99.71% / 0.00376 |
+| `cpu=variants`, 10 GB container limit | 1.16× | 1.13× | 1.10× | 1.13× | 5,551 MB | 10,200 MB | — |
+| no repacking (`STRANDS_DECIDER_NO_REPACK=1`) | 0.63× | 0.70× | 0.78× | 0.67× | 809 MB | 8,560 MB | 99.81% / 0.00395 |
+| no repacking, 10 GB limit | 0.63× | 0.70× | 0.78× | 0.67× | 821 MB | 8,571 MB | — |
+| Q8_0 KV cache (`STRANDS_DECIDER_KV_TYPE=q8_0`) | 1.16× | 0.61× | 0.48× | 1.11× | 5,543 MB | 13,409 MB | 99.71% / 0.00384 |
+| both | 0.63× | 0.46× | 0.41× | 0.66× | 805 MB | 8,625 MB | 99.71% / 0.00382 |
+
+What these results show:
+
+- **ggml's repacked copy of the weights is almost all of the unreclaimable memory.** GGUF stores
+  Q8_0 in its portable block layout. ggml's i8mm GEMM wants rows interleaved (`q8_0_4x8` on
+  Graviton3–5, `q8_0_4x4` on Graviton2). It can't rearrange the read-only mapped file, so it
+  writes an anonymous copy at load. GGUF no longer has pre-interleaved types (`Q4_0_4_4/4_8/8_8`
+  were removed), and never had one for Q8_0.
+- **A 10 GB limit costs no speed.** With repacking, the kernel drops the mapped pages of weights
+  that were repacked, which are no longer read: peak RSS falls from 13.3 GB to 10.2 GB at the
+  same speed. Without repacking, the peak stays under 10 GB and nothing is dropped.
+- **No repacking frees about 4.7 GB of unreclaimable memory for 0.63–0.78× speed,** with
+  conforming accuracy. It's worth it only when memory is what limits a deployment: a longer
+  state than E4B's 12,288-token limit, or a bigger model on Lambda.
+- **A Q8_0 KV cache saves nothing here and is slower on long states.** The state's buffers are
+  mostly compute buffers, not KV, and CPU flash attention dequantizes Q8_0 K and V on every
+  access.
+
+SnapStart would save the time repacking takes (and KleidiAI's re-quantization) on every new
+environment, since the repacked buffer is in the snapshot. It wouldn't reduce memory. SnapStart
+supports container images on the Python 3.12 base image, but not ephemeral storage over 512 MB,
+so a repacked cache file in `/tmp` can't ride along with it.
+
 ## Release check
 
 Run this whenever `LLAMA_CPP_REV` or `patches/` change, and before changing a default here. The
