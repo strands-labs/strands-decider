@@ -513,7 +513,7 @@ class Rank:
             import torch.distributed as dist
             import torch.distributed._functional_collectives as fc
 
-            group = dist.group.WORLD
+            group: Any = dist.group.WORLD
 
             def reduce(x: Any) -> Any:
                 return fc.all_reduce(x, "sum", group)
@@ -630,7 +630,7 @@ class Rank:
         red = self.scatter if self.sp else self.reduce
         gat = self.gather if self.sp else None
         if kind == "embed":
-            f = functools.partial(
+            f: Any = functools.partial(
                 embed, vocab_lo=self.vocab_lo, reduce=red, cc_chunks=self.cc_chunks
             )
         elif kind == "final":
