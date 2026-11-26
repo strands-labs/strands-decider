@@ -250,15 +250,16 @@ class NeuronBackend:
         self._w64 = round_to_bf16(load_readout(path)).astype(np.float64).T.copy()
         self.applies_readout = bool((opts or {}).get("applies_readout", True))
         ctx = mp.get_context("spawn")
-        self._out = ctx.Queue()
-        self._inboxes = [ctx.Queue() for _ in range(tp)]
+        # One pipe per rank: a message is pickled once and written to every rank's pipe.
+        ends = [ctx.Pipe(duplex=True) for _ in range(tp)]
+        self._conns = [a for a, _ in ends]
         port = _free_port()
         from .neuron_model import worker_main
 
         self._procs = [
             ctx.Process(
                 target=worker_main,
-                args=(r, tp, port, path, self.opts, self._inboxes[r], self._out),
+                args=(r, tp, port, path, self.opts, ends[r][1]),
                 daemon=True,
             )
             for r in range(tp)
@@ -278,18 +279,28 @@ class NeuronBackend:
                 ready += 1
 
     def _get(self, timeout: float) -> Any:
-        import queue
+        from multiprocessing.connection import wait
 
         deadline = time.time() + timeout
         while True:
-            try:
-                return self._out.get(timeout=5)
-            except queue.Empty:
-                dead = [r for r, p in enumerate(self._procs) if not p.is_alive()]
-                if dead:
-                    raise RuntimeError(f"Neuron rank(s) {dead} exited") from None
-                if time.time() > deadline:
-                    raise TimeoutError("no answer from the Neuron ranks") from None
+            ready: list[Any] = wait(self._conns, timeout=5)
+            if ready:
+                try:
+                    return ready[0].recv()
+                except EOFError:  # that rank's process is gone
+                    time.sleep(1)
+            dead = [r for r, p in enumerate(self._procs) if not p.is_alive()]
+            if dead:
+                raise RuntimeError(f"Neuron rank(s) {dead} exited") from None
+            if time.time() > deadline:
+                raise TimeoutError("no answer from the Neuron ranks") from None
+
+    def _send(self, msg: tuple[Any, ...]) -> None:
+        from multiprocessing.reduction import ForkingPickler
+
+        buf = bytes(ForkingPickler.dumps(msg))
+        for c in self._conns:
+            c.send_bytes(buf)
 
     @property
     def takes_images(self) -> bool:
@@ -363,8 +374,7 @@ class NeuronBackend:
 
     def _run(self, batch: dict[str, Any]) -> tuple[np.ndarray, dict[str, float]]:
         self._req += 1
-        for box in self._inboxes:
-            box.put(("forward", self._req, batch))
+        self._send(("forward", self._req, batch))
         while True:
             msg = self._get(self.timeout)
             if msg[0] == "error":
@@ -396,8 +406,7 @@ class NeuronBackend:
         batch = self._pack(state, questions)
         with self._lock:
             self._req += 1
-            for box in self._inboxes:
-                box.put(("profile", self._req, batch, outdir, list(modes), reps))
+            self._send(("profile", self._req, batch, outdir, list(modes), reps))
             while True:
                 msg = self._get(self.timeout)
                 if msg[0] == "error":
@@ -409,8 +418,7 @@ class NeuronBackend:
     def stats(self) -> list[dict[str, Any]]:
         """Each rank's compile times and device memory peaks."""
         with self._lock:
-            for box in self._inboxes:
-                box.put(("stats",))
+            self._send(("stats",))
             out: list[dict[str, Any]] = []
             while len(out) < self.tp:
                 msg = self._get(self.timeout)
@@ -424,8 +432,11 @@ class NeuronBackend:
         if getattr(self, "_closed", False):
             return
         self._closed = True
-        for box in getattr(self, "_inboxes", []):
-            box.put(("stop",))
+        if hasattr(self, "_conns"):
+            try:
+                self._send(("stop",))
+            except (OSError, ValueError):  # a rank already gone
+                pass
         for p in getattr(self, "_procs", []):
             p.join(timeout=30)
             if p.is_alive():
@@ -437,12 +448,19 @@ def _warm_shape(spec: str) -> tuple[int, int, int]:
     return s, qt, nq
 
 
+def default_tp(path: str) -> int:
+    """8 NeuronCores for a checkpoint of at most 18 GB of safetensors (E2B), else 16 (the 31B)."""
+    files = [f for f in os.listdir(path) if f.endswith(".safetensors")]
+    size = sum(os.path.getsize(os.path.join(path, f)) for f in files)
+    return 8 if size <= 18e9 else _DEFAULT_TP
+
+
 def load_backend(
     path: str, *, tp: int | None = None, compile: bool | None = None, max_length: int = 32768
 ) -> NeuronBackend:
-    """The model checkpoint in directory `path` on `tp` NeuronCores (STRANDS_NEURON_TP, 16 by
-    default), compiled unless STRANDS_NEURON_EAGER=1."""
-    tp = tp or int(os.environ.get("STRANDS_NEURON_TP", _DEFAULT_TP))
+    """The model checkpoint in directory `path` on `tp` NeuronCores (STRANDS_NEURON_TP; by
+    default 8 for checkpoints up to 18 GB, else 16), compiled unless STRANDS_NEURON_EAGER=1."""
+    tp = tp or int(os.environ.get("STRANDS_NEURON_TP", 0)) or default_tp(path)
     if compile is None:
         compile = os.environ.get("STRANDS_NEURON_EAGER", "0") != "1"
     opts: dict[str, Any] = {}

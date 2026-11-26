@@ -12,6 +12,10 @@ for the state and the questions together (joint packing), or for a long state a 
 a question bucket (the split pass). A joint bucket's decoder runs as graphs of `layers_per_graph`
 layers, a split one's as one graph per layer type, called once per layer with its weights.
 
+Gemma 4 E2B adds per-layer input embeddings and KV-shared layers: from the first shared layer
+on, each layer reuses the keys and values of the last earlier layer of its type, so those layers
+run on the read rows only (one per question), in a graph of their own.
+
 The arithmetic follows transformers' Gemma 4 (modeling_gemma4.py) in bf16, as the reference
 runs on CUDA: RMSNorm in float32, attention probabilities in float32, the residual stream in
 bf16. The attention scores are computed from float32 copies of q and k.
@@ -145,10 +149,14 @@ def decoder_layer(
     q_norm: Any,
     k_norm: Any,
     scalar: Any,
+    w_pg: Any,
+    w_pp: Any,
+    ln_ple: Any,
     cos: Any,
     sin: Any,
     state_valid: Any,
     qid: Any,
+    ple: Any = None,
     *,
     shape: LayerShape,
     state_len: int,
@@ -157,13 +165,17 @@ def decoder_layer(
     q_chunk: int = 0,
     gather: Any = None,
     nki_state: bool = False,
+    return_kv: bool = False,
 ) -> Any:
     """One Gemma4TextDecoderLayer over a packed prompt h [T, D] (T = state bucket + question
     bucket), on one rank's heads and MLP columns, the projection weights stored [in, out];
     `reduce` sums the row-parallel outputs.
     With `gather` (sequence parallelism), h is this rank's slice of the tokens [T / ranks, D],
     `gather` all-gathers the normed input before each projection, and `reduce` is a
-    reduce-scatter back to the slice: the norms and residual adds run on 1/ranks of the tokens."""
+    reduce-scatter back to the slice: the norms and residual adds run on 1/ranks of the tokens.
+    With per-layer inputs (w_pg, w_pp, ln_ple and this layer's `ple` [T, 256]) the layer ends
+    with Gemma 4's per-layer-input block. With `return_kv` it also returns its keys and values
+    [kv, T, hd], for the KV-shared layers."""
     import torch
 
     sb = state_len
@@ -200,7 +212,7 @@ def decoder_layer(
             bc = bias[None, c : c + n].expand(g, -1, -1).reshape(g * n, t)
             outs.append(_attend(qc, k, v, bc).reshape(kvl, g, n, hd))
         attn = torch.cat(outs, dim=2).reshape(ql, t, hd).permute(1, 0, 2).reshape(t, ql * hd)
-        return _mlp_half(
+        h = _mlp_half(
             h,
             attn,
             w_o,
@@ -213,7 +225,9 @@ def decoder_layer(
             eps,
             reduce,
             gather,
+            (w_pg, w_pp, ln_ple, ple),
         )
+        return (h, k, v) if return_kv else h
     state_bias = torch.where(state_valid, zero, neg)[None, :]  # [1, Sb]
     # The question's queries see the state's real tokens and their own question's tokens.
     same = (qid[:, None] == qid[None, :]) & (qid[None, :] >= 0)
@@ -249,15 +263,40 @@ def decoder_layer(
             outs.append(_attend(qs, ks, vs, state_bias).reshape(kvl, g, -1, hd))
     pq = t - sb
     chunk = q_chunk if q_chunk and q_chunk < pq else pq
+    # At most ~128M elements in one chunk's [heads x rows, T] float32 scores: 3,072 question
+    # tokens over a 24,576-token state with 8 heads per rank would need 2.7 GB in one chunk.
+    chunk = max(128, min(chunk, (128 << 20) // max(1, ql * t) // 128 * 128))
     for c in range(0, pq, chunk):
         n = min(chunk, pq - c)
         qp = q[:, :, sb + c : sb + c + n].reshape(kvl, g * n, hd)
         qb = q_bias[None, c : c + n].expand(g, -1, -1).reshape(g * n, t)
         outs.append(_attend(qp, k, v, qb).reshape(kvl, g, n, hd))
     attn = torch.cat(outs, dim=2).reshape(ql, t, hd).permute(1, 0, 2).reshape(t, ql * hd)
-    return _mlp_half(
-        h, attn, w_o, w_gu, w_down, ln_post_attn, ln_pre_ff, ln_post_ff, scalar, eps, reduce, gather
+    h = _mlp_half(
+        h,
+        attn,
+        w_o,
+        w_gu,
+        w_down,
+        ln_post_attn,
+        ln_pre_ff,
+        ln_post_ff,
+        scalar,
+        eps,
+        reduce,
+        gather,
+        (w_pg, w_pp, ln_ple, ple),
     )
+    return (h, k, v) if return_kv else h
+
+
+def _per_layer_input(h: Any, w_pg: Any, w_pp: Any, ln_ple: Any, ple: Any, eps: float) -> Any:
+    """Gemma4TextDecoderLayer's per-layer-input block: h + norm(proj(gelu(gate(h)) * ple)).
+    Its weights are whole on every rank, so it needs no collective."""
+    import torch
+
+    g = torch.nn.functional.gelu(torch.matmul(h, w_pg), approximate="tanh") * ple
+    return h + _rms(torch.matmul(g, w_pp), ln_ple, eps)
 
 
 def _mlp_half(
@@ -273,8 +312,10 @@ def _mlp_half(
     eps: float,
     reduce: Any,
     gather: Any = None,
+    ple: tuple[Any, Any, Any, Any] | None = None,
 ) -> Any:
-    """The rest of the layer after attention: o_proj, the residual, the MLP, the layer scalar."""
+    """The rest of the layer after attention: o_proj, the residual, the MLP, the per-layer
+    input (when `ple` holds its weights and input), the layer scalar."""
     import torch
 
     h = h + _rms(reduce(torch.matmul(attn, w_o)), ln_post_attn, eps)
@@ -283,6 +324,9 @@ def _mlp_half(
     inter = gu.shape[-1] // 2
     m = torch.nn.functional.gelu(gu[:, :inter], approximate="tanh") * gu[:, inter:]
     h = h + _rms(reduce(torch.matmul(m, w_down)), ln_post_ff, eps)
+    if ple is not None and ple[0] is not None:
+        w_pg, w_pp, ln_ple, inp = ple
+        h = _per_layer_input(h, w_pg, w_pp, ln_ple, inp, eps)
     return h * scalar
 
 
@@ -298,7 +342,12 @@ WEIGHT_NAMES = (
     "q_norm",
     "k_norm",
     "scalar",
+    "w_pg",
+    "w_pp",
+    "ln_ple",
 )
+# A KV-shared layer has no keys or values of its own.
+SHARED_NAMES = tuple(n for n in WEIGHT_NAMES if n != "k_norm")
 
 
 def decoder_block(
@@ -312,17 +361,126 @@ def decoder_block(
     *weights: Any,
     shapes: tuple[LayerShape, ...],
     full: tuple[bool, ...],
+    n_ple: int = 0,
+    return_kv: bool = False,
     **kw: Any,
 ) -> Any:
-    """Consecutive decoder layers in one graph; `weights` holds each layer's WEIGHT_NAMES."""
+    """Consecutive decoder layers in one graph; `weights` holds each layer's WEIGHT_NAMES, then
+    (with per-layer inputs) each layer's input [T, 256]. With `return_kv`: h, then the keys and
+    values of the block's last sliding layer and of its last full layer, if it has one."""
     n = len(WEIGHT_NAMES)
+    ples = weights[len(shapes) * n :] if n_ple else ()
+    kv: dict[bool, Any] = {}
     for i, shape in enumerate(shapes):
         c, s = (cos_f, sin_f) if full[i] else (cos_s, sin_s)
-        # mypy can't count the star-args into decoder_layer's positional parameters.
-        h = decoder_layer(  # type: ignore[misc, call-arg]
-            h, *weights[i * n : (i + 1) * n], c, s, state_valid, qid, shape=shape, **kw
+        args = (*weights[i * n : (i + 1) * n], c, s, state_valid, qid, ples[i] if ples else None)
+        out = decoder_layer(h, *args, shape=shape, return_kv=return_kv, **kw)
+        if return_kv:
+            h, k, v = out
+            kv[full[i]] = (k, v)
+        else:
+            h = out
+    if not return_kv:
+        return h
+    return (h, *[x for f in (False, True) if f in kv for x in kv[f]])
+
+
+def shared_block(
+    h: Any,
+    bias: Any,
+    cos_s: Any,
+    sin_s: Any,
+    cos_f: Any,
+    sin_f: Any,
+    k_s: Any,
+    v_s: Any,
+    k_f: Any,
+    v_f: Any,
+    *weights: Any,
+    shapes: tuple[LayerShape, ...],
+    full: tuple[bool, ...],
+    eps: float,
+    reduce: Any,
+) -> Any:
+    """KV-shared decoder layers on the read rows h [R, D]. Their keys and values [kv, T, hd]
+    are the last non-shared layer's of the same type (k_s/v_s sliding, k_f/v_f full), so no
+    other token's hidden state is needed; `bias` [R, T] is each row's prefix_bidir mask.
+    `weights` holds each layer's SHARED_NAMES, then each layer's per-layer input rows [R, 256].
+    `reduce` sums the row-parallel outputs (an all-reduce)."""
+    import torch
+
+    n = len(SHARED_NAMES)
+    ples = weights[len(shapes) * n :]
+    for i, shape in enumerate(shapes):
+        (w_q, w_o, w_gu, w_down, ln_in, ln_post_attn, ln_pre_ff, ln_post_ff, q_norm, scalar) = (
+            weights[i * n : i * n + 10]
+        )
+        w_pg, w_pp, ln_ple = weights[i * n + 10 : (i + 1) * n]
+        c, s = (cos_f, sin_f) if full[i] else (cos_s, sin_s)
+        k, v = (k_f, v_f) if full[i] else (k_s, v_s)
+        hd, ql, kvl, g = shape.head_dim, shape.q_local, shape.kv_local, shape.group
+        r = h.shape[0]
+        q = torch.matmul(_rms(h, ln_in, eps), w_q).reshape(r, ql, hd)
+        q = _rope(_rms(q, q_norm, eps), c, s).permute(1, 0, 2).reshape(kvl, g * r, hd)
+        b = bias[None].expand(g, -1, -1).reshape(g * r, -1)
+        attn = _attend(q, k, v, b).reshape(ql, r, hd).permute(1, 0, 2).reshape(r, ql * hd)
+        h = _mlp_half(
+            h,
+            attn,
+            w_o,
+            w_gu,
+            w_down,
+            ln_post_attn,
+            ln_pre_ff,
+            ln_post_ff,
+            scalar,
+            eps,
+            reduce,
+            None,
+            (w_pg, w_pp, ln_ple, ples[i]),
         )
     return h
+
+
+def rows_of(
+    h: Any,
+    positions: Any,
+    qid: Any,
+    state_valid: Any,
+    rows: Any,
+    cos_s: Any,
+    sin_s: Any,
+    cos_f: Any,
+    sin_f: Any,
+    *,
+    state_len: int,
+    gather: Any = None,
+) -> tuple[Any, ...]:
+    """Into the KV-shared layers: h at the read rows [R, D] (gathered first under sequence
+    parallelism), their cos and sin, and each row's mask over the T keys [R, T]: the state's
+    real tokens and its own question's."""
+    import torch
+
+    if gather is not None:
+        h = gather(h)
+    if state_len:  # the split pass: the state's slots, then the questions' (qid)
+        one = torch.ones_like(qid[:1])
+        kq = torch.cat([torch.where(state_valid, one * STATE, one * -1), qid])
+    else:
+        kq = qid
+    rq = torch.index_select(kq, 0, rows)
+    allowed = (kq[None, :] == STATE) | ((kq[None, :] == rq[:, None]) & (kq[None, :] >= 0))
+    zero = torch.zeros((), dtype=torch.float32, device=h.device)
+    neg = torch.full((), NEG, dtype=torch.float32, device=h.device)
+    p = torch.index_select(positions, 0, rows)
+    return (
+        torch.index_select(h, 0, rows),
+        torch.where(allowed, zero, neg),
+        torch.index_select(cos_s, 0, p),
+        torch.index_select(sin_s, 0, p),
+        torch.index_select(cos_f, 0, p),
+        torch.index_select(sin_f, 0, p),
+    )
 
 
 def embed(
@@ -334,33 +492,69 @@ def embed(
     sin_s: Any,
     cos_f: Any,
     sin_f: Any,
+    ple: tuple[Any, ...] | None = None,
     *,
     vocab_lo: int,
     reduce: Any,
+    allreduce: Any = None,
+    ple_layers: tuple[int, int] = (0, 0),
+    ple_dim: int = 0,
+    eps: float = 1e-6,
 ) -> tuple[Any, ...]:
     """The scaled token embeddings [T, D] from this rank's vocabulary rows (summed over ranks),
-    and each layer type's cos and sin at `positions`."""
+    and each layer type's cos and sin at `positions`. With per-layer inputs (`ple`: the table,
+    its scale, the model projection [D, layers x 256], its norm, the rows read and this rank's
+    token ids; whole on every rank), also each non-shared layer's inputs for this rank's tokens
+    [T or T / ranks, 256], then each shared layer's at the rows [R, 256]: Gemma4TextModel's
+    get_per_layer_inputs and project_per_layer_inputs. Under sequence parallelism the rows'
+    embeddings are all-reduced from this rank's partial sums."""
     import torch
 
     local = ids - vocab_lo
     ok = (local >= 0) & (local < table.shape[0])
-    e = torch.index_select(table, 0, torch.where(ok, local, torch.zeros_like(local)))
-    e = e * ok[:, None].to(e.dtype)
-    e = reduce(e) * scale
-    return (
+    part = torch.index_select(table, 0, torch.where(ok, local, torch.zeros_like(local)))
+    part = part * ok[:, None].to(part.dtype)
+    e = reduce(part) * scale
+    out = (
         e,
         torch.index_select(cos_s, 0, positions),
         torch.index_select(sin_s, 0, positions),
         torch.index_select(cos_f, 0, positions),
         torch.index_select(sin_f, 0, positions),
     )
+    if ple is None:
+        return out
+    ple_table, ple_scale, ple_proj, ple_norm, rows, ids_local = ple
+    n_ns, n_sh = ple_layers
+    hidden = e.shape[-1]
+
+    def per_layer(tok: Any, emb: Any, lo: int, n: int) -> list[Any]:
+        cols = slice(lo * ple_dim, (lo + n) * ple_dim)
+        t = torch.index_select(ple_table, 0, tok)[:, cols] * ple_scale
+        # bf16 x a Python float is computed in float32 and rounded once, as on the reference.
+        p = (torch.matmul(emb, ple_proj[:, cols]).float() * hidden**-0.5).to(emb.dtype)
+        p = _rms(p.reshape(p.shape[0], n, ple_dim), ple_norm, eps)
+        p = ((p + t.reshape(t.shape[0], n, ple_dim)).float() * 2.0**-0.5).to(emb.dtype)
+        return [p[:, i].contiguous() for i in range(n)]
+
+    ns = per_layer(ids if ids_local is None else ids_local, e, 0, n_ns) if n_ns else []
+    if allreduce is not None:
+        e_rows = allreduce(torch.index_select(part, 0, rows)) * scale
+    else:
+        e_rows = torch.index_select(e, 0, rows)
+    sh = per_layer(torch.index_select(ids, 0, rows), e_rows, n_ns, n_sh) if n_sh else []
+    return (*out, *ns, *sh)
 
 
-def final(h: Any, rows: Any, norm: Any, *, eps: float, gather: Any = None) -> Any:
+def final(
+    h: Any, rows: Any, norm: Any, *, eps: float, gather: Any = None, at_rows: bool = False
+) -> Any:
     """The final norm at the rows read, float32 [rows, D] (h gathered first under sequence
-    parallelism)."""
+    parallelism; with `at_rows`, h is already those rows)."""
     import torch
 
+    if at_rows:
+        return _rms(h, norm, eps).float()
     if gather is not None:
         h = gather(h)
     return _rms(torch.index_select(h, 0, rows), norm, eps).float()
@@ -375,12 +569,20 @@ class Shards:
     def __init__(self, path: str):
         from safetensors import safe_open
 
-        with open(os.path.join(path, "model.safetensors.index.json")) as f:
-            self.where = json.load(f)["weight_map"]
+        index = os.path.join(path, "model.safetensors.index.json")
+        if os.path.exists(index):
+            with open(index) as f:
+                self.where = json.load(f)["weight_map"]
+        else:  # a one-file checkpoint, such as the 12B
+            with safe_open(os.path.join(path, "model.safetensors"), framework="pt") as f:
+                self.where = dict.fromkeys(f.keys(), "model.safetensors")
         self.files = {
             name: safe_open(os.path.join(path, name), framework="pt")
             for name in sorted(set(self.where.values()))
         }
+
+    def shape(self, key: str) -> list[int]:
+        return list(self.files[self.where[PREFIX + key]].get_slice(PREFIX + key).get_shape())
 
     def has(self, key: str) -> bool:
         return PREFIX + key in self.where
@@ -411,14 +613,23 @@ class Rank:
         self.world, self.rank, self.opts = world, rank, opts
         self.compiled = bool(opts.get("compile", True))
         self.q_chunk = int(opts.get("q_chunk", 4096))  # query rows per attention chunk
-        # Layers per compiled graph in the joint buckets (6: the 31B's 5 sliding + 1 full).
-        self.per_graph = int(opts.get("layers_per_graph", 6))
         config = transformers.AutoConfig.from_pretrained(path)
         text = config.get_text_config()
         self.text = text
         self.eps = float(text.rms_norm_eps)
         self.layer_types = list(text.layer_types)
         self.shapes = {t: layer_shape(text, t, world, rank) for t in sorted(set(self.layer_types))}
+        n_layers = len(self.layer_types)
+        # From layer first_shared on, layers reuse an earlier layer's keys and values (E2B: 15).
+        self.first_shared = n_layers - int(getattr(text, "num_kv_shared_layers", 0) or 0)
+        self.ple_dim = int(getattr(text, "hidden_size_per_layer_input", 0) or 0)
+        # Layers per compiled graph in the joint buckets: the 31B's 5 sliding + 1 full, or with
+        # KV-shared layers all the non-shared ones; the shared layers, on the rows, in their own.
+        default = self.first_shared if self.first_shared < n_layers else 6
+        self.per_graph = int(opts.get("layers_per_graph", default))
+        self.shared_per_graph = int(opts.get("shared_per_graph", n_layers - self.first_shared))
+        if self.first_shared < n_layers and self.first_shared % self.per_graph:
+            raise ValueError(f"{self.per_graph} layers per graph don't divide {self.first_shared}")
         # opts device/dtype: "cpu"/"float32" runs this same decoder on the host, to check its
         # arithmetic against transformers' without a NeuronCore.
         if opts.get("device"):
@@ -433,6 +644,7 @@ class Rank:
         # each projection's input is all-gathered and its output reduce-scattered.
         self.reduce: Any = _identity
         self.gather: Any = None
+        self.allreduce: Any = _identity  # the KV-shared layers' rows aren't split by tokens
         if world > 1:
             import torch.distributed as dist
             import torch.distributed._functional_collectives as fc
@@ -445,27 +657,34 @@ class Rank:
             def gather(x: Any) -> Any:
                 return fc.all_gather_tensor(x, 0, group)
 
-            self.reduce, self.gather = scatter, gather
+            def allreduce(x: Any) -> Any:
+                return fc.all_reduce(x, "sum", group)
+
+            self.reduce, self.gather, self.allreduce = scatter, gather, allreduce
         # The split pass (long states) runs the state's attention with the NKI flash kernel.
         self.nki_state = bool(opts.get("nki_state", True)) and self.on_neuron
         sh = Shards(path)
         bf16 = dtype
-        inter = text.intermediate_size
-        if inter % world:
-            raise ValueError(f"intermediate size {inter} doesn't split over {world} ranks")
-        il = inter // world
         self.layers = []
         for i, lt in enumerate(self.layer_types):
             s = self.shapes[lt]
             p = f"layers.{i}."
             hd = s.head_dim
+            shared = i >= self.first_shared
+            # The MLP's width from the checkpoint: E2B's shared layers are double-wide.
+            inter = sh.shape(p + "mlp.gate_proj.weight")[0]
+            if inter % world:
+                raise ValueError(f"layer {i}: intermediate size {inter} doesn't split over {world}")
+            il = inter // world
             q = sh.get(p + "self_attn.q_proj.weight", rows=(s.q_lo * hd, (s.q_lo + s.q_local) * hd))
             kv = (s.kv_lo * hd, (s.kv_lo + s.kv_local) * hd)
-            parts = [q, sh.get(p + "self_attn.k_proj.weight", rows=kv)]
-            if not s.k_eq_v:
-                parts.append(sh.get(p + "self_attn.v_proj.weight", rows=kv))
-            elif sh.has(p + "self_attn.v_proj.weight"):
-                raise ValueError(f"layer {i}: attention_k_eq_v but the checkpoint has a v_proj")
+            parts = [q]
+            if not shared:  # a shared layer's k_proj, v_proj and k_norm, if in the file, are unused
+                parts.append(sh.get(p + "self_attn.k_proj.weight", rows=kv))
+                if not s.k_eq_v:
+                    parts.append(sh.get(p + "self_attn.v_proj.weight", rows=kv))
+                elif sh.has(p + "self_attn.v_proj.weight"):
+                    raise ValueError(f"layer {i}: attention_k_eq_v but the checkpoint has a v_proj")
             gate = sh.get(p + "mlp.gate_proj.weight", rows=(rank * il, (rank + 1) * il))
             up = sh.get(p + "mlp.up_proj.weight", rows=(rank * il, (rank + 1) * il))
             w = {
@@ -480,12 +699,19 @@ class Rank:
                 "ln_pre_ff": sh.get(p + "pre_feedforward_layernorm.weight"),
                 "ln_post_ff": sh.get(p + "post_feedforward_layernorm.weight"),
                 "q_norm": sh.get(p + "self_attn.q_norm.weight"),
-                "k_norm": sh.get(p + "self_attn.k_norm.weight"),
                 "scalar": sh.get(p + "layer_scalar"),
             }
-            for k in ("w_qkv", "w_o", "w_gu", "w_down"):
-                w[k] = w[k].t()  # [in, out]: `x @ W.t()` transposes every weight block per call
-            self.layers.append({k: v.to(bf16).contiguous().to(dev) for k, v in w.items()})
+            if not shared:
+                w["k_norm"] = sh.get(p + "self_attn.k_norm.weight")
+            if self.ple_dim:  # whole on every rank
+                w["w_pg"] = sh.get(p + "per_layer_input_gate.weight")
+                w["w_pp"] = sh.get(p + "per_layer_projection.weight")
+                w["ln_ple"] = sh.get(p + "post_per_layer_input_norm.weight")
+            for k in ("w_qkv", "w_o", "w_gu", "w_down", "w_pg", "w_pp"):
+                if k in w:  # [in, out]: `x @ W.t()` transposes every weight block per call
+                    w[k] = w[k].t()
+            layer = {k: v.to(bf16).contiguous().to(dev) for k, v in w.items()}
+            self.layers.append({k: layer.get(k) for k in WEIGHT_NAMES})
         vocab = text.vocab_size
         if vocab % world:
             raise ValueError(f"vocabulary {vocab} doesn't split over {world} ranks")
@@ -500,6 +726,14 @@ class Rank:
         # Gemma4TextScaledWordEmbedding: sqrt(hidden) in the weights' dtype (bf16: 73.5).
         self.scale = torch.tensor(text.hidden_size**0.5, dtype=torch.float32).to(bf16).to(dev)
         self.norm = sh.get("norm.weight").to(bf16).to(dev)
+        if self.ple_dim:
+            # The per-layer embeddings [vocab, layers x 256] (4.7 GB for E2B), their sqrt(256)
+            # scale in bf16, the model projection [D, layers x 256] and its norm.
+            self.ple_table = sh.get("embed_tokens_per_layer.weight").to(bf16).contiguous().to(dev)
+            self.ple_scale = torch.tensor(self.ple_dim**0.5, dtype=torch.float32).to(bf16).to(dev)
+            proj = sh.get("per_layer_model_projection.weight").t()
+            self.ple_proj = proj.to(bf16).contiguous().to(dev)
+            self.ple_norm = sh.get("per_layer_projection_norm.weight").to(bf16).to(dev)
 
         # cos and sin tables from transformers' own rotary embedding, as the reference computes
         # them (float32, then bf16), for every position a bucket can hold.
@@ -529,10 +763,31 @@ class Rank:
             return self._fns[key]
         kind = key[0]
         red, gat = self.reduce, self.gather
+        n_layers = len(self.layer_types)
+        shared = self.first_shared < n_layers
         if kind == "embed":
-            f: Any = functools.partial(embed, vocab_lo=self.vocab_lo, reduce=red)
+            f: Any = functools.partial(
+                embed,
+                vocab_lo=self.vocab_lo,
+                reduce=red,
+                allreduce=self.allreduce if self.world > 1 else None,
+                ple_layers=(self.first_shared, n_layers - self.first_shared),
+                ple_dim=self.ple_dim,
+                eps=self.eps,
+            )
         elif kind == "final":
-            f = functools.partial(final, eps=self.eps, gather=gat)
+            f = functools.partial(final, eps=self.eps, gather=gat, at_rows=shared)
+        elif kind == "rows":
+            f = functools.partial(rows_of, state_len=key[1], gather=gat)
+        elif kind == "shared":
+            types = key[1]
+            f = functools.partial(
+                shared_block,
+                shapes=tuple(self.shapes[t] for t in types),
+                full=tuple(t == "full_attention" for t in types),
+                eps=self.eps,
+                reduce=self.allreduce,
+            )
         elif kind == "block":
             _, types, sb, _pb = key
             f = functools.partial(
@@ -545,6 +800,8 @@ class Rank:
                 q_chunk=self.q_chunk,
                 gather=gat,
                 nki_state=self.nki_state and sb > 0,
+                n_ple=len(types) if self.ple_dim else 0,
+                return_kv=shared,
             )
         else:
             _, lt, sb, _pb = key
@@ -557,6 +814,7 @@ class Rank:
                 q_chunk=self.q_chunk,
                 gather=gat,
                 nki_state=self.nki_state and sb > 0,
+                return_kv=shared,
             )
         if self.compiled and self.on_neuron:
             f = torch.compile(f, backend="neuron", fullgraph=True, dynamic=False)
@@ -576,8 +834,17 @@ class Rank:
         qid = torch.from_numpy(batch["qid"]).to(dev)
         rows = torch.from_numpy(batch["rows"]).to(dev)
         timings: dict[str, float] = {}
-        h, cs, ss, cf, sf = self._timed(
-            ("embed", sb + pb),
+        n_layers, ns = len(self.layer_types), self.first_shared
+        ple = None
+        if self.ple_dim:
+            ids_local = None
+            if self.world > 1:  # this rank's token slice, as the reduce-scatter leaves it
+                t_loc = (sb + pb) // self.world
+                part = batch["ids"][self.rank * t_loc : (self.rank + 1) * t_loc]
+                ids_local = torch.from_numpy(part.copy()).to(dev)
+            ple = (self.ple_table, self.ple_scale, self.ple_proj, self.ple_norm, rows, ids_local)
+        h, cs, ss, cf, sf, *ples = self._timed(
+            ("embed", sb + pb, int(rows.shape[0])),
             timings,
             ids,
             pos,
@@ -587,40 +854,96 @@ class Rank:
             self.sin_s,
             self.cos_f,
             self.sin_f,
+            ple,
         )
+        ple_ns, ple_sh = ples[:ns], ples[ns:]
+        # The last non-shared layer of each type stores the keys and values the shared ones reuse.
+        stores = {
+            t: max(i for i in range(ns) if self.layer_types[i] == t) for t in set(self.layer_types)
+        }
+        stored: dict[str, tuple[Any, Any]] = {}
         # Block graphs for the joint (short) buckets. The split (long) buckets keep one graph per
         # layer: block graphs for every long bucket don't fit the device memory of one process.
         if self.per_graph > 1 and sb == 0:
-            for a in range(0, len(self.layer_types), self.per_graph):
-                types = tuple(self.layer_types[a : a + self.per_graph])
+            for a in range(0, ns, self.per_graph):
+                types = tuple(self.layer_types[a : min(a + self.per_graph, ns)])
                 ws = [self.layers[i][k] for i in range(a, a + len(types)) for k in WEIGHT_NAMES]
-                h = self._timed(
-                    ("block", types, sb, pb), timings, h, cs, ss, cf, sf, state_valid, qid, *ws
+                out = self._timed(
+                    ("block", types, sb, pb),
+                    timings,
+                    h,
+                    cs,
+                    ss,
+                    cf,
+                    sf,
+                    state_valid,
+                    qid,
+                    *ws,
+                    *ple_ns[a : a + len(types)],
                 )
+                if ns == n_layers:
+                    h = out
+                    continue
+                h, *kv = out
+                for j, t in enumerate(sorted(set(types), key=lambda t: t == "full_attention")):
+                    if a <= stores[t] < a + len(types):
+                        stored[t] = (kv[2 * j], kv[2 * j + 1])
         else:
-            for i, lt in enumerate(self.layer_types):
+            for i, lt in enumerate(self.layer_types[:ns]):
                 w = self.layers[i]
                 c, s = (cf, sf) if lt == "full_attention" else (cs, ss)
-                h = self._timed(
+                out = self._timed(
                     ("layer", lt, sb, pb),
                     timings,
                     h,
-                    w["w_qkv"],
-                    w["w_o"],
-                    w["w_gu"],
-                    w["w_down"],
-                    w["ln_in"],
-                    w["ln_post_attn"],
-                    w["ln_pre_ff"],
-                    w["ln_post_ff"],
-                    w["q_norm"],
-                    w["k_norm"],
-                    w["scalar"],
+                    *[w[k] for k in WEIGHT_NAMES],
                     c,
                     s,
                     state_valid,
                     qid,
+                    ple_ns[i] if ple_ns else None,
                 )
+                if ns == n_layers:
+                    h = out
+                    continue
+                h, k, v = out
+                if stores[lt] == i:
+                    stored[lt] = (k, v)
+        if ns < n_layers:
+            hr, bias, csr, ssr, cfr, sfr = self._timed(
+                ("rows", sb, sb + pb, int(rows.shape[0])),
+                timings,
+                h,
+                pos,
+                qid,
+                state_valid,
+                rows,
+                self.cos_s,
+                self.sin_s,
+                self.cos_f,
+                self.sin_f,
+            )
+            (ks, vs), (kf, vf) = stored["sliding_attention"], stored["full_attention"]
+            for a in range(ns, n_layers, self.shared_per_graph):
+                types = tuple(self.layer_types[a : a + self.shared_per_graph])
+                ws = [self.layers[i][k] for i in range(a, a + len(types)) for k in SHARED_NAMES]
+                hr = self._timed(
+                    ("shared", types, sb + pb, int(rows.shape[0])),
+                    timings,
+                    hr,
+                    bias,
+                    csr,
+                    ssr,
+                    cfr,
+                    sfr,
+                    ks,
+                    vs,
+                    kf,
+                    vf,
+                    *ws,
+                    *ple_sh[a - ns : a - ns + len(types)],
+                )
+            h = hr
         out = self._timed(("final", int(rows.shape[0]), sb + pb), timings, h, rows, self.norm)
         res = out.cpu().numpy() if self.rank == 0 else None
         if self.on_neuron:
@@ -632,15 +955,14 @@ class Rank:
         """Runs the graph for `key`, timing its first call (the compile) per bucket."""
         import torch
 
-        name = (
-            f"block{len(key[1])}/{key[2]}/{key[3]}"
-            if key[0] == "block"
-            else "/".join(map(str, key))
-        )
-        if key[0] == "embed":
-            fn = self._fn(("embed",))
-        elif key[0] == "final":
-            fn = self._fn(("final",))
+        if key[0] in ("block", "shared"):
+            name = f"{key[0]}{len(key[1])}/" + "/".join(map(str, key[2:]))
+        else:
+            name = "/".join(map(str, key))
+        if key[0] in ("embed", "final"):
+            fn = self._fn((key[0],))
+        elif key[0] in ("rows", "shared"):
+            fn = self._fn(key[:2])
         else:
             fn = self._fn(key)
         if name in self.compile_s:
@@ -655,10 +977,11 @@ class Rank:
 
 
 def worker_main(
-    rank: int, world: int, port: int, path: str, opts: dict[str, Any], inbox: Any, outbox: Any
+    rank: int, world: int, port: int, path: str, opts: dict[str, Any], conn: Any
 ) -> None:
     """A rank's process: joins the process group, loads its shard, then answers the backend's
-    messages until told to stop. Rank 0 replies with the rows; every rank reports errors."""
+    messages on its pipe until told to stop. Rank 0 replies with the rows; every rank reports
+    errors."""
     os.environ.update(
         RANK=str(rank),
         LOCAL_RANK=str(rank),
@@ -682,22 +1005,19 @@ def worker_main(
             dist.init_process_group(backend="neuron")
         torch.set_grad_enabled(False)
         r = Rank(path, world, rank, opts)
-        outbox.put(("ready", rank))
+        conn.send(("ready", rank))
     except Exception:
-        outbox.put(("error", rank, traceback.format_exc()))
+        conn.send(("error", rank, traceback.format_exc()))
         return
-    import queue
-
     parent = os.getppid()
     while True:
-        try:
-            msg = inbox.get(timeout=5)
-        except queue.Empty:
+        if not conn.poll(5):
             # The backend's process is gone (killed, or a server stopped without close()):
             # leave rather than hold the NeuronCore.
             if os.getppid() != parent:
                 break
             continue
+        msg = conn.recv()
         if msg[0] == "stop":
             break
         if msg[0] == "stats":
@@ -711,7 +1031,7 @@ def worker_main(
                 st["max_memory_reserved"] = int(mem.max_memory_reserved())
             except Exception as e:
                 st["memory_error"] = repr(e)
-            outbox.put(("stats", rank, st))
+            conn.send(("stats", rank, st))
             continue
         if msg[0] == "profile":
             # torch.profiler with a Neuron session on rank 0 (runtime and, if asked, device
@@ -740,12 +1060,12 @@ def worker_main(
                                     sort_by="self_cpu_time_total", row_limit=40
                                 )
                             )
-                        outbox.put(("result", req, None, {"profiled_forward_s": times}))
+                        conn.send(("result", req, None, {"profiled_forward_s": times}))
                     else:
                         for _ in range(reps):
                             r.forward(batch)
             except Exception:
-                outbox.put(("error", rank, traceback.format_exc()))
+                conn.send(("error", rank, traceback.format_exc()))
             continue
         if msg[0] == "forward":
             _, req, batch = msg
@@ -753,9 +1073,9 @@ def worker_main(
                 with torch.inference_mode():
                     out, timings = r.forward(batch)
                 if rank == 0:
-                    outbox.put(("result", req, out, timings))
+                    conn.send(("result", req, out, timings))
             except Exception:
-                outbox.put(("error", rank, traceback.format_exc()))
+                conn.send(("error", rank, traceback.format_exc()))
     if world > 1:
         import torch.distributed as dist
 
