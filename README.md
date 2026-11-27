@@ -64,7 +64,9 @@ pip install strands-decider
 The examples below use `strands-decider-E2B-gemma4-v2-2611`, the smallest v2 model: it fits on a
 24 GB GPU and serves on CPU. The `cuda`, `mps` and `cpu` extras name the devices
 ([designs/inference.md](designs/inference.md#environments-for-serving)); on Apple silicon,
-`--device mlx` runs the v1 Qwen3.5 model 1.4 to 1.6x faster than MPS. Example outputs below are
+`--device mlx` runs the v1 Qwen3.5 model 1.4 to 1.6x faster than MPS. On AWS Trainium2,
+`--device neuron` serves the v2 models checked on it
+([docs/inference.md](docs/inference.md#aws-trainium2---device-neuron)). Example outputs below are
 illustrative; other devices and models differ in the last digits.
 
 ### Choice question
@@ -197,13 +199,17 @@ read off the hidden state at the last prompt token. Options come from the reques
 is needed to add a category. One forward pass, no generation, same three question types
 (`noul`, `choice`, `score`) ([designs/architecture.md](designs/architecture.md#the-v2-token-readout)).
 
-| model | Decision Index 0.3 | JevBench | OpenDecisions | DecisionPivot | BEV | GPU to use | median latency per JevBench question, one H100 |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| [`strands-decider-E2B-gemma4-v2-2611`](https://huggingface.co/StrandsAgents/strands-decider-E2B-gemma4-v2-2611) | 57.1 | 87.4 | 77.7 | 23.3 | 74.0 | 24 GB | 62 ms |
-| [`strands-decider-E4B-gemma4-v2-2611`](https://huggingface.co/StrandsAgents/strands-decider-E4B-gemma4-v2-2611) | 63.2 | 88.3 | 83.9 | 45.2 | 78.9 | 40 GB | 78 ms |
-| [`strands-decider-12B-gemma4-v2-2611`](https://huggingface.co/StrandsAgents/strands-decider-12B-gemma4-v2-2611) | 64.1 | 92.2 | 85.7 | 58.9 | 79.0 | 48 GB | 80 ms |
-| [`strands-decider-26B-A4B-gemma4-v2-2611`](https://huggingface.co/StrandsAgents/strands-decider-26B-A4B-gemma4-v2-2611) | 69.0 | 92.6 | 88.6 | 69.2 | 81.4 | 80 GB | 86 ms |
-| [`strands-decider-31B-gemma4-v2-2611`](https://huggingface.co/StrandsAgents/strands-decider-31B-gemma4-v2-2611) | 71.5 | 93.1 | 92.2 | 84.3 | 84.5 | 80 GB | 99 ms |
+| model | Decision Index 0.3 | JevBench | OpenDecisions | DecisionPivot | BEV | GPU to use | median latency per JevBench question, one H100 | median latency per JevBench question, Trainium2 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| [`strands-decider-E2B-gemma4-v2-2611`](https://huggingface.co/StrandsAgents/strands-decider-E2B-gemma4-v2-2611) | 57.1 | 87.4 | 77.7 | 23.3 | 74.0 | 24 GB | 62 ms | 10.6 ms |
+| [`strands-decider-E4B-gemma4-v2-2611`](https://huggingface.co/StrandsAgents/strands-decider-E4B-gemma4-v2-2611) | 63.2 | 88.3 | 83.9 | 45.2 | 78.9 | 40 GB | 78 ms | 15.2 ms |
+| [`strands-decider-12B-gemma4-v2-2611`](https://huggingface.co/StrandsAgents/strands-decider-12B-gemma4-v2-2611) | 64.1 | 92.2 | 85.7 | 58.9 | 79.0 | 48 GB | 80 ms | — |
+| [`strands-decider-26B-A4B-gemma4-v2-2611`](https://huggingface.co/StrandsAgents/strands-decider-26B-A4B-gemma4-v2-2611) | 69.0 | 92.6 | 88.6 | 69.2 | 81.4 | 80 GB | 86 ms | — |
+| [`strands-decider-31B-gemma4-v2-2611`](https://huggingface.co/StrandsAgents/strands-decider-31B-gemma4-v2-2611) | 71.5 | 93.1 | 92.2 | 84.3 | 84.5 | 80 GB | 99 ms | — |
+
+Trainium2: one trn2.48xlarge in bf16 with `--device neuron`, each model on its share of the 64
+NeuronCores (its model page says how many). Measured with JevBench's own harness and timing, on the
+second of two passes over the items, because the first request of each new length compiles its graph.
 
 Scores are 0 to 100. Every v2 model takes the same request and gives the same kind of answer as
 v1, so switching from v1 to v2 is a one-name change in `strands-decider ask` or `strands-decider
@@ -352,7 +358,7 @@ once under bidirectional attention so several questions share it. v2 ships on fi
 
 **Accuracy, calibration, latency.** v2's five models score 87.4 – 93.1 on JevBench (231 tasks)
 and 57.1 – 71.5 on Decision Index 0.3, with median H100 latency of 62 – 99 ms per question
-([Model options](#model-options)). v1's reference Qwen3.5 2B scores 180 / 231 on JevBench with
+([Model options](#model-options), which also has the Trainium2 latency). v1's reference Qwen3.5 2B scores 180 / 231 on JevBench with
 Brier 0.280 and answers in a median 115 ms on an RTX 3090 and 153 ms on an M3 Pro
 ([evaluation/results.md](evaluation/results.md#v1-the-released-model)). JevBench is a third-party
 benchmark for this class of model; 231 tasks are few, so treat differences under about ten tasks
