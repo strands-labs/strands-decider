@@ -66,8 +66,11 @@ The Neuron backend splits a v2 model checkpoint's text decoder over several
 NeuronCores by tensor parallelism, one worker process per core. It is text
 only (a request with images gets 422), runs bfloat16, always encodes the state
 once per pass, and serves prompts up to the checkpoint's validated length
-(32,768 tokens for the v2 models). The checkpoints it has been checked on are
-listed with their measurements under [Checked checkpoints](#checked-checkpoints).
+(32,768 tokens for the v2 models). A mixture-of-experts checkpoint (26B-A4B)
+also splits its experts over the cores, and uses all 64 NeuronCores of a
+`trn2.48xlarge` by default: each core runs its experts on every token, so more
+cores do less each. The checkpoints it has been checked on are listed with
+their measurements under [Checked checkpoints](#checked-checkpoints).
 
 **Requirements.** A Trainium2 instance (tested on `trn2.48xlarge`), and the
 Neuron deep learning container with PyTorch 2.14 and TorchNeuron from Neuron
@@ -121,12 +124,13 @@ probability difference of at most 0.02 (`tests/core_conformance.py`).
 
 | Checkpoint | NeuronCores | Typed Decisions request, p50 | One question at 4K / 32K tokens | Conformance |
 | --- | --- | --- | --- | --- |
+| `StrandsAgents/strands-decider-26B-A4B-gemma4-v2-2611` | 64 | 33.4 ms (about 1K tokens, five questions) | 114 ms / 1.17 s | Golden vectors up to 32K tokens: 1,227 questions, top-1 0.991, mean \|dp\| 0.009. Typed Decisions against a float32 CPU run of the transformers backend (the checkpoint publishes no predictions): 2,000 decisions, top-1 0.986, mean \|dp\| 0.012, accuracy 0.754 (CPU run 0.757). JevBench: 214 of 231 (92.6; published 92.6). |
 
 **Environment variables.**
 
 | Variable | Default | Effect |
 | --- | --- | --- |
-| `STRANDS_NEURON_TP` | `16` | NeuronCores (and worker processes) the model is split over. |
+| `STRANDS_NEURON_TP` | `16`; `64` for a mixture of experts | NeuronCores (and worker processes) the model is split over. |
 | `STRANDS_NEURON_CORES` | first `TP` cores | Which NeuronCores to use, such as `16-31`; sets `NEURON_RT_VISIBLE_CORES`. Lets several servers share an instance. |
 | `STRANDS_NEURON_WARM` | `default` | Shapes compiled at start-up: `default`, `none`, or `state:question tokens:questions,...`, such as `512:640:5`. |
 | `STRANDS_NEURON_EAGER` | `0` | `1` runs op by op without `torch.compile` (slow; for debugging). |
