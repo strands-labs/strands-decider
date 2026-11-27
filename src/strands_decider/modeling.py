@@ -788,7 +788,12 @@ class StrandsDeciderModel(nn.Module):
         if config.use_lora:
             from peft import PeftModel
 
-            torso = PeftModel.from_pretrained(torso, lora_dir, is_trainable=trainable)
+            # Read on the host, then copied into the LoRA layers wherever the torso is. By
+            # default PEFT reads onto torch's reported accelerator, which safetensors may not
+            # address ("neuron" when torch_neuronx is installed).
+            torso = PeftModel.from_pretrained(
+                torso, lora_dir, is_trainable=trainable, torch_device="cpu"
+            )
 
         # __init__ would re-attach LoRA on top of the adapter we just loaded, so build
         # the module directly and restore the head weights in place.

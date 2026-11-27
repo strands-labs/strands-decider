@@ -49,7 +49,8 @@ Every answer includes a calibrated confidence.
 
 The server picks a device automatically — `cuda`, then `mps`, then `cpu`. Pass
 `--device` to override. On Apple silicon, `--device mlx` runs the torso on
-Metal through mlx-lm.
+Metal through mlx-lm. `--device neuron` runs on AWS Trainium2 and is never
+picked automatically.
 
 | Flag | Install | Target |
 | --- | --- | --- |
@@ -57,6 +58,86 @@ Metal through mlx-lm.
 | `--device mps` | `pip install strands-decider` | Apple silicon GPU. |
 | `--device mlx` | `pip install "strands-decider[mlx]"` | Apple silicon GPU through mlx-lm. |
 | `--device cpu` | `pip install strands-decider` | CPU-only hosts. |
+| `--device neuron` | Inside the Neuron container, see [below](#aws-trainium2---device-neuron) | AWS Trainium2 through TorchNeuron. |
+
+### AWS Trainium2 (`--device neuron`)
+
+The Neuron backend splits a v2 model checkpoint's text decoder over several
+NeuronCores by tensor parallelism, one worker process per core. It is text
+only (a request with images gets 422), runs bfloat16, always encodes the state
+once per pass, and serves prompts up to the checkpoint's validated length
+(32,768 tokens for the v2 models). A mixture-of-experts checkpoint (26B-A4B)
+also splits its experts over the cores, and uses all 64 NeuronCores of a
+`trn2.48xlarge` by default: each core runs its experts on every token, so more
+cores do less each. The checkpoints it has been checked on are listed with
+their measurements under [Checked checkpoints](#checked-checkpoints).
+
+**Requirements.** A Trainium2 instance (tested on `trn2.48xlarge`), and the
+Neuron deep learning container with PyTorch 2.14 and TorchNeuron from Neuron
+SDK 2.33.1
+(`public.ecr.aws/neuron/torch-neuronx:2.14.0-neuronx-py314-sdk2.33.1-ubuntu26.04`).
+
+**Getting a Trainium2 instance.** The AWS Neuron documentation covers each way
+to get one ([Deploy on AWS](https://awsdocs-neuron.readthedocs-hosted.com/en/latest/deploy/index.html)):
+
+- **Amazon EC2:** launch a trn2 instance, for example from a
+  [Neuron Deep Learning AMI](https://awsdocs-neuron.readthedocs-hosted.com/en/latest/deploy/environments/dlami.html),
+  which has the Neuron driver, and run the Neuron PyTorch container on it
+  ([PyTorch DLC setup](https://awsdocs-neuron.readthedocs-hosted.com/en/latest/setup/pytorch/dlc.html)).
+- **Amazon EKS:** add trn2 nodes and install the Neuron device plugin
+  ([Kubernetes getting started](https://awsdocs-neuron.readthedocs-hosted.com/en/latest/deploy/eks/setup.html)).
+- **Amazon SageMaker:** see
+  [Neuron on SageMaker](https://awsdocs-neuron.readthedocs-hosted.com/en/latest/deploy/sagemaker/index.html),
+  and check that the SageMaker feature you use offers trn2 instances.
+
+Use the container's `torch` and `torch-neuronx`: a `pip install` that replaces
+them breaks the backend. Install into a virtual environment that sees the
+container's packages, with the Neuron stack pinned:
+
+```bash
+python3 -m venv --system-site-packages .venv && source .venv/bin/activate
+pip list | awk '$1 ~ /^(torch|torch-neuronx|neuronx-cc|nki|numpy)$/ {print $1"=="$2}' > neuron.txt
+pip install -c neuron.txt strands-decider
+strands-decider serve "$CHECKPOINT" --device neuron --port 8000   # a checked checkpoint
+```
+
+`torchvision` is a dependency only for the 12B's image processor. If pip can't
+find a `torchvision` that matches the container's `torch`, install
+strands-decider with `--no-deps` and its other dependencies under the same
+constraints file. The Neuron backend doesn't need `torchvision`.
+
+**Start-up.** Each worker loads only its slice of the weights, then compiles
+the graphs for the common request shapes, or loads them from the compile cache.
+With the cache warm, start-up is the weight load and a cache read per shape. A request whose
+shape bucket hasn't been compiled yet pays that compile once, from about 40
+seconds for a short prompt to several minutes at 32K tokens. Keep the cache on
+persistent storage with TorchNeuron's `TORCH_NEURONX_NEFF_CACHE_DIR` and
+`TORCH_NEURONX_HLO_CACHE_DIR`. Put `TORCH_NEURONX_NEFF_LOCAL_CACHE_DIR` on a
+local disk.
+
+#### Checked checkpoints
+
+Each was measured on a `trn2.48xlarge` at LNC=2, in bfloat16, with Neuron SDK
+2.33.1, against its own references with `tools/parity.py`. Conformance means at
+least 1,000 questions, top-1 agreement of at least 0.98 and a mean absolute
+probability difference of at most 0.02 (`tests/core_conformance.py`).
+
+| Checkpoint | NeuronCores | Typed Decisions request, p50 | One question at 4K / 32K tokens | Conformance |
+| --- | --- | --- | --- | --- |
+| `StrandsAgents/strands-decider-26B-A4B-gemma4-v2-2611` | 64 | 33.4 ms (about 1K tokens, five questions) | 114 ms / 1.17 s | Golden vectors up to 32K tokens: 1,227 questions, top-1 0.991, mean \|dp\| 0.009. Typed Decisions against a float32 CPU run of the transformers backend (the checkpoint publishes no predictions): 2,000 decisions, top-1 0.986, mean \|dp\| 0.012, accuracy 0.754 (CPU run 0.757). JevBench: 214 of 231 (92.6; published 92.6). |
+
+**Environment variables.**
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `STRANDS_NEURON_TP` | `16`; `64` for a mixture of experts | NeuronCores (and worker processes) the model is split over. |
+| `STRANDS_NEURON_CORES` | first `TP` cores | Which NeuronCores to use, such as `16-31`; sets `NEURON_RT_VISIBLE_CORES`. Lets several servers share an instance. |
+| `STRANDS_NEURON_WARM` | `default` | Shapes compiled at start-up: `default`, `none`, or `state:question tokens:questions,...`, such as `512:640:5`. |
+| `STRANDS_NEURON_EAGER` | `0` | `1` runs op by op without `torch.compile` (slow; for debugging). |
+| `STRANDS_NEURON_CC_OVERLAP` | `0` | `1` passes neuronx-cc's collective/compute overlap option: about 4% faster, but it fails to compile the graphs for states over 4,096 tokens. Use it only when prompts stay below that. Ignored when `NEURON_CC_FLAGS` is set. |
+| `STRANDS_NEURON_JOINT_MAX` | `4096` | Longest state, in tokens, packed jointly. Longer states use separate buckets and the NKI flash-attention kernel. |
+| `STRANDS_NEURON_NKI_STATE` | `1` | NKI Library `attention_cte` for the state block of long prompts. `0` uses plain PyTorch, which runs out of device memory past about 20K tokens. |
+| `STRANDS_NEURON_LAYERS_PER_GRAPH` | `6` | Decoder layers per compiled graph for joint buckets. |
 
 ## Flags worth knowing
 

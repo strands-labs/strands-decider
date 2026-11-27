@@ -85,7 +85,9 @@ endpoint configs).
 
 GPU instances need quota; `InsufficientInstanceCapacity` means no free
 instance of that type in the region. Supply `fallback_instance_types` or try
-another region. Graviton, Inferentia, and Trainium are not supported.
+another region. This deployment doesn't support Graviton, Inferentia or Trainium
+instances. To serve a v2 model on AWS Trainium2, see
+[AWS Trainium2](../inference.md#aws-trainium2---device-neuron).
 
 ### Deploying several models
 

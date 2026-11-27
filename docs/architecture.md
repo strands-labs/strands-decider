@@ -430,7 +430,9 @@ src/strands_decider/              -- published package (inference only)
                   readout, decision_config.json, the runtime contract
   backends/       runtimes for model checkpoints: transformers.py runs them on PyTorch
                   (CPU, CUDA, MPS) and is the reference runtime, transformers_attention.py
-                  its prefix_bidir attention, images.py the pixels every backend encodes
+                  its prefix_bidir attention, images.py the pixels every backend encodes;
+                  neuron.py and neuron_model.py run the text decoder on AWS Trainium2
+                  (--device neuron), split over NeuronCores by tensor parallelism
   decision.py     model checkpoints behind ask and serve: the core and a backend
   refusals.py     the request errors serve maps to 422 and 503
 

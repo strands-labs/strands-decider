@@ -131,6 +131,8 @@ ignore_missing_imports = false
 [[tool.mypy.overrides]]
 module = [
     "torch.*",
+    "torch_neuronx.*",
+    "nkilib.*",
     "transformers.*",
     "peft.*",
     "datasets.*",
@@ -153,6 +155,7 @@ pythonpath = [".", "evaluation", "tests", "training/tests"]
 addopts = "-m 'not distributed'"
 markers = [
     "distributed: launches torchrun worker processes (minutes); run with -m distributed",
+    "neuron: needs a Trainium instance (torch_neuronx and /dev/neuron*); run with -m neuron",
 ]
 
 [tool.coverage.report]
