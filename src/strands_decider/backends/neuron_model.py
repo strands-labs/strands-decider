@@ -58,11 +58,16 @@ def layer_shape(text: Any, layer_type: str, world: int, rank: int) -> LayerShape
     head_dim = int(layer.head_dim)
     kv_heads = int(layer.num_key_value_heads)
     heads = text.num_attention_heads
-    if heads % world:
+    if world > heads and world % heads == 0:
+        # More ranks than query heads (for a mixture of experts): each head on world / heads
+        # ranks, which compute the same attention; o_proj is scaled by heads / world at load.
+        q_local, q_lo = 1, rank % heads
+    elif heads % world:
         raise ValueError(f"{heads} query heads don't split over {world} ranks")
-    q_local = heads // world
+    else:
+        q_local = heads // world
+        q_lo = rank * q_local
     group = heads // kv_heads
-    q_lo = rank * q_local
     kv_lo = q_lo // group
     kv_hi = (q_lo + q_local - 1) // group + 1
     shape = LayerShape(
@@ -149,7 +154,7 @@ def decoder_layer(
     sin: Any,
     state_valid: Any,
     qid: Any,
-    *,
+    *moe_w: Any,
     shape: LayerShape,
     state_len: int,
     eps: float,
@@ -157,6 +162,7 @@ def decoder_layer(
     q_chunk: int = 0,
     gather: Any = None,
     nki_state: bool = False,
+    top_k: int = 0,
 ) -> Any:
     """One Gemma4TextDecoderLayer over a packed prompt h [T, D] (T = state bucket + question
     bucket), on one rank's heads and MLP columns, the projection weights stored [in, out];
@@ -213,6 +219,8 @@ def decoder_layer(
             eps,
             reduce,
             gather,
+            moe_w,
+            top_k,
         )
     state_bias = torch.where(state_valid, zero, neg)[None, :]  # [1, Sb]
     # The question's queries see the state's real tokens and their own question's tokens.
@@ -256,7 +264,20 @@ def decoder_layer(
         outs.append(_attend(qp, k, v, qb).reshape(kvl, g, n, hd))
     attn = torch.cat(outs, dim=2).reshape(ql, t, hd).permute(1, 0, 2).reshape(t, ql * hd)
     return _mlp_half(
-        h, attn, w_o, w_gu, w_down, ln_post_attn, ln_pre_ff, ln_post_ff, scalar, eps, reduce, gather
+        h,
+        attn,
+        w_o,
+        w_gu,
+        w_down,
+        ln_post_attn,
+        ln_pre_ff,
+        ln_post_ff,
+        scalar,
+        eps,
+        reduce,
+        gather,
+        moe_w,
+        top_k,
     )
 
 
@@ -273,17 +294,85 @@ def _mlp_half(
     eps: float,
     reduce: Any,
     gather: Any = None,
+    moe_w: tuple[Any, ...] = (),
+    top_k: int = 0,
 ) -> Any:
-    """The rest of the layer after attention: o_proj, the residual, the MLP, the layer scalar."""
+    """The rest of the layer after attention: o_proj, the residual, the MLP (with the experts
+    beside it when the layer has them), the layer scalar."""
     import torch
 
     h = h + _rms(reduce(torch.matmul(attn, w_o)), ln_post_attn, eps)
+    if moe_w:
+        h = h + _ffn_moe(h, w_gu, w_down, ln_pre_ff, ln_post_ff, moe_w, eps, reduce, gather, top_k)
+        return h * scalar
     x = _rms(h, ln_pre_ff, eps)
     gu = torch.matmul(x if gather is None else gather(x), w_gu)
     inter = gu.shape[-1] // 2
     m = torch.nn.functional.gelu(gu[:, :inter], approximate="tanh") * gu[:, inter:]
     h = h + _rms(reduce(torch.matmul(m, w_down)), ln_post_ff, eps)
     return h * scalar
+
+
+def _ffn_moe(
+    h: Any,
+    w_gu: Any,
+    w_down: Any,
+    ln_pre_ff: Any,
+    ln_post_ff: Any,
+    moe_w: tuple[Any, ...],
+    eps: float,
+    reduce: Any,
+    gather: Any,
+    top_k: int,
+) -> Any:
+    """Gemma 4's feed-forward with a mixture of experts (enable_moe_block), as
+    Gemma4TextDecoderLayer runs it: the dense MLP on pre_feedforward_layernorm(h) and, beside it,
+    the experts on pre_feedforward_layernorm_2(h), routed from h itself; each branch normed
+    (post_feedforward_layernorm_1 / _2), summed, then post_feedforward_layernorm.
+
+    The dense MLP's columns and the experts are split over the ranks. Each rank routes its own
+    tokens; their top-k weights and expert ids are gathered with the normed inputs, and each rank
+    runs its experts on every token, weighted by the token's weight for that expert (0 when it
+    isn't among the token's top k): exact, with static shapes. The local experts run as two
+    matmuls: e_gu [D, n, 2I] for all of them, then each expert's activation times its weights
+    and one down projection, e_down [n, I, D], that sums them. One reduce(-scatter) sums both
+    branches' outputs over the ranks."""
+    import torch
+
+    (r_proj, r_scale, r_pes, e_gu, e_down, ln_post_ff_1, ln_post_ff_2, ln_pre_ff_2, e_ids) = moe_w
+    d = h.shape[-1]
+    # Gemma4TextRouter, in float32 (transformers rounds the logits to bf16 first; a top-k near-tie
+    # between bf16 logits turns over with the summation order).
+    r = _rms(h.float(), None, eps) * r_scale.float() * (d**-0.5)
+    probs = torch.softmax(torch.matmul(r, r_proj.float()), dim=-1)
+    top_w, top_i = torch.topk(probs, k=top_k, dim=-1)
+    top_w = top_w / top_w.sum(dim=-1, keepdim=True)
+    onehot = (top_i[..., None] == torch.arange(r_proj.shape[1], device=h.device)).to(torch.float32)
+    top_w = top_w * torch.matmul(onehot, r_pes.float())  # per_expert_scale[top_i]
+    # Expert ids in float32 are exact; e_ids (this rank's experts) is a tensor, not a constant,
+    # so every rank runs the same compiled graph.
+    route = torch.cat([top_w, top_i.to(torch.float32)], dim=-1)
+    x = torch.cat([_rms(h, ln_pre_ff, eps), _rms(h, ln_pre_ff_2, eps)], dim=-1)
+    if gather is not None:
+        x, route = gather(x), gather(route)
+    k = route.shape[1] // 2
+    hit = (route[:, k:, None] == e_ids[None, None, :]).to(torch.float32)
+    comb = (hit * route[:, :k, None]).sum(1)  # [T, local experts]
+    x1, x2 = x[:, :d], x[:, d:]
+
+    gu = torch.matmul(x1, w_gu)
+    inter = gu.shape[-1] // 2
+    m1 = torch.matmul(
+        torch.nn.functional.gelu(gu[:, :inter], approximate="tanh") * gu[:, inter:], w_down
+    )
+    t, n, i2 = x2.shape[0], e_gu.shape[1], e_gu.shape[2]
+    g = torch.matmul(x2, e_gu.reshape(d, n * i2)).reshape(t, n, i2)
+    a = torch.nn.functional.gelu(g[..., : i2 // 2], approximate="tanh") * g[..., i2 // 2 :]
+    a = (a * comb[:, :, None]).to(h.dtype).reshape(t, n * i2 // 2)
+    y = torch.matmul(a, e_down.reshape(n * i2 // 2, d))
+    out = reduce(torch.cat([m1, y], dim=-1))
+    m = _rms(out[:, :d], ln_post_ff_1, eps) + _rms(out[:, d:], ln_post_ff_2, eps)
+    return _rms(m, ln_post_ff, eps)
 
 
 WEIGHT_NAMES = (
@@ -298,6 +387,18 @@ WEIGHT_NAMES = (
     "q_norm",
     "k_norm",
     "scalar",
+)
+# A mixture-of-experts layer's further weights, passed after the layer's other inputs.
+MOE_NAMES = (
+    "r_proj",
+    "r_scale",
+    "r_pes",
+    "e_gu",
+    "e_down",
+    "ln_post_ff_1",
+    "ln_post_ff_2",
+    "ln_pre_ff_2",
+    "e_ids",
 )
 
 
@@ -314,14 +415,14 @@ def decoder_block(
     full: tuple[bool, ...],
     **kw: Any,
 ) -> Any:
-    """Consecutive decoder layers in one graph; `weights` holds each layer's WEIGHT_NAMES."""
+    """Consecutive decoder layers in one graph; `weights` holds each layer's WEIGHT_NAMES (and
+    MOE_NAMES for a mixture of experts)."""
     n = len(WEIGHT_NAMES)
+    m = n + (len(MOE_NAMES) if kw.get("top_k") else 0)
     for i, shape in enumerate(shapes):
         c, s = (cos_f, sin_f) if full[i] else (cos_s, sin_s)
-        # mypy can't count the star-args into decoder_layer's positional parameters.
-        h = decoder_layer(  # type: ignore[misc, call-arg]
-            h, *weights[i * n : (i + 1) * n], c, s, state_valid, qid, shape=shape, **kw
-        )
+        w = weights[i * m : (i + 1) * m]
+        h = decoder_layer(h, *w[:n], c, s, state_valid, qid, *w[n:], shape=shape, **kw)
     return h
 
 
@@ -454,6 +555,17 @@ class Rank:
         if inter % world:
             raise ValueError(f"intermediate size {inter} doesn't split over {world} ranks")
         il = inter // world
+        # A mixture of experts (enable_moe_block): the experts split over the ranks.
+        self.top_k = int(text.top_k_experts) if getattr(text, "enable_moe_block", False) else 0
+        ex = (0, 0)
+        if self.top_k:
+            if text.num_experts % world:
+                raise ValueError(f"{text.num_experts} experts don't split over {world} ranks")
+            el = text.num_experts // world
+            ex = (rank * el, (rank + 1) * el)
+        dup = max(1, world // text.num_attention_heads)  # ranks per query head (layer_shape)
+        if dup & (dup - 1):
+            raise ValueError(f"{world} ranks over {text.num_attention_heads} query heads")
         self.layers = []
         for i, lt in enumerate(self.layer_types):
             s = self.shapes[lt]
@@ -483,9 +595,28 @@ class Rank:
                 "k_norm": sh.get(p + "self_attn.k_norm.weight"),
                 "scalar": sh.get(p + "layer_scalar"),
             }
+            # Duplicated heads' outputs sum to one head's: a power-of-two scale, exact.
+            w["w_o"] = w["w_o"] / dup
             for k in ("w_qkv", "w_o", "w_gu", "w_down"):
                 w[k] = w[k].t()  # [in, out]: `x @ W.t()` transposes every weight block per call
-            self.layers.append({k: v.to(bf16).contiguous().to(dev) for k, v in w.items()})
+            if self.top_k:
+                w.update(
+                    {
+                        "r_proj": sh.get(p + "router.proj.weight").t(),  # [D, E]
+                        "r_scale": sh.get(p + "router.scale"),
+                        "r_pes": sh.get(p + "router.per_expert_scale"),
+                        # [E, 2I, D] and [E, D, I] in the checkpoint; [D, n, 2I], [n, I, D] here.
+                        "e_gu": sh.get(p + "experts.gate_up_proj", rows=ex).permute(2, 0, 1),
+                        "e_down": sh.get(p + "experts.down_proj", rows=ex).transpose(1, 2),
+                        "ln_post_ff_1": sh.get(p + "post_feedforward_layernorm_1.weight"),
+                        "ln_post_ff_2": sh.get(p + "post_feedforward_layernorm_2.weight"),
+                        "ln_pre_ff_2": sh.get(p + "pre_feedforward_layernorm_2.weight"),
+                    }
+                )
+            layer = {k: v.to(bf16).contiguous().to(dev) for k, v in w.items()}
+            if self.top_k:
+                layer["e_ids"] = torch.arange(*ex, dtype=torch.float32).to(dev)
+            self.layers.append(layer)
         vocab = text.vocab_size
         if vocab % world:
             raise ValueError(f"vocabulary {vocab} doesn't split over {world} ranks")
@@ -516,6 +647,7 @@ class Rank:
         self.cos_s, self.sin_s = tabs["sliding_attention"]
         self.cos_f, self.sin_f = tabs["full_attention"]
 
+        self.names = WEIGHT_NAMES + (MOE_NAMES if self.top_k else ())
         self._fns: dict[Any, Any] = {}
         self.compile_s: dict[str, float] = {}
 
@@ -545,6 +677,7 @@ class Rank:
                 q_chunk=self.q_chunk,
                 gather=gat,
                 nki_state=self.nki_state and sb > 0,
+                top_k=self.top_k,
             )
         else:
             _, lt, sb, _pb = key
@@ -557,6 +690,7 @@ class Rank:
                 q_chunk=self.q_chunk,
                 gather=gat,
                 nki_state=self.nki_state and sb > 0,
+                top_k=self.top_k,
             )
         if self.compiled and self.on_neuron:
             f = torch.compile(f, backend="neuron", fullgraph=True, dynamic=False)
@@ -593,7 +727,7 @@ class Rank:
         if self.per_graph > 1 and sb == 0:
             for a in range(0, len(self.layer_types), self.per_graph):
                 types = tuple(self.layer_types[a : a + self.per_graph])
-                ws = [self.layers[i][k] for i in range(a, a + len(types)) for k in WEIGHT_NAMES]
+                ws = [self.layers[i][k] for i in range(a, a + len(types)) for k in self.names]
                 h = self._timed(
                     ("block", types, sb, pb), timings, h, cs, ss, cf, sf, state_valid, qid, *ws
                 )
@@ -620,6 +754,7 @@ class Rank:
                     s,
                     state_valid,
                     qid,
+                    *[w[k] for k in self.names[len(WEIGHT_NAMES) :]],
                 )
         out = self._timed(("final", int(rows.shape[0]), sb + pb), timings, h, rows, self.norm)
         res = out.cpu().numpy() if self.rank == 0 else None
@@ -655,10 +790,11 @@ class Rank:
 
 
 def worker_main(
-    rank: int, world: int, port: int, path: str, opts: dict[str, Any], inbox: Any, outbox: Any
+    rank: int, world: int, port: int, path: str, opts: dict[str, Any], conn: Any
 ) -> None:
     """A rank's process: joins the process group, loads its shard, then answers the backend's
-    messages until told to stop. Rank 0 replies with the rows; every rank reports errors."""
+    messages on its pipe until told to stop. Rank 0 replies with the rows; every rank reports
+    errors."""
     os.environ.update(
         RANK=str(rank),
         LOCAL_RANK=str(rank),
@@ -682,22 +818,19 @@ def worker_main(
             dist.init_process_group(backend="neuron")
         torch.set_grad_enabled(False)
         r = Rank(path, world, rank, opts)
-        outbox.put(("ready", rank))
+        conn.send(("ready", rank))
     except Exception:
-        outbox.put(("error", rank, traceback.format_exc()))
+        conn.send(("error", rank, traceback.format_exc()))
         return
-    import queue
-
     parent = os.getppid()
     while True:
-        try:
-            msg = inbox.get(timeout=5)
-        except queue.Empty:
+        if not conn.poll(5):
             # The backend's process is gone (killed, or a server stopped without close()):
             # leave rather than hold the NeuronCore.
             if os.getppid() != parent:
                 break
             continue
+        msg = conn.recv()
         if msg[0] == "stop":
             break
         if msg[0] == "stats":
@@ -711,7 +844,7 @@ def worker_main(
                 st["max_memory_reserved"] = int(mem.max_memory_reserved())
             except Exception as e:
                 st["memory_error"] = repr(e)
-            outbox.put(("stats", rank, st))
+            conn.send(("stats", rank, st))
             continue
         if msg[0] == "profile":
             # torch.profiler with a Neuron session on rank 0 (runtime and, if asked, device
@@ -740,12 +873,12 @@ def worker_main(
                                     sort_by="self_cpu_time_total", row_limit=40
                                 )
                             )
-                        outbox.put(("result", req, None, {"profiled_forward_s": times}))
+                        conn.send(("result", req, None, {"profiled_forward_s": times}))
                     else:
                         for _ in range(reps):
                             r.forward(batch)
             except Exception:
-                outbox.put(("error", rank, traceback.format_exc()))
+                conn.send(("error", rank, traceback.format_exc()))
             continue
         if msg[0] == "forward":
             _, req, batch = msg
@@ -753,9 +886,9 @@ def worker_main(
                 with torch.inference_mode():
                     out, timings = r.forward(batch)
                 if rank == 0:
-                    outbox.put(("result", req, out, timings))
+                    conn.send(("result", req, out, timings))
             except Exception:
-                outbox.put(("error", rank, traceback.format_exc()))
+                conn.send(("error", rank, traceback.format_exc()))
     if world > 1:
         import torch.distributed as dist
 
