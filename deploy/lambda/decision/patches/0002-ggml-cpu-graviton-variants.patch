@@ -1,0 +1,155 @@
+diff --git a/ggml/CMakeLists.txt b/ggml/CMakeLists.txt
+index b1018cb..ee4dc18 100644
+--- a/ggml/CMakeLists.txt
++++ b/ggml/CMakeLists.txt
+@@ -181,6 +181,10 @@ option(GGML_XTHEADVECTOR     "ggml: enable xtheadvector"      OFF)
+ option(GGML_VXE              "ggml: enable vxe"               ${GGML_NATIVE})
+ 
+ option(GGML_CPU_ALL_VARIANTS "ggml: build all variants of the CPU backend (requires GGML_BACKEND_DL)" OFF)
++option(GGML_CPU_GRAVITON_VARIANTS "ggml: with GGML_CPU_ALL_VARIANTS on Linux arm64, add a variant per AWS Graviton generation" OFF)
++option(GGML_CPU_GRAVITON_SVE      "ggml: with GGML_CPU_GRAVITON_VARIANTS, add SVE Graviton variants, which take precedence" OFF)
++set(GGML_CPU_GRAVITON5_TUNE "neoverse-v2" CACHE STRING "ggml: the -mtune of the Graviton5 variants (neoverse-v3 needs GCC 15)")
++set(GGML_CPU_GRAVITON5_PART "0xd84" CACHE STRING "ggml: the MIDR part number the Graviton5 variants load on")
+ set(GGML_CPU_ARM_ARCH        "" CACHE STRING "ggml: CPU architecture for ARM")
+ set(GGML_CPU_POWERPC_CPUTYPE "" CACHE STRING "ggml: CPU type for PowerPC")
+ 
+diff --git a/ggml/src/CMakeLists.txt b/ggml/src/CMakeLists.txt
+index 5ff78f2..cd5de42 100644
+--- a/ggml/src/CMakeLists.txt
++++ b/ggml/src/CMakeLists.txt
+@@ -454,8 +454,19 @@ function(ggml_add_cpu_backend_variant tag_name)
+             set(GGML_${feat} ON)
+         endforeach()
+     elseif (GGML_SYSTEM_ARCH STREQUAL "ARM")
++        # Beside features: MCPU=<cpu> (-mcpu), ARCH=<arch> (-march base), TUNE=<cpu> (-mtune), PART=<hex> (load only on that MIDR part).
+         foreach (feat ${ARGN})
+-            set(GGML_INTERNAL_${feat} ON)
++            if (feat MATCHES "^MCPU=(.+)$")
++                set(GGML_INTERNAL_MCPU ${CMAKE_MATCH_1})
++            elseif (feat MATCHES "^ARCH=(.+)$")
++                set(GGML_INTERNAL_ARCH ${CMAKE_MATCH_1})
++            elseif (feat MATCHES "^TUNE=(.+)$")
++                set(GGML_INTERNAL_TUNE ${CMAKE_MATCH_1})
++            elseif (feat MATCHES "^PART=(.+)$")
++                set(GGML_INTERNAL_CPU_PART ${CMAKE_MATCH_1})
++            else()
++                set(GGML_INTERNAL_${feat} ON)
++            endif()
+         endforeach()
+     elseif (GGML_SYSTEM_ARCH STREQUAL "PowerPC")
+         foreach (feat ${ARGN})
+@@ -531,6 +542,23 @@ if (GGML_CPU_ALL_VARIANTS)
+             ggml_add_cpu_backend_variant(armv8.6_2    DOTPROD FP16_VECTOR_ARITHMETIC SVE MATMUL_INT8 SVE2)
+             ggml_add_cpu_backend_variant(armv9.2_1    DOTPROD FP16_VECTOR_ARITHMETIC SVE MATMUL_INT8 SME)
+             ggml_add_cpu_backend_variant(armv9.2_2    DOTPROD FP16_VECTOR_ARITHMETIC SVE MATMUL_INT8 SVE2 SME)
++            if (GGML_CPU_GRAVITON_VARIANTS)
++                # One per Graviton generation, loaded only on its MIDR part; +nosve: see strands-decider docs/deployment/graviton-cpu-variants.md.
++                ggml_add_cpu_backend_variant(graviton2     DOTPROD FP16_VECTOR_ARITHMETIC MCPU=neoverse-n1 PART=0xd0c)
++                ggml_add_cpu_backend_variant(graviton3     DOTPROD FP16_VECTOR_ARITHMETIC MATMUL_INT8 NOSVE MCPU=neoverse-v1 PART=0xd40)
++                ggml_add_cpu_backend_variant(graviton4     DOTPROD FP16_VECTOR_ARITHMETIC MATMUL_INT8 NOSVE MCPU=neoverse-v2 PART=0xd4f)
++                # Graviton5 (Neoverse V3): -mtune=GGML_CPU_GRAVITON5_TUNE, as GCC 14 has no neoverse-v3.
++                ggml_add_cpu_backend_variant(graviton5     DOTPROD FP16_VECTOR_ARITHMETIC MATMUL_INT8 NOSVE
++                                                           ARCH=armv8.6-a TUNE=${GGML_CPU_GRAVITON5_TUNE} PART=${GGML_CPU_GRAVITON5_PART})
++                if (GGML_CPU_GRAVITON_SVE)
++                    ggml_add_cpu_backend_variant(graviton3_sve DOTPROD FP16_VECTOR_ARITHMETIC SVE MATMUL_INT8 MCPU=neoverse-v1 PART=0xd40)
++                    ggml_add_cpu_backend_variant(graviton4_sve DOTPROD FP16_VECTOR_ARITHMETIC SVE MATMUL_INT8 SVE2 MCPU=neoverse-v2 PART=0xd4f)
++                    ggml_add_cpu_backend_variant(graviton5_sve DOTPROD FP16_VECTOR_ARITHMETIC SVE MATMUL_INT8 SVE2
++                                                               ARCH=armv9.2-a TUNE=${GGML_CPU_GRAVITON5_TUNE} PART=${GGML_CPU_GRAVITON5_PART})
++                    ggml_add_cpu_backend_variant(graviton5_sme DOTPROD FP16_VECTOR_ARITHMETIC SVE MATMUL_INT8 SVE2 SME
++                                                               ARCH=armv9.2-a TUNE=${GGML_CPU_GRAVITON5_TUNE} PART=${GGML_CPU_GRAVITON5_PART})
++                endif()
++            endif()
+         elseif (CMAKE_SYSTEM_NAME MATCHES "Android")
+             # Android-specific backends with SoC-compatible feature sets
+             ggml_add_cpu_backend_variant(android_armv8.0_1)
+diff --git a/ggml/src/ggml-cpu/CMakeLists.txt b/ggml/src/ggml-cpu/CMakeLists.txt
+index 8327c52..46f2815 100644
+--- a/ggml/src/ggml-cpu/CMakeLists.txt
++++ b/ggml/src/ggml-cpu/CMakeLists.txt
+@@ -250,7 +250,20 @@ function(ggml_add_cpu_backend_variant_impl tag_name)
+                         set(ARCH_TAGS "${ARCH_TAGS}+sme")
+                         list(APPEND ARCH_DEFINITIONS GGML_USE_SME)
+                     endif()
+-                    list(APPEND ARCH_FLAGS "-march=${ARM_MCPU}${ARCH_TAGS}")
++                    if (GGML_INTERNAL_ARCH)
++                        set(ARM_MCPU ${GGML_INTERNAL_ARCH})
++                    endif()
++                    if (GGML_INTERNAL_MCPU)
++                        list(APPEND ARCH_FLAGS "-mcpu=${GGML_INTERNAL_MCPU}${ARCH_TAGS}")
++                    else()
++                        list(APPEND ARCH_FLAGS "-march=${ARM_MCPU}${ARCH_TAGS}")
++                    endif()
++                    if (GGML_INTERNAL_TUNE)
++                        list(APPEND ARCH_FLAGS "-mtune=${GGML_INTERNAL_TUNE}")
++                    endif()
++                    if (GGML_INTERNAL_CPU_PART)
++                        list(APPEND ARCH_DEFINITIONS GGML_USE_CPU_PART=${GGML_INTERNAL_CPU_PART})
++                    endif()
+                     ggml_add_cpu_backend_features(${GGML_CPU_NAME} arm ${ARCH_DEFINITIONS})
+                 endif()
+             endif()
+diff --git a/ggml/src/ggml-cpu/arch/arm/cpu-feats.cpp b/ggml/src/ggml-cpu/arch/arm/cpu-feats.cpp
+index 84a11ea..1c26a21 100644
+--- a/ggml/src/ggml-cpu/arch/arm/cpu-feats.cpp
++++ b/ggml/src/ggml-cpu/arch/arm/cpu-feats.cpp
+@@ -3,6 +3,44 @@
+ 
+ #if defined(__aarch64__) || defined(_M_ARM64)
+ 
++#if defined(GGML_USE_CPU_PART) && defined(__linux__)
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++// The host's MIDR_EL1 part number (sysfs, else /proc/cpuinfo); -1 if not an Arm Ltd core or unreadable.
++static int ggml_arm_cpu_part() {
++    unsigned long long midr = 0;
++    FILE * f = fopen("/sys/devices/system/cpu/cpu0/regs/identification/midr_el1", "r");
++    if (f) {
++        int ok = fscanf(f, "%llx", &midr) == 1;
++        fclose(f);
++        if (ok) {
++            return ((midr >> 24) & 0xff) == 0x41 ? (int) ((midr >> 4) & 0xfff) : -1;
++        }
++    }
++    f = fopen("/proc/cpuinfo", "r");
++    if (!f) {
++        return -1;
++    }
++    char line[256];
++    long implementer = -1, part = -1;
++    while (fgets(line, sizeof(line), f) && (implementer < 0 || part < 0)) {
++        const char * colon = strchr(line, ':');
++        if (!colon) {
++            continue;
++        }
++        if (implementer < 0 && strncmp(line, "CPU implementer", 15) == 0) {
++            implementer = strtol(colon + 1, NULL, 0);
++        } else if (part < 0 && strncmp(line, "CPU part", 8) == 0) {
++            part = strtol(colon + 1, NULL, 0);
++        }
++    }
++    fclose(f);
++    return implementer == 0x41 ? (int) part : -1;
++}
++#endif
++
+ static int ggml_backend_cpu_aarch64_score() {
+     int score = 1;
+     const ggml_feats_arch64_runtime_t af = ggml_feats_get_arch64_runtime();
+@@ -31,6 +69,15 @@ static int ggml_backend_cpu_aarch64_score() {
+ #ifdef GGML_USE_SME
+     if (!af.has_sme) { return 0; }
+     score += 1<<6;
++#endif
++#ifdef GGML_USE_CPU_PART
++#if defined(__linux__)
++    // A variant for one core: ahead of every generic variant on it, never loaded elsewhere.
++    if (ggml_arm_cpu_part() != (GGML_USE_CPU_PART)) { return 0; }
++    score += 1<<7;
++#else
++    return 0;
++#endif
+ #endif
+ 
+     return score;
