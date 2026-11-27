@@ -71,6 +71,29 @@ LAYOUTS = {
             "rope_parameters": _ROPE,
         },
     },
+    # 26B-A4B: the 31B's attention plus a mixture of experts beside every layer's dense MLP
+    # (here 4 experts, top 2), split over the ranks by expert.
+    "26B-A4B": {
+        "kind": GEMMA4_VISION,
+        "text": {
+            "vocab_size": 262144,
+            "hidden_size": 256,
+            "intermediate_size": 128,
+            "num_hidden_layers": 2,
+            "layer_types": ["sliding_attention", "full_attention"],
+            "num_attention_heads": 4,
+            "num_key_value_heads": 2,
+            "num_global_key_value_heads": 1,
+            "head_dim": 256,
+            "global_head_dim": 512,
+            "attention_k_eq_v": True,
+            "rope_parameters": _ROPE,
+            "enable_moe_block": True,
+            "num_experts": 4,
+            "top_k_experts": 2,
+            "moe_intermediate_size": 64,
+        },
+    },
 }
 FLOAT32 = 5e-3  # float32 on the device against float32 on the CPU (4.3e-4 on the CPU alone)
 SAME = 1e-3  # one device graph, the same token positions: only masked keys differ
@@ -132,6 +155,16 @@ def ckpt(layout, tmp_path_factory) -> Path:
 
     with safe_open(str(path / "model.safetensors"), framework="pt") as f:
         names = list(f.keys())
+    if spec["text"].get("enable_moe_block"):
+        # A random router's logits are about 0.02 apart, so its top-k is a coin flip that any
+        # rounding turns over; a trained router is decisive. Scaled so the logits' spread is ~1.
+        from safetensors.torch import load_file, save_file
+
+        weights = load_file(str(path / "model.safetensors"))
+        for name in names:
+            if name.endswith("router.proj.weight"):
+                weights[name] = weights[name] * 50
+        save_file(weights, str(path / "model.safetensors"), metadata={"format": "pt"})
     index = {"weight_map": dict.fromkeys(names, "model.safetensors")}
     (path / "model.safetensors.index.json").write_text(json.dumps(index))
     return path
@@ -344,7 +377,8 @@ class TestRealCheckpoint:
     def test_its_first_golden_lines_conform(self, devices):
         """The first 20 text lines of the checkpoint's golden_vectors.jsonl against the conformance
         bounds (tests/core_conformance.py); a smoke test, not the 1,000-question check. Runs on
-        STRANDS_NEURON_TP cores (16 by default) from STRANDS_NEURON_CORES."""
+        STRANDS_NEURON_TP cores (load_backend's default for the checkpoint) from
+        STRANDS_NEURON_CORES."""
         from core_conformance import MEAN_ABS_DP, TOP1, agreement, read_golden_vectors
 
         from strands_decider.backends.neuron import load_backend as load_neuron
