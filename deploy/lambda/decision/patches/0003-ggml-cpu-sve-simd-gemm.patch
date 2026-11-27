@@ -1,0 +1,87 @@
+diff --git a/ggml/src/ggml-cpu/simd-gemm.h b/ggml/src/ggml-cpu/simd-gemm.h
+index 969ffd1..b4e5747 100644
+--- a/ggml/src/ggml-cpu/simd-gemm.h
++++ b/ggml/src/ggml-cpu/simd-gemm.h
+@@ -149,6 +149,82 @@ static void simd_gemm(
+         C += N;
+     }
+ }
++#elif defined(GGML_SIMD) && defined(__ARM_FEATURE_SVE)
++// SVE, after llama.cpp #21958: a 4x4 tile of vectors held in named accumulators (sizeless vector
++// types can't be array elements), the vector length read at run time, and the last partial
++// vector of columns done with a predicate rather than in scalar code.
++#define SVE_GEMM_LD(i, r)  if constexpr (i < RM && r < RN) acc##i##r = svld1_f32(pg, C + i * N + r * KN)
++#define SVE_GEMM_ST(i, r)  if constexpr (i < RM && r < RN) svst1_f32(pg, C + i * N + r * KN, acc##i##r)
++#define SVE_GEMM_LB(r)     if constexpr (r < RN) b##r = svld1_f32(pg, B + kk * N + r * KN)
++#define SVE_GEMM_FMA(i, r) if constexpr (i < RM && r < RN) acc##i##r = svmla_n_f32_x(pg, acc##i##r, b##r, a##i)
++#define SVE_GEMM_ROW(M_, i) M_(i, 0); M_(i, 1); M_(i, 2); M_(i, 3)
++
++template <int RM, int RN>
++static inline void sve_simd_gemm_ukernel(
++    float       * GGML_RESTRICT C,
++    const float * GGML_RESTRICT A,
++    const float * GGML_RESTRICT B,
++    int K, int N, int KN, svbool_t pg)
++{
++    svfloat32_t acc00, acc01, acc02, acc03, acc10, acc11, acc12, acc13;
++    svfloat32_t acc20, acc21, acc22, acc23, acc30, acc31, acc32, acc33;
++    SVE_GEMM_ROW(SVE_GEMM_LD, 0); SVE_GEMM_ROW(SVE_GEMM_LD, 1);
++    SVE_GEMM_ROW(SVE_GEMM_LD, 2); SVE_GEMM_ROW(SVE_GEMM_LD, 3);
++    for (int64_t kk = 0; kk < K; kk++) {
++        svfloat32_t b0, b1, b2, b3;
++        SVE_GEMM_LB(0); SVE_GEMM_LB(1); SVE_GEMM_LB(2); SVE_GEMM_LB(3);
++        const float a0 = A[0 * K + kk];
++        const float a1 = RM > 1 ? A[1 * K + kk] : 0.0f;
++        const float a2 = RM > 2 ? A[2 * K + kk] : 0.0f;
++        const float a3 = RM > 3 ? A[3 * K + kk] : 0.0f;
++        (void) a1; (void) a2; (void) a3;
++        SVE_GEMM_ROW(SVE_GEMM_FMA, 0); SVE_GEMM_ROW(SVE_GEMM_FMA, 1);
++        SVE_GEMM_ROW(SVE_GEMM_FMA, 2); SVE_GEMM_ROW(SVE_GEMM_FMA, 3);
++    }
++    SVE_GEMM_ROW(SVE_GEMM_ST, 0); SVE_GEMM_ROW(SVE_GEMM_ST, 1);
++    SVE_GEMM_ROW(SVE_GEMM_ST, 2); SVE_GEMM_ROW(SVE_GEMM_ST, 3);
++}
++
++template <int RM>
++static inline void sve_simd_gemm_rows(
++    float       * GGML_RESTRICT C,
++    const float * GGML_RESTRICT A,
++    const float * GGML_RESTRICT B,
++    int K, int N, int KN)
++{
++    const svbool_t all = svptrue_b32();
++    int64_t jj = 0;
++    for (; jj + 4 * KN <= N; jj += 4 * KN) {
++        sve_simd_gemm_ukernel<RM, 4>(C + jj, A, B + jj, K, N, KN, all);
++    }
++    for (; jj + KN <= N; jj += KN) {
++        sve_simd_gemm_ukernel<RM, 1>(C + jj, A, B + jj, K, N, KN, all);
++    }
++    if (jj < N) {
++        sve_simd_gemm_ukernel<RM, 1>(C + jj, A, B + jj, K, N, KN, svwhilelt_b32((int64_t) 0, (int64_t) (N - jj)));
++    }
++}
++
++// C[M x N] += A[M x K] * B[K x N]
++static void simd_gemm(
++    float       * GGML_RESTRICT C,
++    const float * GGML_RESTRICT A,
++    const float * GGML_RESTRICT B,
++    int M, int K, int N)
++{
++    const int KN = (int) svcntw();
++    int64_t ii = 0;
++    for (; ii + 4 <= M; ii += 4) {
++        sve_simd_gemm_rows<4>(C, A, B, K, N, KN);
++        A += 4 * K;
++        C += 4 * N;
++    }
++    for (; ii < M; ii++) {
++        sve_simd_gemm_rows<1>(C, A, B, K, N, KN);
++        A += K;
++        C += N;
++    }
++}
+ #elif defined(GGML_SIMD) && defined(__riscv_v)
+ // RM accumulators + 1 B vector = RM + 1 <= 8  =>  RM <= 7
+ // Microkernel: C[RM x vl] += A[RM x K] * B[K x N]
