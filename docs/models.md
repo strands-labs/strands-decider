@@ -10,9 +10,9 @@ available, and their matrix is below.
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | [E2B-gemma4-v2-2611](models/e2b-gemma4-v2.md) | gemma-4-E2B-it | 57.1 | 87.4 | 77.7 | 23.3 | 74.0 | 24 GB | 62 ms | — |
 | [E4B-gemma4-v2-2611](models/e4b-gemma4-v2.md) | gemma-4-E4B-it | 63.2 | 88.3 | 83.9 | 45.2 | 78.9 | 40 GB | 78 ms | — |
-| [12B-gemma4-v2-2611](models/12b-gemma4-v2.md) | gemma-4-12B-it | 64.1 | 92.2 | 85.7 | 58.9 | 79.0 | 48 GB | 80 ms | — |
+| [12B-gemma4-v2-2611](models/12b-gemma4-v2.md) | gemma-4-12B-it | 64.1 | 92.2 | 85.7 | 58.9 | 79.0 | 48 GB | 80 ms | 23.2 ms |
 | [26B-A4B-gemma4-v2-2611](models/26b-a4b-gemma4-v2.md) | gemma-4-26B-A4B-it | 69.0 | 92.6 | 88.6 | 69.2 | 81.4 | 80 GB | 86 ms | — |
-| [31B-gemma4-v2-2611](models/31b-gemma4-v2.md) | gemma-4-31B-it | 71.5 | 93.1 | 92.2 | 84.3 | 84.5 | 80 GB | 99 ms | — |
+| [31B-gemma4-v2-2611](models/31b-gemma4-v2.md) | gemma-4-31B-it | 71.5 | 93.1 | 92.2 | 84.3 | 84.5 | 80 GB | 99 ms | 35.1 ms |
 
 Scores are 0 to 100. Decision Index 0.3, public: 41 tasks in five areas. JevBench: the share of the 231 public
 items answered correctly. OpenDecisions: everyday decisions, scored on answer quality and calibration.
