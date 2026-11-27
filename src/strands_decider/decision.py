@@ -26,7 +26,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_DEVICES = ("cpu", "cuda", "mps")
+_DEVICES = ("cpu", "cuda", "mps", "neuron")
 _DTYPES = ("float32", "bfloat16")
 # Told to clients when the backend couldn't build the image processor; the reason, which may
 # name local paths, is only warned at load.
@@ -97,7 +97,10 @@ class DecisionEngine:
         if IMAGE not in self.config.inputs:
             inputs = json.dumps(list(self.config.inputs))
             return f"this checkpoint does not take images: its decision_config.json inputs are {inputs}"
-        return None if self.backend.takes_images else NO_IMAGE_PROCESSOR
+        if self.backend.takes_images:
+            return None
+        # A backend without a vision encoder says so (the Neuron backend: the core's NO_VISION).
+        return getattr(self.backend, "image_problem", None) or NO_IMAGE_PROCESSOR
 
     def evaluate(self, request: Request) -> SystemOneResponse:
         """The answers to `request`. RequestRefused is the caller's error and EngineBusy a full
@@ -118,7 +121,9 @@ class DecisionEngine:
             rows = self.backend.forward(list(rendered.state_ids), questions, rendered.images)
         finally:
             self._slots.release()
-        answers = read(rows, self.config, rendered, weight=self.weight)
+        # A backend that applies the readout itself returns probabilities (core: weight=None).
+        weight = None if getattr(self.backend, "applies_readout", False) else self.weight
+        answers = read(rows, self.config, rendered, weight=weight)
         return SystemOneResponse.model_validate(
             {
                 "model": self.model_name,
@@ -174,16 +179,26 @@ def load_decision_engine(
             stacklevel=2,
         )
     tokenizer, weight = load_tokenizer(path), load_readout(path)
-    from .backends.transformers import load_backend
+    backend: DecisionBackend
+    if device == "neuron":
+        if dtype not in (None, "bfloat16"):
+            raise ValueError("--device neuron runs bfloat16")
+        if not reuse_state:
+            raise ValueError("--device neuron always encodes the state once per pass")
+        from .backends.neuron import load_backend as load_neuron_backend
 
-    backend = load_backend(
-        path,
-        device=device,
-        dtype=dtype,
-        reuse_state=reuse_state,
-        max_batch=max_batch,
-        max_batch_tokens=max_batch_tokens,
-    )
+        backend = load_neuron_backend(path, max_length=max_length or config.max_length_validated)
+    else:
+        from .backends.transformers import load_backend
+
+        backend = load_backend(
+            path,
+            device=device,
+            dtype=dtype,
+            reuse_state=reuse_state,
+            max_batch=max_batch,
+            max_batch_tokens=max_batch_tokens,
+        )
     engine = DecisionEngine(
         backend,
         tokenizer,
