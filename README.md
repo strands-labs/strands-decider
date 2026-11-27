@@ -64,7 +64,9 @@ pip install strands-decider
 The examples below use `strands-decider-E2B-gemma4-v2-2611`, the smallest v2 model: it fits on a
 24 GB GPU and serves on CPU. The `cuda`, `mps` and `cpu` extras name the devices
 ([designs/inference.md](designs/inference.md#environments-for-serving)); on Apple silicon,
-`--device mlx` runs the v1 Qwen3.5 model 1.4 to 1.6x faster than MPS. Example outputs below are
+`--device mlx` runs the v1 Qwen3.5 model 1.4 to 1.6x faster than MPS. On AWS Trainium2,
+`--device neuron` serves the v2 models checked on it
+([docs/inference.md](docs/inference.md#aws-trainium2---device-neuron)). Example outputs below are
 illustrative; other devices and models differ in the last digits.
 
 ### Choice question

@@ -32,6 +32,9 @@ pass `--device` explicitly:
   on the Qwen3.5 model. Needs the `mlx` extra.
 - **`--device cpu`** — portable fallback; works everywhere, slower on the
   larger models.
+- **`--device neuron`** — AWS Trainium2 through TorchNeuron, for the v2
+  models checked on it; never picked automatically. See
+  [AWS Trainium2](../inference.md#aws-trainium2---device-neuron).
 
 See [designs/inference](../../designs/inference.md#environments-for-serving)
 for the full matrix of device × model combinations.
