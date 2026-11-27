@@ -477,6 +477,13 @@ golden vectors:
 | Q8_0 KV cache (`STRANDS_DECIDER_KV_TYPE=q8_0`) | 1.16× | 0.61× | 0.48× | 1.11× | 5,543 MB | 13,409 MB | 99.71% / 0.00384 |
 | both | 0.63× | 0.46× | 0.41× | 0.66× | 805 MB | 8,625 MB | 99.71% / 0.00382 |
 
+Graviton2 (`c6g.8xlarge`), on which Lambda most often runs, follows the same pattern:
+
+- **`cpu=variants`:** 1.00–1.02× of `--lambda`, with or without the 10 GB limit (peak RSS
+  13,305 MB without it, 10,201 MB with it).
+- **No repacking:** 0.59–0.71×, `RssAnon` 765 MB, peak 8,517 MB.
+- **Q8_0 KV cache:** 0.42× at ~9.6k tokens.
+
 What these results show:
 
 - **ggml's repacked copy of the weights is almost all of the unreclaimable memory.** GGUF stores
