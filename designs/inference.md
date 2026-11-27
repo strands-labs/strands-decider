@@ -5,8 +5,9 @@ from the command line, and serve it over HTTP. Strands decider answers typed que
 state, the text to classify; it does not generate text. A question is a `noul` (yes or no,
 returned as P(true)), a `choice` (one of N options) or a `score` (a level on an ordered
 scale). Install the package, point the commands at the published Hub id or at a checkpoint you
-trained, then `strands-decider ask` or `strands-decider serve`. Pass `--device cuda`, `mps`, `cpu` or `mlx`
-explicitly; without it the CLI picks cuda, then mps, then cpu, and mlx only when asked for. A
+trained, then `strands-decider ask` or `strands-decider serve`. Pass `--device cuda`, `mps`, `cpu`, `mlx`
+or `neuron` explicitly; without it the CLI picks cuda, then mps, then cpu, and mlx and neuron only
+when asked for. A
 checkpoint from `training/recipe.sh all` is already calibrated; calibrate any other
 checkpoint with `python -m training.evaluate calibrate` before you serve it.
 
@@ -54,6 +55,7 @@ from a clone, for example `pip install -e ".[mlx]"`.
 | `mps` | `pip install "strands-decider[mps]"` | Nothing: the base install. |
 | `cpu` | `pip install "strands-decider[cpu]"` | Nothing: the base install. |
 | `mlx` | `pip install "strands-decider[mlx]"` | mlx and mlx-lm (Python 3.11+, Apple silicon only). |
+| `neuron` | Inside the AWS Neuron container; see [AWS Trainium2](../docs/inference.md#aws-trainium2---device-neuron) | Nothing: it uses the container's `torch` and `torch-neuronx`, which a `pip install` must not replace. |
 
 flash-linear-attention installs on a Mac without Triton, but its kernels need Triton, so it
 cannot run there. `mps_kernels.py` therefore steps aside only when Triton is present too, and
