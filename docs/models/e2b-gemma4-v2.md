@@ -33,6 +33,10 @@ uses a temperature of 1. Only OpenDecisions depends on the temperature: at a tem
 On one H100 in bf16, the median request over the 231 JevBench items takes 62 ms with one question and
 92 ms with 30 questions about the same state.
 
+On one trn2.48xlarge in bf16 (`--device neuron`, 8 of its 64 NeuronCores), the median request over the
+231 JevBench items takes 10.6 ms with one question and 35.0 ms with 30 questions about the same state,
+and the model answers 203 of the 231 correctly (87.9).
+
 Calibration: the average gap between confidence and accuracy is 3.2 points (HF card).
 
 ## Run it
