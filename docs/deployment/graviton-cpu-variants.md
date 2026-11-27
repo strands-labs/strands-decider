@@ -19,7 +19,7 @@ Each is tuned for its core and loads only on it, matched by the MIDR part number
 | Module | Part | Core | Flags | Features used |
 | --- | --- | --- | --- | --- |
 | `graviton2` | 0xd0c | Neoverse N1 | `-mcpu=neoverse-n1` | dotprod, fp16 |
-| `graviton3` | 0xd40 | Neoverse V1 | `-mcpu=neoverse-v1+i8mm+nosve` | dotprod, fp16, i8mm |
+| `graviton3` | 0xd40 | Neoverse V1 | `-mcpu=neoverse-v1+i8mm` | dotprod, fp16, i8mm, 256-bit SVE |
 | `graviton4` | 0xd4f | Neoverse V2 | `-mcpu=neoverse-v2+i8mm+nosve` | dotprod, fp16, i8mm |
 | `graviton5` | 0xd84 | Neoverse V3 | `-march=armv8.6-a+i8mm+nosve -mtune=neoverse-v2` | dotprod, fp16, i8mm |
 
@@ -49,6 +49,12 @@ The variants build needs GCC 14 (`gcc14`, `gcc14-c++` from the Amazon Linux 2023
 The base image's libstdc++ is GCC 14's, so what it builds runs on the unchanged base image.
 
 ## Why the Graviton modules are `+nosve`
+
+Graviton4 and 5 are `+nosve`. Graviton3 uses SVE, with an SVE `simd_gemm` that
+`patches/0003-ggml-cpu-sve-simd-gemm.patch` adds (a port of llama.cpp #21958). On Graviton3's
+256-bit SVE it's faster than NEON; on Graviton4 and 5's 128-bit SVE it isn't. See
+[SVE on Graviton3](#sve-on-graviton3) for the measurements. The rest of this section is what ruled
+SVE out at first, before the patch.
 
 At llama.cpp `c56be86`, ggml's SVE paths are slower than its NEON ones on every Graviton,
 and much slower on long requests.
@@ -194,8 +200,8 @@ The pin stays at `c56be86`.
 
 ### Preconditions for turning SVE on
 
-`GRAVITON_SVE=1` (`-c graviton_sve=true`) adds `graviton3_sve`, `graviton4_sve`, `graviton5_sve`
-and `graviton5_sme`. They take precedence over the NEON modules, for measuring only.
+`GRAVITON_SVE=1` (`-c graviton_sve=true`) adds `graviton4_sve`, `graviton5_sve` and
+`graviton5_sme`. They take precedence over the NEON modules, for measuring only.
 
 Make SVE the default only when all of the following hold at the llama.cpp pin it would ship with.
 Re-check them after each bump of `LLAMA_CPP_REV`, because ggml's SVE kernels change upstream.
@@ -204,14 +210,32 @@ Re-check them after each bump of `LLAMA_CPP_REV`, because ggml's SVE kernels cha
    would load on (`c7g`, `c8g`, `c9g`), on Lambda and on ECS, at every request size in the bench
    mix, by enough to matter. Use `graviton_bench.py` and `ecs_bench.py` with the same requests
    and the same thread count. At `c56be86` it is 0.21–0.87× of them (above).
-2. **The shipped checkpoints agree at least as well.** On E2B and E4B, against their
-   `golden_vectors.jsonl`, the SVE modules must score at least the NEON modules' top-1 and no
-   larger a mean |dp| on the same host (`conformance_container.py --module`).
+2. **The shipped checkpoints pass the release check.** On E2B and E4B, against their
+   `golden_vectors.jsonl`, each SVE module must conform and be no worse than the static build on
+   its host. That's `conformance_report.py`'s rule for every module: at most 2 more wrong top
+   answers per 1,032 questions, and a mean |dp| at most 10% higher.
 3. **Every SVE module passes `scripts/check_variants.sh` on every generation that loads it.**
    - The image build's own check covers only the modules its build host loads.
    - CodeBuild's arm64 hosts are Graviton2, so they load none of the SVE modules.
 
 SME (`graviton5_sme`) also needs a Graviton that reports SME.
+
+### SVE on Graviton3
+
+Graviton3's module meets all three preconditions at `c56be86` with `patches/0003`:
+
+1. **Faster.** On `c7g.8xlarge` (6 threads, E4B), against `--lambda`, the SVE module's speedup is
+   1.16× (~40 tokens), 1.17× (~1.1k), 1.17× (~4.1k) and 1.14× (one image). The NEON + i8mm
+   module's is 1.14×, 1.13×, 1.11× and 1.11×. So SVE adds 2–6% over NEON + i8mm, growing with
+   context length. Memory is the same.
+2. **Accuracy.** On E4B's golden vectors on Graviton3, the SVE module scores 99.61% top-1 and
+   0.00386 mean |dp|, against `--lambda`'s 99.71% and 0.00374. The release check passes. E2B: see
+   the pull request.
+3. **The in-image check passes.** `check_variants.sh` passes `libggml-cpu-graviton3` on
+   Graviton3 hardware.
+
+On Graviton5 (128-bit SVE) the same patch takes SVE from 0.18× to 0.96× of NEON + i8mm (above),
+so Graviton4 and 5 stay `+nosve`.
 
 ## KleidiAI (`-c kleidiai=true`)
 
