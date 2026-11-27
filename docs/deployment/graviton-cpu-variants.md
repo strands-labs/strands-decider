@@ -229,8 +229,8 @@ Graviton3's module meets all three preconditions at `c56be86` with `patches/0003
    module's is 1.14×, 1.13×, 1.11× and 1.11×. So SVE adds 2–6% over NEON + i8mm, growing with
    context length. Memory is the same.
 2. **Accuracy.** On E4B's golden vectors on Graviton3, the SVE module scores 99.61% top-1 and
-   0.00386 mean |dp|, against `--lambda`'s 99.71% and 0.00374. The release check passes. E2B: see
-   the pull request.
+   0.00386 mean |dp|, against `--lambda`'s 99.71% and 0.00374. On E2B's, it scores 99.42% and
+   0.00538, against 99.13% and 0.00555. The release check passes on both.
 3. **The in-image check passes.** `check_variants.sh` passes `libggml-cpu-graviton3` on
    Graviton3 hardware.
 
